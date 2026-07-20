@@ -1,7 +1,7 @@
 'use client'
 
 import { useMemo, useState } from 'react';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, LineChart, Line } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, LineChart, Line } from 'recharts';
 import { getEmployees } from '@/lib/store';
 
 const weeklyData = [
@@ -40,36 +40,32 @@ export default function GraphicalLogs() {
         <div className="bg-card rounded-xl border border-border p-5">
           <h3 className="font-display font-bold text-foreground mb-4">Weekly Activity Breakdown</h3>
           <div className="h-[300px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={weeklyData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                <XAxis dataKey="day" stroke="hsl(var(--muted-foreground))" fontSize={12} />
-                <YAxis stroke="hsl(var(--muted-foreground))" fontSize={12} />
-                <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '0.5rem', fontSize: '0.875rem' }} />
-                <Legend />
-                <Bar dataKey="productive" fill="hsl(152, 60%, 45%)" radius={[3, 3, 0, 0]} />
-                <Bar dataKey="unproductive" fill="hsl(0, 72%, 55%)" radius={[3, 3, 0, 0]} />
-                <Bar dataKey="idle" fill="hsl(38, 92%, 55%)" radius={[3, 3, 0, 0]} />
-                <Bar dataKey="neutral" fill="hsl(210, 15%, 70%)" radius={[3, 3, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+            <BarChart data={weeklyData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+              <XAxis dataKey="day" stroke="hsl(var(--muted-foreground))" fontSize={12} />
+              <YAxis stroke="hsl(var(--muted-foreground))" fontSize={12} />
+              <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '0.5rem', fontSize: '0.875rem' }} />
+              <Legend />
+              <Bar dataKey="productive" fill="hsl(152, 60%, 45%)" radius={[3, 3, 0, 0]} />
+              <Bar dataKey="unproductive" fill="hsl(0, 72%, 55%)" radius={[3, 3, 0, 0]} />
+              <Bar dataKey="idle" fill="hsl(38, 92%, 55%)" radius={[3, 3, 0, 0]} />
+              <Bar dataKey="neutral" fill="hsl(210, 15%, 70%)" radius={[3, 3, 0, 0]} />
+            </BarChart>
           </div>
         </div>
 
         <div className="bg-card rounded-xl border border-border p-5">
           <h3 className="font-display font-bold text-foreground mb-4">Week-over-Week Performance Trends</h3>
           <div className="h-[300px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={trendData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                <XAxis dataKey="week" stroke="hsl(var(--muted-foreground))" fontSize={12} />
-                <YAxis stroke="hsl(var(--muted-foreground))" fontSize={12} />
-                <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '0.5rem', fontSize: '0.875rem' }} />
-                <Legend />
-                <Line type="monotone" dataKey="efficiency" stroke="hsl(var(--primary))" strokeWidth={2} dot={{ r: 4 }} />
-                <Line type="monotone" dataKey="productivity" stroke="hsl(152, 60%, 45%)" strokeWidth={2} dot={{ r: 4 }} />
-              </LineChart>
-            </ResponsiveContainer>
+            <LineChart data={trendData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+              <XAxis dataKey="week" stroke="hsl(var(--muted-foreground))" fontSize={12} />
+              <YAxis stroke="hsl(var(--muted-foreground))" fontSize={12} />
+              <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '0.5rem', fontSize: '0.875rem' }} />
+              <Legend />
+              <Line type="monotone" dataKey="efficiency" stroke="hsl(var(--primary))" strokeWidth={2} dot={{ r: 4 }} />
+              <Line type="monotone" dataKey="productivity" stroke="hsl(152, 60%, 45%)" strokeWidth={2} dot={{ r: 4 }} />
+            </LineChart>
           </div>
         </div>
       </div>

@@ -4,7 +4,7 @@ import { useMemo } from 'react';
 import { motion } from 'framer-motion';
 import { Users, Clock, TrendingUp, TrendingDown, Award, Eye } from 'lucide-react';
 import { APP_SHORT_NAME } from '@/config';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts';
 import StatsCard from '@/components/ui/StatsCard';
 import { getDashboardStats, getEmployees } from '@/lib/store';
 
@@ -103,25 +103,23 @@ export default function Dashboard() {
       >
         <h3 className="font-display font-bold text-foreground mb-4">Productive / Unproductive</h3>
         <div className="h-[300px]">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={productivityData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-              <XAxis dataKey="day" stroke="hsl(var(--muted-foreground))" fontSize={12} />
-              <YAxis stroke="hsl(var(--muted-foreground))" fontSize={12} />
-              <Tooltip
-                contentStyle={{
-                  backgroundColor: 'hsl(var(--card))',
-                  border: '1px solid hsl(var(--border))',
-                  borderRadius: '0.5rem',
-                  fontSize: '0.875rem',
-                }}
-              />
-              <Legend />
-              <Bar dataKey="productive" fill="hsl(152, 60%, 45%)" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="unproductive" fill="hsl(0, 72%, 55%)" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="idle" fill="hsl(38, 92%, 55%)" radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
+          <BarChart data={productivityData}>
+            <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+            <XAxis dataKey="day" stroke="hsl(var(--muted-foreground))" fontSize={12} />
+            <YAxis stroke="hsl(var(--muted-foreground))" fontSize={12} />
+            <Tooltip
+              contentStyle={{
+                backgroundColor: 'hsl(var(--card))',
+                border: '1px solid hsl(var(--border))',
+                borderRadius: '0.5rem',
+                fontSize: '0.875rem',
+              }}
+            />
+            <Legend />
+            <Bar dataKey="productive" fill="hsl(152, 60%, 45%)" radius={[4, 4, 0, 0]} />
+            <Bar dataKey="unproductive" fill="hsl(0, 72%, 55%)" radius={[4, 4, 0, 0]} />
+            <Bar dataKey="idle" fill="hsl(38, 92%, 55%)" radius={[4, 4, 0, 0]} />
+          </BarChart>
         </div>
       </motion.div>
     </div>

@@ -1,6 +1,6 @@
 'use client';
 
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, PieChart, Pie, Cell } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, PieChart, Pie, Cell } from 'recharts';
 
 const teamData = [
   { dept: 'Engineering', productive: 78, unproductive: 15, idle: 7 },
@@ -34,32 +34,28 @@ export default function ProductivityChart() {
         <div className="bg-card rounded-xl border border-border p-5">
           <h3 className="font-display font-bold text-foreground mb-4">Productivity by Department</h3>
           <div className="h-[350px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={teamData} layout="vertical">
-                <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                <XAxis type="number" stroke="hsl(var(--muted-foreground))" fontSize={12} />
-                <YAxis dataKey="dept" type="category" stroke="hsl(var(--muted-foreground))" fontSize={12} width={90} />
-                <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '0.5rem' }} />
-                <Legend />
-                <Bar dataKey="productive" fill="hsl(152, 60%, 45%)" stackId="a" radius={[0, 0, 0, 0]} />
-                <Bar dataKey="unproductive" fill="hsl(0, 72%, 55%)" stackId="a" />
-                <Bar dataKey="idle" fill="hsl(38, 92%, 55%)" stackId="a" radius={[0, 3, 3, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+            <BarChart data={teamData} layout="vertical">
+              <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+              <XAxis type="number" stroke="hsl(var(--muted-foreground))" fontSize={12} />
+              <YAxis dataKey="dept" type="category" stroke="hsl(var(--muted-foreground))" fontSize={12} width={90} />
+              <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '0.5rem' }} />
+              <Legend />
+              <Bar dataKey="productive" fill="hsl(152, 60%, 45%)" stackId="a" radius={[0, 0, 0, 0]} />
+              <Bar dataKey="unproductive" fill="hsl(0, 72%, 55%)" stackId="a" />
+              <Bar dataKey="idle" fill="hsl(38, 92%, 55%)" stackId="a" radius={[0, 3, 3, 0]} />
+            </BarChart>
           </div>
         </div>
 
         <div className="bg-card rounded-xl border border-border p-5">
           <h3 className="font-display font-bold text-foreground mb-4">Overall Productivity Split</h3>
           <div className="h-[350px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie data={pieData} cx="50%" cy="50%" innerRadius={70} outerRadius={120} paddingAngle={3} dataKey="value" label={({ name, value }) => `${name} ${value}%`}>
-                  {pieData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
-                </Pie>
-                <Tooltip formatter={(v: number) => `${v}%`} />
-              </PieChart>
-            </ResponsiveContainer>
+            <PieChart>
+              <Pie data={pieData} cx="50%" cy="50%" innerRadius={70} outerRadius={120} paddingAngle={3} dataKey="value" label={({ name, value }) => `${name} ${value}%`}>
+                {pieData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
+              </Pie>
+              <Tooltip formatter={(v: number) => `${v}%`} />
+            </PieChart>
           </div>
         </div>
       </div>

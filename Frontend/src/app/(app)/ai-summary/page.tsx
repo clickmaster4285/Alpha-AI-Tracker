@@ -2,7 +2,7 @@
 
 import { useState, useMemo } from 'react';
 import { motion } from 'framer-motion';
-import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend, LineChart, Line, XAxis, YAxis, CartesianGrid } from 'recharts';
+import { PieChart, Pie, Cell, Tooltip, Legend, LineChart, Line, XAxis, YAxis, CartesianGrid } from 'recharts';
 import { getEmployees } from '@/lib/store';
 import { TrendingUp, TrendingDown, Clock, Target } from 'lucide-react';
 
@@ -82,11 +82,9 @@ export default function AISummary() {
         <div className="bg-card rounded-xl border border-border p-5">
           <h3 className="font-display font-bold text-foreground mb-4">Attendance Rate</h3>
           <div className="h-[250px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart><Pie data={attendanceData} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={2} dataKey="value">
-                {attendanceData.map((e, i) => <Cell key={i} fill={e.color} />)}
-              </Pie><Tooltip formatter={(v: number) => `${v}%`} /><Legend /></PieChart>
-            </ResponsiveContainer>
+            <PieChart><Pie data={attendanceData} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={2} dataKey="value">
+              {attendanceData.map((e, i) => <Cell key={i} fill={e.color} />)}
+            </Pie><Tooltip formatter={(v: number) => `${v}%`} /><Legend /></PieChart>
           </div>
         </div>
         <div className="bg-card rounded-xl border border-border p-5">
@@ -106,27 +104,23 @@ export default function AISummary() {
         <div className="bg-card rounded-xl border border-border p-5">
           <h3 className="font-display font-bold text-foreground mb-4">Productivity Split</h3>
           <div className="h-[250px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart><Pie data={productivitySplit} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={2} dataKey="value" label={({ name, value }) => `${value}%`}>
-                {productivitySplit.map((e, i) => <Cell key={i} fill={e.color} />)}
-              </Pie><Tooltip formatter={(v: number) => `${v}%`} /><Legend /></PieChart>
-            </ResponsiveContainer>
+            <PieChart><Pie data={productivitySplit} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={2} dataKey="value" label={({ name, value }) => `${value}%`}>
+              {productivitySplit.map((e, i) => <Cell key={i} fill={e.color} />)}
+            </Pie><Tooltip formatter={(v: number) => `${v}%`} /><Legend /></PieChart>
           </div>
         </div>
         <div className="bg-card rounded-xl border border-border p-5">
           <h3 className="font-display font-bold text-foreground mb-4">Week-over-Week Performance</h3>
           <div className="h-[250px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={weekTrend}>
-                <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                <XAxis dataKey="week" stroke="hsl(var(--muted-foreground))" fontSize={12} />
-                <YAxis stroke="hsl(var(--muted-foreground))" fontSize={12} />
-                <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '0.5rem' }} />
-                <Legend />
-                <Line type="monotone" dataKey="productivity" stroke="hsl(var(--primary))" strokeWidth={2} />
-                <Line type="monotone" dataKey="efficiency" stroke="hsl(152, 60%, 45%)" strokeWidth={2} />
-              </LineChart>
-            </ResponsiveContainer>
+            <LineChart data={weekTrend}>
+              <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+              <XAxis dataKey="week" stroke="hsl(var(--muted-foreground))" fontSize={12} />
+              <YAxis stroke="hsl(var(--muted-foreground))" fontSize={12} />
+              <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '0.5rem' }} />
+              <Legend />
+              <Line type="monotone" dataKey="productivity" stroke="hsl(var(--primary))" strokeWidth={2} />
+              <Line type="monotone" dataKey="efficiency" stroke="hsl(152, 60%, 45%)" strokeWidth={2} />
+            </LineChart>
           </div>
         </div>
       </div>

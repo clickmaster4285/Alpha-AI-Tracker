@@ -3,7 +3,7 @@
 import { useState, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import { Search, TrendingUp, TrendingDown, Clock, Target } from 'lucide-react';
-import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from 'recharts';
+import { PieChart, Pie, Cell, Tooltip, Legend } from 'recharts';
 import { getEmployees } from '@/lib/store';
 
 const attendanceData = [
@@ -80,15 +80,13 @@ export default function UserInsights() {
         <div className="bg-card rounded-xl border border-border p-5">
           <h3 className="font-display font-bold text-foreground mb-4">Attendance Rate</h3>
           <div className="h-[250px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie data={attendanceData} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={2} dataKey="value">
-                  {attendanceData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
-                </Pie>
-                <Tooltip formatter={(value: number) => `${value}%`} />
-                <Legend />
-              </PieChart>
-            </ResponsiveContainer>
+            <PieChart>
+              <Pie data={attendanceData} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={2} dataKey="value">
+                {attendanceData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
+              </Pie>
+              <Tooltip formatter={(value: number) => `${value}%`} />
+              <Legend />
+            </PieChart>
           </div>
         </div>
         <div className="bg-card rounded-xl border border-border p-5">
