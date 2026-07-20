@@ -1,6 +1,10 @@
-import { Navigate } from 'react-router-dom';
-import { useAuth } from '@/lib/auth';
-import { usePermissions } from '@/lib/permissions';
+"use client";
+
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { useAuth } from "@/lib/auth";
+import { usePermissions } from "@/lib/permissions";
+import { initializeData } from "@/lib/store";
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
@@ -10,8 +14,20 @@ interface ProtectedRouteProps {
 export default function ProtectedRoute({ children, module }: ProtectedRouteProps) {
   const { user } = useAuth();
   const { canAccess } = usePermissions();
+  const router = useRouter();
 
-  if (!user) return <Navigate to="/login" replace />;
+  useEffect(() => {
+    initializeData();
+  }, []);
+
+  useEffect(() => {
+    if (!user) {
+      router.replace("/login");
+    }
+  }, [user, router]);
+
+  if (!user) return null;
+
   if (module && !canAccess(user.role, module)) {
     return (
       <div className="flex-1 flex items-center justify-center p-8">
@@ -20,7 +36,7 @@ export default function ProtectedRoute({ children, module }: ProtectedRouteProps
             <span className="text-2xl">🔒</span>
           </div>
           <h2 className="text-xl font-display font-bold text-foreground mb-2">Access Denied</h2>
-          <p className="text-muted-foreground text-sm">You don't have permission to access this module.</p>
+          <p className="text-muted-foreground text-sm">You don&apos;t have permission to access this module.</p>
         </div>
       </div>
     );

@@ -92,6 +92,7 @@ const DEFAULT_PERMISSIONS: Record<string, Record<UserRole, Permission>> = {
 };
 
 function loadPermissions(): Record<string, Record<UserRole, Permission>> {
+  if (typeof window === 'undefined') return { ...DEFAULT_PERMISSIONS };
   try {
     const stored = localStorage.getItem(PERMISSIONS_KEY);
     if (stored) {

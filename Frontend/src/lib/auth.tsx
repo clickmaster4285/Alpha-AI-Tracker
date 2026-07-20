@@ -39,10 +39,14 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<AuthUser | null>(() => {
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [hydrated, setHydrated] = useState(false);
+
+  useEffect(() => {
     const stored = localStorage.getItem(AUTH_KEY);
-    return stored ? JSON.parse(stored) : null;
-  });
+    setUser(stored ? JSON.parse(stored) : null);
+    setHydrated(true);
+  }, []);
 
   const login = (email: string, password: string) => {
     if (password !== DEFAULT_PASSWORD) {

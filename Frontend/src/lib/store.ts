@@ -221,6 +221,7 @@ function generateScreenshots(): Screenshot[] {
 }
 
 export function initializeData() {
+  if (typeof window === 'undefined') return;
   if (localStorage.getItem(STORAGE_KEYS.INITIALIZED)) return;
   
   localStorage.setItem(STORAGE_KEYS.EMPLOYEES, JSON.stringify(SAMPLE_EMPLOYEES));
