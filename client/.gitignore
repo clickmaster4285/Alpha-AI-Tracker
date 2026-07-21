@@ -21,8 +21,13 @@ project.lock.json
 project.fragment.lock.json
 artifacts/
 
-## Publish
-publish/
+## Publish (scripts tracked, binaries ignored)
+publish/windows/
+publish/linux/
+publish/*.exe
+publish/*.dll
+!publish/*.sh
+!publish/*.iss
 
 ## IDE
 .vs/
@@ -67,3 +72,4 @@ Desktop.ini
 *.tmp
 *.orig
 *.swp
+installers/
