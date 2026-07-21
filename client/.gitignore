@@ -73,3 +73,7 @@ Desktop.ini
 *.orig
 *.swp
 installers/
+
+## Environment
+.env
+data/

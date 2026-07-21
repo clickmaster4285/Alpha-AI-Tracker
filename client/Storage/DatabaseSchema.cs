@@ -1,0 +1,43 @@
+namespace client.Storage;
+
+internal static class DatabaseSchema
+{
+    internal const string CreateTableSql = @"
+        CREATE TABLE IF NOT EXISTS activity_logs (
+            id              TEXT PRIMARY KEY,
+            machine_id      TEXT NOT NULL,
+            timestamp       TEXT NOT NULL,
+            process_name    TEXT NOT NULL,
+            window_title    TEXT,
+            process_id      INTEGER NOT NULL,
+            cpu_percent     REAL DEFAULT 0,
+            memory_bytes    INTEGER DEFAULT 0,
+            is_foreground   INTEGER DEFAULT 0,
+            user_name       TEXT,
+            platform        TEXT NOT NULL,
+            session_id      TEXT,
+            synced_at       TEXT,
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_logs_unsent
+            ON activity_logs(synced_at, timestamp);
+
+        CREATE INDEX IF NOT EXISTS idx_logs_timestamp
+            ON activity_logs(timestamp DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_logs_machine
+            ON activity_logs(machine_id, timestamp DESC);
+    ";
+
+    internal const string InsertSql = @"
+        INSERT OR IGNORE INTO activity_logs
+            (id, machine_id, timestamp, process_name, window_title,
+             process_id, cpu_percent, memory_bytes, is_foreground,
+             user_name, platform, session_id)
+        VALUES
+            ($id, $machine_id, $timestamp, $process_name, $window_title,
+             $process_id, $cpu_percent, $memory_bytes, $is_foreground,
+             $user_name, $platform, $session_id)
+    ";
+}
