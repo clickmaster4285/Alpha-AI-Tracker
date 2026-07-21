@@ -21,6 +21,10 @@ mkdir -p "$PKG_ROOT/usr/share/icons/hicolor/256x256/apps"
 # Copy published binaries
 cp -r "$SCRIPT_DIR/linux/"* "$PKG_ROOT/usr/share/$APP_NAME/"
 
+# Copy AT-SPI helper script (Wayland window title detection)
+mkdir -p "$PKG_ROOT/usr/share/$APP_NAME/Platform/Linux"
+cp "$PROJECT_DIR/Platform/Linux/alpha_atspi.py" "$PKG_ROOT/usr/share/$APP_NAME/Platform/Linux/"
+
 # Desktop entry
 cat > "$PKG_ROOT/usr/share/applications/$APP_NAME.desktop" << EOF
 [Desktop Entry]
@@ -62,6 +66,23 @@ EOF
 cat > "$PKG_ROOT/DEBIAN/postinst" << 'EOF'
 #!/bin/sh
 set -e
+
+# Enable AT-SPI accessibility (required for Wayland window title tracking)
+if command -v gsettings >/dev/null 2>&1; then
+  for user_home in /home/*; do
+    user=$(basename "$user_home")
+    if [ -d "$user_home" ]; then
+      su "$user" -c "gsettings set org.gnome.desktop.interface toolkit-accessibility true" 2>/dev/null || true
+    fi
+  done
+fi
+
+# Install xdotool (X11 fallback for window title detection)
+if command -v apt-get >/dev/null 2>&1; then
+  apt-get install -y xdotool 2>/dev/null || true
+fi
+
+# Update desktop database
 if [ -x /usr/bin/update-desktop-database ]; then
   update-desktop-database 2>/dev/null || true
 fi

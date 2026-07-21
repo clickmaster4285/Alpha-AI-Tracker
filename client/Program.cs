@@ -20,10 +20,19 @@ builder.Logging.AddConsole();
 builder.Services.AddSingleton(config);
 builder.Services.AddSingleton<ILogStore>(sp =>
 {
-    var resolvedPath = Path.IsPathRooted(config.DbPath)
-        ? config.DbPath
-        : Path.Combine(AppDomain.CurrentDomain.BaseDirectory, config.DbPath);
-    return new SqliteLogStore(resolvedPath, config.DbEncryptionKey);
+    var dbPath = config.DbPath;
+    if (!Path.IsPathRooted(dbPath))
+    {
+        var baseDir = OperatingSystem.IsWindows()
+            ? Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "AlphaAITracker")
+            : Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".local", "share", "alpha-ai-tracker");
+        dbPath = Path.Combine(baseDir, dbPath);
+    }
+    return new SqliteLogStore(dbPath, config.DbEncryptionKey);
 });
 
 if (OperatingSystem.IsWindows())
@@ -35,6 +44,11 @@ else if (OperatingSystem.IsLinux())
 {
     builder.Services.AddSingleton<IActivityCollector>(
         _ => new client.Platform.Linux.ProcessCollector(config.ClientId));
+}
+else if (OperatingSystem.IsMacOS())
+{
+    builder.Services.AddSingleton<IActivityCollector>(
+        _ => new client.Platform.MacOS.ProcessCollector(config.ClientId));
 }
 else
 {

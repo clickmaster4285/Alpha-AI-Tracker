@@ -1,4 +1,3 @@
-
 # Alpha AI Tracker — Build & Installers
 
 ## Prerequisites

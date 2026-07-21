@@ -29,5 +29,6 @@
   <ItemGroup>
     <None Include=".env" CopyToOutputDirectory="PreserveNewest" Condition="Exists('.env')" />
     <None Include="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Platform/Linux/alpha_atspi.py" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
