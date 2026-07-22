@@ -16,34 +16,27 @@ public class ProcessCollector : IActivityCollector
         _machineId = machineId;
     }
 
-    public Task<IReadOnlyList<ActivityLog>> CollectAsync(CancellationToken ct)
+    public async Task<IReadOnlyList<ActivityLog>> CollectAsync(CancellationToken ct)
     {
         var logs = new List<ActivityLog>();
         var now = DateTime.UtcNow;
         var foregroundPid = GetForegroundProcessId();
         var currentUser = Environment.UserName;
 
+        // Enumerate ALL visible top-level windows → PID → title mapping
+        // This fixes the file manager issue: every process with a visible window
+        // gets its title captured, not just the foreground one.
+        var knownTitles = EnumerateAllWindowTitles();
+
         var processes = Process.GetProcesses();
         var procTree = ParentProcessResolver.BuildProcessTree();
-        var knownTitles = new Dictionary<int, string?>();
 
-        foreach (var proc in processes)
-        {
-            if (ct.IsCancellationRequested) break;
-            if (!ProcessFilter.IsUserProcess(proc)) continue;
-
-            try
-            {
-                var pid = proc.Id;
-                var isForeground = pid == foregroundPid;
-                if (isForeground)
-                {
-                    var title = GetWindowText(proc);
-                    knownTitles[pid] = title;
-                }
-            }
-            catch { }
-        }
+        // CPU measurement: single 100ms gap instead of per-process sleep
+        var cpuBefore = SnapshotCpuTimes(processes);
+        await Task.Delay(100, ct);
+        // Refresh process list in case some exited
+        processes = Process.GetProcesses();
+        var cpuAfter = SnapshotCpuTimes(processes);
 
         foreach (var proc in processes)
         {
@@ -54,37 +47,26 @@ public class ProcessCollector : IActivityCollector
             {
                 var name = proc.ProcessName;
                 var pid = proc.Id;
+                var isForeground = pid == foregroundPid;
 
                 long mem = 0;
-                double cpu = 0;
-
                 try { mem = proc.WorkingSet64; } catch { }
-                try
+
+                double cpu = 0;
+                if (cpuBefore.TryGetValue(pid, out var prev) &&
+                    cpuAfter.TryGetValue(pid, out var curr))
                 {
-                    var startTime = proc.StartTime;
-                    var elapsed = now.ToLocalTime() - startTime;
-                    if (elapsed.TotalSeconds > 1)
-                    {
-                        try
-                        {
-                            var prevCpu = proc.TotalProcessorTime;
-                            Thread.Sleep(100);
-                            var currCpu = proc.TotalProcessorTime;
-                            cpu = (currCpu - prevCpu).TotalSeconds / (Environment.ProcessorCount * 0.1) * 100;
-                        }
-                        catch { }
-                    }
+                    cpu = (curr - prev).TotalSeconds / (Environment.ProcessorCount * 0.1) * 100;
                 }
-                catch { }
 
                 var resolvedTitle = ParentProcessResolver.ResolveWindowTitle(
                     pid, name, procTree, knownTitles, foregroundPid);
 
                 var profile = ParentProcessResolver.GetChromeProfile(name, pid);
 
-                var title = profile != null
+                var title = profile != null && resolvedTitle != null
                     ? $"{resolvedTitle} [{profile}]"
-                    : resolvedTitle;
+                    : resolvedTitle ?? profile;
 
                 logs.Add(new ActivityLog
                 {
@@ -95,7 +77,7 @@ public class ProcessCollector : IActivityCollector
                     ProcessId = pid,
                     CpuPercent = Math.Round(cpu, 1),
                     MemoryBytes = mem,
-                    IsForeground = pid == foregroundPid,
+                    IsForeground = isForeground,
                     UserName = currentUser,
                     Platform = "Windows",
                     SessionId = SessionInfo.SessionId
@@ -107,7 +89,39 @@ public class ProcessCollector : IActivityCollector
             }
         }
 
-        return Task.FromResult<IReadOnlyList<ActivityLog>>(logs);
+        return logs;
+    }
+
+    private static Dictionary<int, TimeSpan> SnapshotCpuTimes(Process[] processes)
+    {
+        var snap = new Dictionary<int, TimeSpan>();
+        foreach (var proc in processes)
+        {
+            try { snap[proc.Id] = proc.TotalProcessorTime; } catch { }
+        }
+        return snap;
+    }
+
+    internal static Dictionary<int, string?> EnumerateAllWindowTitles()
+    {
+        var map = new Dictionary<int, string?>();
+        var seenPids = new HashSet<int>();
+
+        EnumWindows((hWnd, _) =>
+        {
+            if (!IsWindowVisible(hWnd)) return true;
+
+            GetWindowThreadProcessId(hWnd, out var pid);
+            if (pid <= 0 || !seenPids.Add(pid)) return true;
+
+            var sb = new StringBuilder(256);
+            GetWindowTextW(hWnd, sb, sb.Capacity);
+            var title = sb.ToString();
+            map[pid] = string.IsNullOrWhiteSpace(title) ? null : title;
+            return true;
+        }, IntPtr.Zero);
+
+        return map;
     }
 
     public static IReadOnlyDictionary<string, bool> GetPermissionStatus()
@@ -122,6 +136,7 @@ public class ProcessCollector : IActivityCollector
                 GetWindowThreadProcessId(hWnd, out _);
                 status["user32_getwindowthreadprocessid"] = true;
             }
+            status["user32_enumwindows"] = true;
         }
         catch
         {
@@ -145,23 +160,6 @@ public class ProcessCollector : IActivityCollector
         }
     }
 
-    private static string? GetWindowText(Process proc)
-    {
-        try
-        {
-            var hWnd = proc.MainWindowHandle;
-            if (hWnd == IntPtr.Zero) return null;
-            var sb = new StringBuilder(256);
-            GetWindowTextW(hWnd, sb, sb.Capacity);
-            var title = sb.ToString();
-            return string.IsNullOrWhiteSpace(title) ? null : title;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
 
@@ -170,4 +168,12 @@ public class ProcessCollector : IActivityCollector
 
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
     private static extern int GetWindowTextW(IntPtr hWnd, StringBuilder text, int count);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc enumProc, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 }

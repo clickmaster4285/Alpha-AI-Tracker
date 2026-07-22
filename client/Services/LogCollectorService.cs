@@ -61,6 +61,11 @@ public class LogCollectorService : BackgroundService
                 {
                     await StorePermissionStatus(stoppingToken);
                 }
+                if (_cycleCount % 100 == 0)
+                {
+                    await _store.CleanupAsync(TimeSpan.FromDays(30), stoppingToken);
+                    _logger.LogDebug("Cleaned up logs older than 30 days");
+                }
             }
             catch (OperationCanceledException)
             {

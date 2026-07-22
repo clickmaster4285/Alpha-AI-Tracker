@@ -19,6 +19,17 @@ var builder = Host.CreateApplicationBuilder(args);
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
 
+var logLevel = config.LogLevel?.ToLowerInvariant() switch
+{
+    "verbose" => LogLevel.Trace,
+    "debug"   => LogLevel.Debug,
+    "info"    => LogLevel.Information,
+    "warn"    => LogLevel.Warning,
+    "error"   => LogLevel.Error,
+    _         => LogLevel.Information
+};
+builder.Logging.SetMinimumLevel(logLevel);
+
 builder.Services.AddSingleton(config);
 builder.Services.AddSingleton<ILogStore>(sp =>
 {
