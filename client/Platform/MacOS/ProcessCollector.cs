@@ -28,7 +28,7 @@ public class ProcessCollector : IActivityCollector
         foreach (var proc in processes)
         {
             if (ct.IsCancellationRequested) break;
-            if (!ProcessFilter.IsUserProcess(proc)) continue;
+            if (!ProcessFilter.IsUserProcess(proc, false)) continue;
 
             try
             {
@@ -42,7 +42,7 @@ public class ProcessCollector : IActivityCollector
         foreach (var proc in processes)
         {
             if (ct.IsCancellationRequested) break;
-            if (!ProcessFilter.IsUserProcess(proc)) continue;
+            if (!ProcessFilter.IsUserProcess(proc, false)) continue;
 
             try
             {

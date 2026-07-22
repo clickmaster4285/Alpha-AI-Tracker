@@ -43,7 +43,9 @@ public class LogCollectorService : BackgroundService
             {
                 var sw = System.Diagnostics.Stopwatch.StartNew();
 
-                var logs = await _collector.CollectAsync(stoppingToken);
+                var logs = (await _collector.CollectAsync(stoppingToken))
+                    .Where(l => !string.IsNullOrWhiteSpace(l.WindowTitle))
+                    .ToList();
 
                 if (logs.Count > 0)
                 {

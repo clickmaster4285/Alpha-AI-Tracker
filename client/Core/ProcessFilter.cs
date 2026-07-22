@@ -45,7 +45,7 @@ public static partial class ProcessFilter
         catch { return -1; }
     }
 
-    public static bool IsUserProcess(Process proc)
+    public static bool IsUserProcess(Process proc, bool checkWindowHandle = true)
     {
         try
         {
@@ -66,10 +66,13 @@ public static partial class ProcessFilter
             var mem = 0L;
             try { mem = proc.WorkingSet64; } catch { }
 
-            var hasWindow = false;
-            try { hasWindow = proc.MainWindowHandle != IntPtr.Zero; } catch { }
+            if (checkWindowHandle)
+            {
+                var hasWindow = false;
+                try { hasWindow = proc.MainWindowHandle != IntPtr.Zero; } catch { }
+                if (hasWindow) return true;
+            }
 
-            if (hasWindow) return true;
             if (mem <= 0) return false;
 
             try

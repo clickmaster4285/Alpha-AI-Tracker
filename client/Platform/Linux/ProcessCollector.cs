@@ -30,7 +30,7 @@ public partial class ProcessCollector : IActivityCollector
         foreach (var proc in processes)
         {
             if (ct.IsCancellationRequested) break;
-            if (!ProcessFilter.IsUserProcess(proc)) continue;
+            if (!ProcessFilter.IsUserProcess(proc, false)) continue;
 
             try
             {
@@ -44,7 +44,7 @@ public partial class ProcessCollector : IActivityCollector
         foreach (var proc in processes)
         {
             if (ct.IsCancellationRequested) break;
-            if (!ProcessFilter.IsUserProcess(proc)) continue;
+            if (!ProcessFilter.IsUserProcess(proc, false)) continue;
 
             try
             {
@@ -397,7 +397,7 @@ except:
             {
                 try
                 {
-                    if (!ProcessFilter.IsUserProcess(proc)) continue;
+                    if (!ProcessFilter.IsUserProcess(proc, false)) continue;
                     if (proc.MainWindowHandle == IntPtr.Zero) continue;
                     var startTime = proc.StartTime;
                     if (startTime > best.start)
