@@ -1,52 +1,160 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState } from 'react';
 import { motion } from 'framer-motion';
-import { Search, Plus, MoreVertical, Filter } from 'lucide-react';
-import { getEmployees, getDepartments, addEmployee, deleteEmployee, type Employee } from '@/lib/store';
+import { Search, Plus, MoreVertical, Loader2 } from 'lucide-react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { toast } from 'sonner';
+import { usersApi, departmentsApi, type User, type CreateUserPayload, type UpdateUserPayload } from '@/lib/api';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 
 export default function UsersList() {
-  const [employees, setEmployees] = useState(() => getEmployees());
-  const departments = useMemo(() => getDepartments(), []);
+  const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
   const [deptFilter, setDeptFilter] = useState('');
+  const [page, setPage] = useState(1);
   const [showAdd, setShowAdd] = useState(false);
-  const [newName, setNewName] = useState('');
-  const [newEmail, setNewEmail] = useState('');
-  const [newDept, setNewDept] = useState('Engineering');
-  const [newEmpId, setNewEmpId] = useState('');
+  const [showEdit, setShowEdit] = useState<string | null>(null);
   const [openAction, setOpenAction] = useState<string | null>(null);
 
-  const filtered = employees.filter(e => {
-    const matchSearch = e.name.toLowerCase().includes(search.toLowerCase()) || e.email.toLowerCase().includes(search.toLowerCase());
-    const matchDept = !deptFilter || e.department === deptFilter;
-    return matchSearch && matchDept;
+  // Form state
+  const [newName, setNewName] = useState('');
+  const [newEmail, setNewEmail] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [newDept, setNewDept] = useState('Engineering');
+  const [newRole, setNewRole] = useState('employee');
+  const [editName, setEditName] = useState('');
+  const [editEmail, setEditEmail] = useState('');
+  const [editDept, setEditDept] = useState('');
+
+  // ── Queries ──
+  const { data: usersData, isLoading: usersLoading, error: usersError } = useQuery({
+    queryKey: ['users', { page, search, department: deptFilter }],
+    queryFn: () => usersApi.list({ page, perPage: 10, search: search || undefined, department: deptFilter || undefined }),
   });
 
+  const { data: deptData } = useQuery({
+    queryKey: ['departments'],
+    queryFn: () => departmentsApi.list(),
+  });
+
+  const departments = deptData?.departments || ['Engineering', 'Design', 'Marketing', 'Sales', 'HR', 'Finance', 'QA', 'DevOps'];
+
+  // ── Mutations ──
+  const createMutation = useMutation({
+    mutationFn: (data: CreateUserPayload) => usersApi.create(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['users'] });
+      toast.success('User created', { description: 'The user has been added successfully.' });
+      setShowAdd(false);
+      resetForm();
+    },
+    onError: (err: Error) => {
+      toast.error('Failed to create user', { description: err.message });
+    },
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: ({ id, data }: { id: string; data: UpdateUserPayload }) => usersApi.update(id, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['users'] });
+      toast.success('User updated', { description: 'The user has been updated successfully.' });
+      setShowEdit(null);
+    },
+    onError: (err: Error) => {
+      toast.error('Failed to update user', { description: err.message });
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => usersApi.delete(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['users'] });
+      toast.success('User deleted', { description: 'The user has been removed.' });
+      setOpenAction(null);
+    },
+    onError: (err: Error) => {
+      toast.error('Failed to delete user', { description: err.message });
+    },
+  });
+
+  const resetForm = () => {
+    setNewName('');
+    setNewEmail('');
+    setNewPassword('');
+    setNewDept('Engineering');
+    setNewRole('employee');
+  };
+
   const handleAdd = () => {
-    if (!newName || !newEmail) return;
-    const emp = addEmployee({
+    if (!newName || !newEmail) {
+      toast.error('Validation error', { description: 'Name and email are required.' });
+      return;
+    }
+    createMutation.mutate({
       name: newName,
       email: newEmail,
-      employeeId: newEmpId || String(Math.floor(Math.random() * 9000) + 1000),
+      password: newPassword || undefined,
       department: newDept,
-      role: 'Employee',
-      trackingEnabled: true,
-      trackingStatus: 'untracked',
-      isOnline: false,
+      role: newRole,
       shift: 'Day',
     });
-    setEmployees(prev => [...prev, emp]);
-    setNewName(''); setNewEmail(''); setNewEmpId('');
-    setShowAdd(false);
+  };
+
+  const handleEdit = (user: User) => {
+    setShowEdit(user.id);
+    setEditName(user.name);
+    setEditEmail(user.email);
+    setEditDept(user.department);
+  };
+
+  const handleSaveEdit = (id: string) => {
+    updateMutation.mutate({
+      id,
+      data: {
+        name: editName,
+        email: editEmail,
+        department: editDept,
+      },
+    });
   };
 
   const handleDelete = (id: string) => {
-    deleteEmployee(id);
-    setEmployees(prev => prev.filter(e => e.id !== id));
-    setOpenAction(null);
+    deleteMutation.mutate(id);
   };
+
+  const employees = usersData?.data || [];
+  const totalPages = usersData?.totalPages || 1;
+
+  // ── Loading state ──
+  if (usersLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-[400px]">
+        <div className="flex flex-col items-center gap-3">
+          <Loader2 className="w-8 h-8 animate-spin text-primary" />
+          <p className="text-sm text-muted-foreground">Loading users...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Error state ──
+  if (usersError) {
+    return (
+      <div className="flex items-center justify-center min-h-[400px]">
+        <div className="text-center">
+          <p className="text-destructive font-medium mb-2">Failed to load users</p>
+          <p className="text-sm text-muted-foreground">{(usersError as Error).message}</p>
+          <button
+            onClick={() => queryClient.invalidateQueries({ queryKey: ['users'] })}
+            className="mt-4 text-sm text-primary hover:underline"
+          >
+            Try again
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -54,13 +162,25 @@ export default function UsersList() {
       <div className="flex flex-col sm:flex-row gap-3">
         <div className="flex items-center bg-card border border-border rounded-lg px-3 py-2 gap-2 flex-1 max-w-sm">
           <Search className="w-4 h-4 text-muted-foreground" />
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search Users" className="bg-transparent border-none outline-none text-sm flex-1 text-foreground placeholder:text-muted-foreground" />
+          <input
+            value={search}
+            onChange={e => { setSearch(e.target.value); setPage(1); }}
+            placeholder="Search by name, email, or ID"
+            className="bg-transparent border-none outline-none text-sm flex-1 text-foreground placeholder:text-muted-foreground"
+          />
         </div>
-        <select value={deptFilter} onChange={e => setDeptFilter(e.target.value)} className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground">
+        <select
+          value={deptFilter}
+          onChange={e => { setDeptFilter(e.target.value); setPage(1); }}
+          className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground"
+        >
           <option value="">All Departments</option>
           {departments.map(d => <option key={d} value={d}>{d}</option>)}
         </select>
-        <button onClick={() => setShowAdd(true)} className="gradient-primary text-primary-foreground px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 hover:opacity-90 transition-opacity">
+        <button
+          onClick={() => setShowAdd(true)}
+          className="gradient-primary text-primary-foreground px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 hover:opacity-90 transition-opacity"
+        >
           <Plus className="w-4 h-4" /> Add Users
         </button>
       </div>
@@ -70,70 +190,201 @@ export default function UsersList() {
         <table className="w-full min-w-[700px]">
           <thead>
             <tr className="border-b border-border">
-              {['Name', 'Email', 'Employee ID', 'Tracking Enabled', 'Tracking Status', 'Role', 'Action'].map(h => (
+              {['Name', 'Email', 'Employee ID', 'Department', 'Role', 'Status', 'Action'].map(h => (
                 <th key={h} className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground">{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {filtered.map((emp, i) => (
-              <motion.tr
-                key={emp.id}
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                transition={{ delay: i * 0.03 }}
-                className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors"
-              >
-                <td className="px-4 py-3">
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-primary-foreground" style={{ backgroundColor: emp.avatarColor }}>
-                      {emp.avatar}
+            {employees.length === 0 ? (
+              <tr>
+                <td colSpan={7} className="text-center py-12 text-muted-foreground text-sm">
+                  No users found
+                </td>
+              </tr>
+            ) : (
+              employees.map((emp, i) => (
+                <motion.tr
+                  key={emp.id}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ delay: i * 0.03 }}
+                  className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors"
+                >
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-3">
+                      <div
+                        className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-primary-foreground"
+                        style={{ backgroundColor: emp.avatarColor || '#7C3AED' }}
+                      >
+                        {emp.avatar || emp.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)}
+                      </div>
+                      <span className="text-sm font-medium text-foreground">{emp.name}</span>
                     </div>
-                    <span className="text-sm font-medium text-foreground">{emp.name}</span>
-                  </div>
-                </td>
-                <td className="px-4 py-3 text-sm text-muted-foreground">{emp.email}</td>
-                <td className="px-4 py-3 text-sm text-foreground">{emp.employeeId}</td>
-                <td className="px-4 py-3">
-                  <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${emp.trackingEnabled ? 'bg-success/15 text-success' : 'bg-destructive/15 text-destructive'}`}>
-                    {emp.trackingEnabled ? 'Yes' : 'No'}
-                  </span>
-                </td>
-                <td className="px-4 py-3">
-                  <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${emp.trackingStatus === 'tracked' ? 'bg-success/15 text-success' : 'bg-warning/15 text-warning'}`}>
-                    {emp.trackingStatus === 'tracked' ? 'Tracked' : 'Untracked'}
-                  </span>
-                </td>
-                <td className="px-4 py-3 text-sm text-foreground">{emp.role}</td>
-                <td className="px-4 py-3 relative">
-                  <button onClick={() => setOpenAction(openAction === emp.id ? null : emp.id)} className="p-1.5 rounded hover:bg-muted transition-colors">
-                    <MoreVertical className="w-4 h-4 text-muted-foreground" />
-                  </button>
-                  {openAction === emp.id && (
-                    <div className="absolute right-4 top-12 bg-card border border-border rounded-lg shadow-lg z-10 py-1 min-w-[120px]">
-                      <button className="w-full text-left px-4 py-2 text-sm hover:bg-muted transition-colors text-foreground">Edit</button>
-                      <button onClick={() => handleDelete(emp.id)} className="w-full text-left px-4 py-2 text-sm hover:bg-muted transition-colors text-destructive">Delete</button>
-                    </div>
-                  )}
-                </td>
-              </motion.tr>
-            ))}
+                  </td>
+                  <td className="px-4 py-3 text-sm text-muted-foreground">{emp.email}</td>
+                  <td className="px-4 py-3 text-sm font-mono font-medium text-foreground">{emp.employeeId}</td>
+                  <td className="px-4 py-3 text-sm text-foreground">{emp.department}</td>
+                  <td className="px-4 py-3">
+                    <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-primary/10 text-primary">
+                      {emp.role}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${
+                      emp.trackingStatus === 'tracked'
+                        ? 'bg-success/15 text-success'
+                        : 'bg-warning/15 text-warning'
+                    }`}>
+                      {emp.trackingStatus === 'tracked' ? 'Tracked' : 'Untracked'}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 relative">
+                    <button
+                      onClick={() => setOpenAction(openAction === emp.id ? null : emp.id)}
+                      className="p-1.5 rounded hover:bg-muted transition-colors"
+                    >
+                      <MoreVertical className="w-4 h-4 text-muted-foreground" />
+                    </button>
+                    {openAction === emp.id && (
+                      <div className="absolute right-4 top-12 bg-card border border-border rounded-lg shadow-lg z-10 py-1 min-w-[120px]">
+                        <button
+                          onClick={() => { handleEdit(emp); setOpenAction(null); }}
+                          className="w-full text-left px-4 py-2 text-sm hover:bg-muted transition-colors text-foreground"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => handleDelete(emp.id)}
+                          className="w-full text-left px-4 py-2 text-sm hover:bg-muted transition-colors text-destructive"
+                          disabled={deleteMutation.isPending}
+                        >
+                          {deleteMutation.isPending ? 'Deleting...' : 'Delete'}
+                        </button>
+                      </div>
+                    )}
+                  </td>
+                </motion.tr>
+              ))
+            )}
           </tbody>
         </table>
       </div>
 
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between">
+          <p className="text-sm text-muted-foreground">
+            Showing page {page} of {totalPages} ({usersData?.total || 0} total users)
+          </p>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setPage(p => Math.max(1, p - 1))}
+              disabled={page <= 1}
+              className="px-3 py-1.5 rounded-lg border border-border text-sm text-foreground disabled:opacity-50 hover:bg-muted transition-colors"
+            >
+              Previous
+            </button>
+            <button
+              onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+              disabled={page >= totalPages}
+              className="px-3 py-1.5 rounded-lg border border-border text-sm text-foreground disabled:opacity-50 hover:bg-muted transition-colors"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Add Dialog */}
       <Dialog open={showAdd} onOpenChange={setShowAdd}>
-        <DialogContent className="bg-card">
-          <DialogHeader><DialogTitle className="font-display">Add New User</DialogTitle></DialogHeader>
+        <DialogContent className="bg-card sm:max-w-[425px]">
+          <DialogHeader>
+            <DialogTitle className="font-display">Add New User</DialogTitle>
+          </DialogHeader>
           <div className="space-y-3 mt-2">
-            <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="Full Name" className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground" />
-            <input value={newEmail} onChange={e => setNewEmail(e.target.value)} placeholder="Email" className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground" />
-            <input value={newEmpId} onChange={e => setNewEmpId(e.target.value)} placeholder="Employee ID" className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground" />
-            <select value={newDept} onChange={e => setNewDept(e.target.value)} className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground">
+            <input
+              value={newName}
+              onChange={e => setNewName(e.target.value)}
+              placeholder="Full Name"
+              className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
+            />
+            <input
+              value={newEmail}
+              onChange={e => setNewEmail(e.target.value)}
+              placeholder="Email"
+              type="email"
+              className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
+            />
+            <input
+              value={newPassword}
+              onChange={e => setNewPassword(e.target.value)}
+              placeholder="Password (leave blank for default)"
+              type="password"
+              className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
+            />
+            <select
+              value={newDept}
+              onChange={e => setNewDept(e.target.value)}
+              className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
+            >
               {departments.map(d => <option key={d} value={d}>{d}</option>)}
             </select>
-            <button onClick={handleAdd} className="w-full gradient-primary text-primary-foreground py-2.5 rounded-lg text-sm font-medium hover:opacity-90 transition-opacity">Add User</button>
+            <select
+              value={newRole}
+              onChange={e => setNewRole(e.target.value)}
+              className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
+            >
+              <option value="employee">Employee</option>
+              <option value="manager">Manager</option>
+              <option value="hr_admin">HR Admin</option>
+              <option value="org_admin">Org Admin</option>
+            </select>
+            <button
+              onClick={handleAdd}
+              disabled={createMutation.isPending}
+              className="w-full gradient-primary text-primary-foreground py-2.5 rounded-lg text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
+            >
+              {createMutation.isPending ? 'Creating...' : 'Add User'}
+            </button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit Dialog */}
+      <Dialog open={!!showEdit} onOpenChange={(open) => { if (!open) setShowEdit(null); }}>
+        <DialogContent className="bg-card sm:max-w-[425px]">
+          <DialogHeader>
+            <DialogTitle className="font-display">Edit User</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 mt-2">
+            <input
+              value={editName}
+              onChange={e => setEditName(e.target.value)}
+              placeholder="Full Name"
+              className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
+            />
+            <input
+              value={editEmail}
+              onChange={e => setEditEmail(e.target.value)}
+              placeholder="Email"
+              type="email"
+              className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
+            />
+            <select
+              value={editDept}
+              onChange={e => setEditDept(e.target.value)}
+              className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
+            >
+              {departments.map(d => <option key={d} value={d}>{d}</option>)}
+            </select>
+            <button
+              onClick={() => showEdit && handleSaveEdit(showEdit)}
+              disabled={updateMutation.isPending}
+              className="w-full gradient-primary text-primary-foreground py-2.5 rounded-lg text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
+            >
+              {updateMutation.isPending ? 'Saving...' : 'Save Changes'}
+            </button>
           </div>
         </DialogContent>
       </Dialog>
