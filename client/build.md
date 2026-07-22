@@ -72,6 +72,51 @@ bash publish/build-installer.sh -h
 
 ---
 
+## Rebuilding After Code Changes
+
+After making any code changes, you need to rebuild before testing or creating installers.
+
+### Quick Rebuild (Debug)
+
+```bash
+cd client
+dotnet build
+```
+
+### Rebuild and Run Locally
+
+```bash
+cd client
+dotnet run
+```
+
+### Rebuild for Release
+
+```bash
+cd client
+dotnet build -c Release
+```
+
+### Full Rebuild (Clean + Build)
+
+```bash
+cd client
+dotnet clean
+dotnet build
+```
+
+### Create Installers After Rebuild
+
+```bash
+# Rebuild first
+dotnet build -c Release
+
+# Then create installer
+bash publish/build-installer.sh
+```
+
+---
+
 ## Sending to a Friend
 
 ### Windows
