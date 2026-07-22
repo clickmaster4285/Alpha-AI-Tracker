@@ -1,0 +1,139 @@
+package handlers
+
+import (
+	"net/http"
+	"time"
+
+	"github.com/labstack/echo/v4"
+	"github.com/alpha-ai-tracker/server/internal/config"
+	"github.com/alpha-ai-tracker/server/internal/dto"
+	"github.com/alpha-ai-tracker/server/internal/services"
+)
+
+const (
+	authCookieName = "auth_token"
+	authCookiePath = "/"
+)
+
+// AuthHandler handles authentication endpoints.
+type AuthHandler struct {
+	authService *services.AuthService
+	jwtCfg      config.JWTConfig
+}
+
+// NewAuthHandler creates a new AuthHandler.
+func NewAuthHandler(authService *services.AuthService, jwtCfg config.JWTConfig) *AuthHandler {
+	return &AuthHandler{authService: authService, jwtCfg: jwtCfg}
+}
+
+// Login handles POST /api/v1/auth/login
+func (h *AuthHandler) Login(c echo.Context) error {
+	var req dto.LoginRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, dto.APIError{
+			Code:    http.StatusBadRequest,
+			Message: "Invalid request body",
+		})
+	}
+
+	if req.Email == "" || req.Password == "" {
+		return c.JSON(http.StatusBadRequest, dto.APIError{
+			Code:    http.StatusBadRequest,
+			Message: "Email and password are required",
+		})
+	}
+
+	resp, err := h.authService.Login(c.Request().Context(), &req)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, dto.APIError{
+			Code:    http.StatusUnauthorized,
+			Message: err.Error(),
+		})
+	}
+
+	// Set httpOnly secure cookie
+	cookie := &http.Cookie{
+		Name:     authCookieName,
+		Value:    resp.Token,
+		Path:     authCookiePath,
+		HttpOnly: true,
+		Secure:   false, // Set to true in production with HTTPS
+		SameSite: http.SameSiteLaxMode,
+		Expires:  time.Now().Add(h.jwtCfg.AccessExpiry),
+	}
+	c.SetCookie(cookie)
+
+	return c.JSON(http.StatusOK, dto.LoginResponse{
+		User: resp.User,
+	})
+}
+
+// Logout handles POST /api/v1/auth/logout
+func (h *AuthHandler) Logout(c echo.Context) error {
+	// Clear the auth cookie
+	cookie := &http.Cookie{
+		Name:     authCookieName,
+		Value:    "",
+		Path:     authCookiePath,
+		HttpOnly: true,
+		Secure:   false,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+		Expires:  time.Unix(0, 0),
+	}
+	c.SetCookie(cookie)
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "logged out successfully",
+	})
+}
+
+// Me handles GET /api/v1/auth/me — returns current user from cookie
+func (h *AuthHandler) Me(c echo.Context) error {
+	userID, ok := c.Get("user_id").(string)
+	if !ok || userID == "" {
+		return c.JSON(http.StatusUnauthorized, dto.APIError{
+			Code:    http.StatusUnauthorized,
+			Message: "Authentication required",
+		})
+	}
+
+	user, err := h.authService.GetUserByID(c.Request().Context(), userID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, dto.APIError{
+			Code:    http.StatusInternalServerError,
+			Message: "Failed to get user",
+		})
+	}
+	if user == nil {
+		return c.JSON(http.StatusNotFound, dto.APIError{
+			Code:    http.StatusNotFound,
+			Message: "User not found",
+		})
+	}
+
+	return c.JSON(http.StatusOK, user.ToPublic())
+}
+
+// CheckAuth handles GET /api/v1/auth/check — lightweight auth status check (optional auth)
+func (h *AuthHandler) CheckAuth(c echo.Context) error {
+	userID, ok := c.Get("user_id").(string)
+	if !ok || userID == "" {
+		return c.JSON(http.StatusOK, dto.AuthCheckResponse{
+			Authenticated: false,
+		})
+	}
+
+	user, err := h.authService.GetUserByID(c.Request().Context(), userID)
+	if err != nil || user == nil {
+		return c.JSON(http.StatusOK, dto.AuthCheckResponse{
+			Authenticated: false,
+		})
+	}
+
+	resp := user.ToPublic()
+	return c.JSON(http.StatusOK, dto.AuthCheckResponse{
+		Authenticated: true,
+		User:          &resp,
+	})
+}
