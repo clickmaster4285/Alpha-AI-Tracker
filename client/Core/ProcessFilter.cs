@@ -45,7 +45,7 @@ public static partial class ProcessFilter
         catch { return -1; }
     }
 
-    public static bool IsUserProcess(Process proc, bool checkWindowHandle = true)
+    public static bool IsUserProcess(Process proc, bool checkWindowHandle = true, bool checkSession = true)
     {
         try
         {
@@ -60,8 +60,11 @@ public static partial class ProcessFilter
             if (KernelNames.Contains(name)) return false;
             if (KernelPattern.IsMatch(name)) return false;
 
-            if (proc.SessionId == 0) return false;
-            if (CurrentSessionId > 0 && proc.SessionId != CurrentSessionId) return false;
+            if (checkSession)
+            {
+                if (proc.SessionId == 0) return false;
+                if (CurrentSessionId > 0 && proc.SessionId != CurrentSessionId) return false;
+            }
 
             var mem = 0L;
             try { mem = proc.WorkingSet64; } catch { }

@@ -16,7 +16,7 @@ public partial class ProcessCollector : IActivityCollector
         _machineId = machineId;
     }
 
-    public Task<IReadOnlyList<ActivityLog>> CollectAsync(CancellationToken ct)
+    public async Task<IReadOnlyList<ActivityLog>> CollectAsync(CancellationToken ct)
     {
         var logs = new List<ActivityLog>();
         var now = DateTime.UtcNow;
@@ -27,24 +27,27 @@ public partial class ProcessCollector : IActivityCollector
         var procTree = ParentProcessResolver.BuildProcessTree();
         var knownTitles = new Dictionary<int, string?>();
 
+        // Enumerate ALL X11/XWayland windows via _NET_CLIENT_LIST
+        // (Linux equivalent of EnumWindows on Windows)
+        var x11Titles = EnumerateAllWindowTitles();
+        foreach (var kvp in x11Titles)
+            knownTitles[kvp.Key] = kvp.Value!;
+
+        // Override with foreground title if detected (portal/atspi/etc.)
+        if (foreground?.title != null && foreground.Value.pid > 0)
+            knownTitles[foreground.Value.pid] = foreground.Value.title;
+
+        var cpuBefore = SnapshotCpuTimes(processes);
+        await Task.Delay(100, ct);
+        processes = Process.GetProcesses();
+        var cpuAfter = SnapshotCpuTimes(processes);
+
         foreach (var proc in processes)
         {
             if (ct.IsCancellationRequested) break;
-            if (!ProcessFilter.IsUserProcess(proc, false)) continue;
-
-            try
-            {
-                var pid = proc.Id;
-                if (foreground?.pid == pid && foreground?.title != null)
-                    knownTitles[pid] = foreground.Value.title;
-            }
-            catch { }
-        }
-
-        foreach (var proc in processes)
-        {
-            if (ct.IsCancellationRequested) break;
-            if (!ProcessFilter.IsUserProcess(proc, false)) continue;
+            // Use checkSession:false on Linux — session IDs are unreliable on Wayland
+            // and would filter out all user processes, resulting in 0 logs.
+            if (!ProcessFilter.IsUserProcess(proc, false, false)) continue;
 
             try
             {
@@ -54,17 +57,31 @@ public partial class ProcessCollector : IActivityCollector
                 long mem = 0;
                 try { mem = proc.WorkingSet64; } catch { }
 
+                double cpu = 0;
+                if (cpuBefore.TryGetValue(pid, out var prev) &&
+                    cpuAfter.TryGetValue(pid, out var curr))
+                {
+                    cpu = (curr - prev).TotalSeconds / (Environment.ProcessorCount * 0.1) * 100;
+                }
+
                 var resolvedTitle = ParentProcessResolver.ResolveWindowTitle(
                     pid, name, procTree, knownTitles, foreground?.pid);
 
                 if (resolvedTitle == null && foreground?.pid == pid)
                     resolvedTitle = foreground?.title;
 
+                // Fallback to X11 window title if available
+                resolvedTitle ??= x11Titles.GetValueOrDefault(pid);
+
+                // Ultimate fallback: use process name so every user process gets logged
+                // (critical for Wayland where window detection is limited)
+                resolvedTitle ??= name;
+
                 var profile = ParentProcessResolver.GetChromeProfile(name, pid);
 
-                var title = profile != null
+                var title = profile != null && resolvedTitle != null
                     ? $"{resolvedTitle} [{profile}]"
-                    : resolvedTitle;
+                    : resolvedTitle ?? profile;
 
                 logs.Add(new ActivityLog
                 {
@@ -73,7 +90,7 @@ public partial class ProcessCollector : IActivityCollector
                     ProcessName = name,
                     WindowTitle = title,
                     ProcessId = pid,
-                    CpuPercent = 0,
+                    CpuPercent = Math.Round(cpu, 1),
                     MemoryBytes = mem,
                     IsForeground = foreground?.pid == pid,
                     UserName = currentUser,
@@ -87,7 +104,56 @@ public partial class ProcessCollector : IActivityCollector
             }
         }
 
-        return Task.FromResult<IReadOnlyList<ActivityLog>>(logs);
+        return logs;
+    }
+
+    private static Dictionary<int, TimeSpan> SnapshotCpuTimes(Process[] processes)
+    {
+        var snap = new Dictionary<int, TimeSpan>();
+        foreach (var proc in processes)
+        {
+            try { snap[proc.Id] = proc.TotalProcessorTime; } catch { }
+        }
+        return snap;
+    }
+
+    private static Dictionary<int, string?> EnumerateAllWindowTitles()
+    {
+        var map = new Dictionary<int, string?>();
+        var seenPids = new HashSet<int>();
+
+        try
+        {
+            var raw = Run("xprop", "-root -notype _NET_CLIENT_LIST", 2000);
+            if (raw == null) return map;
+
+            var idMatches = WindowIdRegex().Matches(raw);
+            foreach (Match idMatch in idMatches)
+            {
+                var wid = idMatch.Value;
+                if (wid == "0x0") continue;
+
+                var rawPid = Run("xprop", $"-id {wid} _NET_WM_PID", 2000);
+                if (rawPid == null) continue;
+                var pidMatch = PidRegex().Match(rawPid);
+                if (!pidMatch.Success) continue;
+                if (!int.TryParse(pidMatch.Groups[1].Value, out var pid)) continue;
+                if (pid <= 0 || !seenPids.Add(pid)) continue;
+
+                string? title = null;
+                var rawTitle = Run("xprop", $"-id {wid} _NET_WM_NAME", 2000);
+                if (rawTitle != null)
+                {
+                    var tMatch = TitleRegex().Match(rawTitle);
+                    if (tMatch.Success) title = tMatch.Groups[1].Value;
+                }
+
+                map[pid] = title;
+            }
+        }
+        catch { }
+
+        return map;
     }
 
     public static IReadOnlyDictionary<string, bool> GetPermissionStatus()
@@ -342,15 +408,25 @@ except:
         if (!HasTool("gdbus")) return null;
         try
         {
-            var titleRaw = Run("gdbus", "call --session --dest org.freedesktop.portal.Desktop --object-path /org/freedesktop/portal/desktop --method org.freedesktop.DBus.Properties.Get \"org.freedesktop.portal.Window\" \"ActiveWindow\"", 3000);
-            if (titleRaw == null || !titleRaw.StartsWith("(")) return null;
+            var raw = Run("gdbus", "call --session --dest org.freedesktop.portal.Desktop --object-path /org/freedesktop/portal/desktop --method org.freedesktop.portal.Window.GetActiveWindow", 3000);
+            if (raw == null || !raw.StartsWith("(")) return null;
 
-            var match = GvariantString().Match(titleRaw);
+            var match = GvariantString().Match(raw);
             if (!match.Success) return null;
-            var appId = match.Groups[1].Value;
+            var windowId = match.Groups[1].Value;
+            if (string.IsNullOrEmpty(windowId)) return null;
+
+            var appIdRaw = Run("gdbus", $"call --session --dest org.freedesktop.portal.Desktop --object-path /org/freedesktop/portal/desktop --method org.freedesktop.portal.Window.GetWindowAppId \"{windowId}\"", 3000);
+            if (appIdRaw == null) return null;
+
+            var appMatch = GvariantString().Match(appIdRaw);
+            if (!appMatch.Success) return null;
+            var appId = appMatch.Groups[1].Value;
             if (string.IsNullOrEmpty(appId)) return null;
 
             var pid = ResolveAppIdToPid(appId);
+            if (pid <= 0) return null;
+
             return (pid, appId);
         }
         catch { return null; }
@@ -397,14 +473,14 @@ except:
             {
                 try
                 {
-                    if (!ProcessFilter.IsUserProcess(proc, false)) continue;
-                    if (proc.MainWindowHandle == IntPtr.Zero) continue;
+                    if (!ProcessFilter.IsUserProcess(proc, false, false)) continue;
                     var startTime = proc.StartTime;
                     if (startTime > best.start)
                     {
+                        var name = proc.ProcessName;
                         string? t = null;
                         try { t = proc.MainWindowTitle; } catch { }
-                        best = (proc.Id, t, startTime);
+                        best = (proc.Id, t ?? name, startTime);
                     }
                 }
                 catch { }
