@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { usePermissions } from "@/lib/permissions";
-import { initializeData } from "@/lib/store";
+import { Loader2 } from "lucide-react";
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
@@ -12,31 +12,41 @@ interface ProtectedRouteProps {
 }
 
 export default function ProtectedRoute({ children, module }: ProtectedRouteProps) {
-  const { user } = useAuth();
+  const { user, isLoading, isAuthenticated } = useAuth();
   const { canAccess } = usePermissions();
   const router = useRouter();
+  const pathname = usePathname();
 
   useEffect(() => {
-    initializeData();
-  }, []);
-
-  useEffect(() => {
-    if (!user) {
-      router.replace("/login");
+    if (!isLoading && !isAuthenticated) {
+      router.replace(`/login?redirect=${encodeURIComponent(pathname)}`);
     }
-  }, [user, router]);
+  }, [isLoading, isAuthenticated, router, pathname]);
 
-  if (!user) return null;
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="flex flex-col items-center gap-3">
+          <Loader2 className="w-8 h-8 animate-spin text-primary" />
+          <p className="text-sm text-muted-foreground">Verifying authentication...</p>
+        </div>
+      </div>
+    );
+  }
 
+  if (!isAuthenticated || !user) {
+    return null;
+  }
+
+  // Check module permission if specified
   if (module && !canAccess(user.role, module)) {
     return (
-      <div className="flex-1 flex items-center justify-center p-8">
+      <div className="min-h-screen flex items-center justify-center bg-background">
         <div className="text-center">
-          <div className="w-16 h-16 rounded-full bg-destructive/10 flex items-center justify-center mx-auto mb-4">
-            <span className="text-2xl">🔒</span>
-          </div>
           <h2 className="text-xl font-display font-bold text-foreground mb-2">Access Denied</h2>
-          <p className="text-muted-foreground text-sm">You don&apos;t have permission to access this module.</p>
+          <p className="text-muted-foreground text-sm">
+            You do not have permission to access this page.
+          </p>
         </div>
       </div>
     );

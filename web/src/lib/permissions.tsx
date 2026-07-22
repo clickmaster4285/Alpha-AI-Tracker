@@ -48,47 +48,54 @@ export const ALL_MODULES: { key: string; label: string; group: string }[] = [
 ];
 
 export const ALL_ROLES: UserRole[] = [
-  'super_admin', 'org_admin', 'hr_admin', 'manager', 'employee', 'security_analyst', 'it_admin', 'auditor'
+  'company_admin', 'super_admin', 'org_admin', 'hr_admin', 'manager', 'employee', 'security_analyst', 'it_admin', 'auditor'
 ];
 
+// Helper to add company_admin: 'full' to any role-permission map
+function withCompanyAdmin(
+  base: Record<Exclude<UserRole, 'company_admin'>, Permission>
+): Record<UserRole, Permission> {
+  return { ...base, company_admin: 'full' } as Record<UserRole, Permission>;
+}
+
 // Default permissions - the baseline
-const DEFAULT_PERMISSIONS: Record<string, Record<UserRole, Permission>> = {
-  'dashboard': { super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'full', employee: 'self', security_analyst: 'view', it_admin: 'view', auditor: 'view' },
-  'users': { super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'view', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' },
-  'users/activity': { super_admin: 'full', org_admin: 'view', hr_admin: 'full', manager: 'full', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' },
-  'apps': { super_admin: 'full', org_admin: 'view', hr_admin: 'none', manager: 'full', employee: 'self', security_analyst: 'full', it_admin: 'none', auditor: 'none' },
-  'screenshots': { super_admin: 'full', org_admin: 'config', hr_admin: 'none', manager: 'full', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' },
-  'logs': { super_admin: 'full', org_admin: 'view', hr_admin: 'view', manager: 'full', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'view' },
-  'charts': { super_admin: 'full', org_admin: 'view', hr_admin: 'full', manager: 'full', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' },
-  'departments': { super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'view', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' },
-  'kpis': { super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'view', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' },
-  'roles': { super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'none', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' },
-  'live-stream': { super_admin: 'full', org_admin: 'view', hr_admin: 'none', manager: 'full', employee: 'none', security_analyst: 'full', it_admin: 'none', auditor: 'none' },
-  'emails': { super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'full', employee: 'none', security_analyst: 'none', it_admin: 'view', auditor: 'none' },
-  'projects': { super_admin: 'full', org_admin: 'full', hr_admin: 'none', manager: 'full', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' },
-  'ai-summary': { super_admin: 'full', org_admin: 'view', hr_admin: 'full', manager: 'full', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' },
-  'hours-insights': { super_admin: 'full', org_admin: 'view', hr_admin: 'full', manager: 'full', employee: 'self', security_analyst: 'none', it_admin: 'view', auditor: 'none' },
-  'settings': { super_admin: 'full', org_admin: 'full', hr_admin: 'none', manager: 'none', employee: 'none', security_analyst: 'full', it_admin: 'none', auditor: 'none' },
-  'settings/tracking': { super_admin: 'full', org_admin: 'full', hr_admin: 'none', manager: 'none', employee: 'none', security_analyst: 'full', it_admin: 'view', auditor: 'none' },
-  'onboarding': { super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'none', employee: 'none', security_analyst: 'none', it_admin: 'config', auditor: 'none' },
-  'employee-portal': { super_admin: 'full', org_admin: 'view', hr_admin: 'view', manager: 'view', employee: 'full', security_analyst: 'none', it_admin: 'none', auditor: 'none' },
-  'timesheets': { super_admin: 'full', org_admin: 'view', hr_admin: 'full', manager: 'full', employee: 'self', security_analyst: 'none', it_admin: 'none', auditor: 'view' },
-  'attendance': { super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'full', employee: 'self', security_analyst: 'none', it_admin: 'none', auditor: 'none' },
-  'shifts': { super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'full', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' },
-  'gps-location': { super_admin: 'full', org_admin: 'view', hr_admin: 'none', manager: 'full', employee: 'self', security_analyst: 'none', it_admin: 'none', auditor: 'none' },
-  'productivity-scoring': { super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'full', employee: 'self', security_analyst: 'none', it_admin: 'none', auditor: 'none' },
-  'goals': { super_admin: 'full', org_admin: 'view', hr_admin: 'none', manager: 'full', employee: 'self', security_analyst: 'none', it_admin: 'none', auditor: 'none' },
-  'reports': { super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'full', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'view' },
-  'audit-log': { super_admin: 'full', org_admin: 'view', hr_admin: 'none', manager: 'none', employee: 'none', security_analyst: 'view', it_admin: 'none', auditor: 'full' },
-  'executive-dashboard': { super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'none', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'view' },
-  'dlp-alerts': { super_admin: 'full', org_admin: 'view', hr_admin: 'none', manager: 'none', employee: 'none', security_analyst: 'full', it_admin: 'full', auditor: 'view' },
-  'dlp-rules': { super_admin: 'full', org_admin: 'view', hr_admin: 'none', manager: 'none', employee: 'none', security_analyst: 'full', it_admin: 'full', auditor: 'none' },
-  'shadow-it': { super_admin: 'full', org_admin: 'view', hr_admin: 'none', manager: 'none', employee: 'none', security_analyst: 'full', it_admin: 'full', auditor: 'none' },
-  'settings/billing': { super_admin: 'full', org_admin: 'full', hr_admin: 'none', manager: 'none', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' },
-  'settings/compliance': { super_admin: 'full', org_admin: 'full', hr_admin: 'none', manager: 'none', employee: 'none', security_analyst: 'view', it_admin: 'none', auditor: 'full' },
-  'settings/security': { super_admin: 'full', org_admin: 'full', hr_admin: 'none', manager: 'none', employee: 'none', security_analyst: 'full', it_admin: 'full', auditor: 'none' },
-  'settings/notifications': { super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'full', employee: 'self', security_analyst: 'none', it_admin: 'none', auditor: 'none' },
-  'settings/user-management': { super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'none', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' },
+export const DEFAULT_PERMISSIONS: Record<string, Record<UserRole, Permission>> = {
+  'dashboard': withCompanyAdmin({ super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'full', employee: 'self', security_analyst: 'view', it_admin: 'view', auditor: 'view' }),
+  'users': withCompanyAdmin({ super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'view', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' }),
+  'users/activity': withCompanyAdmin({ super_admin: 'full', org_admin: 'view', hr_admin: 'full', manager: 'full', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' }),
+  'apps': withCompanyAdmin({ super_admin: 'full', org_admin: 'view', hr_admin: 'none', manager: 'full', employee: 'self', security_analyst: 'full', it_admin: 'none', auditor: 'none' }),
+  'screenshots': withCompanyAdmin({ super_admin: 'full', org_admin: 'config', hr_admin: 'none', manager: 'full', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' }),
+  'logs': withCompanyAdmin({ super_admin: 'full', org_admin: 'view', hr_admin: 'view', manager: 'full', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'view' }),
+  'charts': withCompanyAdmin({ super_admin: 'full', org_admin: 'view', hr_admin: 'full', manager: 'full', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' }),
+  'departments': withCompanyAdmin({ super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'view', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' }),
+  'kpis': withCompanyAdmin({ super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'view', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' }),
+  'roles': withCompanyAdmin({ super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'none', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' }),
+  'live-stream': withCompanyAdmin({ super_admin: 'full', org_admin: 'view', hr_admin: 'none', manager: 'full', employee: 'none', security_analyst: 'full', it_admin: 'none', auditor: 'none' }),
+  'emails': withCompanyAdmin({ super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'full', employee: 'none', security_analyst: 'none', it_admin: 'view', auditor: 'none' }),
+  'projects': withCompanyAdmin({ super_admin: 'full', org_admin: 'full', hr_admin: 'none', manager: 'full', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' }),
+  'ai-summary': withCompanyAdmin({ super_admin: 'full', org_admin: 'view', hr_admin: 'full', manager: 'full', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' }),
+  'hours-insights': withCompanyAdmin({ super_admin: 'full', org_admin: 'view', hr_admin: 'full', manager: 'full', employee: 'self', security_analyst: 'none', it_admin: 'view', auditor: 'none' }),
+  'settings': withCompanyAdmin({ super_admin: 'full', org_admin: 'full', hr_admin: 'none', manager: 'none', employee: 'none', security_analyst: 'full', it_admin: 'none', auditor: 'none' }),
+  'settings/tracking': withCompanyAdmin({ super_admin: 'full', org_admin: 'full', hr_admin: 'none', manager: 'none', employee: 'none', security_analyst: 'full', it_admin: 'view', auditor: 'none' }),
+  'onboarding': withCompanyAdmin({ super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'none', employee: 'none', security_analyst: 'none', it_admin: 'config', auditor: 'none' }),
+  'employee-portal': withCompanyAdmin({ super_admin: 'full', org_admin: 'view', hr_admin: 'view', manager: 'view', employee: 'full', security_analyst: 'none', it_admin: 'none', auditor: 'none' }),
+  'timesheets': withCompanyAdmin({ super_admin: 'full', org_admin: 'view', hr_admin: 'full', manager: 'full', employee: 'self', security_analyst: 'none', it_admin: 'none', auditor: 'view' }),
+  'attendance': withCompanyAdmin({ super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'full', employee: 'self', security_analyst: 'none', it_admin: 'none', auditor: 'none' }),
+  'shifts': withCompanyAdmin({ super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'full', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' }),
+  'gps-location': withCompanyAdmin({ super_admin: 'full', org_admin: 'view', hr_admin: 'none', manager: 'full', employee: 'self', security_analyst: 'none', it_admin: 'none', auditor: 'none' }),
+  'productivity-scoring': withCompanyAdmin({ super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'full', employee: 'self', security_analyst: 'none', it_admin: 'none', auditor: 'none' }),
+  'goals': withCompanyAdmin({ super_admin: 'full', org_admin: 'view', hr_admin: 'none', manager: 'full', employee: 'self', security_analyst: 'none', it_admin: 'none', auditor: 'none' }),
+  'reports': withCompanyAdmin({ super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'full', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'view' }),
+  'audit-log': withCompanyAdmin({ super_admin: 'full', org_admin: 'view', hr_admin: 'none', manager: 'none', employee: 'none', security_analyst: 'view', it_admin: 'none', auditor: 'full' }),
+  'executive-dashboard': withCompanyAdmin({ super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'none', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'view' }),
+  'dlp-alerts': withCompanyAdmin({ super_admin: 'full', org_admin: 'view', hr_admin: 'none', manager: 'none', employee: 'none', security_analyst: 'full', it_admin: 'full', auditor: 'view' }),
+  'dlp-rules': withCompanyAdmin({ super_admin: 'full', org_admin: 'view', hr_admin: 'none', manager: 'none', employee: 'none', security_analyst: 'full', it_admin: 'full', auditor: 'none' }),
+  'shadow-it': withCompanyAdmin({ super_admin: 'full', org_admin: 'view', hr_admin: 'none', manager: 'none', employee: 'none', security_analyst: 'full', it_admin: 'full', auditor: 'none' }),
+  'settings/billing': withCompanyAdmin({ super_admin: 'full', org_admin: 'full', hr_admin: 'none', manager: 'none', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' }),
+  'settings/compliance': withCompanyAdmin({ super_admin: 'full', org_admin: 'full', hr_admin: 'none', manager: 'none', employee: 'none', security_analyst: 'view', it_admin: 'none', auditor: 'full' }),
+  'settings/security': withCompanyAdmin({ super_admin: 'full', org_admin: 'full', hr_admin: 'none', manager: 'none', employee: 'none', security_analyst: 'full', it_admin: 'full', auditor: 'none' }),
+  'settings/notifications': withCompanyAdmin({ super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'full', employee: 'self', security_analyst: 'none', it_admin: 'none', auditor: 'none' }),
+  'settings/user-management': withCompanyAdmin({ super_admin: 'full', org_admin: 'full', hr_admin: 'full', manager: 'none', employee: 'none', security_analyst: 'none', it_admin: 'none', auditor: 'none' }),
 };
 
 function loadPermissions(): Record<string, Record<UserRole, Permission>> {
@@ -120,8 +127,8 @@ export function PermissionsProvider({ children }: { children: ReactNode }) {
   const [permissions, setPermissions] = useState<Record<string, Record<UserRole, Permission>>>(loadPermissions);
 
   const hasPermission = useCallback((role: UserRole, module: string): Permission => {
-    // Super admin always has full access
-    if (role === 'super_admin') return 'full';
+    // Super admin and company admin always have full access
+    if (role === 'super_admin' || role === 'company_admin') return 'full';
     return permissions[module]?.[role] || 'none';
   }, [permissions]);
 
