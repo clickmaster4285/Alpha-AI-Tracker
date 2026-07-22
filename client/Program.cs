@@ -10,6 +10,8 @@ using client.Storage;
 
 EnvLoader.Load();
 
+var appMutex = new Mutex(true, "AlphaAITracker", out _);
+
 var config = AppConfig.FromEnv();
 
 var builder = Host.CreateApplicationBuilder(args);
@@ -70,6 +72,7 @@ finally
 {
     await host.StopAsync(ct);
     host.Dispose();
+    appMutex.Dispose();
 }
 
 static AppBuilder BuildAvaloniaApp()

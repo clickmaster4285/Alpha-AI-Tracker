@@ -22,6 +22,22 @@ public class ProcessCollector : IActivityCollector
         var foreground = GetActiveWindowInfo();
 
         var processes = Process.GetProcesses();
+        var procTree = ParentProcessResolver.BuildProcessTree();
+        var knownTitles = new Dictionary<int, string?>();
+
+        foreach (var proc in processes)
+        {
+            if (ct.IsCancellationRequested) break;
+            if (!ProcessFilter.IsUserProcess(proc)) continue;
+
+            try
+            {
+                var pid = proc.Id;
+                if (foreground?.pid == pid && foreground?.title != null)
+                    knownTitles[pid] = foreground.Value.title;
+            }
+            catch { }
+        }
 
         foreach (var proc in processes)
         {
@@ -36,8 +52,14 @@ public class ProcessCollector : IActivityCollector
                 long mem = 0;
                 try { mem = proc.WorkingSet64; } catch { }
 
-                var isForeground = foreground?.pid == pid;
-                var title = isForeground ? foreground?.title : null;
+                var resolvedTitle = ParentProcessResolver.ResolveWindowTitle(
+                    pid, name, procTree, knownTitles, foreground?.pid);
+
+                var profile = ParentProcessResolver.GetChromeProfile(name, pid);
+
+                var title = profile != null
+                    ? $"{resolvedTitle} [{profile}]"
+                    : resolvedTitle;
 
                 logs.Add(new ActivityLog
                 {
@@ -48,7 +70,7 @@ public class ProcessCollector : IActivityCollector
                     ProcessId = pid,
                     CpuPercent = 0,
                     MemoryBytes = mem,
-                    IsForeground = isForeground,
+                    IsForeground = foreground?.pid == pid,
                     UserName = currentUser,
                     Platform = "macOS",
                     SessionId = SessionInfo.SessionId
@@ -95,7 +117,7 @@ public class ProcessCollector : IActivityCollector
         }
     }
 
-    private static bool CheckAccessibilityPermission()
+    public static bool CheckAccessibilityPermission()
     {
         try
         {
@@ -124,10 +146,7 @@ public class ProcessCollector : IActivityCollector
 
     private static (int pid, string? title)? GetActiveWindowInfo()
     {
-        var viaOsascript = GetActiveViaOsascript();
-        if (viaOsascript != null) return viaOsascript;
-
-        return null;
+        return GetActiveViaOsascript();
     }
 
     private static (int pid, string? title)? GetActiveViaOsascript()
@@ -147,7 +166,6 @@ public class ProcessCollector : IActivityCollector
                 }
             };
             proc.Start();
-
             var output = proc.StandardOutput.ReadToEnd().Trim();
             proc.WaitForExit(5000);
 
@@ -161,7 +179,6 @@ public class ProcessCollector : IActivityCollector
                 return null;
 
             var title = string.IsNullOrWhiteSpace(parts[1]) ? null : parts[1].Trim();
-
             return (pid, title);
         }
         catch

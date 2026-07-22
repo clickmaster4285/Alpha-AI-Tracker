@@ -24,6 +24,26 @@ public class ProcessCollector : IActivityCollector
         var currentUser = Environment.UserName;
 
         var processes = Process.GetProcesses();
+        var procTree = ParentProcessResolver.BuildProcessTree();
+        var knownTitles = new Dictionary<int, string?>();
+
+        foreach (var proc in processes)
+        {
+            if (ct.IsCancellationRequested) break;
+            if (!ProcessFilter.IsUserProcess(proc)) continue;
+
+            try
+            {
+                var pid = proc.Id;
+                var isForeground = pid == foregroundPid;
+                if (isForeground)
+                {
+                    var title = GetWindowText(proc);
+                    knownTitles[pid] = title;
+                }
+            }
+            catch { }
+        }
 
         foreach (var proc in processes)
         {
@@ -57,24 +77,25 @@ public class ProcessCollector : IActivityCollector
                 }
                 catch { }
 
-                var isForeground = pid == foregroundPid;
+                var resolvedTitle = ParentProcessResolver.ResolveWindowTitle(
+                    pid, name, procTree, knownTitles, foregroundPid);
 
-                string? windowTitle = null;
-                if (isForeground)
-                {
-                    try { windowTitle = GetWindowTitle(proc); } catch { }
-                }
+                var profile = ParentProcessResolver.GetChromeProfile(name, pid);
+
+                var title = profile != null
+                    ? $"{resolvedTitle} [{profile}]"
+                    : resolvedTitle;
 
                 logs.Add(new ActivityLog
                 {
                     MachineId = _machineId,
                     Timestamp = now,
                     ProcessName = name,
-                    WindowTitle = windowTitle,
+                    WindowTitle = title,
                     ProcessId = pid,
                     CpuPercent = Math.Round(cpu, 1),
                     MemoryBytes = mem,
-                    IsForeground = isForeground,
+                    IsForeground = pid == foregroundPid,
                     UserName = currentUser,
                     Platform = "Windows",
                     SessionId = SessionInfo.SessionId
@@ -124,14 +145,14 @@ public class ProcessCollector : IActivityCollector
         }
     }
 
-    private static string? GetWindowTitle(Process proc)
+    private static string? GetWindowText(Process proc)
     {
         try
         {
             var hWnd = proc.MainWindowHandle;
             if (hWnd == IntPtr.Zero) return null;
             var sb = new StringBuilder(256);
-            GetWindowText(hWnd, sb, sb.Capacity);
+            GetWindowTextW(hWnd, sb, sb.Capacity);
             var title = sb.ToString();
             return string.IsNullOrWhiteSpace(title) ? null : title;
         }
@@ -148,5 +169,5 @@ public class ProcessCollector : IActivityCollector
     private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out int lpdwProcessId);
 
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
-    private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+    private static extern int GetWindowTextW(IntPtr hWnd, StringBuilder text, int count);
 }

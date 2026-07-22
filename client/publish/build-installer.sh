@@ -74,26 +74,21 @@ PUBLISH_WIN="$SCRIPT_DIR/windows"
 PUBLISH_LIN="$SCRIPT_DIR/linux"
 PUBLISH_MAC="$SCRIPT_DIR/macos"
 
-NEEDS_PUBLISH=false
-[ "$BUILD_WIN" = true ] && [ ! -f "$PUBLISH_WIN/client.exe" ] && NEEDS_PUBLISH=true
-[ "$BUILD_LIN" = true ] && [ ! -f "$PUBLISH_LIN/client" ]    && NEEDS_PUBLISH=true
-[ "$BUILD_MAC" = true ] && [ ! -f "$PUBLISH_MAC/client" ]   && NEEDS_PUBLISH=true
-
-if [ "$NEEDS_PUBLISH" = true ]; then
-  echo ""
-  echo "[Publish] Publishing .NET app..."
-  [ "$BUILD_WIN" = true ] && [ ! -f "$PUBLISH_WIN/client.exe" ] && \
-    dotnet publish "$PROJECT_DIR" -c Release -r win-x64 --self-contained -o "$PUBLISH_WIN" 2>/dev/null || \
-    echo "  (skipped win-x64, requires .NET SDK)"
-  [ "$BUILD_LIN" = true ] && [ ! -f "$PUBLISH_LIN/client" ] && \
-    dotnet publish "$PROJECT_DIR" -c Release -r linux-x64 --self-contained -o "$PUBLISH_LIN" 2>/dev/null || \
-    echo "  (skipped linux-x64, requires .NET SDK)"
-  [ "$BUILD_MAC" = true ] && [ ! -f "$PUBLISH_MAC/client" ] && \
-    dotnet publish "$PROJECT_DIR" -c Release -r osx-x64 --self-contained -o "$PUBLISH_MAC" 2>/dev/null || \
-    echo "  (skipped osx-x64, requires .NET SDK)"
-else
-  echo "[Publish] Published output already exists — skipping publish step"
-fi
+echo ""
+echo "[Publish] Publishing .NET app..."
+for RID in win-x64 linux-x64 osx-x64; do
+  case "$RID" in
+    win-x64)  OUT="$PUBLISH_WIN"; BUILD_FLAG=$BUILD_WIN ;;
+    linux-x64) OUT="$PUBLISH_LIN"; BUILD_FLAG=$BUILD_LIN ;;
+    osx-x64)  OUT="$PUBLISH_MAC"; BUILD_FLAG=$BUILD_MAC ;;
+  esac
+  if [ "$BUILD_FLAG" = true ]; then
+    rm -rf "$OUT"
+    dotnet publish "$PROJECT_DIR" -c Release -r "$RID" --self-contained -o "$OUT" 2>/dev/null && \
+      echo "  $RID -> $OUT" || \
+      echo "  (skipped $RID, requires .NET SDK)"
+  fi
+done
 
 # Windows installer
 if [ "$BUILD_WIN" = true ]; then

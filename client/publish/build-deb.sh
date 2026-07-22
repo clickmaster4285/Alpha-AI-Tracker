@@ -21,9 +21,7 @@ mkdir -p "$PKG_ROOT/usr/share/icons/hicolor/256x256/apps"
 # Copy published binaries
 cp -r "$SCRIPT_DIR/linux/"* "$PKG_ROOT/usr/share/$APP_NAME/"
 
-# Copy AT-SPI helper script (Wayland window title detection)
-mkdir -p "$PKG_ROOT/usr/share/$APP_NAME/Platform/Linux"
-cp "$PROJECT_DIR/Platform/Linux/alpha_atspi.py" "$PKG_ROOT/usr/share/$APP_NAME/Platform/Linux/"
+# Placeholder for platform-specific files (AT-SPI now inline in C#)
 
 # Desktop entry
 cat > "$PKG_ROOT/usr/share/applications/$APP_NAME.desktop" << EOF

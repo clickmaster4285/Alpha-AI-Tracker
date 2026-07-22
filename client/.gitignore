@@ -24,6 +24,7 @@ artifacts/
 ## Publish (scripts tracked, binaries ignored)
 publish/windows/
 publish/linux/
+publish/macos/
 publish/*.exe
 publish/*.dll
 !publish/*.sh
