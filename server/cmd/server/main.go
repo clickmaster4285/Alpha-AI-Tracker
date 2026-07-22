@@ -1,0 +1,127 @@
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"time"
+
+	"github.com/labstack/echo/v4"
+	"github.com/alpha-ai-tracker/server/internal/config"
+	"github.com/alpha-ai-tracker/server/internal/database"
+	"github.com/alpha-ai-tracker/server/internal/handlers"
+	"github.com/alpha-ai-tracker/server/internal/repository"
+	"github.com/alpha-ai-tracker/server/internal/router"
+	"github.com/alpha-ai-tracker/server/internal/services"
+)
+
+func main() {
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	log.Println("[server] Alpha AI Tracker — Starting...")
+
+	// ────────────────
+	// Load Config
+	// ────────────────
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("[server] failed to load config: %v", err)
+	}
+	log.Printf("[server] configured for %s", cfg.ServerAddr())
+
+	// ────────────────
+	// Database
+	// ────────────────
+	pool, err := database.NewPool(cfg.Database)
+	if err != nil {
+		log.Fatalf("[server] database connection failed: %v", err)
+	}
+	defer pool.Close()
+
+	// Run migrations
+	migrationsDir := findMigrationsDir()
+	if err := database.RunMigrations(pool, migrationsDir); err != nil {
+		log.Fatalf("[server] migration failed: %v", err)
+	}
+
+	// ────────────────
+	// Dependencies (DI)
+	// ────────────────
+	userRepo := repository.NewUserRepo(pool)
+	authService := services.NewAuthService(userRepo, cfg.JWT, cfg.Admin)
+	userService := services.NewUserService(userRepo)
+	authHandler := handlers.NewAuthHandler(authService, cfg.JWT)
+	userHandler := handlers.NewUserHandler(userService)
+
+	// ────────────────
+	// Auto-initialize Company Admin
+	// ────────────────
+	ctx := context.Background()
+	if err := authService.EnsureCompanyAdmin(ctx); err != nil {
+		log.Fatalf("[server] failed to ensure company admin: %v", err)
+	}
+
+	// ────────────────
+	// Setup Echo
+	// ────────────────
+	e := echo.New()
+	e.HideBanner = true
+	e.HidePort = true
+
+	router.Setup(e, cfg, authService, authHandler, userHandler)
+
+	// ────────────────
+	// Graceful Shutdown
+	// ────────────────
+	go func() {
+		log.Printf("[server] listening on %s", cfg.ServerAddr())
+		if err := e.Start(cfg.ServerAddr()); err != nil {
+			log.Printf("[server] server stopped: %v", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	log.Println("[server] shutting down gracefully...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := e.Shutdown(shutdownCtx); err != nil {
+		log.Fatalf("[server] forced shutdown: %v", err)
+	}
+	log.Println("[server] stopped")
+}
+
+// findMigrationsDir locates the migrations directory relative to the binary.
+// It tries common locations: working dir, binary dir, and parent directories.
+func findMigrationsDir() string {
+	candidates := []string{
+		"migrations",
+		"../../migrations",
+		"../migrations",
+		filepath.Join("server", "migrations"),
+	}
+
+	// Also try relative to the executable
+	if exe, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "migrations"))
+		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "..", "..", "migrations"))
+	}
+
+	for _, dir := range candidates {
+		absDir, err := filepath.Abs(dir)
+		if err != nil {
+			continue
+		}
+		if info, err := os.Stat(absDir); err == nil && info.IsDir() {
+			return absDir
+		}
+	}
+
+	log.Println("[server] WARNING: migrations directory not found, using 'migrations'")
+	return "migrations"
+}
