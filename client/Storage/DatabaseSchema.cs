@@ -28,6 +28,23 @@ internal static class DatabaseSchema
 
         CREATE INDEX IF NOT EXISTS idx_logs_machine
             ON activity_logs(machine_id, timestamp DESC);
+
+        CREATE TABLE IF NOT EXISTS app_status (
+            key             TEXT PRIMARY KEY,
+            value           TEXT NOT NULL,
+            updated_at      TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS permission_status (
+            check_id        TEXT PRIMARY KEY,
+            session_id      TEXT NOT NULL,
+            session_type    TEXT NOT NULL,
+            platform        TEXT NOT NULL,
+            checked_at      TEXT NOT NULL,
+            method          TEXT NOT NULL,
+            works           INTEGER NOT NULL DEFAULT 0,
+            details         TEXT
+        );
     ";
 
     internal const string InsertSql = @"
@@ -39,5 +56,20 @@ internal static class DatabaseSchema
             ($id, $machine_id, $timestamp, $process_name, $window_title,
              $process_id, $cpu_percent, $memory_bytes, $is_foreground,
              $user_name, $platform, $session_id)
+    ";
+
+    internal const string UpsertStatusSql = @"
+        INSERT INTO app_status (key, value, updated_at)
+        VALUES ($key, $value, datetime('now'))
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = excluded.updated_at
+    ";
+
+    internal const string InsertPermissionSql = @"
+        INSERT INTO permission_status
+            (check_id, session_id, session_type, platform, checked_at, method, works, details)
+        VALUES
+            ($check_id, $session_id, $session_type, $platform, $checked_at, $method, $works, $details)
     ";
 }

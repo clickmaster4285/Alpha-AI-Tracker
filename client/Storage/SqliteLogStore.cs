@@ -141,6 +141,62 @@ public class SqliteLogStore : ILogStore, IDisposable
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task SetStatusAsync(string key, string value, CancellationToken ct)
+    {
+        if (_connection == null) return;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = DatabaseSchema.UpsertStatusSql;
+        cmd.Parameters.AddWithValue("$key", key);
+        cmd.Parameters.AddWithValue("$value", value);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<string?> GetStatusAsync(string key, CancellationToken ct)
+    {
+        if (_connection == null) return null;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT value FROM app_status WHERE key = $key";
+        cmd.Parameters.AddWithValue("$key", key);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result as string;
+    }
+
+    public async Task SetPermissionStatusAsync(IReadOnlyDictionary<string, bool> permissions, string sessionType, CancellationToken ct)
+    {
+        if (_connection == null) return;
+
+        await using var tx = await _connection.BeginTransactionAsync(ct);
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = DatabaseSchema.InsertPermissionSql;
+        ((DbCommand)cmd).Transaction = tx;
+
+        var checkId = Guid.NewGuid().ToString("N");
+        var platform = "Linux";
+        if (OperatingSystem.IsWindows()) platform = "Windows";
+        else if (OperatingSystem.IsMacOS()) platform = "macOS";
+
+        foreach (var kvp in permissions)
+        {
+            cmd.Parameters.Clear();
+            cmd.Parameters.AddWithValue("$check_id", $"{checkId}_{kvp.Key}");
+            cmd.Parameters.AddWithValue("$session_id", SessionInfo.SessionId);
+            cmd.Parameters.AddWithValue("$session_type", sessionType);
+            cmd.Parameters.AddWithValue("$platform", platform);
+            cmd.Parameters.AddWithValue("$checked_at", DateTime.UtcNow.ToString("O"));
+            cmd.Parameters.AddWithValue("$method", kvp.Key);
+            cmd.Parameters.AddWithValue("$works", kvp.Value ? 1 : 0);
+            cmd.Parameters.AddWithValue("$details", "");
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+
+        await tx.CommitAsync(ct);
+
+        await SetStatusAsync("permission_check_id", checkId, ct);
+        await SetStatusAsync("session_id", SessionInfo.SessionId, ct);
+        await SetStatusAsync("session_type", sessionType, ct);
+        await SetStatusAsync("last_permission_check", DateTime.UtcNow.ToString("O"), ct);
+    }
+
     public void Dispose()
     {
         _connection?.Close();

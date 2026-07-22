@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.RegularExpressions;
+using client.Core;
 using client.Core.Abstractions;
 using client.Core.Models;
 
@@ -8,8 +9,7 @@ namespace client.Platform.Linux;
 public partial class ProcessCollector : IActivityCollector
 {
     private readonly string _machineId;
-    private static bool _atspiChecked;
-    private static bool _atspiAvailable;
+    private static readonly HashSet<string> PermissionCache = new();
 
     public ProcessCollector(string machineId)
     {
@@ -28,12 +28,12 @@ public partial class ProcessCollector : IActivityCollector
         foreach (var proc in processes)
         {
             if (ct.IsCancellationRequested) break;
+            if (!ProcessFilter.IsUserProcess(proc)) continue;
 
             try
             {
                 var name = proc.ProcessName;
                 var pid = proc.Id;
-                if (pid == 0 || string.IsNullOrWhiteSpace(name)) continue;
 
                 long mem = 0;
                 try { mem = proc.WorkingSet64; } catch { }
@@ -52,7 +52,8 @@ public partial class ProcessCollector : IActivityCollector
                     MemoryBytes = mem,
                     IsForeground = isForeground,
                     UserName = currentUser,
-                    Platform = "Linux"
+                    Platform = "Linux",
+                    SessionId = SessionInfo.SessionId
                 });
             }
             catch
@@ -64,16 +65,70 @@ public partial class ProcessCollector : IActivityCollector
         return Task.FromResult<IReadOnlyList<ActivityLog>>(logs);
     }
 
-    private static (int pid, string? title)? GetActiveWindowInfo()
+    public static IReadOnlyDictionary<string, bool> GetPermissionStatus()
     {
-        if (GetActiveWindowXprop() is {} x11) return x11;
-        if (GetActiveWindowAtSpi() is {} atspi) return atspi;
-        if (GetActiveWindowGnomeEval() is {} ge) return ge;
-        if (GetActiveWindowXdotool() is {} xt) return xt;
-        return null;
+        var status = new Dictionary<string, bool>();
+        status["xprop"] = HasTool("xprop");
+        status["xdotool"] = HasTool("xdotool");
+        status["gdbus"] = HasTool("gdbus");
+        status["xdg_portal"] = GetActiveViaPortal() != null;
+        status["shell_introspect"] = GetActiveViaShellIntrospect() != null;
+        status["atspi"] = GetActiveViaAtSpi() != null;
+        status["xprop_x11"] = CheckX11();
+        return status;
     }
 
-    private static (int pid, string? title)? GetActiveWindowXprop()
+    private static bool HasTool(string name)
+    {
+        if (PermissionCache.Contains(name)) return true;
+        try
+        {
+            using var proc = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = "which",
+                    Arguments = name,
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                }
+            };
+            proc.Start();
+            var ok = proc.WaitForExit(1000) && proc.ExitCode == 0;
+            if (ok) PermissionCache.Add(name);
+            return ok;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool CheckX11()
+    {
+        try
+        {
+            var outRaw = Run("xprop", "-root -notype _NET_SUPPORTING_WM_CHECK");
+            return outRaw != null;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static (int pid, string? title)? GetActiveWindowInfo()
+    {
+        if (GetActiveViaXprop() is {} x11) return x11;
+        if (GetActiveViaPortal() is {} portal) return portal;
+        if (GetActiveViaShellIntrospect() is {} shell) return shell;
+        if (GetActiveViaAtSpi() is {} atspi) return atspi;
+        if (GetActiveViaXdotool() is {} xt) return xt;
+        return GetActiveViaHeuristic();
+    }
+
+    private static (int pid, string? title)? GetActiveViaXprop()
     {
         try
         {
@@ -109,53 +164,27 @@ public partial class ProcessCollector : IActivityCollector
         }
     }
 
-    private static (int pid, string? title)? GetActiveWindowAtSpi()
+    private static (int pid, string? title)? GetActiveViaPortal()
     {
-        var sessionType = Environment.GetEnvironmentVariable("XDG_SESSION_TYPE");
-        if (!string.Equals(sessionType, "wayland", StringComparison.OrdinalIgnoreCase))
-            return null;
-
-        if (!_atspiChecked)
-        {
-            var check = Run("gsettings", "get org.gnome.desktop.interface toolkit-accessibility");
-            _atspiAvailable = check == "true";
-            _atspiChecked = true;
-        }
-
-        if (!_atspiAvailable)
-            return null;
+        if (!HasTool("gdbus")) return null;
 
         try
         {
-            var scriptPath = Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory, "Platform", "Linux", "alpha_atspi.py");
-            if (!File.Exists(scriptPath))
+            var outRaw = Run("gdbus", "call --session --dest org.freedesktop.portal.Desktop --object-path /org/freedesktop/portal/desktop --method org.freedesktop.DBus.Properties.GetAll \"org.freedesktop.portal.Window\"");
+            if (outRaw == null) return null;
+
+            var titleRaw = Run("gdbus", "call --session --dest org.freedesktop.portal.Desktop --object-path /org/freedesktop/portal/desktop --method org.freedesktop.DBus.Properties.Get \"org.freedesktop.portal.Window\" \"ActiveWindow\"");
+            if (titleRaw == null || !titleRaw.StartsWith("("))
                 return null;
 
-            using var proc = new Process
-            {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = "python3",
-                    Arguments = $"\"{scriptPath}\"",
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                }
-            };
-            proc.Start();
-            var output = proc.StandardOutput.ReadToEnd().Trim();
-            if (!proc.WaitForExit(2000)) { proc.Kill(); return null; }
-            if (proc.ExitCode != 0 || string.IsNullOrEmpty(output)) return null;
+            var match = WindowTitleFromVariant().Match(titleRaw);
+            if (!match.Success) return null;
 
-            var parts = output.Split('|', 2);
-            if (parts.Length < 2) return null;
+            var appId = match.Groups[1].Value;
+            if (string.IsNullOrEmpty(appId)) return null;
 
-            var pid = int.TryParse(parts[0], out var p) ? p : (int?)null;
-            var title = string.IsNullOrEmpty(parts[1]) ? null : parts[1];
-            if (pid == null) return null;
-
-            return (pid.Value, title);
+            var pid = ResolveAppIdToPid(appId);
+            return (pid, appId);
         }
         catch
         {
@@ -163,24 +192,22 @@ public partial class ProcessCollector : IActivityCollector
         }
     }
 
-    private static (int pid, string? title)? GetActiveWindowGnomeEval()
+    private static (int pid, string? title)? GetActiveViaShellIntrospect()
     {
+        if (!HasTool("gdbus")) return null;
+
         try
         {
-            var evalOut = Run("gdbus", "call --session --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.gnome.Shell.Eval \"global.display.focus_window?.get_pid()\"");
-            if (evalOut == null || !evalOut.StartsWith("(true, '"))
+            var outRaw = Run("gdbus", "call --session --dest org.gnome.Shell --object-path /org/gnome/Shell/Introspect --method org.gnome.Shell.Introspect.GetWindows");
+            if (outRaw == null || outRaw.Contains("Access denied"))
                 return null;
 
-            var pidStr = evalOut.Split('\'')[1];
-            if (!int.TryParse(pidStr, out var pid)) return null;
+            var pidMatch = ShellPidFromVariant().Match(outRaw);
+            if (!pidMatch.Success) return null;
+            var pid = int.Parse(pidMatch.Groups[1].Value);
 
-            var titleOut = Run("gdbus", "call --session --dest org.gnome.Shell --object-path /org/gnome/Shell --method org.gnome.Shell.Eval \"global.display.focus_window?.get_title()\"");
-            string? title = null;
-            if (titleOut != null && titleOut.StartsWith("(true, '"))
-            {
-                var parts = titleOut.Split('\'');
-                if (parts.Length >= 2) title = parts[1];
-            }
+            var titleMatch = ShellTitleFromVariant().Match(outRaw);
+            var title = titleMatch.Success ? titleMatch.Groups[1].Value : null;
 
             return (pid, title);
         }
@@ -190,7 +217,60 @@ public partial class ProcessCollector : IActivityCollector
         }
     }
 
-    private static (int pid, string? title)? GetActiveWindowXdotool()
+    private static (int pid, string? title)? GetActiveViaAtSpi()
+    {
+        if (!HasTool("gdbus")) return null;
+
+        try
+        {
+            var addrRaw = Run("gdbus", "call --session --dest org.a11y.Bus --object-path /org/a11y/bus --method org.a11y.Bus.GetAddress");
+            if (addrRaw == null) return null;
+
+            var addrMatch = BusAddressRegex().Match(addrRaw);
+            if (!addrMatch.Success) return null;
+            var busAddr = addrMatch.Groups[1].Value;
+
+            var namesRaw = Run("gdbus", $"call --bus \"{busAddr}\" --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.ListNames");
+            if (namesRaw == null) return null;
+
+            var nameMatches = AtSpiNameRegex().Matches(namesRaw);
+            foreach (Match nameMatch in nameMatches)
+            {
+                var appName = nameMatch.Groups[1].Value;
+                if (appName == ":1.0" || appName.Contains("Registry")) continue;
+
+                try
+                {
+                    var stateRaw = Run("gdbus", $"call --bus \"{busAddr}\" --dest {appName} --object-path /org/a11y/atspi/accessible/root --method org.freedesktop.DBus.Properties.Get \"org.a11y.atspi.Accessible\" \"AccessibleState\"");
+                    if (stateRaw == null) continue;
+
+                    if (stateRaw.Contains("8") || stateRaw.Contains("focused"))
+                    {
+                        var titleRaw = Run("gdbus", $"call --bus \"{busAddr}\" --dest {appName} --object-path /org/a11y/atspi/accessible/root --method org.freedesktop.DBus.Properties.Get \"org.a11y.atspi.Accessible\" \"Name\"");
+                        var title = titleRaw != null ? ExtractStringValue(titleRaw) : null;
+
+                        var pidRaw = Run("gdbus", $"call --bus \"{busAddr}\" --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.GetConnectionUnixProcessID \"{appName}\"");
+                        var pid = pidRaw != null && int.TryParse(ExtractStringValue(pidRaw), out var p) ? p : 0;
+
+                        if (pid > 0)
+                            return (pid, title);
+                    }
+                }
+                catch
+                {
+                    continue;
+                }
+            }
+        }
+        catch
+        {
+            return null;
+        }
+
+        return null;
+    }
+
+    private static (int pid, string? title)? GetActiveViaXdotool()
     {
         try
         {
@@ -206,6 +286,66 @@ public partial class ProcessCollector : IActivityCollector
         }
     }
 
+    private static (int pid, string? title)? GetActiveViaHeuristic()
+    {
+        try
+        {
+            var processes = Process.GetProcesses();
+            (int pid, string? title, DateTime start) best = (0, null, DateTime.MinValue);
+
+            foreach (var proc in processes)
+            {
+                try
+                {
+                    if (!ProcessFilter.IsUserProcess(proc)) continue;
+                    var hasWindow = proc.MainWindowHandle != IntPtr.Zero;
+                    if (!hasWindow) continue;
+
+                    var startTime = proc.StartTime;
+                    if (startTime > best.start)
+                    {
+                        string? title = null;
+                        try { title = proc.MainWindowTitle; } catch { }
+                        best = (proc.Id, title, startTime);
+                    }
+                }
+                catch { }
+            }
+
+            return best.pid > 0 ? (best.pid, best.title) : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static int ResolveAppIdToPid(string appId)
+    {
+        try
+        {
+            var processes = Process.GetProcessesByName(appId);
+            if (processes.Length > 0)
+                return processes[0].Id;
+
+            if (appId.Contains('.'))
+            {
+                var shortName = appId.Split('.').Last().ToLowerInvariant();
+                var procs = Process.GetProcessesByName(shortName);
+                if (procs.Length > 0)
+                    return procs[0].Id;
+            }
+        }
+        catch { }
+        return 0;
+    }
+
+    private static string? ExtractStringValue(string gvariantOutput)
+    {
+        var match = StringValueRegex().Match(gvariantOutput);
+        return match.Success ? match.Groups[1].Value : null;
+    }
+
     private static string? Run(string file, string args)
     {
         try
@@ -217,13 +357,14 @@ public partial class ProcessCollector : IActivityCollector
                     FileName = file,
                     Arguments = args,
                     RedirectStandardOutput = true,
+                    RedirectStandardError = true,
                     UseShellExecute = false,
                     CreateNoWindow = true
                 }
             };
             proc.Start();
             var output = proc.StandardOutput.ReadToEnd().Trim();
-            proc.WaitForExit(1000);
+            proc.WaitForExit(3000);
             return proc.ExitCode == 0 && output.Length > 0 ? output : null;
         }
         catch
@@ -240,4 +381,25 @@ public partial class ProcessCollector : IActivityCollector
 
     [GeneratedRegex(@"""(.+?)""")]
     private static partial Regex TitleRegex();
+
+    [GeneratedRegex(@"ActiveWindow\s+:\s+'([^']+)'")]
+    private static partial Regex WindowTitleFromVariant();
+
+    [GeneratedRegex(@"pid\s*:?\s*(\d+)", RegexOptions.IgnoreCase)]
+    private static partial Regex ShellPidFromVariant();
+
+    [GeneratedRegex(@"title\s*:?\s*'([^']*)'", RegexOptions.IgnoreCase)]
+    private static partial Regex ShellTitleFromVariant();
+
+    [GeneratedRegex(@"\(true,\s*'([^']*)'\)")]
+    private static partial Regex GdbusStringResult();
+
+    [GeneratedRegex(@"'([^']+)'")]
+    private static partial Regex BusAddressRegex();
+
+    [GeneratedRegex(@"'(:?\d[\w.]*)'")]
+    private static partial Regex AtSpiNameRegex();
+
+    [GeneratedRegex(@"<([^>]*)>")]
+    private static partial Regex StringValueRegex();
 }

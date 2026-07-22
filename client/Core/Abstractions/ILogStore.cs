@@ -10,4 +10,7 @@ public interface ILogStore
     Task MarkSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
     Task<long> GetCountAsync(CancellationToken ct);
     Task CleanupAsync(TimeSpan olderThan, CancellationToken ct);
+    Task SetStatusAsync(string key, string value, CancellationToken ct);
+    Task<string?> GetStatusAsync(string key, CancellationToken ct);
+    Task SetPermissionStatusAsync(IReadOnlyDictionary<string, bool> permissions, string sessionType, CancellationToken ct);
 }

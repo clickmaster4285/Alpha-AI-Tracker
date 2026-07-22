@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using client.Core;
 using client.Core.Abstractions;
 using client.Core.Models;
 
@@ -27,14 +28,12 @@ public class ProcessCollector : IActivityCollector
         foreach (var proc in processes)
         {
             if (ct.IsCancellationRequested) break;
+            if (!ProcessFilter.IsUserProcess(proc)) continue;
 
             try
             {
                 var name = proc.ProcessName;
-                if (string.IsNullOrWhiteSpace(name)) continue;
-
                 var pid = proc.Id;
-                if (pid == 0) continue;
 
                 long mem = 0;
                 double cpu = 0;
@@ -58,8 +57,10 @@ public class ProcessCollector : IActivityCollector
                 }
                 catch { }
 
+                var isForeground = pid == foregroundPid;
+
                 string? windowTitle = null;
-                if (pid == foregroundPid)
+                if (isForeground)
                 {
                     try { windowTitle = GetWindowTitle(proc); } catch { }
                 }
@@ -69,13 +70,14 @@ public class ProcessCollector : IActivityCollector
                     MachineId = _machineId,
                     Timestamp = now,
                     ProcessName = name,
-                    WindowTitle = windowTitle ?? proc.MainWindowTitle,
+                    WindowTitle = windowTitle,
                     ProcessId = pid,
                     CpuPercent = Math.Round(cpu, 1),
                     MemoryBytes = mem,
-                    IsForeground = pid == foregroundPid,
+                    IsForeground = isForeground,
                     UserName = currentUser,
-                    Platform = "Windows"
+                    Platform = "Windows",
+                    SessionId = SessionInfo.SessionId
                 });
             }
             catch
@@ -85,6 +87,26 @@ public class ProcessCollector : IActivityCollector
         }
 
         return Task.FromResult<IReadOnlyList<ActivityLog>>(logs);
+    }
+
+    public static IReadOnlyDictionary<string, bool> GetPermissionStatus()
+    {
+        var status = new Dictionary<string, bool>();
+        try
+        {
+            var hWnd = GetForegroundWindow();
+            status["user32_getforegroundwindow"] = hWnd != IntPtr.Zero;
+            if (hWnd != IntPtr.Zero)
+            {
+                GetWindowThreadProcessId(hWnd, out _);
+                status["user32_getwindowthreadprocessid"] = true;
+            }
+        }
+        catch
+        {
+            status["user32"] = false;
+        }
+        return status;
     }
 
     private static int GetForegroundProcessId()
