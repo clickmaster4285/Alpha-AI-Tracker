@@ -1,73 +1,110 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { STORAGE_PREFIX } from '@/config';
+'use client';
 
-export type UserRole = 'super_admin' | 'org_admin' | 'hr_admin' | 'manager' | 'employee' | 'security_analyst' | 'it_admin' | 'auditor';
+import React, { createContext, useContext, useEffect, ReactNode } from 'react';
+import { useRouter } from 'next/navigation';
+import { useAppDispatch, useAppSelector } from './store/hooks';
+import { checkAuth, loginUser, logoutUser, clearError } from './store/redux';
+
+export type UserRole = 'super_admin' | 'org_admin' | 'hr_admin' | 'manager' | 'employee' | 'security_analyst' | 'it_admin' | 'auditor' | 'company_admin';
 
 export interface AuthUser {
   id: string;
   name: string;
   email: string;
   role: UserRole;
+  employeeId: string;
+  department: string;
   avatar: string;
   avatarColor: string;
-  department?: string;
-  jobTitle?: string;
-  hireDate?: string;
 }
 
-const FIXED_USERS: AuthUser[] = [
-  { id: 'sa1', name: 'Super Admin', email: 'superadmin@alphai.com', role: 'super_admin', avatar: 'SA', avatarColor: '#7C3AED', department: 'Executive', jobTitle: 'System Administrator' },
-  { id: 'oa1', name: 'Org Admin', email: 'orgadmin@alphai.com', role: 'org_admin', avatar: 'OA', avatarColor: '#3B82F6', department: 'Executive', jobTitle: 'Organization Admin' },
-  { id: 'ha1', name: 'HR Admin', email: 'hradmin@alphai.com', role: 'hr_admin', avatar: 'HA', avatarColor: '#EC4899', department: 'HR', jobTitle: 'HR Manager' },
-  { id: 'mg1', name: 'Manager User', email: 'manager@alphai.com', role: 'manager', avatar: 'MU', avatarColor: '#F59E0B', department: 'Engineering', jobTitle: 'Engineering Manager' },
-  { id: 'em1', name: 'Employee User', email: 'employee@alphai.com', role: 'employee', avatar: 'EU', avatarColor: '#10B981', department: 'Engineering', jobTitle: 'Software Engineer' },
-  { id: 'sc1', name: 'Security Analyst', email: 'security@alphai.com', role: 'security_analyst', avatar: 'SC', avatarColor: '#EF4444', department: 'Security', jobTitle: 'Security Analyst' },
-  { id: 'it1', name: 'IT Admin', email: 'itadmin@alphai.com', role: 'it_admin', avatar: 'IT', avatarColor: '#06B6D4', department: 'IT', jobTitle: 'IT Administrator' },
-  { id: 'au1', name: 'Auditor', email: 'auditor@alphai.com', role: 'auditor', avatar: 'AU', avatarColor: '#8B5CF6', department: 'Compliance', jobTitle: 'Compliance Auditor' },
-];
+function mapAuthUser(user: import('./api').AuthUser): AuthUser {
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    role: user.role as UserRole,
+    employeeId: user.employeeId,
+    department: user.department,
+    avatar: user.avatar || user.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2),
+    avatarColor: user.avatarColor || '#7C3AED',
+  };
+}
 
-const DEFAULT_PASSWORD = 'alphai123';
-const AUTH_KEY = `${STORAGE_PREFIX}current_user`;
+export function getRoleName(role: UserRole): string {
+  const names: Record<string, string> = {
+    super_admin: 'Super Admin',
+    org_admin: 'Org Admin',
+    hr_admin: 'HR Admin',
+    manager: 'Manager',
+    employee: 'Employee',
+    security_analyst: 'Security Analyst',
+    it_admin: 'IT Admin',
+    auditor: 'Auditor',
+    company_admin: 'Company Admin',
+  };
+  return names[role] || role;
+}
+
+const FALLBACK_USERS: AuthUser[] = [
+  { id: 'sa1', name: 'Super Admin', email: 'superadmin@alphai.com', role: 'super_admin', avatar: 'SA', avatarColor: '#7C3AED', department: 'Executive', employeeId: 'SA-0001' },
+  { id: 'oa1', name: 'Org Admin', email: 'orgadmin@alphai.com', role: 'org_admin', avatar: 'OA', avatarColor: '#3B82F6', department: 'Executive', employeeId: 'OA-0001' },
+  { id: 'ha1', name: 'HR Admin', email: 'hradmin@alphai.com', role: 'hr_admin', avatar: 'HA', avatarColor: '#EC4899', department: 'HR', employeeId: 'HA-0001' },
+  { id: 'mg1', name: 'Manager User', email: 'manager@alphai.com', role: 'manager', avatar: 'MU', avatarColor: '#F59E0B', department: 'Engineering', employeeId: 'MG-0001' },
+  { id: 'em1', name: 'Employee User', email: 'employee@alphai.com', role: 'employee', avatar: 'EU', avatarColor: '#10B981', department: 'Engineering', employeeId: 'EM-0001' },
+  { id: 'sc1', name: 'Security Analyst', email: 'security@alphai.com', role: 'security_analyst', avatar: 'SC', avatarColor: '#EF4444', department: 'Security', employeeId: 'SC-0001' },
+  { id: 'it1', name: 'IT Admin', email: 'itadmin@alphai.com', role: 'it_admin', avatar: 'IT', avatarColor: '#06B6D4', department: 'IT', employeeId: 'IT-0001' },
+  { id: 'au1', name: 'Auditor', email: 'auditor@alphai.com', role: 'auditor', avatar: 'AU', avatarColor: '#8B5CF6', department: 'Compliance', employeeId: 'AU-0001' },
+];
 
 interface AuthContextType {
   user: AuthUser | null;
-  login: (email: string, password: string) => { success: boolean; error?: string };
+  login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => void;
+  isLoading: boolean;
+  isAuthenticated: boolean;
   allUsers: AuthUser[];
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<AuthUser | null>(null);
-  const [hydrated, setHydrated] = useState(false);
+  const dispatch = useAppDispatch();
+  const { user: rawUser, isLoading, isAuthenticated } = useAppSelector((state) => state.auth);
+  const router = useRouter();
 
+  // Check auth status on mount (cookie-based)
   useEffect(() => {
-    const stored = localStorage.getItem(AUTH_KEY);
-    setUser(stored ? JSON.parse(stored) : null);
-    setHydrated(true);
-  }, []);
+    dispatch(checkAuth());
+  }, [dispatch]);
 
-  const login = (email: string, password: string) => {
-    if (password !== DEFAULT_PASSWORD) {
-      return { success: false, error: 'Invalid password' };
+  const login = async (email: string, password: string) => {
+    try {
+      const result = await dispatch(loginUser({ email, password })).unwrap();
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: typeof err === 'string' ? err : 'Login failed' };
     }
-    const found = FIXED_USERS.find(u => u.email.toLowerCase() === email.toLowerCase());
-    if (!found) {
-      return { success: false, error: 'User not found' };
-    }
-    setUser(found);
-    localStorage.setItem(AUTH_KEY, JSON.stringify(found));
-    return { success: true };
   };
 
   const logout = () => {
-    setUser(null);
-    localStorage.removeItem(AUTH_KEY);
+    dispatch(logoutUser());
+    router.replace('/login');
   };
 
+  const mappedUser: AuthUser | null = rawUser ? mapAuthUser(rawUser) : null;
+
   return (
-    <AuthContext.Provider value={{ user, login, logout, allUsers: FIXED_USERS }}>
+    <AuthContext.Provider
+      value={{
+        user: mappedUser,
+        login,
+        logout,
+        isLoading,
+        isAuthenticated,
+        allUsers: FALLBACK_USERS,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );
@@ -77,18 +114,4 @@ export function useAuth() {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error('useAuth must be inside AuthProvider');
   return ctx;
-}
-
-export function getRoleName(role: UserRole): string {
-  const names: Record<UserRole, string> = {
-    super_admin: 'Super Admin',
-    org_admin: 'Org Admin',
-    hr_admin: 'HR Admin',
-    manager: 'Manager',
-    employee: 'Employee',
-    security_analyst: 'Security Analyst',
-    it_admin: 'IT Admin',
-    auditor: 'Auditor',
-  };
-  return names[role];
 }
