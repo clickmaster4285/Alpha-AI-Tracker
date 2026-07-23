@@ -51,6 +51,7 @@ func Setup(
 	auth := e.Group("/api/v1/auth")
 	auth.POST("/login", authHandler.Login)
 	auth.POST("/employee-login", authHandler.EmployeeLogin) // employee desktop client login
+	auth.POST("/employee-disconnect", authHandler.EmployeeDisconnect) // employee desktop client disconnect
 
 	// ─────────────────────────────
 	// Semi-Protected Routes (optional auth)

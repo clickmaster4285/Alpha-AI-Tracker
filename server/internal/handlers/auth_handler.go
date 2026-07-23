@@ -250,4 +250,67 @@ func (h *AuthHandler) EmployeeLogin(c echo.Context) error {
 	return c.JSON(http.StatusOK, resp)
 }
 
+// EmployeeDisconnect handles POST /api/v1/auth/employee-disconnect
+// Sets the employee's tracking status back to untracked and is_online to false.
+func (h *AuthHandler) EmployeeDisconnect(c echo.Context) error {
+	var req dto.EmployeeDisconnectRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, dto.APIError{
+			Code:    http.StatusBadRequest,
+			Message: "Invalid request body",
+		})
+	}
+
+	if req.EmployeeID == "" {
+		return c.JSON(http.StatusBadRequest, dto.APIError{
+			Code:    http.StatusBadRequest,
+			Message: "Employee ID is required",
+		})
+	}
+
+	// Validate token if provided
+	if req.Token != "" {
+		claims, err := h.authService.ValidateToken(req.Token)
+		if err != nil || claims.UserID == "" {
+			return c.JSON(http.StatusUnauthorized, dto.APIError{
+				Code:    http.StatusUnauthorized,
+				Message: "Invalid or expired token",
+			})
+		}
+	}
+
+	// Resolve EmployeeID (EMP-XXXXX) to internal UUID
+	emp, err := h.employeeRepo.GetByEmployeeID(c.Request().Context(), req.EmployeeID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, dto.APIError{
+			Code:    http.StatusInternalServerError,
+			Message: "Failed to find employee",
+			Detail:  err.Error(),
+		})
+	}
+	if emp == nil {
+		return c.JSON(http.StatusNotFound, dto.APIError{
+			Code:    http.StatusNotFound,
+			Message: "Employee not found",
+		})
+	}
+
+	// Update status to untracked and offline
+	updates := map[string]interface{}{
+		"tracking_status": "untracked",
+		"is_online":       false,
+	}
+	if _, err := h.employeeRepo.Update(c.Request().Context(), emp.ID, updates); err != nil {
+		return c.JSON(http.StatusInternalServerError, dto.APIError{
+			Code:    http.StatusInternalServerError,
+			Message: "Failed to update employee status",
+			Detail:  err.Error(),
+		})
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "disconnected successfully",
+	})
+}
+
 
