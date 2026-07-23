@@ -23,11 +23,11 @@ export default function UsersList() {
   // Form state
   const [newName, setNewName] = useState('');
   const [newEmail, setNewEmail] = useState('');
-  const [newDept, setNewDept] = useState('Engineering');
+  const [newDeptId, setNewDeptId] = useState(1);
   const [newRole, setNewRole] = useState('employee');
   const [editName, setEditName] = useState('');
   const [editEmail, setEditEmail] = useState('');
-  const [editDept, setEditDept] = useState('');
+  const [editDeptId, setEditDeptId] = useState(1);
 
   // ── Queries ──
   const { data: employeesData, isLoading: employeesLoading, error: employeesError } = useQuery({
@@ -35,12 +35,12 @@ export default function UsersList() {
     queryFn: () => employeesApi.list({ page, perPage: 10, search: search || undefined, department: deptFilter || undefined }),
   });
 
-  const { data: deptData } = useQuery({
+  const { data: deptResponse } = useQuery({
     queryKey: ['departments'],
     queryFn: () => departmentsApi.list(),
   });
 
-  const departments = deptData?.departments || ['Engineering', 'Design', 'Marketing', 'Sales', 'HR', 'Finance', 'QA', 'DevOps'];
+  const departments = deptResponse?.departments || [];
 
   // ── Mutations ──
   const createMutation = useMutation({
@@ -97,7 +97,7 @@ export default function UsersList() {
   const resetForm = () => {
     setNewName('');
     setNewEmail('');
-    setNewDept('Engineering');
+    setNewDeptId(1);
     setNewRole('employee');
   };
 
@@ -109,7 +109,7 @@ export default function UsersList() {
     createMutation.mutate({
       name: newName,
       email: newEmail,
-      department: newDept,
+      departmentId: newDeptId,
       role: newRole,
       shift: 'Day',
     });
@@ -119,7 +119,7 @@ export default function UsersList() {
     setShowEdit(emp.id);
     setEditName(emp.name);
     setEditEmail(emp.email);
-    setEditDept(emp.department);
+    setEditDeptId(emp.departmentId);
   };
 
   const handleSaveEdit = (id: string) => {
@@ -128,7 +128,7 @@ export default function UsersList() {
       data: {
         name: editName,
         email: editEmail,
-        department: editDept,
+        departmentId: editDeptId,
       },
     });
   };
@@ -204,7 +204,7 @@ export default function UsersList() {
           className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground"
         >
           <option value="">All Departments</option>
-          {departments.map(d => <option key={d} value={d}>{d}</option>)}
+          {departments.map(d => <option key={d.id} value={d.name}>{d.name}</option>)}
         </select>
         <button
           onClick={() => setShowAdd(true)}
@@ -353,11 +353,11 @@ export default function UsersList() {
               className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
             />
             <select
-              value={newDept}
-              onChange={e => setNewDept(e.target.value)}
+              value={newDeptId}
+              onChange={e => setNewDeptId(Number(e.target.value))}
               className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
             >
-              {departments.map(d => <option key={d} value={d}>{d}</option>)}
+              {departments.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
             </select>
             <select
               value={newRole}
@@ -401,11 +401,11 @@ export default function UsersList() {
               className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
             />
             <select
-              value={editDept}
-              onChange={e => setEditDept(e.target.value)}
+              value={editDeptId}
+              onChange={e => setEditDeptId(Number(e.target.value))}
               className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
             >
-              {departments.map(d => <option key={d} value={d}>{d}</option>)}
+              {departments.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
             </select>
             <button
               onClick={() => showEdit && handleSaveEdit(showEdit)}

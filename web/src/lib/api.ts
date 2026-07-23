@@ -7,7 +7,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || '/api/v1';
 interface RequestOptions {
   method?: string;
   body?: unknown;
-  params?: Record<string, string | number | undefined>;
+  params?: Record<string, string | number | boolean | undefined>;
   headers?: Record<string, string>;
   /** Skip JSON parse for blob/download responses */
   raw?: boolean;
@@ -33,7 +33,7 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
   if (params) {
     const searchParams = new URLSearchParams();
     Object.entries(params).forEach(([key, value]) => {
-      if (value !== undefined && value !== '') {
+      if (value !== undefined && value !== '' && value !== null) {
         searchParams.set(key, String(value));
       }
     });
@@ -124,77 +124,31 @@ export const authApi = {
 };
 
 // ──────────────────────────
-// Users API
+// Departments API (dynamic CRUD)
 // ──────────────────────────
 
-export interface User {
-  id: string;
-  employeeId: string;
+export interface Department {
+  id: number;
   name: string;
-  email: string;
-  role: string;
-  department: string;
-  shift: string;
-  trackingEnabled: boolean;
-  trackingStatus: string;
-  isOnline: boolean;
-  avatar: string;
-  avatarColor: string;
-  createdAt: string;
-  updatedAt: string;
+  employeeCount: number;
 }
 
-export interface UserListResponse {
-  data: User[];
+export interface DepartmentListResponse {
+  departments: Department[];
   total: number;
-  page: number;
-  perPage: number;
-  totalPages: number;
 }
-
-export interface CreateUserPayload {
-  name: string;
-  email: string;
-  password?: string;
-  department: string;
-  role: string;
-  shift?: string;
-  trackingEnabled?: boolean;
-}
-
-export interface UpdateUserPayload {
-  name?: string;
-  email?: string;
-  department?: string;
-  role?: string;
-  shift?: string;
-  trackingEnabled?: boolean;
-  trackingStatus?: string;
-  isOnline?: boolean;
-}
-
-export const usersApi = {
-  list: (params?: { page?: number; perPage?: number; search?: string; department?: string; role?: string; status?: string }) =>
-    request<UserListResponse>('/users', { params: params as Record<string, string | number | undefined> }),
-
-  get: (id: string) => request<User>('/users/' + id),
-
-  create: (data: CreateUserPayload) =>
-    request<User>('/users', { method: 'POST', body: data }),
-
-  update: (id: string, data: UpdateUserPayload) =>
-    request<User>('/users/' + id, { method: 'PUT', body: data }),
-
-  delete: (id: string) =>
-    request<{ message: string }>('/users/' + id, { method: 'DELETE' }),
-};
-
-// ──────────────────────────
-// Departments API
-// ──────────────────────────
 
 export const departmentsApi = {
-  list: () => request<{ departments: string[] }>('/departments'),
+  list: () => request<DepartmentListResponse>('/departments'),
+
+  create: (name: string) =>
+    request<Department>('/departments', { method: 'POST', body: { name } }),
+
+  update: (id: number, name: string) =>
+    request<Department>('/departments/' + id, { method: 'PUT', body: { name } }),
+
+  delete: (id: number) =>
+    request<{ message: string }>('/departments/' + id, { method: 'DELETE' }),
 };
 
 // ──────────────────────────
@@ -208,6 +162,7 @@ export interface Employee {
   email: string;
   role: string;
   department: string;
+  departmentId: number;
   shift: string;
   trackingEnabled: boolean;
   trackingStatus: string;
@@ -229,7 +184,8 @@ export interface EmployeeListResponse {
 export interface CreateEmployeePayload {
   name: string;
   email: string;
-  department: string;
+  departmentId: number;
+  department?: string;
   role: string;
   shift?: string;
 }
@@ -238,6 +194,7 @@ export interface UpdateEmployeePayload {
   name?: string;
   email?: string;
   department?: string;
+  departmentId?: number;
   role?: string;
   shift?: string;
   trackingEnabled?: boolean;
@@ -286,6 +243,41 @@ export interface EmployeeLoginResponse {
 export const employeeAuthApi = {
   login: (data: EmployeeLoginRequest) =>
     request<EmployeeLoginResponse>('/auth/employee-login', { method: 'POST', body: data }),
+};
+
+// ──────────────────────────
+// Activity Logs API
+// ──────────────────────────
+
+export interface ActivityLog {
+  id: string;
+  employeeId: string;
+  employeeName?: string;
+  machineId: string;
+  timestamp: string;
+  processName: string;
+  windowTitle?: string;
+  processId: number;
+  cpuPercent: number;
+  memoryBytes: number;
+  isForeground: boolean;
+  userName: string;
+  platform: string;
+  sessionId?: string;
+  syncedAt: string;
+}
+
+export interface ActivityLogListResponse {
+  data: ActivityLog[];
+  total: number;
+  page: number;
+  perPage: number;
+  totalPages: number;
+}
+
+export const activityLogsApi = {
+  list: (params?: { page?: number; perPage?: number; employeeId?: string; search?: string; platform?: string; foreground?: boolean; startDate?: string; endDate?: string }) =>
+    request<ActivityLogListResponse>('/activity-logs', { params: params as Record<string, string | number | boolean | undefined> }),
 };
 
 // ──────────────────────────
