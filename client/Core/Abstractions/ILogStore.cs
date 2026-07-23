@@ -14,6 +14,7 @@ public interface ILogStore
     Task CleanupAsync(TimeSpan olderThan, CancellationToken ct);
     Task SetStatusAsync(string key, string value, CancellationToken ct);
     Task<string?> GetStatusAsync(string key, CancellationToken ct);
+    Task CleanupSyncedAsync(TimeSpan olderThan, CancellationToken ct);
     Task SetPermissionStatusAsync(IReadOnlyDictionary<string, bool> permissions, string sessionType, CancellationToken ct);
     Task SaveEmployeeInfoAsync(EmployeeInfo employee, CancellationToken ct);
     Task<EmployeeInfo?> GetEmployeeInfoAsync(CancellationToken ct);

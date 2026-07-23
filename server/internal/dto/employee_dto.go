@@ -4,15 +4,14 @@ import "time"
 
 // ────────────────────────────────
 // Request DTOs
-// ────────────────────────────────
-
-// CreateEmployeeRequest is the payload for creating a new employee.
+// ────────────────────────────────// CreateEmployeeRequest is the payload for creating a new employee.
 type CreateEmployeeRequest struct {
-	Name       string  `json:"name"`
-	Email      string  `json:"email"`
-	Department string  `json:"department"`
-	Role       string  `json:"role"`
-	Shift      string  `json:"shift,omitempty"`
+	Name         string `json:"name"`
+	Email        string `json:"email"`
+	Department   string `json:"department,omitempty"`
+	DepartmentID int    `json:"departmentId"`
+	Role         string `json:"role"`
+	Shift        string `json:"shift,omitempty"`
 }
 
 // UpdateEmployeeRequest is the payload for updating an employee.
@@ -20,6 +19,7 @@ type UpdateEmployeeRequest struct {
 	Name            *string `json:"name,omitempty"`
 	Email           *string `json:"email,omitempty"`
 	Department      *string `json:"department,omitempty"`
+	DepartmentID    *int    `json:"departmentId,omitempty"`
 	Role            *string `json:"role,omitempty"`
 	Shift           *string `json:"shift,omitempty"`
 	TrackingEnabled *bool   `json:"trackingEnabled,omitempty"`
@@ -57,6 +57,7 @@ type EmployeeResponse struct {
 	Email           string    `json:"email"`
 	Role            string    `json:"role"`
 	Department      string    `json:"department"`
+	DepartmentID    int       `json:"departmentId"`
 	Shift           string    `json:"shift"`
 	TrackingEnabled bool      `json:"trackingEnabled"`
 	TrackingStatus  string    `json:"trackingStatus"`
