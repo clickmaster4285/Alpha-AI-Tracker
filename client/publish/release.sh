@@ -47,8 +47,8 @@ ls -lh "$INSTALLER_DIR/"
 echo ""
 echo "[2/4] Creating git tag $VERSION..."
 cd "$PROJECT_DIR"
-git add client/
-echo "  Staged changes in client/"
+git add .
+echo "  Staged changes in $PROJECT_DIR"
 git commit -m "release: $VERSION" 2>/dev/null || echo "  (nothing to commit)"
 git push origin HEAD 2>&1 || echo "  WARNING: Failed to push commit — push manually"
 git tag -f "$VERSION" 2>/dev/null || true
