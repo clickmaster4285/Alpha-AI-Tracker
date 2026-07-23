@@ -237,25 +237,6 @@ func (r *UserRepo) CountCompanyAdmins(ctx context.Context) (int, error) {
 	return count, nil
 }
 
-// GetDepartments returns all department names.
-func (r *UserRepo) GetDepartments(ctx context.Context) ([]string, error) {
-	rows, err := r.pool.Query(ctx, "SELECT name FROM departments ORDER BY name")
-	if err != nil {
-		return nil, fmt.Errorf("get departments: %w", err)
-	}
-	defer rows.Close()
-
-	var depts []string
-	for rows.Next() {
-		var d string
-		if err := rows.Scan(&d); err != nil {
-			return nil, fmt.Errorf("scan department: %w", err)
-		}
-		depts = append(depts, d)
-	}
-	return depts, nil
-}
-
 // IsUniqueEmail checks if an email is already taken (excluding a given user ID).
 func (r *UserRepo) IsUniqueEmail(ctx context.Context, email, excludeID string) (bool, error) {
 	var exists bool
