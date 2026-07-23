@@ -18,6 +18,6 @@ type ActivityLog struct {
 	Platform      string    `json:"platform" db:"platform"`
 	SessionID     *string   `json:"sessionId,omitempty" db:"session_id"`
 	EmployeeName  *string   `json:"employeeName,omitempty" db:"employee_name"`
-	SyncedAt      time.Time `json:"syncedAt" db:"synced_at"`
+	SyncedAt      *time.Time `json:"syncedAt,omitempty" db:"synced_at"`
 	CreatedAt     time.Time `json:"createdAt" db:"created_at"`
 }

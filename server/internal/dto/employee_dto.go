@@ -64,8 +64,9 @@ type EmployeeResponse struct {
 	IsOnline        bool      `json:"isOnline"`
 	Avatar          string    `json:"avatar"`
 	AvatarColor     string    `json:"avatarColor"`
-	CreatedAt       time.Time `json:"createdAt"`
-	UpdatedAt       time.Time `json:"updatedAt"`
+	CreatedAt       time.Time    `json:"createdAt"`
+	UpdatedAt       time.Time    `json:"updatedAt"`
+	DeletedAt       *time.Time   `json:"deletedAt"`
 }
 
 // EmployeeListResponse is a paginated list response.

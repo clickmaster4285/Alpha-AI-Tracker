@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/alpha-ai-tracker/server/internal/models"
 )
@@ -112,6 +111,8 @@ func (r *ActivityLogRepo) List(ctx context.Context, params ActivityLogListParams
 	var args []interface{}
 	argIdx := 1
 
+	conditions = append(conditions, "deleted_at IS NULL")
+
 	if params.EmployeeID != "" {
 		conditions = append(conditions, fmt.Sprintf("employee_id = $%d", argIdx))
 		args = append(args, params.EmployeeID)
@@ -177,9 +178,22 @@ func (r *ActivityLogRepo) List(ctx context.Context, params ActivityLogListParams
 	}
 	defer rows.Close()
 
-	logs, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.ActivityLog])
-	if err != nil {
-		return nil, fmt.Errorf("collect activity logs: %w", err)
+	var logs []models.ActivityLog
+	for rows.Next() {
+		var l models.ActivityLog
+		if err := rows.Scan(
+			&l.ID, &l.EmployeeID, &l.MachineID, &l.Timestamp,
+			&l.ProcessName, &l.WindowTitle,
+			&l.ProcessID, &l.CPUPercent, &l.MemoryBytes, &l.IsForeground,
+			&l.UserName, &l.Platform, &l.SessionID, &l.EmployeeName,
+			&l.SyncedAt, &l.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan activity log row: %w", err)
+		}
+		logs = append(logs, l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate activity logs: %w", err)
 	}
 
 	return &ActivityLogListResult{
