@@ -72,9 +72,13 @@ func (s *EmployeeService) Create(ctx context.Context, req *dto.CreateEmployeeReq
 	if shift == "" {
 		shift = "Day"
 	}
-	department := req.Department
-	if department == "" {
-		department = "Engineering"
+	deptID := req.DepartmentID
+	if deptID == 0 {
+		deptID = 1 // Default to Engineering (ID 1)
+	}
+	departmentStr := req.Department
+	if departmentStr == "" {
+		departmentStr = "Engineering"
 	}
 
 	emp := &models.Employee{
@@ -82,7 +86,8 @@ func (s *EmployeeService) Create(ctx context.Context, req *dto.CreateEmployeeReq
 		Name:            req.Name,
 		Email:           req.Email,
 		Role:            role,
-		Department:      department,
+		Department:      departmentStr,
+		DepartmentID:    deptID,
 		Shift:           shift,
 		TrackingEnabled: true,
 		TrackingStatus:  "untracked",
@@ -118,6 +123,9 @@ func (s *EmployeeService) Update(ctx context.Context, id string, req *dto.Update
 	}
 	if req.Department != nil {
 		updates["department"] = *req.Department
+	}
+	if req.DepartmentID != nil {
+		updates["department_id"] = *req.DepartmentID
 	}
 	if req.Role != nil {
 		updates["role"] = *req.Role
@@ -199,6 +207,7 @@ func employeeToResponse(e *models.Employee) dto.EmployeeResponse {
 		Email:           e.Email,
 		Role:            e.Role,
 		Department:      e.Department,
+		DepartmentID:    e.DepartmentID,
 		Shift:           e.Shift,
 		TrackingEnabled: e.TrackingEnabled,
 		TrackingStatus:  e.TrackingStatus,
