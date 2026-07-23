@@ -146,6 +146,7 @@ bash publish/release.sh
 ```
 
 This will:
+
 1. Build all installers via `build-installer.sh`
 2. Commit any pending changes
 3. Create and push the git tag (e.g. `v1.0.0`)
@@ -159,7 +160,7 @@ If you prefer to upload manually:
 ```bash
 cd client
 bash publish/build-installer.sh
-# Then go to https://github.com/AlphaDev-7/Alpha-AI-Tracker/releases/new
+# Then go to https://github.com/clickmaster4285/Alpha-AI-Tracker/releases/new
 # and upload the files from installers/
 ```
 

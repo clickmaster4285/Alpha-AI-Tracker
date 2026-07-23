@@ -12,7 +12,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 INSTALLER_DIR="$PROJECT_DIR/installers"
 VERSION="${1:-v1.0.0}"
-REPO="AlphaDev-7/Alpha-AI-Tracker"
+
+# Load REPO from .env if not set in environment
+if [ -z "${REPO:-}" ]; then
+  if [ -f "$PROJECT_DIR/.env" ]; then
+    REPO=$(grep -E '^REPO=' "$PROJECT_DIR/.env" | cut -d '=' -f 2-)
+  fi
+fi
+REPO="${REPO:-clickmaster4285/Alpha-AI-Tracker}"
 
 echo "=========================================="
 echo " Alpha AI Tracker — Release $VERSION"
