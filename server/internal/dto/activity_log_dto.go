@@ -57,7 +57,7 @@ type ActivityLogResponse struct {
 	UserName     string    `json:"userName"`
 	Platform     string    `json:"platform"`
 	SessionID    *string   `json:"sessionId,omitempty"`
-	SyncedAt     time.Time `json:"syncedAt"`
+	SyncedAt     *time.Time `json:"syncedAt,omitempty"`
 }
 
 // ActivityLogListResponse is a paginated list of activity logs.

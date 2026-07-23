@@ -207,5 +207,6 @@ func userToResponse(u *models.User) dto.UserResponse {
 		AvatarColor:     u.AvatarColor,
 		CreatedAt:       u.CreatedAt,
 		UpdatedAt:       u.UpdatedAt,
+		DeletedAt:       u.DeletedAt,
 	}
 }

@@ -61,7 +61,7 @@ func (s *ActivityLogService) SyncLogs(ctx context.Context, req *dto.SyncActivity
 			Platform:     entry.Platform,
 			SessionID:    entry.SessionID,
 			EmployeeName: entry.EmployeeName,
-			SyncedAt:     now,
+			SyncedAt:     &now,
 		})
 	}
 
@@ -100,7 +100,7 @@ func (s *ActivityLogService) List(ctx context.Context, params repository.Activit
 			UserName:     l.UserName,
 			Platform:     l.Platform,
 			SessionID:    l.SessionID,
-			SyncedAt:     l.SyncedAt,
+			SyncedAt:     l.SyncedAt, // *time.Time → *time.Time
 		}
 	}
 

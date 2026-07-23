@@ -2,10 +2,12 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/alpha-ai-tracker/server/internal/models"
 )
@@ -52,8 +54,10 @@ func (r *EmployeeRepo) List(ctx context.Context, params EmployeeListParams) (*Em
 	var args []interface{}
 	argIdx := 1
 
+	conditions = append(conditions, "e.deleted_at IS NULL")
+
 	if params.Search != "" {
-		conditions = append(conditions, fmt.Sprintf("(LOWER(name) LIKE LOWER($%d) OR LOWER(email) LIKE LOWER($%d) OR LOWER(employee_id) LIKE LOWER($%d))", argIdx, argIdx, argIdx))
+		conditions = append(conditions, fmt.Sprintf("(LOWER(e.name) LIKE LOWER($%d) OR LOWER(e.email) LIKE LOWER($%d) OR LOWER(e.employee_id) LIKE LOWER($%d))", argIdx, argIdx, argIdx))
 		args = append(args, "%"+params.Search+"%")
 		argIdx++
 	}
@@ -79,7 +83,7 @@ func (r *EmployeeRepo) List(ctx context.Context, params EmployeeListParams) (*Em
 	}
 
 	// Count total
-	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM employees %s", whereClause)
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM employees e %s", whereClause)
 	var total int
 	if err := r.pool.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
 		return nil, fmt.Errorf("count employees: %w", err)
@@ -88,13 +92,14 @@ func (r *EmployeeRepo) List(ctx context.Context, params EmployeeListParams) (*Em
 	offset := (params.Page - 1) * params.PerPage
 	totalPages := (total + params.PerPage - 1) / params.PerPage
 
-	// Fetch page
+	// Fetch page — use manual scan to avoid RowToStructByName issues with nullable columns
 	query := fmt.Sprintf(`
 		SELECT e.id, e.employee_id, e.name, e.email, e.role,
 		       COALESCE(d.name, e.department) AS department,
 		       e.department_id, e.shift,
-		       e.tracking_enabled, e.tracking_status, e.is_online, e.avatar, e.avatar_color,
-		       e.created_at, e.updated_at
+		       e.tracking_enabled, e.tracking_status, e.is_online,
+		           COALESCE(e.avatar, '') AS avatar, COALESCE(e.avatar_color, '') AS avatar_color,
+		       e.created_at, e.updated_at, e.deleted_at
 		FROM employees e
 		LEFT JOIN departments d ON e.department_id = d.id
 		%s
@@ -109,9 +114,22 @@ func (r *EmployeeRepo) List(ctx context.Context, params EmployeeListParams) (*Em
 	}
 	defer rows.Close()
 
-	employees, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Employee])
-	if err != nil {
-		return nil, fmt.Errorf("collect employees: %w", err)
+	var employees []models.Employee
+	for rows.Next() {
+		var e models.Employee
+		if err := rows.Scan(
+			&e.ID, &e.EmployeeID, &e.Name, &e.Email, &e.Role,
+			&e.Department, &e.DepartmentID, &e.Shift,
+			&e.TrackingEnabled, &e.TrackingStatus, &e.IsOnline,
+			&e.Avatar, &e.AvatarColor,
+			&e.CreatedAt, &e.UpdatedAt, &e.DeletedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan employee row: %w", err)
+		}
+		employees = append(employees, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate employees: %w", err)
 	}
 
 	return &EmployeeListResult{
@@ -125,31 +143,7 @@ func (r *EmployeeRepo) List(ctx context.Context, params EmployeeListParams) (*Em
 
 // getByID is an internal helper to fetch a single employee row.
 func (r *EmployeeRepo) getByID(ctx context.Context, query string, args ...interface{}) (*models.Employee, error) {
-	rows, err := r.pool.Query(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("query employee: %w", err)
-	}
-	defer rows.Close()
-
-	// Use manual scanning instead of RowToStructByName because we have a LEFT JOIN
-	emp, err := pgx.CollectOneRow(rows, func(row pgx.CollectableRow) (models.Employee, error) {
-		var e models.Employee
-		err := row.Scan(
-			&e.ID, &e.EmployeeID, &e.Name, &e.Email, &e.Role,
-			&e.Department, &e.DepartmentID, &e.Shift,
-			&e.TrackingEnabled, &e.TrackingStatus, &e.IsOnline,
-			&e.Avatar, &e.AvatarColor,
-			&e.CreatedAt, &e.UpdatedAt,
-		)
-		return e, err
-	})
-	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("collect employee: %w", err)
-	}
-	return &emp, nil
+	return execGetByID(ctx, r.pool, query, args...)
 }
 
 // GetByID returns an employee by UUID.
@@ -158,11 +152,12 @@ func (r *EmployeeRepo) GetByID(ctx context.Context, id string) (*models.Employee
 		SELECT e.id, e.employee_id, e.name, e.email, e.role,
 		       COALESCE(d.name, e.department) AS department,
 		       e.department_id, e.shift,
-		       e.tracking_enabled, e.tracking_status, e.is_online, e.avatar, e.avatar_color,
-		       e.created_at, e.updated_at
+		       e.tracking_enabled, e.tracking_status, e.is_online,
+		           COALESCE(e.avatar, '') AS avatar, COALESCE(e.avatar_color, '') AS avatar_color,
+		       e.created_at, e.updated_at, e.deleted_at
 		FROM employees e
 		LEFT JOIN departments d ON e.department_id = d.id
-		WHERE e.id = $1
+		WHERE e.id = $1 AND e.deleted_at IS NULL
 	`, id)
 }
 
@@ -172,11 +167,12 @@ func (r *EmployeeRepo) GetByEmployeeID(ctx context.Context, employeeID string) (
 		SELECT e.id, e.employee_id, e.name, e.email, e.role,
 		       COALESCE(d.name, e.department) AS department,
 		       e.department_id, e.shift,
-		       e.tracking_enabled, e.tracking_status, e.is_online, e.avatar, e.avatar_color,
-		       e.created_at, e.updated_at
+		       e.tracking_enabled, e.tracking_status, e.is_online,
+		           COALESCE(e.avatar, '') AS avatar, COALESCE(e.avatar_color, '') AS avatar_color,
+		       e.created_at, e.updated_at, e.deleted_at
 		FROM employees e
 		LEFT JOIN departments d ON e.department_id = d.id
-		WHERE e.employee_id = $1
+		WHERE e.employee_id = $1 AND e.deleted_at IS NULL
 	`, employeeID)
 }
 
@@ -186,16 +182,24 @@ func (r *EmployeeRepo) GetByEmail(ctx context.Context, email string) (*models.Em
 		SELECT e.id, e.employee_id, e.name, e.email, e.role,
 		       COALESCE(d.name, e.department) AS department,
 		       e.department_id, e.shift,
-		       e.tracking_enabled, e.tracking_status, e.is_online, e.avatar, e.avatar_color,
-		       e.created_at, e.updated_at
+		       e.tracking_enabled, e.tracking_status, e.is_online,
+		           COALESCE(e.avatar, '') AS avatar, COALESCE(e.avatar_color, '') AS avatar_color,
+		       e.created_at, e.updated_at, e.deleted_at
 		FROM employees e
 		LEFT JOIN departments d ON e.department_id = d.id
-		WHERE e.email = $1
+		WHERE e.email = $1 AND e.deleted_at IS NULL
 	`, email)
 }
 
 // Create inserts a new employee and returns it.
+// Uses a transaction for atomicity.
 func (r *EmployeeRepo) Create(ctx context.Context, e *models.Employee) (*models.Employee, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	query := `
 		INSERT INTO employees (employee_id, name, email, role, department, department_id, shift,
 		                       tracking_enabled, tracking_status, is_online)
@@ -203,20 +207,40 @@ func (r *EmployeeRepo) Create(ctx context.Context, e *models.Employee) (*models.
 		RETURNING id, employee_id, name, email, role,
 		          COALESCE((SELECT name FROM departments WHERE id = $6), $5) AS department,
 		          $6 AS department_id, shift,
-		          tracking_enabled, tracking_status, is_online, avatar, avatar_color,
-		          created_at, updated_at
+		          tracking_enabled, tracking_status, is_online,
+		          COALESCE(avatar, '') AS avatar, COALESCE(avatar_color, '') AS avatar_color,
+		          created_at, updated_at, deleted_at
 	`
-	return r.getByID(ctx, query,
+	emp, err := execGetByID(ctx, tx, query,
 		e.EmployeeID, e.Name, e.Email, e.Role, e.Department, e.DepartmentID, e.Shift,
 		e.TrackingEnabled, e.TrackingStatus, e.IsOnline,
 	)
+	if err != nil {
+		// Check for duplicate key violations
+		if isDuplicateKeyError(err) {
+			return nil, fmt.Errorf("duplicate employee record: %w", err)
+		}
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
+	return emp, nil
 }
 
 // Update partially updates an employee and returns the updated record.
+// Uses a transaction for atomicity.
 func (r *EmployeeRepo) Update(ctx context.Context, id string, updates map[string]interface{}) (*models.Employee, error) {
 	if len(updates) == 0 {
 		return r.GetByID(ctx, id)
 	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
 
 	var setClauses []string
 	var args []interface{}
@@ -246,32 +270,52 @@ func (r *EmployeeRepo) Update(ctx context.Context, id string, updates map[string
 
 	query := fmt.Sprintf(`
 		UPDATE employees SET %s
-		WHERE id = $1
+		WHERE id = $1 AND deleted_at IS NULL
 		RETURNING id, employee_id, name, email, role,
 		          COALESCE((SELECT name FROM departments WHERE id = employees.department_id), department) AS department,
 		          department_id, shift,
-		          tracking_enabled, tracking_status, is_online, avatar, avatar_color,
-		          created_at, updated_at
+		          tracking_enabled, tracking_status, is_online,
+		          COALESCE(avatar, '') AS avatar, COALESCE(avatar_color, '') AS avatar_color,
+		          created_at, updated_at, deleted_at
 	`, strings.Join(setClauses, ", "))
 
-	return r.getByID(ctx, query, args...)
+	emp, err := execGetByID(ctx, tx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
+	return emp, nil
 }
 
 // Delete removes an employee by ID.
+// Uses a transaction for atomicity.
 func (r *EmployeeRepo) Delete(ctx context.Context, id string) error {
-	tag, err := r.pool.Exec(ctx, "DELETE FROM employees WHERE id = $1", id)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx, "UPDATE employees SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL", id)
 	if err != nil {
 		return fmt.Errorf("delete employee: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("employee not found")
 	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
+	}
 	return nil
 }
 
 // GetDepartments returns all department names.
 func (r *EmployeeRepo) GetDepartments(ctx context.Context) ([]string, error) {
-	rows, err := r.pool.Query(ctx, "SELECT name FROM departments ORDER BY name")
+	rows, err := r.pool.Query(ctx, "SELECT name FROM departments WHERE deleted_at IS NULL ORDER BY name")
 	if err != nil {
 		return nil, fmt.Errorf("get departments: %w", err)
 	}
@@ -286,6 +330,56 @@ func (r *EmployeeRepo) GetDepartments(ctx context.Context) ([]string, error) {
 		depts = append(depts, d)
 	}
 	return depts, nil
+}
+
+// ────────────────────────────────
+// Transaction-aware helpers
+// ────────────────────────────────
+
+// isDuplicateKeyError checks if an error is a PostgreSQL unique constraint violation.
+func isDuplicateKeyError(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23505"
+	}
+	return false
+}
+
+// scanEmployeeRow scans a single employee row using manual field scan.
+// Uses manual scanning to avoid RowToStructByName issues with nullable columns.
+// Note: rows are closed by CollectOneRow internally.
+func scanEmployeeRow(rows pgx.Rows) (*models.Employee, error) {
+	emp, err := pgx.CollectOneRow(rows, func(row pgx.CollectableRow) (models.Employee, error) {
+		var e models.Employee
+		err := row.Scan(
+			&e.ID, &e.EmployeeID, &e.Name, &e.Email, &e.Role,
+			&e.Department, &e.DepartmentID, &e.Shift,
+			&e.TrackingEnabled, &e.TrackingStatus, &e.IsOnline,
+			&e.Avatar, &e.AvatarColor,
+			&e.CreatedAt, &e.UpdatedAt, &e.DeletedAt,
+		)
+		return e, err
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("scan employee: %w", err)
+	}
+	return &emp, nil
+}
+
+// execGetByID executes a query against a transaction and scans a single employee row.
+type queryable interface {
+	Query(ctx context.Context, sql string, args ...interface{}) (pgx.Rows, error)
+}
+
+func execGetByID(ctx context.Context, q queryable, query string, args ...interface{}) (*models.Employee, error) {
+	rows, err := q.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query employee: %w", err)
+	}
+	return scanEmployeeRow(rows)
 }
 
 // GenerateEmployeeID generates the next employee ID in EMP-XXXXX format.

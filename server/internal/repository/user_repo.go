@@ -2,10 +2,12 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/alpha-ai-tracker/server/internal/models"
 )
@@ -52,6 +54,8 @@ func (r *UserRepo) List(ctx context.Context, params ListParams) (*ListResult, er
 	var args []interface{}
 	argIdx := 1
 
+	conditions = append(conditions, "deleted_at IS NULL")
+
 	if params.Search != "" {
 		conditions = append(conditions, fmt.Sprintf("(LOWER(name) LIKE LOWER($%d) OR LOWER(email) LIKE LOWER($%d) OR LOWER(employee_id) LIKE LOWER($%d))", argIdx, argIdx, argIdx))
 		args = append(args, "%"+params.Search+"%")
@@ -92,7 +96,7 @@ func (r *UserRepo) List(ctx context.Context, params ListParams) (*ListResult, er
 	query := fmt.Sprintf(`
 		SELECT id, employee_id, name, email, password_hash, role, department, shift,
 		       tracking_enabled, tracking_status, is_online, avatar, avatar_color,
-		       is_company_admin, created_at, updated_at
+		       is_company_admin, created_at, updated_at, deleted_at
 		FROM users %s
 		ORDER BY created_at DESC
 		LIMIT $%d OFFSET $%d
@@ -105,9 +109,22 @@ func (r *UserRepo) List(ctx context.Context, params ListParams) (*ListResult, er
 	}
 	defer rows.Close()
 
-	users, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.User])
-	if err != nil {
-		return nil, fmt.Errorf("collect users: %w", err)
+	var users []models.User
+	for rows.Next() {
+		var u models.User
+		if err := rows.Scan(
+			&u.ID, &u.EmployeeID, &u.Name, &u.Email, &u.PasswordHash,
+			&u.Role, &u.Department, &u.Shift,
+			&u.TrackingEnabled, &u.TrackingStatus, &u.IsOnline,
+			&u.Avatar, &u.AvatarColor,
+			&u.IsCompanyAdmin, &u.CreatedAt, &u.UpdatedAt, &u.DeletedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan user row: %w", err)
+		}
+		users = append(users, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate users: %w", err)
 	}
 
 	return &ListResult{
@@ -119,22 +136,42 @@ func (r *UserRepo) List(ctx context.Context, params ListParams) (*ListResult, er
 	}, nil
 }
 
-// getByID returns a user by their UUID (internal helper).
-func (r *UserRepo) getByID(ctx context.Context, query string, args ...interface{}) (*models.User, error) {
-	rows, err := r.pool.Query(ctx, query, args...)
+// scanUserRow scans a single user row using manual field scan.
+func scanUserRow(rows pgx.Rows) (*models.User, error) {
+	user, err := pgx.CollectOneRow(rows, func(row pgx.CollectableRow) (models.User, error) {
+		var u models.User
+		err := row.Scan(
+			&u.ID, &u.EmployeeID, &u.Name, &u.Email, &u.PasswordHash,
+			&u.Role, &u.Department, &u.Shift,
+			&u.TrackingEnabled, &u.TrackingStatus, &u.IsOnline,
+			&u.Avatar, &u.AvatarColor,
+			&u.IsCompanyAdmin, &u.CreatedAt, &u.UpdatedAt, &u.DeletedAt,
+		)
+		return u, err
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("scan user: %w", err)
+	}
+	return &user, nil
+}
+
+// execUserQuery executes a query against a pool or tx and scans a single user row.
+func execUserQuery(ctx context.Context, q interface {
+	Query(ctx context.Context, sql string, args ...interface{}) (pgx.Rows, error)
+}, query string, args ...interface{}) (*models.User, error) {
+	rows, err := q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query user: %w", err)
 	}
-	defer rows.Close()
+	return scanUserRow(rows)
+}
 
-	user, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.User])
-	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("collect user: %w", err)
-	}
-	return &user, nil
+// getByID returns a user by their UUID (internal helper).
+func (r *UserRepo) getByID(ctx context.Context, query string, args ...interface{}) (*models.User, error) {
+	return execUserQuery(ctx, r.pool, query, args...)
 }
 
 // GetByID returns a user by their UUID.
@@ -142,8 +179,8 @@ func (r *UserRepo) GetByID(ctx context.Context, id string) (*models.User, error)
 	return r.getByID(ctx, `
 		SELECT id, employee_id, name, email, password_hash, role, department, shift,
 		       tracking_enabled, tracking_status, is_online, avatar, avatar_color,
-		       is_company_admin, created_at, updated_at
-		FROM users WHERE id = $1
+		       is_company_admin, created_at, updated_at, deleted_at
+		FROM users WHERE id = $1 AND deleted_at IS NULL
 	`, id)
 }
 
@@ -152,25 +189,42 @@ func (r *UserRepo) GetByEmail(ctx context.Context, email string) (*models.User, 
 	return r.getByID(ctx, `
 		SELECT id, employee_id, name, email, password_hash, role, department, shift,
 		       tracking_enabled, tracking_status, is_online, avatar, avatar_color,
-		       is_company_admin, created_at, updated_at
-		FROM users WHERE email = $1
+		       is_company_admin, created_at, updated_at, deleted_at
+		FROM users WHERE email = $1 AND deleted_at IS NULL
 	`, email)
 }
 
 // Create inserts a new user and returns it.
 func (r *UserRepo) Create(ctx context.Context, u *models.User) (*models.User, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	query := `
 		INSERT INTO users (name, email, password_hash, role, department, shift,
 		                   tracking_enabled, tracking_status, is_online, is_company_admin)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING id, employee_id, name, email, password_hash, role, department, shift,
 		          tracking_enabled, tracking_status, is_online, avatar, avatar_color,
-		          is_company_admin, created_at, updated_at
+		          is_company_admin, created_at, updated_at, deleted_at
 	`
-	return r.getByID(ctx, query,
+	user, err := execUserQuery(ctx, tx, query,
 		u.Name, u.Email, u.PasswordHash, u.Role, u.Department, u.Shift,
 		u.TrackingEnabled, u.TrackingStatus, u.IsOnline, u.IsCompanyAdmin,
 	)
+	if err != nil {
+		if isDuplicateKeyErr(err) {
+			return nil, fmt.Errorf("email already exists")
+		}
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
+	return user, nil
 }
 
 // Update partially updates a user and returns the updated record.
@@ -178,6 +232,12 @@ func (r *UserRepo) Update(ctx context.Context, id string, updates map[string]int
 	if len(updates) == 0 {
 		return r.GetByID(ctx, id)
 	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
 
 	var setClauses []string
 	var args []interface{}
@@ -206,23 +266,44 @@ func (r *UserRepo) Update(ctx context.Context, id string, updates map[string]int
 
 	query := fmt.Sprintf(`
 		UPDATE users SET %s
-		WHERE id = $1
+		WHERE id = $1 AND deleted_at IS NULL
 		RETURNING id, employee_id, name, email, password_hash, role, department, shift,
 		          tracking_enabled, tracking_status, is_online, avatar, avatar_color,
-		          is_company_admin, created_at, updated_at
+		          is_company_admin, created_at, updated_at, deleted_at
 	`, strings.Join(setClauses, ", "))
 
-	return r.getByID(ctx, query, args...)
+	user, err := execUserQuery(ctx, tx, query, args...)
+	if err != nil {
+		if isDuplicateKeyErr(err) {
+			return nil, fmt.Errorf("email already exists")
+		}
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
+	return user, nil
 }
 
-// Delete removes a user by ID.
+// Delete softly removes a user by ID (sets deleted_at).
 func (r *UserRepo) Delete(ctx context.Context, id string) error {
-	tag, err := r.pool.Exec(ctx, "DELETE FROM users WHERE id = $1", id)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx, "UPDATE users SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL", id)
 	if err != nil {
 		return fmt.Errorf("delete user: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("user not found")
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
 	}
 	return nil
 }
@@ -230,7 +311,7 @@ func (r *UserRepo) Delete(ctx context.Context, id string) error {
 // CountCompanyAdmins returns the number of company_admin users.
 func (r *UserRepo) CountCompanyAdmins(ctx context.Context) (int, error) {
 	var count int
-	err := r.pool.QueryRow(ctx, "SELECT COUNT(*) FROM users WHERE is_company_admin = true").Scan(&count)
+	err := r.pool.QueryRow(ctx, "SELECT COUNT(*) FROM users WHERE is_company_admin = true AND deleted_at IS NULL").Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count company admins: %w", err)
 	}
@@ -242,9 +323,9 @@ func (r *UserRepo) IsUniqueEmail(ctx context.Context, email, excludeID string) (
 	var exists bool
 	var err error
 	if excludeID != "" {
-		err = r.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM users WHERE email = $1 AND id != $2)", email, excludeID).Scan(&exists)
+		err = r.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM users WHERE email = $1 AND id != $2 AND deleted_at IS NULL)", email, excludeID).Scan(&exists)
 	} else {
-		err = r.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)", email).Scan(&exists)
+		err = r.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM users WHERE email = $1 AND deleted_at IS NULL)", email).Scan(&exists)
 	}
 	if err != nil {
 		return false, fmt.Errorf("check email uniqueness: %w", err)
@@ -255,4 +336,13 @@ func (r *UserRepo) IsUniqueEmail(ctx context.Context, email, excludeID string) (
 // EnsureCompanyAdminExists is a helper type for the service layer
 type CompanyAdminCheck struct {
 	Exists bool
+}
+
+// isDuplicateKeyErr checks if an error is a PostgreSQL unique constraint violation.
+func isDuplicateKeyErr(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23505"
+	}
+	return false
 }
