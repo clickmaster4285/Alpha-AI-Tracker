@@ -213,6 +213,20 @@ func (h *AuthHandler) EmployeeLogin(c echo.Context) error {
 		})
 	}
 
+	// Update employee tracking status to tracked and set online
+	updates := map[string]interface{}{
+		"tracking_status": "tracked",
+		"is_online":       true,
+	}
+	if _, err := h.employeeRepo.Update(c.Request().Context(), emp.ID, updates); err != nil {
+		// Non-fatal — log but don't block login
+		c.Logger().Errorf("failed to update employee tracking status: %v", err)
+	}
+
+	// Update in-memory struct for the response (avoid re-fetch from DB)
+	emp.TrackingStatus = "tracked"
+	emp.IsOnline = true
+
 	resp := dto.EmployeeLoginResponse{
 		Employee: dto.EmployeeResponse{
 			ID:              emp.ID,
