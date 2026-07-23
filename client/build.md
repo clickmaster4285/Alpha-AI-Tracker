@@ -117,6 +117,54 @@ bash publish/build-installer.sh
 
 ---
 
+## Release to GitHub
+
+After building installers, you can publish them as a GitHub Release.
+
+### Prerequisites
+
+```bash
+# Install GitHub CLI
+sudo apt install gh   # Ubuntu/Debian
+# or: brew install gh  # macOS
+
+# Authenticate
+echo "YOUR_GITHUB_TOKEN" | gh auth login --with-token
+# Or: gh auth login  # interactive browser-based auth
+```
+
+### Create a Release (One Command)
+
+Run **from the `client/` directory**.
+
+```bash
+# Build all installers, create git tag, and upload to GitHub Releases
+bash publish/release.sh v1.0.0
+
+# Or without a version (defaults to v1.0.0)
+bash publish/release.sh
+```
+
+This will:
+1. Build all installers via `build-installer.sh`
+2. Commit any pending changes
+3. Create and push the git tag (e.g. `v1.0.0`)
+4. Create a GitHub Release with the installer files attached
+5. Verify the release was created
+
+### Manual Upload
+
+If you prefer to upload manually:
+
+```bash
+cd client
+bash publish/build-installer.sh
+# Then go to https://github.com/AlphaDev-7/Alpha-AI-Tracker/releases/new
+# and upload the files from installers/
+```
+
+---
+
 ## Sending to a Friend
 
 ### Windows

@@ -76,6 +76,7 @@ PUBLISH_MAC="$SCRIPT_DIR/macos"
 
 echo ""
 echo "[Publish] Publishing .NET app..."
+HAS_ERRORS=false
 for RID in win-x64 linux-x64 osx-x64; do
   case "$RID" in
     win-x64)  OUT="$PUBLISH_WIN"; BUILD_FLAG=$BUILD_WIN ;;
@@ -84,11 +85,20 @@ for RID in win-x64 linux-x64 osx-x64; do
   esac
   if [ "$BUILD_FLAG" = true ]; then
     rm -rf "$OUT"
-    dotnet publish "$PROJECT_DIR" -c Release -r "$RID" --self-contained -o "$OUT" 2>/dev/null && \
-      echo "  $RID -> $OUT" || \
-      echo "  (skipped $RID, requires .NET SDK)"
+    if dotnet publish "$PROJECT_DIR" -c Release -r "$RID" --self-contained -o "$OUT"; then
+      echo "  $RID -> $OUT"
+    else
+      echo "  FAILED: $RID publish error. Check SDK and dependencies."
+      HAS_ERRORS=true
+    fi
   fi
 done
+
+# Abort if any publish failed
+if [ "$HAS_ERRORS" = true ]; then
+  echo "ERROR: One or more builds failed. Aborting."
+  exit 1
+fi
 
 # Windows installer
 if [ "$BUILD_WIN" = true ]; then
