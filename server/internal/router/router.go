@@ -16,6 +16,7 @@ func Setup(
 	authService *services.AuthService,
 	authHandler *handlers.AuthHandler,
 	userHandler *handlers.UserHandler,
+	employeeHandler *handlers.EmployeeHandler,
 ) {
 	// ─────────────────────────────
 	// Global Middleware
@@ -40,7 +41,7 @@ func Setup(
 	e.GET("/api/v1/health", func(c echo.Context) error {
 		return c.JSON(200, map[string]string{
 			"status":    "ok",
-			"timestamp": c.RealIP(), // placeholder — could use time
+			"timestamp": c.RealIP(),
 		})
 	})
 
@@ -49,6 +50,7 @@ func Setup(
 	// ─────────────────────────────
 	auth := e.Group("/api/v1/auth")
 	auth.POST("/login", authHandler.Login)
+	auth.POST("/employee-login", authHandler.EmployeeLogin) // employee desktop client login
 
 	// ─────────────────────────────
 	// Semi-Protected Routes (optional auth)
@@ -69,13 +71,22 @@ func Setup(
 	protected.GET("/auth/me", authHandler.Me)
 	protected.POST("/auth/logout", authHandler.Logout)
 
-	// Users
+	// Users (admin users only)
 	users := protected.Group("/users")
 	users.GET("", userHandler.ListUsers)
 	users.GET("/:id", userHandler.GetUser)
 	users.POST("", userHandler.CreateUser)
 	users.PUT("/:id", userHandler.UpdateUser)
 	users.DELETE("/:id", userHandler.DeleteUser)
+
+	// Employees
+	employees := protected.Group("/employees")
+	employees.GET("", employeeHandler.ListEmployees)
+	employees.GET("/:id", employeeHandler.GetEmployee)
+	employees.POST("", employeeHandler.CreateEmployee)
+	employees.PUT("/:id", employeeHandler.UpdateEmployee)
+	employees.DELETE("/:id", employeeHandler.DeleteEmployee)
+	employees.POST("/:id/generate-secret", employeeHandler.GenerateSecret)
 
 	// Departments
 	protected.GET("/departments", userHandler.GetDepartments)

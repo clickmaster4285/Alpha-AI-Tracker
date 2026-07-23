@@ -45,6 +45,20 @@ internal static class DatabaseSchema
             works           INTEGER NOT NULL DEFAULT 0,
             details         TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS employee_info (
+            id              TEXT PRIMARY KEY,
+            employee_id     TEXT NOT NULL,
+            name            TEXT NOT NULL,
+            email           TEXT NOT NULL,
+            role            TEXT NOT NULL,
+            department      TEXT NOT NULL,
+            shift           TEXT,
+            avatar          TEXT,
+            avatar_color    TEXT,
+            token           TEXT,
+            logged_in_at    TEXT DEFAULT (datetime('now'))
+        );
     ";
 
     internal const string InsertSql = @"

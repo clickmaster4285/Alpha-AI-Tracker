@@ -13,6 +13,7 @@ import (
 type Config struct {
 	Server   ServerConfig
 	Database DatabaseConfig
+	Redis    RedisConfig
 	JWT      JWTConfig
 	Admin    AdminConfig
 	CORS     CORSConfig
@@ -37,8 +38,15 @@ type DatabaseConfig struct {
 }
 
 type JWTConfig struct {
-	Secret        string
-	AccessExpiry  time.Duration
+	Secret       string
+	AccessExpiry time.Duration
+}
+
+type RedisConfig struct {
+	Host     string
+	Port     int
+	Password string
+	DB       int
 }
 
 type AdminConfig struct {
@@ -82,6 +90,12 @@ func Load() (*Config, error) {
 			MaxOpenConns:    getEnvInt("DB_MAX_OPEN_CONNS", 25),
 			MaxIdleConns:    getEnvInt("DB_MAX_IDLE_CONNS", 10),
 			ConnMaxLifetime: getEnvDuration("DB_CONN_MAX_LIFETIME", 5*time.Minute),
+		},
+		Redis: RedisConfig{
+			Host:     getEnv("REDIS_HOST", "localhost"),
+			Port:     getEnvInt("REDIS_PORT", 6379),
+			Password: getEnv("REDIS_PASSWORD", ""),
+			DB:       getEnvInt("REDIS_DB", 0),
 		},
 		JWT: JWTConfig{
 			Secret:       getEnv("JWT_SECRET", ""),

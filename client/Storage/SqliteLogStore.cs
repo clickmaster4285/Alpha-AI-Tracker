@@ -197,6 +197,84 @@ public class SqliteLogStore : ILogStore, IDisposable
         await SetStatusAsync("last_permission_check", DateTime.UtcNow.ToString("O"), ct);
     }
 
+    // ────────────────────────────────
+    // Employee Info
+    // ────────────────────────────────
+
+    public async Task SaveEmployeeInfoAsync(EmployeeInfo employee, CancellationToken ct)
+    {
+        if (_connection == null) return;
+
+        // Clear old info first (only one employee at a time)
+        var clearCmd = _connection.CreateCommand();
+        clearCmd.CommandText = "DELETE FROM employee_info";
+        await clearCmd.ExecuteNonQueryAsync(ct);
+
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = @"
+            INSERT INTO employee_info (id, employee_id, name, email, role, department, shift, avatar, avatar_color, token, logged_in_at)
+            VALUES ($id, $employee_id, $name, $email, $role, $department, $shift, $avatar, $avatar_color, $token, datetime('now'))
+        ";
+        cmd.Parameters.AddWithValue("$id", employee.Id);
+        cmd.Parameters.AddWithValue("$employee_id", employee.EmployeeId);
+        cmd.Parameters.AddWithValue("$name", employee.Name);
+        cmd.Parameters.AddWithValue("$email", employee.Email);
+        cmd.Parameters.AddWithValue("$role", employee.Role);
+        cmd.Parameters.AddWithValue("$department", employee.Department);
+        cmd.Parameters.AddWithValue("$shift", (object?)employee.Shift ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$avatar", (object?)employee.Avatar ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$avatar_color", (object?)employee.AvatarColor ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$token", (object?)employee.Token ?? DBNull.Value);
+        await cmd.ExecuteNonQueryAsync(ct);
+
+        // Also set in app_status for quick access
+        await SetStatusAsync("employee_id", employee.EmployeeId, ct);
+        await SetStatusAsync("employee_name", employee.Name, ct);
+        await SetStatusAsync("is_logged_in", "true", ct);
+    }
+
+    public async Task<EmployeeInfo?> GetEmployeeInfoAsync(CancellationToken ct)
+    {
+        if (_connection == null) return null;
+
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT id, employee_id, name, email, role, department, shift, avatar, avatar_color, token, logged_in_at FROM employee_info LIMIT 1";
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (await reader.ReadAsync(ct))
+        {
+            return new EmployeeInfo
+            {
+                Id = reader.GetString(reader.GetOrdinal("id")),
+                EmployeeId = reader.GetString(reader.GetOrdinal("employee_id")),
+                Name = reader.GetString(reader.GetOrdinal("name")),
+                Email = reader.GetString(reader.GetOrdinal("email")),
+                Role = reader.GetString(reader.GetOrdinal("role")),
+                Department = reader.GetString(reader.GetOrdinal("department")),
+                Shift = reader.IsDBNull(reader.GetOrdinal("shift")) ? string.Empty : reader.GetString(reader.GetOrdinal("shift")),
+                Avatar = reader.IsDBNull(reader.GetOrdinal("avatar")) ? null : reader.GetString(reader.GetOrdinal("avatar")),
+                AvatarColor = reader.IsDBNull(reader.GetOrdinal("avatar_color")) ? null : reader.GetString(reader.GetOrdinal("avatar_color")),
+                Token = reader.IsDBNull(reader.GetOrdinal("token")) ? null : reader.GetString(reader.GetOrdinal("token")),
+                LoggedInAt = reader.IsDBNull(reader.GetOrdinal("logged_in_at")) ? null : reader.GetString(reader.GetOrdinal("logged_in_at")),
+            };
+        }
+
+        return null;
+    }
+
+    public async Task ClearEmployeeInfoAsync(CancellationToken ct)
+    {
+        if (_connection == null) return;
+
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "DELETE FROM employee_info";
+        await cmd.ExecuteNonQueryAsync(ct);
+
+        await SetStatusAsync("is_logged_in", "false", ct);
+        await SetStatusAsync("employee_id", "", ct);
+        await SetStatusAsync("employee_name", "", ct);
+    }
+
     public void Dispose()
     {
         _connection?.Close();

@@ -13,6 +13,7 @@ import (
 	"github.com/alpha-ai-tracker/server/internal/config"
 	"github.com/alpha-ai-tracker/server/internal/database"
 	"github.com/alpha-ai-tracker/server/internal/handlers"
+	goredis "github.com/alpha-ai-tracker/server/internal/redis"
 	"github.com/alpha-ai-tracker/server/internal/repository"
 	"github.com/alpha-ai-tracker/server/internal/router"
 	"github.com/alpha-ai-tracker/server/internal/services"
@@ -47,13 +48,38 @@ func main() {
 	}
 
 	// ────────────────
+	// Redis
+	// ────────────────
+	redisAddr := cfg.Redis.Host + ":" + itoa(cfg.Redis.Port)
+	redisClient, err := goredis.NewClient(redisAddr, cfg.Redis.Password, cfg.Redis.DB)
+	if err != nil {
+		log.Printf("[server] WARNING: Redis connection failed: %v — employee secrets will not work", err)
+		redisClient = nil
+	}
+	if redisClient != nil {
+		defer redisClient.Close()
+		log.Printf("[server] connected to Redis at %s", redisAddr)
+	}
+
+	// ────────────────
 	// Dependencies (DI)
 	// ────────────────
 	userRepo := repository.NewUserRepo(pool)
+	employeeRepo := repository.NewEmployeeRepo(pool)
+
 	authService := services.NewAuthService(userRepo, cfg.JWT, cfg.Admin)
 	userService := services.NewUserService(userRepo)
-	authHandler := handlers.NewAuthHandler(authService, cfg.JWT)
+	employeeService := services.NewEmployeeService(employeeRepo, redisClient)
+
+	// Cast Redis client to interface
+	var redisInterface services.RedisClientInterface
+	if redisClient != nil {
+		redisInterface = redisClient
+	}
+
+	authHandler := handlers.NewAuthHandler(authService, employeeRepo, redisInterface, cfg.JWT)
 	userHandler := handlers.NewUserHandler(userService)
+	employeeHandler := handlers.NewEmployeeHandler(employeeService)
 
 	// ────────────────
 	// Auto-initialize Company Admin
@@ -70,7 +96,7 @@ func main() {
 	e.HideBanner = true
 	e.HidePort = true
 
-	router.Setup(e, cfg, authService, authHandler, userHandler)
+	router.Setup(e, cfg, authService, authHandler, userHandler, employeeHandler)
 
 	// ────────────────
 	// Graceful Shutdown
@@ -97,7 +123,6 @@ func main() {
 }
 
 // findMigrationsDir locates the migrations directory relative to the binary.
-// It tries common locations: working dir, binary dir, and parent directories.
 func findMigrationsDir() string {
 	candidates := []string{
 		"migrations",
@@ -106,7 +131,6 @@ func findMigrationsDir() string {
 		filepath.Join("server", "migrations"),
 	}
 
-	// Also try relative to the executable
 	if exe, err := os.Executable(); err == nil {
 		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "migrations"))
 		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "..", "..", "migrations"))
@@ -124,4 +148,26 @@ func findMigrationsDir() string {
 
 	log.Println("[server] WARNING: migrations directory not found, using 'migrations'")
 	return "migrations"
+}
+
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	pos := len(buf)
+	neg := i < 0
+	if neg {
+		i = -i
+	}
+	for i > 0 {
+		pos--
+		buf[pos] = byte('0' + i%10)
+		i /= 10
+	}
+	if neg {
+		pos--
+		buf[pos] = '-'
+	}
+	return string(buf[pos:])
 }

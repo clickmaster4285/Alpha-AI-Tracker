@@ -34,6 +34,7 @@ AppMutex=AlphaAITracker
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
 CreateUninstallRegKey=yes
+; Force silent kill before any install steps
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -60,6 +61,52 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [Code]
+
+// ────────────────────────────────────────────────
+// KillRunningInstance — Forcefully terminates any
+// running Alpha AI Tracker process before setup.
+// Uses taskkill to ensure the process is fully gone.
+// ────────────────────────────────────────────────
+function KillRunningInstance: Boolean;
+var
+  ResultCode: Integer;
+  KillCount: Integer;
+begin
+  Result := True;
+  KillCount := 0;
+
+  // Try multiple possible executable names
+  if Exec('taskkill', '/F /IM client.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    if ResultCode = 0 then KillCount := KillCount + 1;
+
+  if Exec('taskkill', '/F /IM AlphaAITracker.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    if ResultCode = 0 then KillCount := KillCount + 1;
+
+  // Small pause to let OS release file handles
+  if KillCount > 0 then
+    Exec('ping', '127.0.0.1 -n 2 -w 1000', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+// ────────────────────────────────────────────────
+// InitializeSetup — Called when setup starts.
+// Returns True to continue, False to abort.
+// ────────────────────────────────────────────────
+function InitializeSetup: Boolean;
+begin
+  Result := True;
+  KillRunningInstance;
+end;
+
+// ────────────────────────────────────────────────
+// InitializeUninstall — Called when uninstall starts.
+// Also kills running instances before removing files.
+// ────────────────────────────────────────────────
+function InitializeUninstall: Boolean;
+begin
+  Result := True;
+  KillRunningInstance;
+end;
+
 procedure InitializeWizard;
 begin
   WizardForm.LicenseAcceptedRadio.Checked := True;

@@ -7,6 +7,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/alpha-ai-tracker/server/internal/config"
 	"github.com/alpha-ai-tracker/server/internal/dto"
+	"github.com/alpha-ai-tracker/server/internal/repository"
 	"github.com/alpha-ai-tracker/server/internal/services"
 )
 
@@ -17,13 +18,20 @@ const (
 
 // AuthHandler handles authentication endpoints.
 type AuthHandler struct {
-	authService *services.AuthService
-	jwtCfg      config.JWTConfig
+	authService      *services.AuthService
+	employeeRepo     *repository.EmployeeRepo
+	redisClient      services.RedisClientInterface
+	jwtCfg           config.JWTConfig
 }
 
 // NewAuthHandler creates a new AuthHandler.
-func NewAuthHandler(authService *services.AuthService, jwtCfg config.JWTConfig) *AuthHandler {
-	return &AuthHandler{authService: authService, jwtCfg: jwtCfg}
+func NewAuthHandler(authService *services.AuthService, employeeRepo *repository.EmployeeRepo, redisClient services.RedisClientInterface, jwtCfg config.JWTConfig) *AuthHandler {
+	return &AuthHandler{
+		authService:  authService,
+		employeeRepo: employeeRepo,
+		redisClient:  redisClient,
+		jwtCfg:       jwtCfg,
+	}
 }
 
 // Login handles POST /api/v1/auth/login
@@ -137,3 +145,95 @@ func (h *AuthHandler) CheckAuth(c echo.Context) error {
 		User:          &resp,
 	})
 }
+
+// EmployeeLogin handles POST /api/v1/auth/employee-login
+func (h *AuthHandler) EmployeeLogin(c echo.Context) error {
+	var req dto.EmployeeLoginRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, dto.APIError{
+			Code:    http.StatusBadRequest,
+			Message: "Invalid request body",
+		})
+	}
+
+	if req.EmployeeID == "" || req.SecretKey == "" {
+		return c.JSON(http.StatusBadRequest, dto.APIError{
+			Code:    http.StatusBadRequest,
+			Message: "Employee ID and secret key are required",
+		})
+	}
+
+	// Check Redis is available
+	if h.redisClient == nil {
+		return c.JSON(http.StatusInternalServerError, dto.APIError{
+			Code:    http.StatusInternalServerError,
+			Message: "Employee authentication is unavailable (Redis not connected)",
+		})
+	}
+
+	// Validate secret from Redis
+	valid, err := h.redisClient.ValidateSecret(c.Request().Context(), req.EmployeeID, req.SecretKey)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, dto.APIError{
+			Code:    http.StatusInternalServerError,
+			Message: "Failed to validate secret",
+			Detail:  err.Error(),
+		})
+	}
+	if !valid {
+		return c.JSON(http.StatusUnauthorized, dto.APIError{
+			Code:    http.StatusUnauthorized,
+			Message: "Invalid or expired secret key",
+		})
+	}
+
+	// Look up employee
+	emp, err := h.employeeRepo.GetByEmployeeID(c.Request().Context(), req.EmployeeID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, dto.APIError{
+			Code:    http.StatusInternalServerError,
+			Message: "Failed to get employee",
+			Detail:  err.Error(),
+		})
+	}
+	if emp == nil {
+		return c.JSON(http.StatusNotFound, dto.APIError{
+			Code:    http.StatusNotFound,
+			Message: "Employee not found",
+		})
+	}
+
+	// Generate JWT for employee session
+	token, err := h.authService.GenerateEmployeeToken(emp)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, dto.APIError{
+			Code:    http.StatusInternalServerError,
+			Message: "Failed to generate token",
+			Detail:  err.Error(),
+		})
+	}
+
+	resp := dto.EmployeeLoginResponse{
+		Employee: dto.EmployeeResponse{
+			ID:              emp.ID,
+			EmployeeID:      emp.EmployeeID,
+			Name:            emp.Name,
+			Email:           emp.Email,
+			Role:            emp.Role,
+			Department:      emp.Department,
+			Shift:           emp.Shift,
+			TrackingEnabled: emp.TrackingEnabled,
+			TrackingStatus:  emp.TrackingStatus,
+			IsOnline:        emp.IsOnline,
+			Avatar:          emp.Avatar,
+			AvatarColor:     emp.AvatarColor,
+			CreatedAt:       emp.CreatedAt,
+			UpdatedAt:       emp.UpdatedAt,
+		},
+		Token: token,
+	}
+
+	return c.JSON(http.StatusOK, resp)
+}
+
+

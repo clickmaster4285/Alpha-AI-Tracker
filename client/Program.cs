@@ -7,6 +7,7 @@ using client.Configuration;
 using client.Core.Abstractions;
 using client.Services;
 using client.Storage;
+using client.ViewModels;
 
 EnvLoader.Load();
 
@@ -48,6 +49,17 @@ builder.Services.AddSingleton<ILogStore>(sp =>
     return new SqliteLogStore(dbPath, config.DbEncryptionKey);
 });
 
+// Register HttpClient for API calls
+builder.Services.AddSingleton<HttpClient>(sp =>
+{
+    var client = new HttpClient();
+    client.Timeout = TimeSpan.FromSeconds(10);
+    return client;
+});
+
+// Register MainViewModel
+builder.Services.AddTransient<MainViewModel>();
+
 if (OperatingSystem.IsWindows())
 {
     builder.Services.AddSingleton<IActivityCollector>(
@@ -74,6 +86,9 @@ var host = builder.Build();
 
 var ct = CancellationToken.None;
 await host.StartAsync(ct);
+
+// Set service provider for App to resolve ViewModels from DI
+App.ServiceProvider = host.Services;
 
 try
 {

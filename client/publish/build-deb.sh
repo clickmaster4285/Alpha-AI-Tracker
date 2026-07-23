@@ -90,10 +90,18 @@ fi
 EOF
 chmod +x "$PKG_ROOT/DEBIAN/postinst"
 
-# prerm script
+# prerm script — kill running instance before uninstall
 cat > "$PKG_ROOT/DEBIAN/prerm" << 'EOF'
 #!/bin/sh
 set -e
+
+# Forcefully kill any running Alpha AI Tracker instance
+APP_PID=$(pidof alpha-ai-tracker 2>/dev/null || pidof client 2>/dev/null || echo "")
+if [ -n "$APP_PID" ]; then
+  echo "Stopping Alpha AI Tracker (PID: $APP_PID)..."
+  kill -9 $APP_PID 2>/dev/null || true
+  sleep 1
+fi
 EOF
 chmod +x "$PKG_ROOT/DEBIAN/prerm"
 

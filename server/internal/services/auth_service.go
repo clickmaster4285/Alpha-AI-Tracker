@@ -200,6 +200,29 @@ func (s *AuthService) GetUserByID(ctx context.Context, id string) (*models.User,
 	return s.repo.GetByID(ctx, id)
 }
 
+// GenerateEmployeeToken generates a JWT token for an employee desktop client session.
+func (s *AuthService) GenerateEmployeeToken(emp *models.Employee) (string, error) {
+	now := time.Now()
+	claims := &Claims{
+		UserID: emp.ID,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(now.Add(s.jwtConfig.AccessExpiry)),
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
+			Issuer:    "alpha-ai-tracker-employee",
+			Subject:   emp.ID,
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signedToken, err := token.SignedString([]byte(s.jwtConfig.Secret))
+	if err != nil {
+		return "", fmt.Errorf("sign token: %w", err)
+	}
+
+	return encryptToken(signedToken, s.jwtConfig.Secret)
+}
+
 func (s *AuthService) generateToken(user *models.User) (string, error) {
 	now := time.Now()
 	claims := &Claims{

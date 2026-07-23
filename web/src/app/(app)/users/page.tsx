@@ -2,10 +2,10 @@
 
 import { useState } from 'react';
 import { motion } from 'framer-motion';
-import { Search, Plus, MoreVertical, Loader2 } from 'lucide-react';
+import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { usersApi, departmentsApi, type User, type CreateUserPayload, type UpdateUserPayload } from '@/lib/api';
+import { employeesApi, departmentsApi, type Employee, type CreateEmployeePayload, type UpdateEmployeePayload } from '@/lib/api';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 
 export default function UsersList() {
@@ -16,11 +16,13 @@ export default function UsersList() {
   const [showAdd, setShowAdd] = useState(false);
   const [showEdit, setShowEdit] = useState<string | null>(null);
   const [openAction, setOpenAction] = useState<string | null>(null);
+  const [showSecret, setShowSecret] = useState<string | null>(null);
+  const [secretValue, setSecretValue] = useState('');
+  const [copied, setCopied] = useState(false);
 
   // Form state
   const [newName, setNewName] = useState('');
   const [newEmail, setNewEmail] = useState('');
-  const [newPassword, setNewPassword] = useState('');
   const [newDept, setNewDept] = useState('Engineering');
   const [newRole, setNewRole] = useState('employee');
   const [editName, setEditName] = useState('');
@@ -28,9 +30,9 @@ export default function UsersList() {
   const [editDept, setEditDept] = useState('');
 
   // ── Queries ──
-  const { data: usersData, isLoading: usersLoading, error: usersError } = useQuery({
-    queryKey: ['users', { page, search, department: deptFilter }],
-    queryFn: () => usersApi.list({ page, perPage: 10, search: search || undefined, department: deptFilter || undefined }),
+  const { data: employeesData, isLoading: employeesLoading, error: employeesError } = useQuery({
+    queryKey: ['employees', { page, search, department: deptFilter }],
+    queryFn: () => employeesApi.list({ page, perPage: 10, search: search || undefined, department: deptFilter || undefined }),
   });
 
   const { data: deptData } = useQuery({
@@ -42,70 +44,82 @@ export default function UsersList() {
 
   // ── Mutations ──
   const createMutation = useMutation({
-    mutationFn: (data: CreateUserPayload) => usersApi.create(data),
+    mutationFn: (data: CreateEmployeePayload) => employeesApi.create(data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['users'] });
-      toast.success('User created', { description: 'The user has been added successfully.' });
+      queryClient.invalidateQueries({ queryKey: ['employees'] });
+      toast.success('Employee created', { description: 'The employee has been added successfully.' });
       setShowAdd(false);
       resetForm();
     },
     onError: (err: Error) => {
-      toast.error('Failed to create user', { description: err.message });
+      toast.error('Failed to create employee', { description: err.message });
     },
   });
 
   const updateMutation = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: UpdateUserPayload }) => usersApi.update(id, data),
+    mutationFn: ({ id, data }: { id: string; data: UpdateEmployeePayload }) => employeesApi.update(id, data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['users'] });
-      toast.success('User updated', { description: 'The user has been updated successfully.' });
+      queryClient.invalidateQueries({ queryKey: ['employees'] });
+      toast.success('Employee updated', { description: 'The employee has been updated successfully.' });
       setShowEdit(null);
     },
     onError: (err: Error) => {
-      toast.error('Failed to update user', { description: err.message });
+      toast.error('Failed to update employee', { description: err.message });
     },
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => usersApi.delete(id),
+    mutationFn: (id: string) => employeesApi.delete(id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['users'] });
-      toast.success('User deleted', { description: 'The user has been removed.' });
+      queryClient.invalidateQueries({ queryKey: ['employees'] });
+      toast.success('Employee deleted', { description: 'The employee has been removed.' });
       setOpenAction(null);
     },
     onError: (err: Error) => {
-      toast.error('Failed to delete user', { description: err.message });
+      toast.error('Failed to delete employee', { description: err.message });
+    },
+  });
+
+  const secretMutation = useMutation({
+    mutationFn: (id: string) => employeesApi.generateSecret(id),
+    onSuccess: (data) => {
+      setSecretValue(data.secret);
+      toast.success('Login secret generated!', {
+        description: `Secret expires in ${data.expiresIn} seconds. Copy it now — it won't be shown again.`,
+        duration: 8000,
+      });
+    },
+    onError: (err: Error) => {
+      toast.error('Failed to generate secret', { description: err.message });
     },
   });
 
   const resetForm = () => {
     setNewName('');
     setNewEmail('');
-    setNewPassword('');
     setNewDept('Engineering');
     setNewRole('employee');
   };
 
   const handleAdd = () => {
-    if (!newName || !newEmail) {
-      toast.error('Validation error', { description: 'Name and email are required.' });
+    if (!newName) {
+      toast.error('Validation error', { description: 'Name is required.' });
       return;
     }
     createMutation.mutate({
       name: newName,
       email: newEmail,
-      password: newPassword || undefined,
       department: newDept,
       role: newRole,
       shift: 'Day',
     });
   };
 
-  const handleEdit = (user: User) => {
-    setShowEdit(user.id);
-    setEditName(user.name);
-    setEditEmail(user.email);
-    setEditDept(user.department);
+  const handleEdit = (emp: Employee) => {
+    setShowEdit(emp.id);
+    setEditName(emp.name);
+    setEditEmail(emp.email);
+    setEditDept(emp.department);
   };
 
   const handleSaveEdit = (id: string) => {
@@ -121,32 +135,47 @@ export default function UsersList() {
 
   const handleDelete = (id: string) => {
     deleteMutation.mutate(id);
+    setOpenAction(null);
   };
 
-  const employees = usersData?.data || [];
-  const totalPages = usersData?.totalPages || 1;
+  const handleGenerateSecret = (id: string) => {
+    setOpenAction(null);
+    setShowSecret(id);
+    setSecretValue('');
+    setCopied(false);
+    secretMutation.mutate(id);
+  };
+
+  const handleCopySecret = () => {
+    navigator.clipboard.writeText(secretValue);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const employees = employeesData?.data || [];
+  const totalPages = employeesData?.totalPages || 1;
 
   // ── Loading state ──
-  if (usersLoading) {
+  if (employeesLoading) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
         <div className="flex flex-col items-center gap-3">
           <Loader2 className="w-8 h-8 animate-spin text-primary" />
-          <p className="text-sm text-muted-foreground">Loading users...</p>
+          <p className="text-sm text-muted-foreground">Loading employees...</p>
         </div>
       </div>
     );
   }
 
   // ── Error state ──
-  if (usersError) {
+  if (employeesError) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
         <div className="text-center">
-          <p className="text-destructive font-medium mb-2">Failed to load users</p>
-          <p className="text-sm text-muted-foreground">{(usersError as Error).message}</p>
+          <p className="text-destructive font-medium mb-2">Failed to load employees</p>
+          <p className="text-sm text-muted-foreground">{(employeesError as Error).message}</p>
           <button
-            onClick={() => queryClient.invalidateQueries({ queryKey: ['users'] })}
+            onClick={() => queryClient.invalidateQueries({ queryKey: ['employees'] })}
             className="mt-4 text-sm text-primary hover:underline"
           >
             Try again
@@ -181,7 +210,7 @@ export default function UsersList() {
           onClick={() => setShowAdd(true)}
           className="gradient-primary text-primary-foreground px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 hover:opacity-90 transition-opacity"
         >
-          <Plus className="w-4 h-4" /> Add Users
+          <Plus className="w-4 h-4" /> Add Employee
         </button>
       </div>
 
@@ -190,7 +219,7 @@ export default function UsersList() {
         <table className="w-full min-w-[700px]">
           <thead>
             <tr className="border-b border-border">
-              {['Name', 'Email', 'Employee ID', 'Department', 'Role', 'Status', 'Action'].map(h => (
+              {['Name', 'Employee ID', 'Email', 'Department', 'Role', 'Status', 'Action'].map(h => (
                 <th key={h} className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground">{h}</th>
               ))}
             </tr>
@@ -199,7 +228,7 @@ export default function UsersList() {
             {employees.length === 0 ? (
               <tr>
                 <td colSpan={7} className="text-center py-12 text-muted-foreground text-sm">
-                  No users found
+                  No employees found
                 </td>
               </tr>
             ) : (
@@ -222,8 +251,8 @@ export default function UsersList() {
                       <span className="text-sm font-medium text-foreground">{emp.name}</span>
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-sm text-muted-foreground">{emp.email}</td>
                   <td className="px-4 py-3 text-sm font-mono font-medium text-foreground">{emp.employeeId}</td>
+                  <td className="px-4 py-3 text-sm text-muted-foreground">{emp.email}</td>
                   <td className="px-4 py-3 text-sm text-foreground">{emp.department}</td>
                   <td className="px-4 py-3">
                     <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-primary/10 text-primary">
@@ -247,12 +276,19 @@ export default function UsersList() {
                       <MoreVertical className="w-4 h-4 text-muted-foreground" />
                     </button>
                     {openAction === emp.id && (
-                      <div className="absolute right-4 top-12 bg-card border border-border rounded-lg shadow-lg z-10 py-1 min-w-[120px]">
+                      <div className="absolute right-4 top-12 bg-card border border-border rounded-lg shadow-lg z-10 py-1 min-w-[160px]">
                         <button
                           onClick={() => { handleEdit(emp); setOpenAction(null); }}
                           className="w-full text-left px-4 py-2 text-sm hover:bg-muted transition-colors text-foreground"
                         >
                           Edit
+                        </button>
+                        <button
+                          onClick={() => handleGenerateSecret(emp.id)}
+                          className="w-full text-left px-4 py-2 text-sm hover:bg-muted transition-colors text-foreground flex items-center gap-2"
+                        >
+                          <Key className="w-3.5 h-3.5" />
+                          Generate Login Secret
                         </button>
                         <button
                           onClick={() => handleDelete(emp.id)}
@@ -275,7 +311,7 @@ export default function UsersList() {
       {totalPages > 1 && (
         <div className="flex items-center justify-between">
           <p className="text-sm text-muted-foreground">
-            Showing page {page} of {totalPages} ({usersData?.total || 0} total users)
+            Showing page {page} of {totalPages} ({employeesData?.total || 0} total employees)
           </p>
           <div className="flex gap-2">
             <button
@@ -300,7 +336,7 @@ export default function UsersList() {
       <Dialog open={showAdd} onOpenChange={setShowAdd}>
         <DialogContent className="bg-card sm:max-w-[425px]">
           <DialogHeader>
-            <DialogTitle className="font-display">Add New User</DialogTitle>
+            <DialogTitle className="font-display">Add New Employee</DialogTitle>
           </DialogHeader>
           <div className="space-y-3 mt-2">
             <input
@@ -314,13 +350,6 @@ export default function UsersList() {
               onChange={e => setNewEmail(e.target.value)}
               placeholder="Email"
               type="email"
-              className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
-            />
-            <input
-              value={newPassword}
-              onChange={e => setNewPassword(e.target.value)}
-              placeholder="Password (leave blank for default)"
-              type="password"
               className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
             />
             <select
@@ -345,7 +374,7 @@ export default function UsersList() {
               disabled={createMutation.isPending}
               className="w-full gradient-primary text-primary-foreground py-2.5 rounded-lg text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
             >
-              {createMutation.isPending ? 'Creating...' : 'Add User'}
+              {createMutation.isPending ? 'Creating...' : 'Add Employee'}
             </button>
           </div>
         </DialogContent>
@@ -355,7 +384,7 @@ export default function UsersList() {
       <Dialog open={!!showEdit} onOpenChange={(open) => { if (!open) setShowEdit(null); }}>
         <DialogContent className="bg-card sm:max-w-[425px]">
           <DialogHeader>
-            <DialogTitle className="font-display">Edit User</DialogTitle>
+            <DialogTitle className="font-display">Edit Employee</DialogTitle>
           </DialogHeader>
           <div className="space-y-3 mt-2">
             <input
@@ -384,6 +413,48 @@ export default function UsersList() {
               className="w-full gradient-primary text-primary-foreground py-2.5 rounded-lg text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
             >
               {updateMutation.isPending ? 'Saving...' : 'Save Changes'}
+            </button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Secret Dialog */}
+      <Dialog open={showSecret !== null} onOpenChange={(open) => { if (!open) { setShowSecret(null); setSecretValue(''); setCopied(false); } }}>
+        <DialogContent className="bg-card sm:max-w-[425px]">
+          <DialogHeader>
+            <DialogTitle className="font-display">Login Secret Generated</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 mt-2">
+            <p className="text-sm text-muted-foreground">
+              Share this secret with the employee. It expires in 5 minutes and can only be used once.
+            </p>
+            {secretMutation.isPending ? (
+              <div className="flex items-center justify-center py-6">
+                <Loader2 className="w-6 h-6 animate-spin text-primary" />
+              </div>
+            ) : secretValue ? (
+              <div className="flex items-center gap-2 bg-background border border-border rounded-lg p-3">
+                <code className="flex-1 text-sm font-mono font-bold text-foreground select-all">{secretValue}</code>
+                <button
+                  onClick={handleCopySecret}
+                  className="p-2 rounded-lg hover:bg-muted transition-colors"
+                  title="Copy secret"
+                >
+                  {copied ? (
+                    <Check className="w-4 h-4 text-success" />
+                  ) : (
+                    <Copy className="w-4 h-4 text-muted-foreground" />
+                  )}
+                </button>
+              </div>
+            ) : (
+              <p className="text-sm text-destructive">Failed to generate secret. Try again.</p>
+            )}
+            <button
+              onClick={() => { setShowSecret(null); setSecretValue(''); setCopied(false); }}
+              className="w-full border border-border text-foreground py-2.5 rounded-lg text-sm font-medium hover:bg-muted transition-colors"
+            >
+              Close
             </button>
           </div>
         </DialogContent>

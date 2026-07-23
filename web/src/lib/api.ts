@@ -198,6 +198,97 @@ export const departmentsApi = {
 };
 
 // ──────────────────────────
+// Employees API
+// ──────────────────────────
+
+export interface Employee {
+  id: string;
+  employeeId: string;
+  name: string;
+  email: string;
+  role: string;
+  department: string;
+  shift: string;
+  trackingEnabled: boolean;
+  trackingStatus: string;
+  isOnline: boolean;
+  avatar: string;
+  avatarColor: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EmployeeListResponse {
+  data: Employee[];
+  total: number;
+  page: number;
+  perPage: number;
+  totalPages: number;
+}
+
+export interface CreateEmployeePayload {
+  name: string;
+  email: string;
+  department: string;
+  role: string;
+  shift?: string;
+}
+
+export interface UpdateEmployeePayload {
+  name?: string;
+  email?: string;
+  department?: string;
+  role?: string;
+  shift?: string;
+  trackingEnabled?: boolean;
+  trackingStatus?: string;
+  isOnline?: boolean;
+}
+
+export interface GenerateSecretResponse {
+  secret: string;
+  expiresIn: number;
+}
+
+export const employeesApi = {
+  list: (params?: { page?: number; perPage?: number; search?: string; department?: string; role?: string; status?: string }) =>
+    request<EmployeeListResponse>('/employees', { params: params as Record<string, string | number | undefined> }),
+
+  get: (id: string) => request<Employee>('/employees/' + id),
+
+  create: (data: CreateEmployeePayload) =>
+    request<Employee>('/employees', { method: 'POST', body: data }),
+
+  update: (id: string, data: UpdateEmployeePayload) =>
+    request<Employee>('/employees/' + id, { method: 'PUT', body: data }),
+
+  delete: (id: string) =>
+    request<{ message: string }>('/employees/' + id, { method: 'DELETE' }),
+
+  generateSecret: (id: string) =>
+    request<GenerateSecretResponse>('/employees/' + id + '/generate-secret', { method: 'POST' }),
+};
+
+// ──────────────────────────
+// Employee Auth API (for desktop client)
+// ──────────────────────────
+
+export interface EmployeeLoginRequest {
+  employeeId: string;
+  secretKey: string;
+}
+
+export interface EmployeeLoginResponse {
+  employee: Employee;
+  token: string;
+}
+
+export const employeeAuthApi = {
+  login: (data: EmployeeLoginRequest) =>
+    request<EmployeeLoginResponse>('/auth/employee-login', { method: 'POST', body: data }),
+};
+
+// ──────────────────────────
 // Health API
 // ──────────────────────────
 

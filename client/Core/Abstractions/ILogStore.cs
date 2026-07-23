@@ -2,6 +2,8 @@ using client.Core.Models;
 
 namespace client.Core.Abstractions;
 
+using client.Core.Models;
+
 public interface ILogStore
 {
     Task InitializeAsync(CancellationToken ct);
@@ -13,4 +15,7 @@ public interface ILogStore
     Task SetStatusAsync(string key, string value, CancellationToken ct);
     Task<string?> GetStatusAsync(string key, CancellationToken ct);
     Task SetPermissionStatusAsync(IReadOnlyDictionary<string, bool> permissions, string sessionType, CancellationToken ct);
+    Task SaveEmployeeInfoAsync(EmployeeInfo employee, CancellationToken ct);
+    Task<EmployeeInfo?> GetEmployeeInfoAsync(CancellationToken ct);
+    Task ClearEmployeeInfoAsync(CancellationToken ct);
 }
