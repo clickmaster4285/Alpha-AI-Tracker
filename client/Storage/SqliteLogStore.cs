@@ -59,6 +59,8 @@ public class SqliteLogStore : ILogStore, IDisposable
         var userNameParam = cmd.Parameters.Add("$user_name", SqliteType.Text);
         var platformParam = cmd.Parameters.Add("$platform", SqliteType.Text);
         var sessionIdParam = cmd.Parameters.Add("$session_id", SqliteType.Text);
+        var employeeIdParam = cmd.Parameters.Add("$employee_id", SqliteType.Text);
+        var employeeNameParam = cmd.Parameters.Add("$employee_name", SqliteType.Text);
 
         await using var tx = await _connection.BeginTransactionAsync(ct);
         ((DbCommand)cmd).Transaction = tx;
@@ -77,6 +79,8 @@ public class SqliteLogStore : ILogStore, IDisposable
             userNameParam.Value = log.UserName;
             platformParam.Value = log.Platform;
             sessionIdParam.Value = (object?)log.SessionId ?? DBNull.Value;
+            employeeIdParam.Value = (object?)log.EmployeeId ?? DBNull.Value;
+            employeeNameParam.Value = (object?)log.EmployeeName ?? DBNull.Value;
 
             await cmd.ExecuteNonQueryAsync(ct);
         }
@@ -141,6 +145,17 @@ public class SqliteLogStore : ILogStore, IDisposable
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task CleanupSyncedAsync(TimeSpan olderThan, CancellationToken ct)
+    {
+        if (_connection == null) return;
+
+        var cutoff = DateTime.UtcNow - olderThan;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "DELETE FROM activity_logs WHERE synced_at IS NOT NULL AND timestamp < $cutoff";
+        cmd.Parameters.AddWithValue("$cutoff", cutoff.ToString("O"));
+        var deleted = await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task SetStatusAsync(string key, string value, CancellationToken ct)
     {
         if (_connection == null) return;
@@ -175,6 +190,11 @@ public class SqliteLogStore : ILogStore, IDisposable
         if (OperatingSystem.IsWindows()) platform = "Windows";
         else if (OperatingSystem.IsMacOS()) platform = "macOS";
 
+        // Get current employee info
+        var empInfo = await GetEmployeeInfoAsync(ct);
+        var empId = empInfo?.EmployeeId;
+        var empName = empInfo?.Name;
+
         foreach (var kvp in permissions)
         {
             cmd.Parameters.Clear();
@@ -186,6 +206,8 @@ public class SqliteLogStore : ILogStore, IDisposable
             cmd.Parameters.AddWithValue("$method", kvp.Key);
             cmd.Parameters.AddWithValue("$works", kvp.Value ? 1 : 0);
             cmd.Parameters.AddWithValue("$details", "");
+            cmd.Parameters.AddWithValue("$employee_id", (object?)empId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$employee_name", (object?)empName ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync(ct);
         }
 
@@ -299,7 +321,11 @@ public class SqliteLogStore : ILogStore, IDisposable
                 ? string.Empty : reader.GetString(reader.GetOrdinal("user_name")),
             Platform = reader.GetString(reader.GetOrdinal("platform")),
             SessionId = reader.IsDBNull(reader.GetOrdinal("session_id"))
-                ? null : reader.GetString(reader.GetOrdinal("session_id"))
+                ? null : reader.GetString(reader.GetOrdinal("session_id")),
+            EmployeeId = reader.IsDBNull(reader.GetOrdinal("employee_id"))
+                ? null : reader.GetString(reader.GetOrdinal("employee_id")),
+            EmployeeName = reader.IsDBNull(reader.GetOrdinal("employee_name"))
+                ? null : reader.GetString(reader.GetOrdinal("employee_name"))
         };
     }
 }
