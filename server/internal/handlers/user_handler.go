@@ -156,17 +156,3 @@ func (h *UserHandler) DeleteUser(c echo.Context) error {
 		"message": "user deleted successfully",
 	})
 }
-
-// GetDepartments handles GET /api/v1/departments
-func (h *UserHandler) GetDepartments(c echo.Context) error {
-	depts, err := h.userService.GetDepartments(c.Request().Context())
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, dto.APIError{
-			Code:    http.StatusInternalServerError,
-			Message: "Failed to get departments",
-		})
-	}
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"departments": depts,
-	})
-}

@@ -10,6 +10,7 @@ type Employee struct {
 	Email           string    `json:"email" db:"email"`
 	Role            string    `json:"role" db:"role"`
 	Department      string    `json:"department" db:"department"`
+	DepartmentID    int       `json:"departmentId" db:"department_id"`
 	Shift           string    `json:"shift" db:"shift"`
 	TrackingEnabled bool      `json:"trackingEnabled" db:"tracking_enabled"`
 	TrackingStatus  string    `json:"trackingStatus" db:"tracking_status"`
@@ -28,6 +29,7 @@ type EmployeePublic struct {
 	Email           string    `json:"email"`
 	Role            string    `json:"role"`
 	Department      string    `json:"department"`
+	DepartmentID    int       `json:"departmentId"`
 	Shift           string    `json:"shift"`
 	TrackingEnabled bool      `json:"trackingEnabled"`
 	TrackingStatus  string    `json:"trackingStatus"`
@@ -47,6 +49,7 @@ func (e *Employee) ToPublic() EmployeePublic {
 		Email:           e.Email,
 		Role:            e.Role,
 		Department:      e.Department,
+		DepartmentID:    e.DepartmentID,
 		Shift:           e.Shift,
 		TrackingEnabled: e.TrackingEnabled,
 		TrackingStatus:  e.TrackingStatus,
