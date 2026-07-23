@@ -63,6 +63,41 @@ internal static class DatabaseSchema
             token           TEXT,
             logged_in_at    TEXT DEFAULT (datetime('now'))
         );
+
+        CREATE TABLE IF NOT EXISTS shell_commands (
+            id              TEXT PRIMARY KEY,
+            machine_id      TEXT NOT NULL,
+            timestamp       TEXT NOT NULL,
+            shell_name      TEXT NOT NULL,
+            shell_pid       TEXT,
+            command         TEXT NOT NULL,
+            working_directory TEXT,
+            exit_code       TEXT,
+            user_name       TEXT,
+            platform        TEXT NOT NULL,
+            session_id      TEXT,
+            employee_id     TEXT,
+            employee_name   TEXT,
+            synced_at       TEXT,
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_shell_unsent
+            ON shell_commands(synced_at, timestamp);
+
+        CREATE INDEX IF NOT EXISTS idx_shell_timestamp
+            ON shell_commands(timestamp DESC);
+    ";
+
+    internal const string InsertShellCommandSql = @"
+        INSERT OR IGNORE INTO shell_commands
+            (id, machine_id, timestamp, shell_name, shell_pid,
+             command, working_directory, exit_code,
+             user_name, platform, session_id, employee_id, employee_name)
+        VALUES
+            ($id, $machine_id, $timestamp, $shell_name, $shell_pid,
+             $command, $working_directory, $exit_code,
+             $user_name, $platform, $session_id, $employee_id, $employee_name)
     ";
 
     internal const string InsertSql = @"
@@ -90,4 +125,5 @@ internal static class DatabaseSchema
         VALUES
             ($check_id, $session_id, $session_type, $platform, $checked_at, $method, $works, $details, $employee_id, $employee_name)
     ";
+
 }

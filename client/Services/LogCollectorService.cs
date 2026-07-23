@@ -13,6 +13,8 @@ public class LogCollectorService : BackgroundService
     private readonly ILogStore _store;
     private readonly ILogger<LogCollectorService> _logger;
     private readonly HttpClient _httpClient;
+    private readonly IInstalledAppDetector _appDetector;
+    private readonly IShellCommandCollector _shellCollector;
     private int _cycleCount;
     private string? _currentEmployeeId;
     private string? _currentEmployeeName;
@@ -23,13 +25,17 @@ public class LogCollectorService : BackgroundService
         IActivityCollector collector,
         ILogStore store,
         ILogger<LogCollectorService> logger,
-        HttpClient httpClient)
+        HttpClient httpClient,
+        IInstalledAppDetector appDetector,
+        IShellCommandCollector shellCollector)
     {
         _config = config;
         _collector = collector;
         _store = store;
         _logger = logger;
         _httpClient = httpClient;
+        _appDetector = appDetector;
+        _shellCollector = shellCollector;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -56,36 +62,73 @@ public class LogCollectorService : BackgroundService
                     await RefreshEmployeeInfo(stoppingToken);
                 }
 
-                var logs = (await _collector.CollectAsync(stoppingToken))
+                // ─── Phase 1: Collect installed application activity ───
+                var allLogs = await _collector.CollectAsync(stoppingToken);
+
+                // Filter to INSTALLED APPLICATIONS only (not random scripts/binaries)
+                var installedAppLogs = allLogs
+                    .Where(l => IsInstalledApp(l.ProcessName, l.WindowTitle))
+                    .ToList();
+
+                // Only keep logs that have a meaningful window title
+                var filteredLogs = installedAppLogs
                     .Where(l => !string.IsNullOrWhiteSpace(l.WindowTitle))
                     .ToList();
 
-                // Attach current employee info to logs
-                if (logs.Count > 0)
+                // Attach current employee info
+                if (filteredLogs.Count > 0)
                 {
-                    foreach (var log in logs)
+                    foreach (var log in filteredLogs)
                     {
                         log.EmployeeId = _currentEmployeeId;
                         log.EmployeeName = _currentEmployeeName;
                     }
 
-                    await _store.StoreAsync(logs, stoppingToken);
-                    var total = await _store.GetCountAsync(stoppingToken);
+                    await _store.StoreAsync(filteredLogs, stoppingToken);
+                    var activityTotal = await _store.GetCountAsync(stoppingToken);
                     _logger.LogDebug(
-                        "Collected {Count} logs (total in db: {Total}) in {Elapsed}ms",
-                        logs.Count, total, sw.ElapsedMilliseconds);
+                        "Collected {Count} app logs from {TotalProcesses} total (total in db: {Total}) in {Elapsed}ms",
+                        filteredLogs.Count, allLogs.Count, activityTotal, sw.ElapsedMilliseconds);
                 }
 
+                // ─── Phase 2: Collect shell/terminal commands ───
+                try
+                {
+                    var shellCommands = await _shellCollector.CollectNewCommandsAsync(stoppingToken);
+                    if (shellCommands.Count > 0)
+                    {
+                        foreach (var cmd in shellCommands)
+                        {
+                            cmd.EmployeeId = _currentEmployeeId;
+                            cmd.EmployeeName = _currentEmployeeName;
+                            cmd.MachineId = _config.ClientId;
+                        }
+
+                        await _store.StoreShellCommandsAsync(shellCommands, stoppingToken);
+                        var shellTotal = await _store.GetShellCommandCountAsync(stoppingToken);
+                        _logger.LogDebug(
+                            "Collected {Count} shell commands (total in db: {Total})",
+                            shellCommands.Count, shellTotal);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to collect shell commands");
+                }
+
+                // ─── Phase 3: Periodic sync & cleanup ───
                 _cycleCount++;
                 if (_cycleCount % 10 == 0)
                 {
                     await SyncUnsentLogs(stoppingToken);
+                    await SyncUnsentShellCommands(stoppingToken);
                     await StorePermissionStatus(stoppingToken);
                 }
                 if (_cycleCount % 120 == 0)
                 {
                     // Remove logs that have been synced and are older than 24 hours
                     await CleanupSyncedLogs(stoppingToken);
+                    await _store.CleanupShellCommandsSyncedAsync(TimeSpan.FromHours(24), stoppingToken);
                     // Also clean up very old unsynced logs (30 days)
                     await _store.CleanupAsync(TimeSpan.FromDays(30), stoppingToken);
                     _logger.LogDebug("Ran periodic cleanup");
@@ -113,6 +156,55 @@ public class LogCollectorService : BackgroundService
         _logger.LogInformation("LogCollectorService stopped");
     }
 
+    /// <summary>
+    /// Check if a process is a known installed application.
+    /// </summary>
+    private bool IsInstalledApp(string processName, string? windowTitle)
+    {
+        // Always track shell/terminal processes for command collection
+        if (IsShellProcess(processName))
+            return true;
+
+        // Check via InstalledAppDetector
+        try
+        {
+            return _appDetector.IsInstalledApplication(processName, GetExecutablePath(processName));
+        }
+        catch
+        {
+            // Fallback: include processes with window titles (user is interacting with it)
+            return !string.IsNullOrWhiteSpace(windowTitle);
+        }
+    }
+
+    private static bool IsShellProcess(string processName)
+    {
+        return processName switch
+        {
+            "cmd" or "powershell" or "pwsh" or "wsl" or
+            "bash" or "zsh" or "sh" or "dash" or "fish" or
+            "gnome-terminal" or "konsole" or "alacritty" or "kitty" or
+            "iterm2" or "terminal" or "xterm" or "rxvt" or "urxvt" or "st" or
+            "tmux" or "screen" => true,
+            _ => false
+        };
+    }
+
+    private static string? GetExecutablePath(string processName)
+    {
+        try
+        {
+            var procs = System.Diagnostics.Process.GetProcessesByName(processName);
+            if (procs.Length > 0)
+            {
+                try { return procs[0].MainModule?.FileName; }
+                catch { }
+            }
+        }
+        catch { }
+        return null;
+    }
+
     private async Task RefreshEmployeeInfo(CancellationToken ct)
     {
         try
@@ -124,7 +216,6 @@ public class LogCollectorService : BackgroundService
         }
         catch
         {
-            // Silently continue if employee info not available
             _currentEmployeeId = null;
             _currentEmployeeName = null;
             _currentToken = null;
@@ -197,6 +288,71 @@ public class LogCollectorService : BackgroundService
         }
     }
 
+    private async Task SyncUnsentShellCommands(CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(_currentEmployeeId) || string.IsNullOrEmpty(_currentToken))
+            return;
+
+        try
+        {
+            var unsent = await _store.GetUnsentShellCommandsAsync(100, ct);
+            if (unsent.Count == 0) return;
+
+            var serverUrl = _config.ServerUrl ?? "http://localhost:8080";
+
+            var payload = new
+            {
+                employeeId = _currentEmployeeId,
+                token = _currentToken,
+                commands = unsent.Select(c => new
+                {
+                    id = c.Id,
+                    machineId = c.MachineId,
+                    timestamp = c.Timestamp.ToString("O"),
+                    shellName = c.ShellName,
+                    shellPid = c.ShellPid,
+                    command = c.Command,
+                    workingDirectory = c.WorkingDirectory,
+                    exitCode = c.ExitCode,
+                    userName = c.UserName,
+                    platform = c.Platform,
+                    sessionId = c.SessionId,
+                    employeeId = _currentEmployeeId,
+                    employeeName = _currentEmployeeName
+                }).ToList()
+            };
+
+            var json = System.Text.Json.JsonSerializer.Serialize(payload);
+            var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+
+            var response = await _httpClient.PostAsync($"{serverUrl}/api/v1/shell-commands/sync", content, ct);
+
+            if (response.IsSuccessStatusCode)
+            {
+                var syncedIds = unsent.Select(c => c.Id).ToList();
+                await _store.MarkShellCommandsSentAsync(syncedIds, ct);
+                _logger.LogDebug("Synced {Count} shell commands to server", unsent.Count);
+            }
+            else
+            {
+                var body = await response.Content.ReadAsStringAsync(ct);
+                _logger.LogWarning("Shell sync failed (status {Status}): {Body}", (int)response.StatusCode, body);
+            }
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogDebug(ex, "Shell sync failed (server unreachable)");
+        }
+        catch (TaskCanceledException)
+        {
+            _logger.LogDebug("Shell sync timed out");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to sync shell commands");
+        }
+    }
+
     private async Task CleanupSyncedLogs(CancellationToken ct)
     {
         try
@@ -233,8 +389,6 @@ public class LogCollectorService : BackgroundService
                 var perms = client.Platform.MacOS.ProcessCollector.GetPermissionStatus();
                 await _store.SetPermissionStatusAsync(perms, sessionType, ct);
             }
-
-            _logger.LogDebug("Permission status stored (session_type={SessionType})", sessionType);
         }
         catch (Exception ex)
         {
