@@ -2,7 +2,13 @@ package services
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"log"
 	"time"
 
@@ -32,10 +38,70 @@ func NewAuthService(repo *repository.UserRepo, jwtCfg config.JWTConfig, adminCfg
 
 // Claims represents JWT claims.
 type Claims struct {
-	UserID     string `json:"userId"`
-	Email      string `json:"email"`
-	Role       string `json:"role"`
+	UserID string `json:"userId"`
 	jwt.RegisteredClaims
+}
+
+// deriveKey derives a 32-byte AES key from the JWT secret using SHA-256.
+func deriveKey(secret string) []byte {
+	hash := sha256.Sum256([]byte(secret))
+	return hash[:]
+}
+
+// encryptToken encrypts a signed JWT string using AES-GCM.
+func encryptToken(signedToken string, secret string) (string, error) {
+	key := deriveKey(secret)
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", fmt.Errorf("create cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("create GCM: %w", err)
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", fmt.Errorf("generate nonce: %w", err)
+	}
+
+	ciphertext := gcm.Seal(nonce, nonce, []byte(signedToken), nil)
+	return base64.URLEncoding.EncodeToString(ciphertext), nil
+}
+
+// decryptToken decrypts an AES-GCM encrypted token back to a signed JWT string.
+func decryptToken(encrypted string, secret string) (string, error) {
+	key := deriveKey(secret)
+
+	data, err := base64.URLEncoding.DecodeString(encrypted)
+	if err != nil {
+		return "", fmt.Errorf("base64 decode: %w", err)
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", fmt.Errorf("create cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("create GCM: %w", err)
+	}
+
+	nonceSize := gcm.NonceSize()
+	if len(data) < nonceSize {
+		return "", fmt.Errorf("ciphertext too short")
+	}
+
+	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return "", fmt.Errorf("decrypt: %w", err)
+	}
+
+	return string(plaintext), nil
 }
 
 // EnsureCompanyAdmin checks if a company admin exists, and if not, creates one.
@@ -104,9 +170,14 @@ func (s *AuthService) Login(ctx context.Context, req *dto.LoginRequest) (*dto.Lo
 	}, nil
 }
 
-// ValidateToken validates a JWT token and returns the claims.
+// ValidateToken decrypts and validates a JWT token, returning the claims.
 func (s *AuthService) ValidateToken(tokenString string) (*Claims, error) {
-	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
+	signedToken, err := decryptToken(tokenString, s.jwtConfig.Secret)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt token: %w", err)
+	}
+
+	token, err := jwt.ParseWithClaims(signedToken, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
@@ -133,8 +204,6 @@ func (s *AuthService) generateToken(user *models.User) (string, error) {
 	now := time.Now()
 	claims := &Claims{
 		UserID: user.ID,
-		Email:  user.Email,
-		Role:   user.Role,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(now.Add(s.jwtConfig.AccessExpiry)),
 			IssuedAt:  jwt.NewNumericDate(now),
@@ -145,5 +214,10 @@ func (s *AuthService) generateToken(user *models.User) (string, error) {
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString([]byte(s.jwtConfig.Secret))
+	signedToken, err := token.SignedString([]byte(s.jwtConfig.Secret))
+	if err != nil {
+		return "", fmt.Errorf("sign token: %w", err)
+	}
+
+	return encryptToken(signedToken, s.jwtConfig.Secret)
 }

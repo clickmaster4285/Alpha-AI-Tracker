@@ -50,8 +50,6 @@ func JWTAuth(authService *services.AuthService) echo.MiddlewareFunc {
 
 			// Set user info in context
 			c.Set("user_id", claims.UserID)
-			c.Set("user_email", claims.Email)
-			c.Set("user_role", claims.Role)
 
 			return next(c)
 		}
@@ -81,8 +79,6 @@ func OptionalAuth(authService *services.AuthService) echo.MiddlewareFunc {
 				claims, err := authService.ValidateToken(tokenString)
 				if err == nil {
 					c.Set("user_id", claims.UserID)
-					c.Set("user_email", claims.Email)
-					c.Set("user_role", claims.Role)
 				}
 			}
 
