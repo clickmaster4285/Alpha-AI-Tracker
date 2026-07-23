@@ -14,4 +14,6 @@ public class ActivityLog
     public string UserName { get; set; } = string.Empty;
     public string Platform { get; set; } = string.Empty;
     public string? SessionId { get; set; }
+    public string? EmployeeId { get; set; }
+    public string? EmployeeName { get; set; }
 }
