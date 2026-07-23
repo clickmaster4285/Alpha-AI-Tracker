@@ -16,6 +16,8 @@ internal static class DatabaseSchema
             user_name       TEXT,
             platform        TEXT NOT NULL,
             session_id      TEXT,
+            employee_id     TEXT,
+            employee_name   TEXT,
             synced_at       TEXT,
             created_at      TEXT DEFAULT (datetime('now'))
         );
@@ -43,7 +45,9 @@ internal static class DatabaseSchema
             checked_at      TEXT NOT NULL,
             method          TEXT NOT NULL,
             works           INTEGER NOT NULL DEFAULT 0,
-            details         TEXT
+            details         TEXT,
+            employee_id     TEXT,
+            employee_name   TEXT
         );
 
         CREATE TABLE IF NOT EXISTS employee_info (
@@ -65,11 +69,11 @@ internal static class DatabaseSchema
         INSERT OR IGNORE INTO activity_logs
             (id, machine_id, timestamp, process_name, window_title,
              process_id, cpu_percent, memory_bytes, is_foreground,
-             user_name, platform, session_id)
+             user_name, platform, session_id, employee_id, employee_name)
         VALUES
             ($id, $machine_id, $timestamp, $process_name, $window_title,
              $process_id, $cpu_percent, $memory_bytes, $is_foreground,
-             $user_name, $platform, $session_id)
+             $user_name, $platform, $session_id, $employee_id, $employee_name)
     ";
 
     internal const string UpsertStatusSql = @"
@@ -82,8 +86,8 @@ internal static class DatabaseSchema
 
     internal const string InsertPermissionSql = @"
         INSERT INTO permission_status
-            (check_id, session_id, session_type, platform, checked_at, method, works, details)
+            (check_id, session_id, session_type, platform, checked_at, method, works, details, employee_id, employee_name)
         VALUES
-            ($check_id, $session_id, $session_type, $platform, $checked_at, $method, $works, $details)
+            ($check_id, $session_id, $session_type, $platform, $checked_at, $method, $works, $details, $employee_id, $employee_name)
     ";
 }
