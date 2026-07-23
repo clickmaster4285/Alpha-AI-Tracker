@@ -66,10 +66,14 @@ func main() {
 	// ────────────────
 	userRepo := repository.NewUserRepo(pool)
 	employeeRepo := repository.NewEmployeeRepo(pool)
+	activityLogRepo := repository.NewActivityLogRepo(pool)
+	departmentRepo := repository.NewDepartmentRepo(pool)
 
 	authService := services.NewAuthService(userRepo, cfg.JWT, cfg.Admin)
 	userService := services.NewUserService(userRepo)
 	employeeService := services.NewEmployeeService(employeeRepo, redisClient)
+	activityLogService := services.NewActivityLogService(activityLogRepo, employeeRepo)
+	departmentService := services.NewDepartmentService(departmentRepo, employeeRepo)
 
 	// Cast Redis client to interface
 	var redisInterface services.RedisClientInterface
@@ -80,6 +84,8 @@ func main() {
 	authHandler := handlers.NewAuthHandler(authService, employeeRepo, redisInterface, cfg.JWT)
 	userHandler := handlers.NewUserHandler(userService)
 	employeeHandler := handlers.NewEmployeeHandler(employeeService)
+	activityLogHandler := handlers.NewActivityLogHandler(activityLogService, authService)
+	departmentHandler := handlers.NewDepartmentHandler(departmentService)
 
 	// ────────────────
 	// Auto-initialize Company Admin
@@ -96,7 +102,7 @@ func main() {
 	e.HideBanner = true
 	e.HidePort = true
 
-	router.Setup(e, cfg, authService, authHandler, userHandler, employeeHandler)
+	router.Setup(e, cfg, authService, authHandler, userHandler, employeeHandler, activityLogHandler, departmentHandler)
 
 	// ────────────────
 	// Graceful Shutdown
