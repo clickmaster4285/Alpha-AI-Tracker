@@ -2,8 +2,6 @@ using client.Core.Models;
 
 namespace client.Core.Abstractions;
 
-using client.Core.Models;
-
 public interface ILogStore
 {
     Task InitializeAsync(CancellationToken ct);
@@ -19,4 +17,11 @@ public interface ILogStore
     Task SaveEmployeeInfoAsync(EmployeeInfo employee, CancellationToken ct);
     Task<EmployeeInfo?> GetEmployeeInfoAsync(CancellationToken ct);
     Task ClearEmployeeInfoAsync(CancellationToken ct);
+    
+    // Shell command storage
+    Task StoreShellCommandsAsync(IReadOnlyList<ShellCommand> commands, CancellationToken ct);
+    Task<IReadOnlyList<ShellCommand>> GetUnsentShellCommandsAsync(int limit, CancellationToken ct);
+    Task MarkShellCommandsSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
+    Task CleanupShellCommandsSyncedAsync(TimeSpan olderThan, CancellationToken ct);
+    Task<long> GetShellCommandCountAsync(CancellationToken ct);
 }

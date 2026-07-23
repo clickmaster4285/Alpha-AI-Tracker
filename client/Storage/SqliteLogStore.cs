@@ -303,6 +303,113 @@ public class SqliteLogStore : ILogStore, IDisposable
         _connection?.Dispose();
     }
 
+    // ────────────────────────────────
+    // Shell Commands
+    // ────────────────────────────────
+
+    public async Task StoreShellCommandsAsync(IReadOnlyList<ShellCommand> commands, CancellationToken ct)
+    {
+        if (_connection == null || commands.Count == 0) return;
+
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = DatabaseSchema.InsertShellCommandSql;
+
+        var idParam = cmd.Parameters.Add("$id", SqliteType.Text);
+        var machineIdParam = cmd.Parameters.Add("$machine_id", SqliteType.Text);
+        var timestampParam = cmd.Parameters.Add("$timestamp", SqliteType.Text);
+        var shellNameParam = cmd.Parameters.Add("$shell_name", SqliteType.Text);
+        var shellPidParam = cmd.Parameters.Add("$shell_pid", SqliteType.Text);
+        var commandParam = cmd.Parameters.Add("$command", SqliteType.Text);
+        var workDirParam = cmd.Parameters.Add("$working_directory", SqliteType.Text);
+        var exitCodeParam = cmd.Parameters.Add("$exit_code", SqliteType.Text);
+        var userNameParam = cmd.Parameters.Add("$user_name", SqliteType.Text);
+        var platformParam = cmd.Parameters.Add("$platform", SqliteType.Text);
+        var sessionIdParam = cmd.Parameters.Add("$session_id", SqliteType.Text);
+        var employeeIdParam = cmd.Parameters.Add("$employee_id", SqliteType.Text);
+        var employeeNameParam = cmd.Parameters.Add("$employee_name", SqliteType.Text);
+
+        await using var tx = await _connection.BeginTransactionAsync(ct);
+        ((System.Data.Common.DbCommand)cmd).Transaction = tx;
+
+        foreach (var sc in commands)
+        {
+            idParam.Value = sc.Id;
+            machineIdParam.Value = sc.MachineId;
+            timestampParam.Value = sc.Timestamp.ToString("O");
+            shellNameParam.Value = sc.ShellName;
+            shellPidParam.Value = (object?)sc.ShellPid ?? DBNull.Value;
+            commandParam.Value = sc.Command;
+            workDirParam.Value = (object?)sc.WorkingDirectory ?? DBNull.Value;
+            exitCodeParam.Value = (object?)sc.ExitCode ?? DBNull.Value;
+            userNameParam.Value = sc.UserName;
+            platformParam.Value = sc.Platform;
+            sessionIdParam.Value = (object?)sc.SessionId ?? DBNull.Value;
+            employeeIdParam.Value = (object?)sc.EmployeeId ?? DBNull.Value;
+            employeeNameParam.Value = (object?)sc.EmployeeName ?? DBNull.Value;
+
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+
+        await tx.CommitAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<ShellCommand>> GetUnsentShellCommandsAsync(int limit, CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<ShellCommand>();
+
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT * FROM shell_commands WHERE synced_at IS NULL ORDER BY timestamp ASC LIMIT $limit";
+        cmd.Parameters.AddWithValue("$limit", limit);
+
+        var commands = new List<ShellCommand>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            commands.Add(MapShellReader(reader));
+        }
+
+        return commands;
+    }
+
+    public async Task MarkShellCommandsSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        if (_connection == null || ids.Count == 0) return;
+
+        await using var tx = await _connection.BeginTransactionAsync(ct);
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "UPDATE shell_commands SET synced_at = datetime('now') WHERE id = $id";
+
+        var param = cmd.Parameters.Add("$id", SqliteType.Text);
+        foreach (var id in ids)
+        {
+            param.Value = id;
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+
+        await tx.CommitAsync(ct);
+    }
+
+    public async Task CleanupShellCommandsSyncedAsync(TimeSpan olderThan, CancellationToken ct)
+    {
+        if (_connection == null) return;
+
+        var cutoff = DateTime.UtcNow - olderThan;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "DELETE FROM shell_commands WHERE synced_at IS NOT NULL AND timestamp < $cutoff";
+        cmd.Parameters.AddWithValue("$cutoff", cutoff.ToString("O"));
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<long> GetShellCommandCountAsync(CancellationToken ct)
+    {
+        if (_connection == null) return 0;
+
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM shell_commands";
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result is long l ? l : 0;
+    }
+
     private static ActivityLog MapReader(SqliteDataReader reader)
     {
         return new ActivityLog
@@ -317,6 +424,33 @@ public class SqliteLogStore : ILogStore, IDisposable
             CpuPercent = reader.GetDouble(reader.GetOrdinal("cpu_percent")),
             MemoryBytes = reader.GetInt64(reader.GetOrdinal("memory_bytes")),
             IsForeground = reader.GetInt32(reader.GetOrdinal("is_foreground")) == 1,
+            UserName = reader.IsDBNull(reader.GetOrdinal("user_name"))
+                ? string.Empty : reader.GetString(reader.GetOrdinal("user_name")),
+            Platform = reader.GetString(reader.GetOrdinal("platform")),
+            SessionId = reader.IsDBNull(reader.GetOrdinal("session_id"))
+                ? null : reader.GetString(reader.GetOrdinal("session_id")),
+            EmployeeId = reader.IsDBNull(reader.GetOrdinal("employee_id"))
+                ? null : reader.GetString(reader.GetOrdinal("employee_id")),
+            EmployeeName = reader.IsDBNull(reader.GetOrdinal("employee_name"))
+                ? null : reader.GetString(reader.GetOrdinal("employee_name"))
+        };
+    }
+
+    private static ShellCommand MapShellReader(SqliteDataReader reader)
+    {
+        return new ShellCommand
+        {
+            Id = reader.GetString(reader.GetOrdinal("id")),
+            MachineId = reader.GetString(reader.GetOrdinal("machine_id")),
+            Timestamp = DateTime.Parse(reader.GetString(reader.GetOrdinal("timestamp"))),
+            ShellName = reader.GetString(reader.GetOrdinal("shell_name")),
+            ShellPid = reader.IsDBNull(reader.GetOrdinal("shell_pid"))
+                ? null : reader.GetString(reader.GetOrdinal("shell_pid")),
+            Command = reader.GetString(reader.GetOrdinal("command")),
+            WorkingDirectory = reader.IsDBNull(reader.GetOrdinal("working_directory"))
+                ? null : reader.GetString(reader.GetOrdinal("working_directory")),
+            ExitCode = reader.IsDBNull(reader.GetOrdinal("exit_code"))
+                ? null : reader.GetString(reader.GetOrdinal("exit_code")),
             UserName = reader.IsDBNull(reader.GetOrdinal("user_name"))
                 ? string.Empty : reader.GetString(reader.GetOrdinal("user_name")),
             Platform = reader.GetString(reader.GetOrdinal("platform")),

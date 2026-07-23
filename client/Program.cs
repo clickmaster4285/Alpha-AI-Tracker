@@ -4,6 +4,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using client;
 using client.Configuration;
+using client.Core;
 using client.Core.Abstractions;
 using client.Services;
 using client.Storage;
@@ -32,6 +33,8 @@ var logLevel = config.LogLevel?.ToLowerInvariant() switch
 builder.Logging.SetMinimumLevel(logLevel);
 
 builder.Services.AddSingleton(config);
+
+// SQLite Log Store
 builder.Services.AddSingleton<ILogStore>(sp =>
 {
     var dbPath = config.DbPath;
@@ -49,7 +52,7 @@ builder.Services.AddSingleton<ILogStore>(sp =>
     return new SqliteLogStore(dbPath, config.DbEncryptionKey);
 });
 
-// Register HttpClient for API calls
+// HTTP Client
 builder.Services.AddSingleton<HttpClient>(sp =>
 {
     var client = new HttpClient();
@@ -57,30 +60,43 @@ builder.Services.AddSingleton<HttpClient>(sp =>
     return client;
 });
 
-// Register MainViewModel
-builder.Services.AddTransient<MainViewModel>();
+// Installed App Detector (cross-platform)
+builder.Services.AddSingleton<IInstalledAppDetector, InstalledAppDetector>();
 
+// Platform-specific services
 if (OperatingSystem.IsWindows())
 {
     builder.Services.AddSingleton<IActivityCollector>(
         _ => new client.Platform.Windows.ProcessCollector(config.ClientId));
+    builder.Services.AddSingleton<IShellCommandCollector>(
+        _ => new client.Platform.Windows.ShellCommandCollector(config.ClientId));
 }
 else if (OperatingSystem.IsLinux())
 {
     builder.Services.AddSingleton<IActivityCollector>(
         _ => new client.Platform.Linux.ProcessCollector(config.ClientId));
+    builder.Services.AddSingleton<IShellCommandCollector>(
+        _ => new client.Platform.Linux.ShellCommandCollector(config.ClientId));
 }
 else if (OperatingSystem.IsMacOS())
 {
     builder.Services.AddSingleton<IActivityCollector>(
         _ => new client.Platform.MacOS.ProcessCollector(config.ClientId));
+    builder.Services.AddSingleton<IShellCommandCollector>(
+        _ => new client.Platform.MacOS.ShellCommandCollector(config.ClientId));
 }
 else
 {
     throw new PlatformNotSupportedException($"Unsupported OS: {Environment.OSVersion}");
 }
 
+// Background services (order matters: guard first for most resilience)
+builder.Services.AddSingleton<AutoStartService>();
+builder.Services.AddHostedService<BackgroundGuardService>();
 builder.Services.AddHostedService<LogCollectorService>();
+
+// Main ViewModel
+builder.Services.AddTransient<MainViewModel>();
 
 var host = builder.Build();
 
@@ -89,6 +105,22 @@ await host.StartAsync(ct);
 
 // Set service provider for App to resolve ViewModels from DI
 App.ServiceProvider = host.Services;
+
+// Enable auto-start registration immediately
+try
+{
+    var autoStart = host.Services.GetRequiredService<AutoStartService>();
+    if (!autoStart.IsAutoStartEnabled())
+    {
+        autoStart.EnableAutoStart();
+    }
+}
+catch (Exception ex)
+{
+    var loggerFactory = host.Services.GetRequiredService<ILoggerFactory>();
+    var logger = loggerFactory.CreateLogger("AutoStart");
+    logger.LogWarning(ex, "Failed to enable auto-start");
+}
 
 try
 {
