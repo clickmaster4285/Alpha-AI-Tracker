@@ -267,15 +267,39 @@ The `/logs/comprehensive` page now fetches real data from server:
 
 #### Log sync architecture
 
-The client now actively syncs activity logs to the server:
+The client actively syncs two types of data to the server:
 
+**Activity logs (installed apps only):**
 1. **Collection**: `LogCollectorService` collects process activity every ~30s
-2. **Employee association**: Each log is tagged with `employee_id` and `employee_name` from SQLite store
-3. **Local storage**: Logs stored in SQLite with `synced_at = NULL`
-4. **Sync**: Every ~5 min, up to 100 unsent logs are sent to `POST /api/v1/activity-logs/sync`
-5. **Mark sent**: On server acknowledgement, `synced_at` is set to current time
-6. **Cleanup**: Synced logs older than 24h are automatically deleted from local SQLite
-7. **Permission status**: Also associated with current employee via `employee_id`/`employee_name`
+2. **Installed app filter**: Only processes matching known installed applications (via `IInstalledAppDetector`) are stored — system scripts and random binaries are excluded
+3. **Shell/terminal commands**: Collected per-platform via `IShellCommandCollector` — bash/zsh/fish history files (Linux/macOS) or PSReadLine/cmd history (Windows)
+4. **Employee association**: Each log/command is tagged with `employee_id` and `employee_name` from SQLite store
+5. **Local storage**: Logs stored in SQLite `activity_logs` table; shell commands in `shell_commands` table, both with `synced_at = NULL`
+6. **Sync**: Every ~5 min, up to 100 unsent logs/commands are sent to server
+7. **Mark sent**: On server acknowledgement, `synced_at` is set to current time
+8. **Cleanup**: Synced entries older than 24h are automatically deleted from local SQLite
+9. **Permission status**: Also associated with current employee via `employee_id`/`employee_name`
+
+#### Background resilience & auto-start
+
+The client now persists as a background service with multiple protection layers:
+
+**Auto-start (registered on first run):**
+- **Windows**: Registry `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+- **Linux**: `~/.config/autostart/alpha-ai-tracker.desktop`
+- **macOS**: `~/Library/LaunchAgents/com.alphaai.tracker.plist`
+
+**Background guard (`BackgroundGuardService`):**
+- **Linux**: Installs a `systemctl --user` service with `Restart=always` — auto-restarts if killed
+- **Windows**: Creates a Scheduled Task with `RUNLEVEL HIGHEST` + a restart watchdog script
+- **macOS**: launchd `KeepAlive=true` plist
+- **Watchdog**: Health checks every 60s; re-ensures auto-start if removed manually
+
+**Force permissions (platform-specific UI):**
+- **Windows**: Button opens `ms-settings:privacy-accessibility` + shows admin elevation info
+- **Linux**: Shows commands for `chmod`, `setcap`, `systemctl` to grant history/process access
+- **macOS**: Shows instructions for System Settings → Privacy & Security (Full Disk Access, Accessibility)
+- Permission panel is expandable from the main window footer
 
 #### Directory structure
 
@@ -290,34 +314,46 @@ client/
 ├── Core/
 │   ├── Abstractions/
 │   │   ├── IActivityCollector.cs      # Process activity collection interface
-│   │   └── ILogStore.cs              # Storage interface (logs + employee info + cleanup)
+│   │   ├── ILogStore.cs               # Storage interface (logs + shell cmds + employee info)
+│   │   ├── IInstalledAppDetector.cs   # Interface for detecting installed applications
+│   │   └── IShellCommandCollector.cs  # Interface for collecting shell/terminal commands
 │   ├── Models/
-│   │   ├── ActivityLog.cs            # Activity log entry (includes EmployeeId, EmployeeName)
-│   │   ├── SessionInfo.cs            # Session tracking
-│   │   └── EmployeeInfo.cs           # Employee login info (SQLite-persisted)
-│   └── ProcessFilter.cs             # Process filtering utilities
-│── Platform/                         # OS-specific activity collectors
-│   ├── Windows/ProcessCollector.cs
-│   ├── MacOS/ProcessCollector.cs
-│   └── Linux/ProcessCollector.cs
+│   │   ├── ActivityLog.cs             # Activity log entry (includes EmployeeId, EmployeeName)
+│   │   ├── ShellCommand.cs            # Shell/terminal command entry
+│   │   ├── SessionInfo.cs             # Session tracking
+│   │   └── EmployeeInfo.cs            # Employee login info (SQLite-persisted)
+│   ├── InstalledAppDetector.cs        # Cross-platform impl: registry, dpkg, snap, brew, .desktop files
+│   └── ProcessFilter.cs               # Process filtering utilities
+├── Platform/
+│   ├── Windows/
+│   │   ├── ProcessCollector.cs        # Windows process activity collector
+│   │   └── ShellCommandCollector.cs   # Windows: PSReadLine history + cmd command history
+│   ├── MacOS/
+│   │   ├── ProcessCollector.cs        # macOS process activity collector
+│   │   └── ShellCommandCollector.cs   # macOS: bash/zsh/fish history file reader
+│   └── Linux/
+│       ├── ProcessCollector.cs        # Linux process activity collector
+│       └── ShellCommandCollector.cs   # Linux: bash/zsh/fish history + /proc/ cmdline reader
 ├── Storage/
-│   ├── DatabaseSchema.cs             # SQLite schema (activity_logs + employee_id cols)
-│   └── SqliteLogStore.cs             # SQLite implementation + CleanupSyncedAsync
+│   ├── DatabaseSchema.cs              # SQLite schema (activity_logs + shell_commands + employee_id)
+│   └── SqliteLogStore.cs              # SQLite implementation + shell command storage
 ├── Services/
-│   └── LogCollectorService.cs        # Collection + sync + cleanup + permission status (now includes employee association)
+│   ├── LogCollectorService.cs         # Collection + installed-app filter + shell cmd collect + sync + cleanup
+│   ├── AutoStartService.cs            # Auto-start registration per platform (registry/.desktop/launchd)
+│   └── BackgroundGuardService.cs      # systemd/WinSched/macOS-launchd watchdog, auto-restart
 ├── ViewModels/
-│   └── MainViewModel.cs              # Login state, employee info, API calls
+│   └── MainViewModel.cs               # Login state, employee info, permissions, auto-start toggle
 ├── Views/
-│   └── MainWindow.axaml / .cs        # UI: login flow + employee info panel
+│   └── MainWindow.axaml / .cs         # UI: login flow + employee info + permission panel
 ├── Converters/
-│   ├── BoolInvertConverter.cs        # Invert boolean for XAML visibility
-│   ├── StringNotEmptyConverter.cs    # Show when string is not empty
-│   └── LoadingToTextConverter.cs     # Show "Authenticating..." when loading
-└── publish/                          # Installer build scripts
-    ├── installer-windows.iss         # Inno Setup script (auto-kills running instances)
-    ├── build-installer.sh            # Cross-platform installer builder
-    ├── build-deb.sh                  # Linux .deb builder (prerm kills running instances)
-    └── build-dmg.sh                  # macOS .dmg builder
+│   ├── BoolInvertConverter.cs         # Invert boolean for XAML visibility
+│   ├── StringNotEmptyConverter.cs     # Show when string is not empty
+│   └── LoadingToTextConverter.cs      # Show "Authenticating..." when loading
+└── publish/                           # Installer build scripts
+    ├── installer-windows.iss          # Inno Setup script (auto-kills running instances)
+    ├── build-installer.sh             # Cross-platform installer builder
+    ├── build-deb.sh                   # Linux .deb builder (prerm kills running instances)
+    └── build-dmg.sh                   # macOS .dmg builder
 ```
 
 #### Client Employee Login Flow
@@ -331,11 +367,105 @@ client/
 7. Shows employee info panel with avatar, name, department, role
 8. **Disconnect** button: sends disconnect to server (untrack + offline) then clears SQLite
 
+#### Installed App Detection
+
+The `InstalledAppDetector` identifies installed applications using platform-specific heuristics:
+- **Windows**: Start Menu programs, `Program Files` directories, Windows Registry Uninstall keys
+- **Linux**: `.desktop` files in standard paths, `dpkg-query` package list, `snap list`
+- **macOS**: `/Applications/*.app` bundles, `brew list` packages
+- Plus a curated list of ~120 known app names (browsers, terminals, IDEs, dev tools, etc.)
+- Only processes matching installed apps are stored in SQLite, excluding random scripts/binaries
+
+#### Shell Command Collection
+
+Each platform collects shell/terminal commands:
+- **Windows**: `PSReadLine` history file (`ConsoleHost_history.txt`) + cmd `doskey` history
+- **Linux**: `~/.bash_history`, `~/.zsh_history`, `~/.local/share/fish/fish_history`; also reads `/proc/*/cmdline` for running shell commands
+- **macOS**: `~/.bash_history`, `~/.zsh_history`, `~/.local/share/fish/fish_history`
+- Commands are synced to server every ~5 min via `POST /api/v1/shell-commands/sync`
+- Synced commands older than 24h are auto-deleted from local SQLite
+
 #### Installer behavior
 
 - **Windows**: Inno Setup installer auto-kills any running `client.exe` or `AlphaAITracker.exe` via `taskkill /F /IM` in `InitializeSetup` and `InitializeUninstall` (see `installer-windows.iss`)
 - **Linux**: `.deb` postrm script auto-kills running instances via `kill -9` before uninstall (see `build-deb.sh`)
 - **Mutex**: `AlphaAITracker` named mutex prevents multiple instances
+
+---
+
+## Database & Error Handling Conventions
+
+### Transactions
+
+All **write operations** (Create, Update, Delete) MUST use database transactions for atomicity:
+
+```go
+tx, err := r.pool.Begin(ctx)
+if err != nil {
+    return nil, fmt.Errorf("begin tx: %w", err)
+}
+defer tx.Rollback(ctx) // no-op after Commit
+
+// ... perform operations against `tx` (not `r.pool`) ...
+
+if err := tx.Commit(ctx); err != nil {
+    return nil, fmt.Errorf("commit tx: %w", err)
+}
+return result, nil
+```
+
+- Use `tx.Exec`, `tx.Query`, `tx.QueryRow` instead of `r.pool.*` inside transactions
+- Use a `queryable` interface (pool or tx) for shared helpers
+- Read operations (List, GetByID) may use the pool directly
+
+### Row Scanning
+
+**NEVER** use `pgx.RowToStructByName` or `pgx.RowToStructByPos` for queries involving:
+- `LEFT JOIN` (nullable columns from the joined table)
+- `COALESCE` (returns technically nullable type)
+- Tables with nullable columns (`VARCHAR` without `NOT NULL`)
+
+Instead, always use **manual `rows.Scan()`** or a custom `CollectOneRow` callback with explicit field order that matches the SELECT column order exactly:
+
+```go
+pgx.CollectOneRow(rows, func(row pgx.CollectableRow) (models.Employee, error) {
+    var e models.Employee
+    err := row.Scan(
+        &e.ID, &e.EmployeeID, // ... all fields in SELECT order
+    )
+    return e, err
+})
+```
+
+For `List` queries, use a `for rows.Next()` loop with `rows.Scan()` and always check `rows.Err()` after the loop.
+
+### Error Handling
+
+- **Handlers**: Always log errors via `log.Printf` before returning JSON responses. Use a `logAndReturnError` helper pattern.
+- **Duplicate detection**: Check for PostgreSQL error code `23505` (unique_violation) using `*pgconn.PgError` with `errors.As()`.
+- **Duplicate prevention**: Validate email/name uniqueness in service layer BEFORE calling repo.Create (but always rely on DB constraints + transactions as the final safeguard).
+- **Log format**: `[module] message: error` — e.g., `[employee] Failed to create employee: email already exists: test@test.com`
+- **HTTP status codes**: Use appropriate codes — 409 Conflict for duplicates, 404 Not Found for missing resources, 400 Bad Request for validation errors, 500 Internal Server Error for unexpected failures.
+
+### Duplicate Prevention Rules
+
+1. Add `UNIQUE` constraints at the database level (PostgreSQL)
+2. Check uniqueness in the service layer before write operations
+3. Catch duplicate-key errors (`23505`) from the repository layer and wrap with descriptive messages
+4. Return `409 Conflict` from the handler for duplicates
+5. Always use transactions so the unique check + insert are atomic
+
+### Soft Delete Convention
+
+**All tables use soft delete.** Never hard-delete rows — always set `deleted_at = NOW()`.
+
+- Every table has a `deleted_at TIMESTAMPTZ` column (NULL = active, set = deleted)
+- All `DELETE` repo methods must be converted to `UPDATE ... SET deleted_at = NOW() WHERE ... AND deleted_at IS NULL`
+- All `SELECT` queries must include `WHERE deleted_at IS NULL` (or `AND deleted_at IS NULL` when combined with other filters)
+- All `INSERT ... RETURNING` and `UPDATE ... RETURNING` must include `deleted_at` in the SELECT list
+- The `deleted_at` field is exposed in API responses as `"deletedAt": null` (active) or `"deletedAt": "2024-01-15T10:30:00Z"` (deleted)
+- When checking uniqueness (email, etc.), always filter `deleted_at IS NULL` so soft-deleted records don't block new creation
+- The `Department` employee count subquery must also filter `deleted_at IS NULL` on the `employees` table
 
 ---
 
