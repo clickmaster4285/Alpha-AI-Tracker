@@ -17,6 +17,8 @@ func Setup(
 	authHandler *handlers.AuthHandler,
 	userHandler *handlers.UserHandler,
 	employeeHandler *handlers.EmployeeHandler,
+	activityLogHandler *handlers.ActivityLogHandler,
+	departmentHandler *handlers.DepartmentHandler,
 ) {
 	// ─────────────────────────────
 	// Global Middleware
@@ -50,8 +52,12 @@ func Setup(
 	// ─────────────────────────────
 	auth := e.Group("/api/v1/auth")
 	auth.POST("/login", authHandler.Login)
-	auth.POST("/employee-login", authHandler.EmployeeLogin) // employee desktop client login
+	auth.POST("/employee-login", authHandler.EmployeeLogin)        // employee desktop client login
 	auth.POST("/employee-disconnect", authHandler.EmployeeDisconnect) // employee desktop client disconnect
+
+	// Activity log sync — authenticated by employee token in body (not cookie)
+	activityLogs := e.Group("/api/v1/activity-logs")
+	activityLogs.POST("/sync", activityLogHandler.SyncLogs)
 
 	// ─────────────────────────────
 	// Semi-Protected Routes (optional auth)
@@ -89,6 +95,13 @@ func Setup(
 	employees.DELETE("/:id", employeeHandler.DeleteEmployee)
 	employees.POST("/:id/generate-secret", employeeHandler.GenerateSecret)
 
-	// Departments
-	protected.GET("/departments", userHandler.GetDepartments)
+	// Activity Logs listing (protected — web admin access)
+	protected.GET("/activity-logs", activityLogHandler.ListLogs)
+
+	// Departments (dynamic CRUD)
+	depts := protected.Group("/departments")
+	depts.GET("", departmentHandler.ListDepartments)
+	depts.POST("", departmentHandler.CreateDepartment)
+	depts.PUT("/:id", departmentHandler.UpdateDepartment)
+	depts.DELETE("/:id", departmentHandler.DeleteDepartment)
 }
