@@ -1,0 +1,200 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:client.ViewModels"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:conv="clr-namespace:client.Converters"
+        mc:Ignorable="d" d:DesignWidth="500" d:DesignHeight="400"
+        x:Class="client.Views.MainWindow"
+        x:DataType="vm:MainViewModel"
+        Icon="/Assets/avalonia-logo.ico"
+        Title="Alpha AI Tracker"
+        WindowStartupLocation="CenterScreen"
+        MinWidth="400" MinHeight="300"
+        Width="500" Height="400">
+
+    <Window.Resources>
+        <conv:BoolInvertConverter x:Key="BoolInvert" />
+        <conv:StringNotEmptyConverter x:Key="StringNotEmpty" />
+        <conv:LoadingToTextConverter x:Key="LoadingToText" />
+    </Window.Resources>
+
+    <Design.DataContext>
+        <vm:MainViewModel />
+    </Design.DataContext>
+
+    <Window.Styles>
+        <!-- TextBox styles -->
+        <Style Selector="TextBox">
+            <Setter Property="Background" Value="#2a2a2a" />
+            <Setter Property="Foreground" Value="White" />
+            <Setter Property="BorderBrush" Value="#444" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="Padding" Value="12,10" />
+            <Setter Property="FontSize" Value="14" />
+        </Style>
+        <Style Selector="TextBox:focus">
+            <Setter Property="BorderBrush" Value="#7C3AED" />
+        </Style>
+        <!-- Primary button -->
+        <Style Selector="Button.primary">
+            <Setter Property="Background" Value="#7C3AED" />
+            <Setter Property="Foreground" Value="White" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="Padding" Value="16,10" />
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Cursor" Value="Hand" />
+        </Style>
+        <Style Selector="Button.primary:pointerover">
+            <Setter Property="Background" Value="#6D28D9" />
+        </Style>
+        <!-- Secondary button -->
+        <Style Selector="Button.secondary">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Foreground" Value="#999" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="Padding" Value="16,10" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="BorderBrush" Value="#444" />
+            <Setter Property="BorderThickness" Value="1" />
+        </Style>
+        <Style Selector="Button.secondary:pointerover">
+            <Setter Property="Background" Value="#2a2a2a" />
+            <Setter Property="Foreground" Value="White" />
+        </Style>
+        <!-- Danger button -->
+        <Style Selector="Button.danger">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Foreground" Value="#EF4444" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="Padding" Value="12,8" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="BorderBrush" Value="#444" />
+            <Setter Property="BorderThickness" Value="1" />
+        </Style>
+        <Style Selector="Button.danger:pointerover">
+            <Setter Property="Background" Value="#2a2a2a" />
+        </Style>
+    </Window.Styles>
+
+    <Grid Background="#1a1a1a">
+        <!-- Main Content -->
+        <Grid RowDefinitions="Auto,*,Auto" Margin="20">
+
+            <!-- Header -->
+            <Border Background="#222" CornerRadius="10" Padding="16,12" Margin="0,0,0,16">
+                <Grid ColumnDefinitions="Auto,*">
+                    <Border Background="#7C3AED" CornerRadius="8" Width="40" Height="40"
+                            HorizontalAlignment="Left" VerticalAlignment="Center">
+                        <TextBlock Text="AI" TextAlignment="Center"
+                                   FontSize="16" FontWeight="Bold" Foreground="White"
+                                   VerticalAlignment="Center" HorizontalAlignment="Center" />
+                    </Border>
+                    <StackPanel Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center">
+                        <TextBlock Text="Alpha AI Tracker" FontSize="16" FontWeight="Bold" Foreground="White" />
+                        <TextBlock Text="Employee Monitoring" FontSize="11" Foreground="#888" Margin="0,2,0,0" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- Content Area -->
+            <Border Grid.Row="1" Background="#222" CornerRadius="10" Padding="24">
+                <Grid RowDefinitions="Auto,*">
+
+                    <!-- Not Logged In State -->
+                    <Grid IsVisible="{Binding IsLoggedIn, Converter={StaticResource BoolInvert}}">
+                        <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center"
+                                    IsVisible="{Binding ShowLoginForm, Converter={StaticResource BoolInvert}}"
+                                    Spacing="16">
+                            <TextBlock Text="Not Connected" FontSize="18" FontWeight="Bold"
+                                       Foreground="White" HorizontalAlignment="Center" />
+                            <TextBlock Text="Connect to your monitoring server to start tracking."
+                                       FontSize="13" Foreground="#888" HorizontalAlignment="Center"
+                                       TextWrapping="Wrap" MaxWidth="280" TextAlignment="Center" />
+                            <Button Classes="primary" Command="{Binding ShowLoginCommand}"
+                                    HorizontalAlignment="Center" Width="160"
+                                    Content="Login" />
+                        </StackPanel>
+
+                        <!-- Login Form -->
+                        <StackPanel VerticalAlignment="Center" HorizontalAlignment="Stretch"
+                                    IsVisible="{Binding ShowLoginForm}"
+                                    Spacing="12" MaxWidth="320">
+                            <TextBlock Text="Employee Login" FontSize="18" FontWeight="Bold"
+                                       Foreground="White" HorizontalAlignment="Center" Margin="0,0,0,8" />
+
+                            <TextBlock Text="Employee ID" FontSize="12" Foreground="#999" />
+                            <TextBox Text="{Binding EmployeeId}"
+                                     PlaceholderText="e.g. EMP-10001" />
+
+                            <TextBlock Text="Secret Key" FontSize="12" Foreground="#999" />
+                            <TextBox Text="{Binding SecretKey}"
+                                     PlaceholderText="Enter your secret key" />
+
+                            <TextBlock Text="{Binding StatusMessage}"
+                                       Foreground="#EF4444" FontSize="12"
+                                       HorizontalAlignment="Center"
+                                       IsVisible="{Binding StatusMessage, Converter={StaticResource StringNotEmpty}}" />
+
+                            <Grid ColumnDefinitions="*,Auto,*" Margin="0,8,0,0">
+                                <Button Grid.Column="0" Classes="secondary" Command="{Binding CancelLoginCommand}"
+                                        Content="Cancel" />
+                                <Button Grid.Column="2" Classes="primary" Command="{Binding LoginCommand}"
+                                        IsEnabled="{Binding IsLoading, Converter={StaticResource BoolInvert}}"
+                                        Content="{Binding IsLoading, Converter={StaticResource LoadingToText}}" />
+                            </Grid>
+                        </StackPanel>
+                    </Grid>
+
+                    <!-- Logged In - Show Employee Info -->
+                    <Grid IsVisible="{Binding IsLoggedIn}">
+                        <StackPanel VerticalAlignment="Center" HorizontalAlignment="Stretch" Spacing="16">
+                            <!-- Avatar -->
+                            <Border Background="{Binding EmployeeAvatarColor}"
+                                    CornerRadius="40" Width="80" Height="80"
+                                    HorizontalAlignment="Center">
+                                <TextBlock Text="{Binding EmployeeAvatar}"
+                                           FontSize="28" FontWeight="Bold" Foreground="White"
+                                           VerticalAlignment="Center" HorizontalAlignment="Center" />
+                            </Border>
+
+                            <TextBlock Text="{Binding EmployeeName}" FontSize="20" FontWeight="Bold"
+                                       Foreground="White" HorizontalAlignment="Center" />
+
+                            <Border Background="#2a2a2a" CornerRadius="8" Padding="16" Margin="0,4,0,0">
+                                <StackPanel Spacing="12">
+                                    <Grid ColumnDefinitions="Auto,*">
+                                        <TextBlock Text="Department" FontSize="12" Foreground="#888" />
+                                        <TextBlock Grid.Column="1" Text="{Binding EmployeeDepartment}"
+                                                   FontSize="14" Foreground="White"
+                                                   HorizontalAlignment="Right" />
+                                    </Grid>
+                                    <Rectangle Height="1" Fill="#333" />
+                                    <Grid ColumnDefinitions="Auto,*">
+                                        <TextBlock Text="Role" FontSize="12" Foreground="#888" />
+                                        <TextBlock Grid.Column="1" Text="{Binding EmployeeRole}"
+                                                   FontSize="14" Foreground="White"
+                                                   HorizontalAlignment="Right" />
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
+
+                            <Button Classes="danger" Command="{Binding LogoutCommand}"
+                                    HorizontalAlignment="Center" Width="140"
+                                    Content="Disconnect" />
+                        </StackPanel>
+                    </Grid>
+                </Grid>
+            </Border>
+
+            <!-- Footer -->
+            <TextBlock Grid.Row="2" Text="Alpha AI Tracker v1.0"
+                       FontSize="11" Foreground="#555"
+                       HorizontalAlignment="Center" Margin="0,12,0,0" />
+        </Grid>
+    </Grid>
+</Window>

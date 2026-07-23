@@ -1,0 +1,244 @@
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using client.Configuration;
+using client.Core.Abstractions;
+using client.Core.Models;
+
+namespace client.Services;
+
+public class LogCollectorService : BackgroundService
+{
+    private readonly AppConfig _config;
+    private readonly IActivityCollector _collector;
+    private readonly ILogStore _store;
+    private readonly ILogger<LogCollectorService> _logger;
+    private readonly HttpClient _httpClient;
+    private int _cycleCount;
+    private string? _currentEmployeeId;
+    private string? _currentEmployeeName;
+    private string? _currentToken;
+
+    public LogCollectorService(
+        AppConfig config,
+        IActivityCollector collector,
+        ILogStore store,
+        ILogger<LogCollectorService> logger,
+        HttpClient httpClient)
+    {
+        _config = config;
+        _collector = collector;
+        _store = store;
+        _logger = logger;
+        _httpClient = httpClient;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        _logger.LogInformation(
+            "LogCollectorService starting (machine={MachineId}, interval={Interval}s, session={SessionId})",
+            _config.ClientId, _config.CollectIntervalSec, SessionInfo.SessionId);
+
+        await _store.InitializeAsync(stoppingToken);
+        await RefreshEmployeeInfo(stoppingToken);
+        await StorePermissionStatus(stoppingToken);
+
+        var interval = TimeSpan.FromSeconds(Math.Max(5, _config.CollectIntervalSec));
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+
+                // Refresh employee info periodically
+                if (_cycleCount % 6 == 0)
+                {
+                    await RefreshEmployeeInfo(stoppingToken);
+                }
+
+                var logs = (await _collector.CollectAsync(stoppingToken))
+                    .Where(l => !string.IsNullOrWhiteSpace(l.WindowTitle))
+                    .ToList();
+
+                // Attach current employee info to logs
+                if (logs.Count > 0)
+                {
+                    foreach (var log in logs)
+                    {
+                        log.EmployeeId = _currentEmployeeId;
+                        log.EmployeeName = _currentEmployeeName;
+                    }
+
+                    await _store.StoreAsync(logs, stoppingToken);
+                    var total = await _store.GetCountAsync(stoppingToken);
+                    _logger.LogDebug(
+                        "Collected {Count} logs (total in db: {Total}) in {Elapsed}ms",
+                        logs.Count, total, sw.ElapsedMilliseconds);
+                }
+
+                _cycleCount++;
+                if (_cycleCount % 10 == 0)
+                {
+                    await SyncUnsentLogs(stoppingToken);
+                    await StorePermissionStatus(stoppingToken);
+                }
+                if (_cycleCount % 120 == 0)
+                {
+                    // Remove logs that have been synced and are older than 24 hours
+                    await CleanupSyncedLogs(stoppingToken);
+                    // Also clean up very old unsynced logs (30 days)
+                    await _store.CleanupAsync(TimeSpan.FromDays(30), stoppingToken);
+                    _logger.LogDebug("Ran periodic cleanup");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error during log collection cycle");
+            }
+
+            try
+            {
+                await Task.Delay(interval, stoppingToken);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+        }
+
+        _logger.LogInformation("LogCollectorService stopped");
+    }
+
+    private async Task RefreshEmployeeInfo(CancellationToken ct)
+    {
+        try
+        {
+            var info = await _store.GetEmployeeInfoAsync(ct);
+            _currentEmployeeId = info?.EmployeeId;
+            _currentEmployeeName = info?.Name;
+            _currentToken = info?.Token;
+        }
+        catch
+        {
+            // Silently continue if employee info not available
+            _currentEmployeeId = null;
+            _currentEmployeeName = null;
+            _currentToken = null;
+        }
+    }
+
+    private async Task SyncUnsentLogs(CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(_currentEmployeeId) || string.IsNullOrEmpty(_currentToken))
+            return;
+
+        try
+        {
+            var unsentLogs = await _store.GetUnsentAsync(100, ct);
+            if (unsentLogs.Count == 0) return;
+
+            var serverUrl = _config.ServerUrl ?? "http://localhost:8080";
+
+            var payload = new
+            {
+                employeeId = _currentEmployeeId,
+                token = _currentToken,
+                logs = unsentLogs.Select(l => new
+                {
+                    id = l.Id,
+                    machineId = l.MachineId,
+                    timestamp = l.Timestamp.ToString("O"),
+                    processName = l.ProcessName,
+                    windowTitle = l.WindowTitle,
+                    processId = l.ProcessId,
+                    cpuPercent = l.CpuPercent,
+                    memoryBytes = l.MemoryBytes,
+                    isForeground = l.IsForeground,
+                    userName = l.UserName,
+                    platform = l.Platform,
+                    sessionId = l.SessionId,
+                    employeeId = _currentEmployeeId,
+                    employeeName = _currentEmployeeName
+                }).ToList()
+            };
+
+            var json = System.Text.Json.JsonSerializer.Serialize(payload);
+            var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+
+            var response = await _httpClient.PostAsync($"{serverUrl}/api/v1/activity-logs/sync", content, ct);
+
+            if (response.IsSuccessStatusCode)
+            {
+                var syncedIds = unsentLogs.Select(l => l.Id).ToList();
+                await _store.MarkSentAsync(syncedIds, ct);
+                _logger.LogDebug("Synced {Count} logs to server", unsentLogs.Count);
+            }
+            else
+            {
+                var body = await response.Content.ReadAsStringAsync(ct);
+                _logger.LogWarning("Sync failed (status {Status}): {Body}", (int)response.StatusCode, body);
+            }
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogDebug(ex, "Sync failed (server unreachable)");
+        }
+        catch (TaskCanceledException)
+        {
+            _logger.LogDebug("Sync timed out");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to sync logs");
+        }
+    }
+
+    private async Task CleanupSyncedLogs(CancellationToken ct)
+    {
+        try
+        {
+            await _store.CleanupSyncedAsync(TimeSpan.FromHours(24), ct);
+            _logger.LogDebug("Cleaned up synced logs older than 24h");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to cleanup synced logs");
+        }
+    }
+
+    private async Task StorePermissionStatus(CancellationToken ct)
+    {
+        try
+        {
+            var sessionType = "unknown";
+            if (OperatingSystem.IsLinux())
+            {
+                sessionType = Environment.GetEnvironmentVariable("XDG_SESSION_TYPE") ?? "unknown";
+                var perms = client.Platform.Linux.ProcessCollector.GetPermissionStatus();
+                await _store.SetPermissionStatusAsync(perms, sessionType, ct);
+            }
+            else if (OperatingSystem.IsWindows())
+            {
+                sessionType = "windows";
+                var perms = client.Platform.Windows.ProcessCollector.GetPermissionStatus();
+                await _store.SetPermissionStatusAsync(perms, sessionType, ct);
+            }
+            else if (OperatingSystem.IsMacOS())
+            {
+                sessionType = "macos";
+                var perms = client.Platform.MacOS.ProcessCollector.GetPermissionStatus();
+                await _store.SetPermissionStatusAsync(perms, sessionType, ct);
+            }
+
+            _logger.LogDebug("Permission status stored (session_type={SessionType})", sessionType);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to store permission status");
+        }
+    }
+}
