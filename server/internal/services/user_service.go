@@ -191,11 +191,6 @@ func (s *UserService) Delete(ctx context.Context, id string) error {
 	return s.repo.Delete(ctx, id)
 }
 
-// GetDepartments returns all department names.
-func (s *UserService) GetDepartments(ctx context.Context) ([]string, error) {
-	return s.repo.GetDepartments(ctx)
-}
-
 func userToResponse(u *models.User) dto.UserResponse {
 	return dto.UserResponse{
 		ID:              u.ID,
