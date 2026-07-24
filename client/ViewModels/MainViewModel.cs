@@ -17,6 +17,7 @@ public partial class MainViewModel : ViewModelBase
     private readonly IInstalledAppDetector _appDetector;
     private readonly IShellCommandCollector _shellCollector;
     private readonly AutoStartService _autoStart;
+    private readonly LogCollectorService _logCollector;
 
     [ObservableProperty]
     private bool _isLoggedIn;
@@ -77,7 +78,8 @@ public partial class MainViewModel : ViewModelBase
         HttpClient httpClient,
         IInstalledAppDetector appDetector,
         IShellCommandCollector shellCollector,
-        AutoStartService autoStart)
+        AutoStartService autoStart,
+        LogCollectorService logCollector)
     {
         _config = config;
         _store = store;
@@ -85,6 +87,7 @@ public partial class MainViewModel : ViewModelBase
         _appDetector = appDetector;
         _shellCollector = shellCollector;
         _autoStart = autoStart;
+        _logCollector = logCollector;
     }
 
     public async Task InitializeAsync(CancellationToken ct)
@@ -99,11 +102,20 @@ public partial class MainViewModel : ViewModelBase
             EmployeeRole = info.Role;
             EmployeeAvatar = info.Avatar ?? string.Empty;
             EmployeeAvatarColor = info.AvatarColor ?? "#7C3AED";
+
+            // Resume tracking for previously logged-in session
+            _logCollector.SetEmployeeInfo(info.EmployeeId, info.Name, info.Token ?? string.Empty);
+            _logCollector.StartTracking();
+
+            // Re-enforce auto-start
+            _autoStart.EnableAutoStartForced();
+            IsAutoStartEnabled = true;
+            AutoStartStatusText = "Auto-start enabled (protected)";
         }
         else
         {
             IsLoggedIn = false;
-            ShowLoginForm = false;
+            ShowLoginForm = true;
         }
 
         // Initialize permission & auto-start status
@@ -225,6 +237,15 @@ public partial class MainViewModel : ViewModelBase
 
             await _store.SaveEmployeeInfoAsync(employeeInfo, CancellationToken.None);
 
+            // Start tracking NOW — only after successful login
+            _logCollector.SetEmployeeInfo(emp.EmployeeId, emp.Name, loginResp.Token ?? string.Empty);
+            _logCollector.StartTracking();
+
+            // Force-register auto-start (not deletable)
+            _autoStart.EnableAutoStartForced();
+            IsAutoStartEnabled = true;
+            AutoStartStatusText = "Auto-start enabled (protected)";
+
             // Update UI
             IsLoggedIn = true;
             ShowLoginForm = false;
@@ -276,6 +297,9 @@ public partial class MainViewModel : ViewModelBase
             // Best effort — don't block logout if server is unreachable
         }
 
+        // Stop tracking immediately
+        _logCollector.StopTracking();
+
         await _store.ClearEmployeeInfoAsync(CancellationToken.None);
         IsLoggedIn = false;
         ShowLoginForm = false;
@@ -307,96 +331,92 @@ public partial class MainViewModel : ViewModelBase
     /// <summary>
     /// Windows: Open Windows Security/Accessibility settings.
     /// </summary>
+    /// <summary>
+    /// Windows: Request admin elevation via UAC popup.
+    /// Uses a lightweight command to trigger UAC without re-launching the GUI app.
+    /// </summary>
     [RelayCommand]
     private void RequestWindowsPermissions()
     {
         try
         {
-            // Open Windows settings for privacy & accessibility permissions
+            // Run a lightweight admin command to trigger UAC without spawning another GUI instance
             var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = "/c echo Alpha AI Tracker is requesting admin permissions... && whoami",
+                UseShellExecute = true,
+                Verb = "runas",        // Triggers native UAC popup
+                WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden
+            };
+            System.Diagnostics.Process.Start(psi);
+
+            // Also open the privacy settings page for accessibility permissions
+            var settingsPsi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = "ms-settings:privacy-accessibility",
                 UseShellExecute = true
             };
-            System.Diagnostics.Process.Start(psi);
+            System.Diagnostics.Process.Start(settingsPsi);
 
-            // Also show where to grant Full Disk Access / Accessibility
             PermissionCommands = """
-                To grant required permissions:
+                ✅ UAC elevation prompt was shown.
+                Click "Yes" to grant administrator permissions.
 
-                1. Go to Settings → Privacy & Security → Accessibility
-                   → Enable Alpha AI Tracker
+                Also opened Windows Settings for Accessibility permissions.
+                Enable Alpha AI Tracker in the list.
 
-                2. Go to Settings → Privacy & Security → App permissions
-                   → Enable access to app info, location, and file system
-
-                3. For best results, run as Administrator:
-                   - Right-click the app → "Run as administrator"
-                   - Or install via the installer which auto-elevates
-
-                Run these commands to set auto-start manually if needed:
-                reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v AlphaAITracker /t REG_SZ /d "\"{exe_path}\" --minimized" /f
-                """.Replace("{exe_path}", Environment.ProcessPath ?? "AlphaAITracker.exe");
+                This allows:
+                • Reading all process and app usage data
+                • Accessing shell/command history
+                • Running persistently in the background
+                """;
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            PermissionCommands = "⚠️ UAC prompt was cancelled by user.\n\nClick the button again and accept the UAC prompt to grant permissions.";
         }
         catch (Exception ex)
         {
-            PermissionCommands = $"Failed to open settings: {ex.Message}";
+            PermissionCommands = $"Failed to open permissions: {ex.Message}";
         }
 
         ShowPermissionsPanel = true;
     }
 
     /// <summary>
-    /// Linux: Show commands to grant permissions and install systemd service.
+    /// Linux: Request permissions via pkexec (PolKit) which shows a native GTK password dialog.
+    /// User enters their admin password directly in the popup.
     /// </summary>
     [RelayCommand]
     private void ShowLinuxPermissionCommands()
     {
-        var exePath = Environment.ProcessPath ?? "AlphaAITracker";
-        var bashPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".bash_history");
-        var zshPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".zsh_history");
+        try
+        {
+            var exePath = Environment.ProcessPath ?? "AlphaAITracker";
 
-        PermissionCommands = $"""
-            ═══ Linux Permission Setup ═══
+            // Use pkexec to get root privileges — shows native PolKit password dialog
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "pkexec",
+                Arguments = $"chmod +r /home/*/.bash_history /home/*/.zsh_history /home/*/.local/share/fish/fish_history 2>/dev/null; setcap CAP_DAC_READ_SEARCH+ep \"{exePath}\"",
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            System.Diagnostics.Process.Start(psi);
 
-            1. GRANT PERMISSIONS:
-
-            # Allow reading shell history files:
-            chmod +r "{bashPath}" 2>/dev/null
-            chmod +r "{zshPath}" 2>/dev/null
-
-            # Allow running xprop/xdotool for window detection:
-            sudo apt install x11-utils xdotool  # Debian/Ubuntu
-            sudo dnf install xorg-x11-utils xdotool  # Fedora
-            sudo pacman -S xorg-xprop xdotool  # Arch
-
-            # Grant read access to /proc for process detection:
-            sudo setcap CAP_DAC_READ_SEARCH+ep "{exePath}"
-
-            # For GNOME Shell integration (requires extension):
-            # Install: gnome-shell-extension-appindicator
-            # Enable: User Themes, Window List
-
-            2. SYSTEMD PERSISTENCE (auto-start):
-
-            # The app will auto-register as a user systemd service.
-            # Verify with:
-            systemctl --user status alpha-ai-tracker.service
-
-            # Enable manually if needed:
-            systemctl --user enable alpha-ai-tracker.service
-            systemctl --user start alpha-ai-tracker.service
-
-            3. BACKGROUND RUNNING:
-
-            # The app runs as a systemd user service with Restart=always.
-            # To check if it's running:
-            ps aux | grep AlphaAITracker
-            """;
+            PermissionCommands = """
+                ✅ PolKit password prompt was shown.
+                Enter your administrator password to grant:
+                • Read access to shell history files
+                • Process detection permissions
+                • Full background persistence
+                """;
+        }
+        catch (Exception ex)
+        {
+            PermissionCommands = $"Failed to launch pkexec: {ex.Message}\n\nMake sure 'pkexec' is installed (part of polkit).";
+        }
 
         ShowPermissionsPanel = true;
     }
@@ -460,9 +480,9 @@ public partial class MainViewModel : ViewModelBase
         }
         else
         {
-            _autoStart.EnableAutoStart();
+            _autoStart.EnableAutoStartForced();
             IsAutoStartEnabled = true;
-            AutoStartStatusText = "Auto-start enabled";
+            AutoStartStatusText = "Auto-start enabled (protected)";
         }
     }
 }

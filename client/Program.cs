@@ -12,7 +12,15 @@ using client.ViewModels;
 
 EnvLoader.Load();
 
-var appMutex = new Mutex(true, "AlphaAITracker", out _);
+var isBackground = args.Contains("--background");
+
+var appMutex = new Mutex(true, "AlphaAITracker", out var mutexCreated);
+if (!mutexCreated)
+{
+    Console.Error.WriteLine("Another instance is already running.");
+    if (!isBackground) Console.ReadKey();
+    return;
+}
 
 var config = AppConfig.FromEnv();
 
@@ -93,15 +101,15 @@ else
 // Background services (order matters: guard first for most resilience)
 builder.Services.AddSingleton<AutoStartService>();
 builder.Services.AddHostedService<BackgroundGuardService>();
-builder.Services.AddHostedService<LogCollectorService>();
+builder.Services.AddSingleton<LogCollectorService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<LogCollectorService>());
 
 // Main ViewModel
 builder.Services.AddTransient<MainViewModel>();
 
 var host = builder.Build();
 
-var ct = CancellationToken.None;
-await host.StartAsync(ct);
+await host.StartAsync(CancellationToken.None);
 
 // Set service provider for App to resolve ViewModels from DI
 App.ServiceProvider = host.Services;
@@ -122,16 +130,26 @@ catch (Exception ex)
     logger.LogWarning(ex, "Failed to enable auto-start");
 }
 
-try
+if (isBackground)
+{
+    // Headless mode: keep background services running until Ctrl+C
+    var tcs = new TaskCompletionSource();
+    Console.CancelKeyPress += (_, e) =>
+    {
+        e.Cancel = true;
+        tcs.TrySetResult();
+    };
+    AppDomain.CurrentDomain.ProcessExit += (_, _) => tcs.TrySetResult();
+    await tcs.Task;
+}
+else
 {
     BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
 }
-finally
-{
-    await host.StopAsync(ct);
-    host.Dispose();
-    appMutex.Dispose();
-}
+
+await host.StopAsync(CancellationToken.None);
+host.Dispose();
+appMutex.Dispose();
 
 static AppBuilder BuildAvaloniaApp()
     => AppBuilder.Configure<App>()

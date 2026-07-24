@@ -16,9 +16,11 @@ public class LogCollectorService : BackgroundService
     private readonly IInstalledAppDetector _appDetector;
     private readonly IShellCommandCollector _shellCollector;
     private int _cycleCount;
-    private string? _currentEmployeeId;
-    private string? _currentEmployeeName;
-    private string? _currentToken;
+    private string? _currentEmployeeId;  // Loosely synchronized — read in bg loop, written under _trackingLock
+    private string? _currentEmployeeName; // Same as above
+    private string? _currentToken;         // Same as above
+    private bool _trackingEnabled;
+    private readonly object _trackingLock = new();
 
     public LogCollectorService(
         AppConfig config,
@@ -38,15 +40,60 @@ public class LogCollectorService : BackgroundService
         _shellCollector = shellCollector;
     }
 
+    /// <summary>
+    /// Start tracking — called after successful employee login.
+    /// </summary>
+    public void StartTracking()
+    {
+        lock (_trackingLock)
+        {
+            _trackingEnabled = true;
+            _cycleCount = 0; // Reset cycle counter so sync/cleanup timing starts fresh
+            _logger.LogInformation("Tracking started");
+        }
+    }
+
+    /// <summary>
+    /// Stop tracking — called on employee disconnect/logout.
+    /// </summary>
+    public void StopTracking()
+    {
+        lock (_trackingLock)
+        {
+            _trackingEnabled = false;
+            _currentEmployeeId = null;
+            _currentEmployeeName = null;
+            _currentToken = null;
+            _logger.LogInformation("Tracking stopped");
+        }
+    }
+
+    /// <summary>
+    /// Update the employee info used for tagging logs.
+    /// </summary>
+    public void SetEmployeeInfo(string employeeId, string employeeName, string token)
+    {
+        lock (_trackingLock)
+        {
+            _currentEmployeeId = employeeId;
+            _currentEmployeeName = employeeName;
+            _currentToken = token;
+        }
+    }
+
+    public bool IsTrackingEnabled
+    {
+        get { lock (_trackingLock) { return _trackingEnabled; } }
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation(
-            "LogCollectorService starting (machine={MachineId}, interval={Interval}s, session={SessionId})",
+            "LogCollectorService starting (machine={MachineId}, interval={Interval}s, session={SessionId}) — waiting for login to begin tracking",
             _config.ClientId, _config.CollectIntervalSec, SessionInfo.SessionId);
 
         await _store.InitializeAsync(stoppingToken);
         await RefreshEmployeeInfo(stoppingToken);
-        await StorePermissionStatus(stoppingToken);
 
         var interval = TimeSpan.FromSeconds(Math.Max(5, _config.CollectIntervalSec));
 
@@ -54,6 +101,14 @@ public class LogCollectorService : BackgroundService
         {
             try
             {
+                // ─── Only collect if tracking is enabled (user is logged in) ───
+                if (!_trackingEnabled)
+                {
+                    // While idle, just check every 5 seconds if tracking was enabled
+                    await Task.Delay(5000, stoppingToken);
+                    continue;
+                }
+
                 var sw = System.Diagnostics.Stopwatch.StartNew();
 
                 // Refresh employee info periodically
@@ -126,10 +181,8 @@ public class LogCollectorService : BackgroundService
                 }
                 if (_cycleCount % 120 == 0)
                 {
-                    // Remove logs that have been synced and are older than 24 hours
                     await CleanupSyncedLogs(stoppingToken);
                     await _store.CleanupShellCommandsSyncedAsync(TimeSpan.FromHours(24), stoppingToken);
-                    // Also clean up very old unsynced logs (30 days)
                     await _store.CleanupAsync(TimeSpan.FromDays(30), stoppingToken);
                     _logger.LogDebug("Ran periodic cleanup");
                 }

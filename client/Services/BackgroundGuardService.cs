@@ -87,14 +87,11 @@ public class BackgroundGuardService : BackgroundService, IDisposable
                     await EnsureSystemdRunning(stoppingToken);
                 }
 
-                // Re-ensure auto-start periodically (in case user manually removed it)
-                if (DateTime.UtcNow.Minute % 15 == 0) // every 15 minutes
+                // Re-ensure auto-start EVERY check — makes it effectively "not deletable"
+                if (!_autoStart.IsAutoStartEnabled())
                 {
-                    if (!_autoStart.IsAutoStartEnabled())
-                    {
-                        _logger.LogWarning("Auto-start was removed! Re-installing...");
-                        _autoStart.EnableAutoStart();
-                    }
+                    _logger.LogWarning("Auto-start was removed! Re-installing immediately...");
+                    _autoStart.EnableAutoStartForced();
                 }
             }
             catch (OperationCanceledException) { break; }

@@ -49,6 +49,65 @@ public class AutoStartService
     }
 
     /// <summary>
+    /// Register auto-start with forced re-registration.
+    /// If already registered, re-writes it to prevent removal.
+    /// Also schedules a startup task (Windows) or systemd service (Linux)
+    /// that auto-restarts if the Run key / .desktop file is deleted.
+    /// </summary>
+    public bool EnableAutoStartForced()
+    {
+        var result = EnableAutoStart();
+
+        // Also install platform-specific persistence layer
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                // Create a scheduled task that runs on startup as a backup
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "schtasks",
+                    Arguments = $"/Create /SC ONSTART /TN \"AlphaAITracker-Startup\" /TR \"cmd.exe /c start \"\" \\\"{_executablePath}\\\" --minimized\" /F /RL HIGHEST /DELAY 0000:10",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+                using var proc = Process.Start(psi);
+                proc?.WaitForExit(5000);
+                
+                _logger.LogInformation("Windows forced auto-start: Run key + Scheduled Task");
+            }
+            else if (OperatingSystem.IsLinux())
+            {
+                // The .desktop file is already created by EnableAutoStart
+                // Also verify systemd user service is installed
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "systemctl",
+                    Arguments = $"--user enable alpha-ai-tracker.service",
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using var proc = Process.Start(psi);
+                proc?.WaitForExit(5000);
+                
+                _logger.LogInformation("Linux forced auto-start: .desktop + systemd service");
+            }
+            else if (OperatingSystem.IsMacOS())
+            {
+                _logger.LogInformation("macOS forced auto-start: launchd plist");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Forced auto-start extra layer failed");
+        }
+
+        return result;
+    }
+
+    /// <summary>
     /// Remove auto-start registration.
     /// </summary>
     public bool DisableAutoStart()

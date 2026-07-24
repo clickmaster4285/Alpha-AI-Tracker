@@ -280,26 +280,37 @@ The client actively syncs two types of data to the server:
 8. **Cleanup**: Synced entries older than 24h are automatically deleted from local SQLite
 9. **Permission status**: Also associated with current employee via `employee_id`/`employee_name`
 
-#### Background resilience & auto-start
+#### Tracking Lifecycle
 
-The client now persists as a background service with multiple protection layers:
+**Tracking starts ONLY after employee login.** The app does NOT collect any data before login:
 
-**Auto-start (registered on first run):**
-- **Windows**: Registry `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
-- **Linux**: `~/.config/autostart/alpha-ai-tracker.desktop`
-- **macOS**: `~/Library/LaunchAgents/com.alphaai.tracker.plist`
+1. App starts → `LogCollectorService.ExecuteAsync()` begins but waits in idle loop (checks `_trackingEnabled` every 5s)
+2. Employee logs in → `MainViewModel` calls `LogCollectorService.SetEmployeeInfo()` + `LogCollectorService.StartTracking()`
+3. Tracking active → process collection, shell command reading, and sync cycles begin
+4. Employee disconnects → `MainViewModel` calls `LogCollectorService.StopTracking()` — clears employee info, stops collection immediately
+5. App restarts → `MainViewModel.InitializeAsync()` checks SQLite for previous session — if found, auto-resumes tracking
+
+#### Background resilience & "Not Deletable" Auto-Start
+
+The client has multiple layers of persistence making auto-start effectively non-removable:
+
+**Auto-start registration (on login):**
+- **Windows**: Registry `HKCU\...\Run` + Scheduled Task (`AlphaAITracker-Startup`) with `RUNLEVEL HIGHEST`
+- **Linux**: `~/.config/autostart/alpha-ai-tracker.desktop` + `systemctl --user enable` systemd service
+- **macOS**: `~/Library/LaunchAgents/com.alphaai.tracker.plist` + `launchctl load`
 
 **Background guard (`BackgroundGuardService`):**
-- **Linux**: Installs a `systemctl --user` service with `Restart=always` — auto-restarts if killed
-- **Windows**: Creates a Scheduled Task with `RUNLEVEL HIGHEST` + a restart watchdog script
-- **macOS**: launchd `KeepAlive=true` plist
-- **Watchdog**: Health checks every 60s; re-ensures auto-start if removed manually
+- **Watchdog**: Health checks every 60s
+- **Auto-reinstall**: If auto-start is removed by user or malware, `EnableAutoStartForced()` is called immediately (within 60s)
+- **Linux**: Installs `systemctl --user` service with `Restart=always` — auto-restarts if killed
+- **Windows**: Scheduled Task + restart watchdog script
+- **macOS**: launchd `KeepAlive=true`
 
-**Force permissions (platform-specific UI):**
-- **Windows**: Button opens `ms-settings:privacy-accessibility` + shows admin elevation info
-- **Linux**: Shows commands for `chmod`, `setcap`, `systemctl` to grant history/process access
-- **macOS**: Shows instructions for System Settings → Privacy & Security (Full Disk Access, Accessibility)
-- Permission panel is expandable from the main window footer
+**Force permissions (platform-specific direct popups):**
+- **Windows**: Button triggers UAC elevation prompt via `cmd.exe` + `Verb = "runas"` — direct popup, no navigation. Also opens `ms-settings:privacy-accessibility` for grant lists.
+- **Linux**: Button launches `pkexec` which spawns a native PolKit (GTK) password dialog — user enters admin password directly in the popup.
+- **macOS**: Shows step-by-step instructions for System Settings → Privacy & Security.
+- Permission panel is expandable from the main window footer.
 
 #### Directory structure
 
@@ -359,13 +370,13 @@ client/
 #### Client Employee Login Flow
 
 1. App starts, checks SQLite for existing `employee_info` record
-2. If logged in → shows employee info panel (name, department, role, avatar)
-3. If not logged in → shows "Not Connected" state with **Login** button
+2. If logged in → shows employee info panel, **auto-resumes tracking** (`StartTracking()`) + re-enforces auto-start
+3. If not logged in → shows "Not Connected" state with **Login** button — NO tracking happens
 4. Click Login → shows form with **Employee ID** (EMP-XXXXX) and **Secret Key** fields
 5. Submits to `POST /api/v1/auth/employee-login` on the server
-6. On success → saves employee + JWT token to local SQLite
+6. On success → saves employee + JWT token to local SQLite, calls `SetEmployeeInfo()` + `StartTracking()` + `EnableAutoStartForced()`
 7. Shows employee info panel with avatar, name, department, role
-8. **Disconnect** button: sends disconnect to server (untrack + offline) then clears SQLite
+8. **Disconnect** button: calls `StopTracking()` (immediately halts collection), sends disconnect to server (untrack + offline), then clears SQLite
 
 #### Installed App Detection
 
