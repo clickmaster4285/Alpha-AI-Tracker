@@ -27,4 +27,10 @@ public interface IInstalledAppDetector
     /// Get human-readable instructions for granting missing permissions.
     /// </summary>
     IReadOnlyList<string> PermissionGrantInstructions { get; }
+
+    /// <summary>
+    /// Force re-detection of installed apps and missing permissions.
+    /// Call this after the user grants permissions via PolKit/UAC.
+    /// </summary>
+    void ForceRecheck();
 }

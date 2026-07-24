@@ -5,10 +5,16 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <DefaultServerUrl Condition="'$(DefaultServerUrl)'==''">http://localhost:8080</DefaultServerUrl>
   </PropertyGroup>
 
   <ItemGroup>
     <AvaloniaResource Include="Assets\**" />
+    <AvaloniaResource Include="Styles\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyMetadata Include="DefaultServerUrl" Value="$(DefaultServerUrl)" />
   </ItemGroup>
 
   <ItemGroup>
@@ -27,7 +33,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include=".env" CopyToOutputDirectory="PreserveNewest" Condition="Exists('.env')" />
+    <None Include=".env.example" CopyToOutputDirectory="Never" />
     <None Include="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
     <None Remove="Platform/Linux/alpha_atspi.py" />
   </ItemGroup>

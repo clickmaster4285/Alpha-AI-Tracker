@@ -10,6 +10,26 @@ using client.Services;
 using client.Storage;
 using client.ViewModels;
 
+// ─── CLI modes (checked before anything else) ───
+if (args.Contains("--encrypt-config"))
+{
+    // Build-time encryption: .env → config.enc using transport key
+    // Usage: dotnet run --project client -- --encrypt-config [input] [output]
+    var inputPath = args.ElementAtOrDefault(1) ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".env");
+    var outputPath = args.ElementAtOrDefault(2) ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.enc");
+
+    if (!File.Exists(inputPath))
+    {
+        Console.Error.WriteLine($"Error: .env not found at {inputPath}");
+        return;
+    }
+
+    Console.WriteLine($"Encrypting {inputPath} → {outputPath} (AES-256-GCM)...");
+    EnvLoader.EncryptToFile(inputPath, outputPath);
+    Console.WriteLine($"Done: {new FileInfo(outputPath).Length} bytes written.");
+    return;
+}
+
 EnvLoader.Load();
 
 var isBackground = args.Contains("--background");
@@ -114,20 +134,23 @@ await host.StartAsync(CancellationToken.None);
 // Set service provider for App to resolve ViewModels from DI
 App.ServiceProvider = host.Services;
 
-// Enable auto-start registration immediately
-try
+// Enable auto-start registration (GUI only, not background mode)
+if (!isBackground)
 {
-    var autoStart = host.Services.GetRequiredService<AutoStartService>();
-    if (!autoStart.IsAutoStartEnabled())
+    try
     {
-        autoStart.EnableAutoStart();
+        var autoStart = host.Services.GetRequiredService<AutoStartService>();
+        if (!autoStart.IsAutoStartEnabled())
+        {
+            autoStart.EnableAutoStart();
+        }
     }
-}
-catch (Exception ex)
-{
-    var loggerFactory = host.Services.GetRequiredService<ILoggerFactory>();
-    var logger = loggerFactory.CreateLogger("AutoStart");
-    logger.LogWarning(ex, "Failed to enable auto-start");
+    catch (Exception ex)
+    {
+        var loggerFactory = host.Services.GetRequiredService<ILoggerFactory>();
+        var logger = loggerFactory.CreateLogger("AutoStart");
+        logger.LogWarning(ex, "Failed to enable auto-start");
+    }
 }
 
 if (isBackground)

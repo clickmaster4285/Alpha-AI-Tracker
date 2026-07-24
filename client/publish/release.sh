@@ -13,15 +13,19 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 INSTALLER_DIR="$PROJECT_DIR/installers"
 VERSION="${1:-v1.0.0}"
 
-# Load REPO from .env if not set in environment
-if [ -z "${REPO:-}" ]; then
+# Load REPO and ALPHA_SERVER_URL from .env if not set in environment
+if [ -z "${REPO:-}" ] || [ -z "${ALPHA_SERVER_URL:-}" ]; then
   if [ -f "$PROJECT_DIR/.env" ]; then
-    REPO=$(grep -E '^REPO=' "$PROJECT_DIR/.env" | cut -d '=' -f 2-)
+    if [ -z "${REPO:-}" ]; then
+      REPO=$(grep -E '^REPO=' "$PROJECT_DIR/.env" | cut -d '=' -f 2-)
+    fi
+    if [ -z "${ALPHA_SERVER_URL:-}" ]; then
+      ALPHA_SERVER_URL=$(grep -E '^ALPHA_SERVER_URL=' "$PROJECT_DIR/.env" | cut -d '=' -f 2-)
+    fi
   fi
 fi
 REPO="${REPO:-clickmaster4285/Alpha-AI-Tracker}"
-
-echo "=========================================="
+export ALPHA_SERVER_URLecho "=========================================="
 echo " Alpha AI Tracker — Release $VERSION"
 echo "=========================================="
 
@@ -36,9 +40,14 @@ if ! gh auth status &>/dev/null; then
   exit 1
 fi
 
-# ── Step 1: Build Installers ──
+# ── Step 1: Encrypt .env for distribution ──
 echo ""
-echo "[1/4] Building installers..."
+echo "[1/5] Encrypting .env → config.enc..."
+bash "$SCRIPT_DIR/encrypt-config.sh"
+
+# ── Step 2: Build Installers ──
+echo ""
+echo "[2/5] Building installers..."
 bash "$SCRIPT_DIR/build-installer.sh"
 
 if [ ! -d "$INSTALLER_DIR" ] || [ -z "$(ls -A "$INSTALLER_DIR" 2>/dev/null)" ]; then
@@ -50,9 +59,9 @@ echo ""
 echo "Installers found:"
 ls -lh "$INSTALLER_DIR/"
 
-# ── Step 2: Create Git Tag ──
+# ── Step 3: Create Git Tag ──
 echo ""
-echo "[2/4] Creating git tag $VERSION..."
+echo "[3/5] Creating git tag $VERSION..."
 cd "$PROJECT_DIR"
 git add .
 echo "  Staged changes in $PROJECT_DIR"
@@ -64,9 +73,9 @@ git push origin "$VERSION" 2>&1 || {
   echo "  git push origin $VERSION"
 }
 
-# ── Step 3: Create GitHub Release ──
+# ── Step 4: Create GitHub Release ──
 echo ""
-echo "[3/4] Creating GitHub release..."
+echo "[4/5] Creating GitHub release..."
 RELEASE_NOTES=$(mktemp)
 cat > "$RELEASE_NOTES" << EOF
 # Alpha AI Tracker $VERSION
@@ -118,13 +127,13 @@ gh release create "$VERSION" \
 
 rm -f "$RELEASE_NOTES"
 
-# ── Step 4: Verify ──
+# ── Step 5: Verify ──
 echo ""
-echo "[4/4] Verifying release..."
+echo "[5/5] Verifying release..."
 gh release view "$VERSION" --repo "$REPO" --json tagName,url | head -5
-
 echo ""
 echo "=========================================="
 echo " Release $VERSION complete!"
 echo " View at: https://github.com/$REPO/releases/tag/$VERSION"
 echo "=========================================="
+

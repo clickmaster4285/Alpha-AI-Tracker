@@ -85,7 +85,12 @@ for RID in win-x64 linux-x64 osx-x64; do
   esac
   if [ "$BUILD_FLAG" = true ]; then
     rm -rf "$OUT"
-    if dotnet publish "$PROJECT_DIR" -c Release -r "$RID" --self-contained -o "$OUT"; then
+    PUBLISH_ARGS=""
+    if [ -n "${ALPHA_SERVER_URL:-}" ]; then
+      PUBLISH_ARGS="-p:DefaultServerUrl=$ALPHA_SERVER_URL"
+      echo "  Baking in ALPHA_SERVER_URL=$ALPHA_SERVER_URL"
+    fi
+    if dotnet publish "$PROJECT_DIR" -c Release -r "$RID" --self-contained -o "$OUT" $PUBLISH_ARGS; then
       echo "  $RID -> $OUT"
     else
       echo "  FAILED: $RID publish error. Check SDK and dependencies."
@@ -98,6 +103,21 @@ done
 if [ "$HAS_ERRORS" = true ]; then
   echo "ERROR: One or more builds failed. Aborting."
   exit 1
+fi
+
+# ─── Step: Encrypt .env to config.enc and distribute to publish outputs ───
+echo ""
+echo "[Config] Encrypting .env → config.enc..."
+bash "$SCRIPT_DIR/encrypt-config.sh"
+CONFIG_ENC="$PROJECT_DIR/config.enc"
+if [ -f "$CONFIG_ENC" ]; then
+  echo "  Distributing config.enc to publish outputs..."
+  for OUT in "$PUBLISH_WIN" "$PUBLISH_LIN" "$PUBLISH_MAC"; do
+    if [ -d "$OUT" ]; then
+      cp "$CONFIG_ENC" "$OUT/"
+      echo "    → $OUT/config.enc"
+    fi
+  done
 fi
 
 # Windows installer

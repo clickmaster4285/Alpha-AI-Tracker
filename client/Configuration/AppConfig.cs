@@ -1,3 +1,5 @@
+using System.Reflection;
+
 namespace client.Configuration;
 
 public class AppConfig
@@ -19,9 +21,15 @@ public class AppConfig
             DbEncryptionKey = GetEnv("ALPHA_DB_ENCRYPTION_KEY"),
             CollectIntervalSec = int.TryParse(GetEnv("ALPHA_COLLECT_INTERVAL_SEC"), out var sec) ? sec : 30,
             LogLevel = GetEnv("ALPHA_LOG_LEVEL") ?? "Info",
-            ServerUrl = GetEnv("ALPHA_SERVER_URL"),
+            ServerUrl = GetEnv("ALPHA_SERVER_URL") ?? GetDefaultServerUrl(),
             ApiKey = GetEnv("ALPHA_API_KEY")
         };
+    }
+
+    private static string? GetDefaultServerUrl()
+    {
+        var attrs = typeof(AppConfig).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>();
+        return attrs.FirstOrDefault(a => a.Key == "DefaultServerUrl")?.Value;
     }
 
     private static string? GetEnv(string key)

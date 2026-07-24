@@ -4,14 +4,16 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:conv="clr-namespace:client.Converters"
-        mc:Ignorable="d" d:DesignWidth="560" d:DesignHeight="700"
+        mc:Ignorable="d" d:DesignWidth="480" d:DesignHeight="640"
         x:Class="client.Views.MainWindow"
         x:DataType="vm:MainViewModel"
         Icon="/Assets/avalonia-logo.ico"
         Title="Alpha AI Tracker"
         WindowStartupLocation="CenterScreen"
-        MinWidth="420" MinHeight="500"
-        Width="560" Height="700">
+        MinWidth="400" MinHeight="480"
+        Width="480" Height="640"
+        Background="{StaticResource BgBrush}"
+        Foreground="{StaticResource FgBrush}">
 
     <Window.Resources>
         <conv:BoolInvertConverter x:Key="BoolInvert" />
@@ -23,283 +25,233 @@
         <vm:MainViewModel />
     </Design.DataContext>
 
-    <Window.Styles>
-        <!-- TextBox styles -->
-        <Style Selector="TextBox">
-            <Setter Property="Background" Value="#2a2a2a" />
-            <Setter Property="Foreground" Value="White" />
-            <Setter Property="BorderBrush" Value="#444" />
-            <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="CornerRadius" Value="6" />
-            <Setter Property="Padding" Value="12,10" />
-            <Setter Property="FontSize" Value="14" />
-        </Style>
-        <Style Selector="TextBox:focus">
-            <Setter Property="BorderBrush" Value="#7C3AED" />
-        </Style>
-        <Style Selector="TextBox.multiline">
-            <Setter Property="AcceptsReturn" Value="True" />
-            <Setter Property="TextWrapping" Value="Wrap" />
-            <Setter Property="FontSize" Value="12" />
-            <Setter Property="FontFamily" Value="Consolas,monospace" />
-        </Style>
-        <!-- Primary button -->
-        <Style Selector="Button.primary">
-            <Setter Property="Background" Value="#7C3AED" />
-            <Setter Property="Foreground" Value="White" />
-            <Setter Property="CornerRadius" Value="6" />
-            <Setter Property="Padding" Value="16,10" />
-            <Setter Property="FontSize" Value="14" />
-            <Setter Property="FontWeight" Value="SemiBold" />
-            <Setter Property="Cursor" Value="Hand" />
-        </Style>
-        <Style Selector="Button.primary:pointerover">
-            <Setter Property="Background" Value="#6D28D9" />
-        </Style>
-        <!-- Secondary button -->
-        <Style Selector="Button.secondary">
-            <Setter Property="Background" Value="Transparent" />
-            <Setter Property="Foreground" Value="#999" />
-            <Setter Property="CornerRadius" Value="6" />
-            <Setter Property="Padding" Value="12,8" />
-            <Setter Property="FontSize" Value="13" />
-            <Setter Property="Cursor" Value="Hand" />
-            <Setter Property="BorderBrush" Value="#444" />
-            <Setter Property="BorderThickness" Value="1" />
-        </Style>
-        <Style Selector="Button.secondary:pointerover">
-            <Setter Property="Background" Value="#2a2a2a" />
-            <Setter Property="Foreground" Value="White" />
-        </Style>
-        <!-- Danger button -->
-        <Style Selector="Button.danger">
-            <Setter Property="Background" Value="Transparent" />
-            <Setter Property="Foreground" Value="#EF4444" />
-            <Setter Property="CornerRadius" Value="6" />
-            <Setter Property="Padding" Value="12,8" />
-            <Setter Property="FontSize" Value="13" />
-            <Setter Property="Cursor" Value="Hand" />
-            <Setter Property="BorderBrush" Value="#444" />
-            <Setter Property="BorderThickness" Value="1" />
-        </Style>
-        <Style Selector="Button.danger:pointerover">
-            <Setter Property="Background" Value="#2a2a2a" />
-        </Style>
-        <!-- Success button -->
-        <Style Selector="Button.success">
-            <Setter Property="Background" Value="#059669" />
-            <Setter Property="Foreground" Value="White" />
-            <Setter Property="CornerRadius" Value="6" />
-            <Setter Property="Padding" Value="12,8" />
-            <Setter Property="FontSize" Value="13" />
-            <Setter Property="Cursor" Value="Hand" />
-        </Style>
-        <Style Selector="Button.success:pointerover">
-            <Setter Property="Background" Value="#047857" />
-        </Style>
-        <!-- Info button -->
-        <Style Selector="Button.info">
-            <Setter Property="Background" Value="#2563EB" />
-            <Setter Property="Foreground" Value="White" />
-            <Setter Property="CornerRadius" Value="6" />
-            <Setter Property="Padding" Value="12,8" />
-            <Setter Property="FontSize" Value="13" />
-            <Setter Property="Cursor" Value="Hand" />
-        </Style>
-        <Style Selector="Button.info:pointerover">
-            <Setter Property="Background" Value="#1D4ED8" />
-        </Style>
-        <!-- ScrollViewer style -->
-        <Style Selector="ScrollViewer">
-            <Setter Property="Background" Value="Transparent" />
-        </Style>
-    </Window.Styles>
+    <Grid>
+        <!-- ════════════════════════════════════════════════ -->
+        <!--  SECTION 1: LOGIN (shown when not logged in)   -->
+        <!-- ════════════════════════════════════════════════ -->
+        <Border IsVisible="{Binding IsLoggedIn, Converter={StaticResource BoolInvert}}"
+                Background="{StaticResource BgBrush}">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center"
+                            MaxWidth="360" Spacing="14" Margin="32,48">
 
-    <Grid Background="#1a1a1a">
-        <ScrollViewer>
-            <Grid RowDefinitions="Auto,*,Auto" Margin="20">
+                    <!-- Logo -->
+                    <Border Background="{StaticResource PrimaryBrush}"
+                            CornerRadius="{StaticResource RadiusLg}"
+                            Width="56" Height="56"
+                            HorizontalAlignment="Center"
+                            BoxShadow="{StaticResource CardShadow}">
+                        <TextBlock Text="AI" FontSize="22" FontWeight="Bold"
+                                   Foreground="{StaticResource PrimaryFgBrush}"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
 
-                <!-- Header -->
-                <Border Background="#222" CornerRadius="10" Padding="16,12" Margin="0,0,0,12">
-                    <Grid ColumnDefinitions="Auto,*,Auto">
-                        <Border Background="#7C3AED" CornerRadius="8" Width="40" Height="40"
-                                HorizontalAlignment="Left" VerticalAlignment="Center">
-                            <TextBlock Text="AI" TextAlignment="Center"
-                                       FontSize="16" FontWeight="Bold" Foreground="White"
-                                       VerticalAlignment="Center" HorizontalAlignment="Center" />
-                        </Border>
-                        <StackPanel Grid.Column="1" Margin="12,0,8,0" VerticalAlignment="Center">
-                            <TextBlock Text="Alpha AI Tracker" FontSize="16" FontWeight="Bold" Foreground="White" />
-                            <TextBlock Text="Employee Monitoring" FontSize="11" Foreground="#888" Margin="0,2,0,0" />
-                        </StackPanel>
+                    <TextBlock Text="Alpha AI Tracker" FontSize="22" FontWeight="Bold"
+                               Foreground="{StaticResource FgBrush}"
+                               HorizontalAlignment="Center"/>
 
-                        <!-- Background status indicator -->
-                        <Border Grid.Column="2" Background="#059669" CornerRadius="4"
-                                Width="10" Height="10" VerticalAlignment="Center"
-                                ToolTip.Tip="Background service running" />
-                    </Grid>
-                </Border>
+                    <TextBlock Text="Employee Login" FontSize="14"
+                               Foreground="{StaticResource MutedFgBrush}"
+                               HorizontalAlignment="Center" Margin="0,0,0,4"/>
 
-                <!-- Content Area -->
-                <Border Grid.Row="1" Background="#222" CornerRadius="10" Padding="20">
-                    <Grid RowDefinitions="Auto,*">
+                    <TextBlock Text="Employee ID" FontSize="12"
+                               Foreground="{StaticResource MutedFgBrush}"/>
+                    <TextBox Text="{Binding EmployeeId}" PlaceholderText="e.g. EMP-10001"
+                             Watermark="e.g. EMP-10001"/>
 
-                        <!-- Not Logged In State -->
-                        <Grid IsVisible="{Binding IsLoggedIn, Converter={StaticResource BoolInvert}}">
+                    <TextBlock Text="Secret Key" FontSize="12"
+                               Foreground="{StaticResource MutedFgBrush}"/>
+                    <TextBox Text="{Binding SecretKey}" PlaceholderText="Enter your secret key"
+                             Watermark="Enter your secret key"/>
+
+                    <!-- Error / status message -->
+                    <TextBlock Text="{Binding StatusMessage}"
+                               Foreground="{StaticResource DestructiveBrush}" FontSize="12"
+                               HorizontalAlignment="Center" TextWrapping="Wrap"
+                               IsVisible="{Binding StatusMessage, Converter={StaticResource StringNotEmpty}}"/>
+
+                    <!-- Login button -->
+                    <Button Classes="primary"
+                            Command="{Binding LoginCommand}"
+                            HorizontalAlignment="Stretch" Height="44"
+                            IsEnabled="{Binding IsLoading, Converter={StaticResource BoolInvert}}"
+                            Content="{Binding IsLoading, Converter={StaticResource LoadingToText}}"
+                            Margin="0,6,0,0"/>
+                </StackPanel>
+            </ScrollViewer>
+        </Border>
+
+        <!-- ════════════════════════════════════════════════ -->
+        <!--  SECTION 2: LOGGED IN — Steps or Profile        -->
+        <!-- ════════════════════════════════════════════════ -->
+        <Border IsVisible="{Binding IsLoggedIn}" Background="{StaticResource BgBrush}">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <Grid RowDefinitions="Auto,*" Margin="24,32">
+
+                    <!-- Step counter (shown during permission flow) -->
+                    <Border IsVisible="{Binding RequiresPermissionAction}"
+                            Background="{StaticResource CardBrush}"
+                            CornerRadius="{StaticResource RadiusLg}"
+                            Padding="14,10"
+                            HorizontalAlignment="Center" Margin="0,0,0,24"
+                            BoxShadow="{StaticResource CardShadow}">
+                        <TextBlock FontSize="13" Foreground="{StaticResource MutedFgBrush}"
+                                   HorizontalAlignment="Center">
+                            <Run Text="Step "/>
+                            <Run Text="{Binding CurrentPermissionStepNumber}"/>
+                            <Run Text=" of 3"/>
+                        </TextBlock>
+                    </Border>
+
+                    <!-- Content area -->
+                    <Grid Grid.Row="1">
+
+                        <!-- ── Step 1: Auto-Start ── -->
+                        <Border Classes="fade-in" IsVisible="{Binding IsAutoStartStep}">
                             <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center"
-                                        IsVisible="{Binding ShowLoginForm, Converter={StaticResource BoolInvert}}"
-                                        Spacing="14">
-                                <TextBlock Text="Not Connected" FontSize="18" FontWeight="Bold"
-                                           Foreground="White" HorizontalAlignment="Center" />
-                                <TextBlock Text="Connect to your monitoring server to start tracking."
-                                           FontSize="13" Foreground="#888" HorizontalAlignment="Center"
-                                           TextWrapping="Wrap" MaxWidth="300" TextAlignment="Center" />
-                                <Button Classes="primary" Command="{Binding ShowLoginCommand}"
-                                        HorizontalAlignment="Center" Width="160"
-                                        Content="Login" />
+                                        MaxWidth="360" Spacing="14">
+                                <Border Background="{StaticResource PrimaryBrush}"
+                                        CornerRadius="{StaticResource RadiusLg}"
+                                        Width="48" Height="48" HorizontalAlignment="Center"
+                                        BoxShadow="{StaticResource CardShadow}">
+                                    <TextBlock Text="1" FontSize="20" FontWeight="Bold"
+                                               Foreground="{StaticResource PrimaryFgBrush}"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Border>
+                                <TextBlock Text="{Binding StepTitle}" FontSize="20" FontWeight="Bold"
+                                           Foreground="{StaticResource FgBrush}"
+                                           HorizontalAlignment="Center"/>
+                                <TextBlock Text="{Binding StepDescription}" FontSize="13"
+                                           Foreground="{StaticResource MutedFgBrush}"
+                                           TextWrapping="Wrap" HorizontalAlignment="Center"
+                                           TextAlignment="Center"/>
+                                <Button Classes="primary"
+                                        Command="{Binding GrantCurrentStepPermissionCommand}"
+                                        IsEnabled="{Binding IsStepWorking, Converter={StaticResource BoolInvert}}"
+                                        Content="{Binding StepButtonText}"
+                                        HorizontalAlignment="Center" MinWidth="200" Margin="0,8,0,0"/>
+                                <TextBlock Text="{Binding StepStatusText}" FontSize="12"
+                                           Foreground="{StaticResource SuccessBrush}"
+                                           HorizontalAlignment="Center" TextWrapping="Wrap"/>
                             </StackPanel>
+                        </Border>
 
-                            <!-- Login Form -->
-                            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Stretch"
-                                        IsVisible="{Binding ShowLoginForm}"
-                                        Spacing="10" MaxWidth="340">
-                                <TextBlock Text="Employee Login" FontSize="18" FontWeight="Bold"
-                                           Foreground="White" HorizontalAlignment="Center" Margin="0,0,0,6" />
-
-                                <TextBlock Text="Employee ID" FontSize="12" Foreground="#999" />
-                                <TextBox Text="{Binding EmployeeId}"
-                                         PlaceholderText="e.g. EMP-10001" />
-
-                                <TextBlock Text="Secret Key" FontSize="12" Foreground="#999" />
-                                <TextBox Text="{Binding SecretKey}"
-                                         PlaceholderText="Enter your secret key" />
-
-                                <TextBlock Text="{Binding StatusMessage}"
-                                           Foreground="#EF4444" FontSize="12"
-                                           HorizontalAlignment="Center"
-                                           IsVisible="{Binding StatusMessage, Converter={StaticResource StringNotEmpty}}" />
-
-                                <Grid ColumnDefinitions="*,Auto,*" Margin="0,6,0,0">
-                                    <Button Grid.Column="0" Classes="secondary" Command="{Binding CancelLoginCommand}"
-                                            Content="Cancel" />
-                                    <Button Grid.Column="2" Classes="primary" Command="{Binding LoginCommand}"
-                                            IsEnabled="{Binding IsLoading, Converter={StaticResource BoolInvert}}"
-                                            Content="{Binding IsLoading, Converter={StaticResource LoadingToText}}" />
-                                </Grid>
+                        <!-- ── Step 2: Background Guard ── -->
+                        <Border Classes="fade-in" IsVisible="{Binding IsBackgroundStep}">
+                            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center"
+                                        MaxWidth="360" Spacing="14">
+                                <Border Background="{StaticResource InfoBrush}"
+                                        CornerRadius="{StaticResource RadiusLg}"
+                                        Width="48" Height="48" HorizontalAlignment="Center"
+                                        BoxShadow="{StaticResource CardShadow}">
+                                    <TextBlock Text="2" FontSize="20" FontWeight="Bold"
+                                               Foreground="{StaticResource InfoFgBrush}"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Border>
+                                <TextBlock Text="{Binding StepTitle}" FontSize="20" FontWeight="Bold"
+                                           Foreground="{StaticResource FgBrush}"
+                                           HorizontalAlignment="Center"/>
+                                <TextBlock Text="{Binding StepDescription}" FontSize="13"
+                                           Foreground="{StaticResource MutedFgBrush}"
+                                           TextWrapping="Wrap" HorizontalAlignment="Center"
+                                           TextAlignment="Center"/>
+                                <Button Classes="success"
+                                        Command="{Binding GrantCurrentStepPermissionCommand}"
+                                        IsEnabled="{Binding IsStepWorking, Converter={StaticResource BoolInvert}}"
+                                        Content="{Binding StepButtonText}"
+                                        HorizontalAlignment="Center" MinWidth="200" Margin="0,8,0,0"/>
+                                <TextBlock Text="{Binding StepStatusText}" FontSize="12"
+                                           Foreground="{StaticResource SuccessBrush}"
+                                           HorizontalAlignment="Center" TextWrapping="Wrap"/>
                             </StackPanel>
-                        </Grid>
+                        </Border>
 
-                        <!-- Logged In - Show Employee Info -->
-                        <Grid IsVisible="{Binding IsLoggedIn}">
-                            <StackPanel VerticalAlignment="Top" HorizontalAlignment="Stretch" Spacing="12">
-                                <!-- Avatar & Name -->
+                        <!-- ── Step 3: Other Permissions ── -->
+                        <Border Classes="fade-in" IsVisible="{Binding IsPermissionStep}">
+                            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center"
+                                        MaxWidth="360" Spacing="14">
+                                <Border Background="{StaticResource WarningBrush}"
+                                        CornerRadius="{StaticResource RadiusLg}"
+                                        Width="48" Height="48" HorizontalAlignment="Center"
+                                        BoxShadow="{StaticResource CardShadow}">
+                                    <TextBlock Text="3" FontSize="20" FontWeight="Bold"
+                                               Foreground="{StaticResource WarningFgBrush}"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Border>
+                                <TextBlock Text="{Binding StepTitle}" FontSize="20" FontWeight="Bold"
+                                           Foreground="{StaticResource FgBrush}"
+                                           HorizontalAlignment="Center"/>
+                                <TextBlock Text="{Binding StepDescription}" FontSize="13"
+                                           Foreground="{StaticResource MutedFgBrush}"
+                                           TextWrapping="Wrap" HorizontalAlignment="Center"
+                                           TextAlignment="Center"/>
+                                <Button Classes="primary"
+                                        Command="{Binding GrantCurrentStepPermissionCommand}"
+                                        IsEnabled="{Binding IsStepWorking, Converter={StaticResource BoolInvert}}"
+                                        Content="{Binding StepButtonText}"
+                                        HorizontalAlignment="Center" MinWidth="200" Margin="0,8,0,0"/>
+                                <TextBlock Text="{Binding StepStatusText}" FontSize="12"
+                                           Foreground="{StaticResource MutedFgBrush}"
+                                           HorizontalAlignment="Center" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- ── Profile (all permissions granted) ── -->
+                        <Border Classes="fade-in" IsVisible="{Binding IsProfile}">
+                            <StackPanel VerticalAlignment="Top" HorizontalAlignment="Center"
+                                        MaxWidth="360" Spacing="16" Margin="0,8,0,0">
+                                <!-- Avatar -->
                                 <Border Background="{Binding EmployeeAvatarColor}"
                                         CornerRadius="36" Width="72" Height="72"
-                                        HorizontalAlignment="Center">
+                                        HorizontalAlignment="Center"
+                                        BoxShadow="{StaticResource ShadowLg}">
                                     <TextBlock Text="{Binding EmployeeAvatar}"
-                                               FontSize="26" FontWeight="Bold" Foreground="White"
-                                               VerticalAlignment="Center" HorizontalAlignment="Center" />
+                                               FontSize="28" FontWeight="Bold"
+                                               Foreground="White"
+                                               VerticalAlignment="Center" HorizontalAlignment="Center"/>
                                 </Border>
 
-                                <TextBlock Text="{Binding EmployeeName}" FontSize="18" FontWeight="Bold"
-                                           Foreground="White" HorizontalAlignment="Center" />
+                                <TextBlock Text="{Binding EmployeeName}" FontSize="22" FontWeight="Bold"
+                                           Foreground="{StaticResource FgBrush}"
+                                           HorizontalAlignment="Center"/>
 
                                 <!-- Info card -->
-                                <Border Background="#2a2a2a" CornerRadius="8" Padding="14" Margin="0,2,0,0">
-                                    <StackPanel Spacing="10">
+                                <Border Background="{StaticResource CardBrush}"
+                                        CornerRadius="{StaticResource RadiusLg}" Padding="16"
+                                        BoxShadow="{StaticResource CardShadow}">
+                                    <StackPanel Spacing="12">
                                         <Grid ColumnDefinitions="Auto,*">
-                                            <TextBlock Text="Department" FontSize="12" Foreground="#888" />
-                                            <TextBlock Grid.Column="1" Text="{Binding EmployeeDepartment}"
-                                                       FontSize="14" Foreground="White"
-                                                       HorizontalAlignment="Right" />
+                                            <TextBlock Text="Department" FontSize="12"
+                                                       Foreground="{StaticResource MutedFgBrush}"/>
+                                            <TextBlock Grid.Column="1"
+                                                       Text="{Binding EmployeeDepartment}"
+                                                       FontSize="14" FontWeight="Medium"
+                                                       Foreground="{StaticResource FgBrush}"
+                                                       HorizontalAlignment="Right"/>
                                         </Grid>
-                                        <Rectangle Height="1" Fill="#333" />
+                                        <Rectangle Height="1" Fill="{StaticResource BorderBrush}"/>
                                         <Grid ColumnDefinitions="Auto,*">
-                                            <TextBlock Text="Role" FontSize="12" Foreground="#888" />
-                                            <TextBlock Grid.Column="1" Text="{Binding EmployeeRole}"
-                                                       FontSize="14" Foreground="White"
-                                                       HorizontalAlignment="Right" />
+                                            <TextBlock Text="Role" FontSize="12"
+                                                       Foreground="{StaticResource MutedFgBrush}"/>
+                                            <TextBlock Grid.Column="1"
+                                                       Text="{Binding EmployeeRole}"
+                                                       FontSize="14" FontWeight="Medium"
+                                                       Foreground="{StaticResource FgBrush}"
+                                                       HorizontalAlignment="Right"/>
                                         </Grid>
                                     </StackPanel>
                                 </Border>
 
-                                <!-- Disconnect button -->
-                                <Button Classes="danger" Command="{Binding LogoutCommand}"
-                                        HorizontalAlignment="Center" Width="140"
-                                        Content="Disconnect" />
-                            </StackPanel>
-                        </Grid>
-                    </Grid>
-                </Border>
-
-                <!-- Permission & Status Panel (always visible) -->
-                <Border Grid.Row="2" Background="#222" CornerRadius="10" Padding="16" Margin="0,10,0,0">
-                    <StackPanel Spacing="10">
-
-                        <!-- Auto-start status & toggle -->
-                        <Grid ColumnDefinitions="*,Auto">
-                            <StackPanel VerticalAlignment="Center">
-                                <TextBlock Text="Auto-Start" FontSize="13" FontWeight="Bold" Foreground="#ccc" />
-                                <TextBlock Text="{Binding AutoStartStatusText}" FontSize="11" Foreground="#888" />
-                            </StackPanel>
-                            <Button Grid.Column="1" Classes="secondary"
-                                    Command="{Binding ToggleAutoStartCommand}" Width="120"
-                                    Content="Toggle Auto-Start" />
-                        </Grid>
-
-                        <Rectangle Height="1" Fill="#333" />
-
-                        <!-- Shell access status -->
-                        <TextBlock Text="{Binding ShellAccessInfo}" FontSize="11" Foreground="#888" />
-
-                        <!-- Permission buttons row -->
-                        <Grid ColumnDefinitions="*,Auto" Margin="0,4,0,0">
-                            <TextBlock Text="Background Guard Active"
-                                       FontSize="12" Foreground="#059669"
-                                       VerticalAlignment="Center" />
-
-                            <Button Grid.Column="1" Classes="info"
-                                    Command="{Binding TogglePermissionsPanelCommand}"
-                                    Content="Permissions" />
-                        </Grid>
-
-                        <!-- Permissions Panel (expandable) -->
-                        <Border IsVisible="{Binding ShowPermissionsPanel}"
-                                Background="#1a1a1a" CornerRadius="8" Padding="12">
-                            <StackPanel Spacing="10">
-                                <TextBlock Text="Permissions &amp; Setup" FontSize="14" FontWeight="Bold" Foreground="White" />
-
-                                <TextBox Classes="multiline"
-                                         Text="{Binding PermissionCommands}"
-                                         MinHeight="120"
-                                         IsVisible="{Binding PermissionCommands, Converter={StaticResource StringNotEmpty}}" />
-
-                                <TextBlock Text="{Binding PermissionInfo}"
-                                           FontSize="11" Foreground="#888"
-                                           TextWrapping="Wrap" />
-
-                                <!-- Platform-specific permission buttons -->
-                                <Grid ColumnDefinitions="*,*,*" Margin="0,6,0,0">
-                                    <Button Classes="info"
-                                            Command="{Binding RequestWindowsPermissionsCommand}"
-                                            Content="🔧 Windows" />
-                                    <Button Grid.Column="1" Classes="success"
-                                            Command="{Binding ShowLinuxPermissionCommandsCommand}"
-                                            Content="🐧 Linux" />
-                                    <Button Grid.Column="2" Classes="info"
-                                            Command="{Binding ShowMacOSPermissionCommandsCommand}"
-                                            Content="🍎 macOS" />
-                                </Grid>
-
-                                <TextBlock Text="Note: The app runs as a persistent background service that auto-restarts if terminated."
-                                           FontSize="11" Foreground="#666"
-                                           TextWrapping="Wrap" />
+                                <Button Classes="danger"
+                                        Command="{Binding LogoutCommand}"
+                                        HorizontalAlignment="Center" Width="160" Margin="0,8,0,0"
+                                        Content="Disconnect"/>
                             </StackPanel>
                         </Border>
-                    </StackPanel>
-                </Border>
 
-            </Grid>
-        </ScrollViewer>
+                    </Grid>
+                </Grid>
+            </ScrollViewer>
+        </Border>
     </Grid>
 </Window>

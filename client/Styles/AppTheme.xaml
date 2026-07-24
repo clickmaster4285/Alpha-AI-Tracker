@@ -1,0 +1,60 @@
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- Colors - Dark Theme (matching web/src/globals.css .dark) -->
+    <Color x:Key="BgColor">#14111C</Color>
+    <Color x:Key="FgColor">#E7E4ED</Color>
+    <Color x:Key="CardColor">#1F1B2B</Color>
+    <Color x:Key="CardFgColor">#E7E4ED</Color>
+    <Color x:Key="PrimaryColor">#8B5CF6</Color>
+    <Color x:Key="PrimaryFgColor">#FFFFFF</Color>
+    <Color x:Key="SecondaryColor">#2B203F</Color>
+    <Color x:Key="SecondaryFgColor">#D2C6EC</Color>
+    <Color x:Key="MutedColor">#28242E</Color>
+    <Color x:Key="MutedFgColor">#847E8F</Color>
+    <Color x:Key="DestructiveColor">#A52727</Color>
+    <Color x:Key="DestructiveFgColor">#FFFFFF</Color>
+    <Color x:Key="SuccessColor">#2EB872</Color>
+    <Color x:Key="SuccessFgColor">#FFFFFF</Color>
+    <Color x:Key="WarningColor">#F59E0B</Color>
+    <Color x:Key="WarningFgColor">#4A3000</Color>
+    <Color x:Key="InfoColor">#3B82F6</Color>
+    <Color x:Key="InfoFgColor">#FFFFFF</Color>
+    <Color x:Key="BorderColor">#292530</Color>
+    <Color x:Key="InputColor">#292530</Color>
+    <Color x:Key="RingColor">#8B5CF6</Color>
+
+    <!-- Brushes -->
+    <SolidColorBrush x:Key="BgBrush" Color="{StaticResource BgColor}"/>
+    <SolidColorBrush x:Key="FgBrush" Color="{StaticResource FgColor}"/>
+    <SolidColorBrush x:Key="CardBrush" Color="{StaticResource CardColor}"/>
+    <SolidColorBrush x:Key="CardFgBrush" Color="{StaticResource CardFgColor}"/>
+    <SolidColorBrush x:Key="PrimaryBrush" Color="{StaticResource PrimaryColor}"/>
+    <SolidColorBrush x:Key="PrimaryFgBrush" Color="{StaticResource PrimaryFgColor}"/>
+    <SolidColorBrush x:Key="SecondaryBrush" Color="{StaticResource SecondaryColor}"/>
+    <SolidColorBrush x:Key="SecondaryFgBrush" Color="{StaticResource SecondaryFgColor}"/>
+    <SolidColorBrush x:Key="MutedBrush" Color="{StaticResource MutedColor}"/>
+    <SolidColorBrush x:Key="MutedFgBrush" Color="{StaticResource MutedFgColor}"/>
+    <SolidColorBrush x:Key="DestructiveBrush" Color="{StaticResource DestructiveColor}"/>
+    <SolidColorBrush x:Key="DestructiveFgBrush" Color="{StaticResource DestructiveFgColor}"/>
+    <SolidColorBrush x:Key="SuccessBrush" Color="{StaticResource SuccessColor}"/>
+    <SolidColorBrush x:Key="SuccessFgBrush" Color="{StaticResource SuccessFgColor}"/>
+    <SolidColorBrush x:Key="WarningBrush" Color="{StaticResource WarningColor}"/>
+    <SolidColorBrush x:Key="WarningFgBrush" Color="{StaticResource WarningFgColor}"/>
+    <SolidColorBrush x:Key="InfoBrush" Color="{StaticResource InfoColor}"/>
+    <SolidColorBrush x:Key="InfoFgBrush" Color="{StaticResource InfoFgColor}"/>
+    <SolidColorBrush x:Key="BorderBrush" Color="{StaticResource BorderColor}"/>
+    <SolidColorBrush x:Key="InputBrush" Color="{StaticResource InputColor}"/>
+    <SolidColorBrush x:Key="RingBrush" Color="{StaticResource RingColor}"/>
+    <SolidColorBrush x:Key="TransparentBrush" Color="Transparent"/>
+
+    <!-- Radii -->
+    <CornerRadius x:Key="RadiusSm">8</CornerRadius>
+    <CornerRadius x:Key="RadiusMd">10</CornerRadius>
+    <CornerRadius x:Key="RadiusLg">12</CornerRadius>
+
+    <!-- Fonts -->
+    <FontFamily x:Key="DisplayFont">avares://Avalonia.Fonts.Inter/Assets#Inter</FontFamily>
+    <FontFamily x:Key="BodyFont">avares://Avalonia.Fonts.Inter/Assets#Inter</FontFamily>
+
+</ResourceDictionary>

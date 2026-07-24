@@ -43,6 +43,18 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
         }
     }
 
+    public void ForceRecheck()
+    {
+        lock (_lock)
+        {
+            _initialized = false;
+            _knownApps.Clear();
+            _missingPerms.Clear();
+            _permInstructions.Clear();
+        }
+        EnsureInitialized();
+    }
+
     public bool IsInstalledApplication(string processName, string? executablePath)
     {
         EnsureInitialized();
@@ -307,7 +319,7 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                 var psi = new ProcessStartInfo
                 {
                     FileName = "snap",
-                    Arguments = "list --quiet",
+                    Arguments = "list",
                     RedirectStandardOutput = true,
                     UseShellExecute = false,
                     CreateNoWindow = true

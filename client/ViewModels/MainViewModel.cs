@@ -19,11 +19,15 @@ public partial class MainViewModel : ViewModelBase
     private readonly AutoStartService _autoStart;
     private readonly LogCollectorService _logCollector;
 
-    [ObservableProperty]
-    private bool _isLoggedIn;
+    // ─── Auth State ───
 
     [ObservableProperty]
-    private bool _showLoginForm;
+    [NotifyPropertyChangedFor(nameof(IsAutoStartStep))]
+    [NotifyPropertyChangedFor(nameof(IsBackgroundStep))]
+    [NotifyPropertyChangedFor(nameof(IsPermissionStep))]
+    [NotifyPropertyChangedFor(nameof(IsProfile))]
+    [NotifyPropertyChangedFor(nameof(RequiresPermissionAction))]
+    private bool _isLoggedIn;
 
     [ObservableProperty]
     private string _employeeId = string.Empty;
@@ -36,6 +40,8 @@ public partial class MainViewModel : ViewModelBase
 
     [ObservableProperty]
     private bool _isLoading;
+
+    // ─── Employee Info ───
 
     [ObservableProperty]
     private string _employeeName = string.Empty;
@@ -52,25 +58,73 @@ public partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     private string _employeeAvatarColor = string.Empty;
 
-    // ─── Permission & Background status ───
+    // ─── Permission Step Flow ───
+
+    public enum PermissionStep { None, AutoStart, BackgroundRunning, OtherPermissions }
 
     [ObservableProperty]
-    private bool _isAutoStartEnabled;
+    [NotifyPropertyChangedFor(nameof(IsAutoStartStep))]
+    [NotifyPropertyChangedFor(nameof(IsBackgroundStep))]
+    [NotifyPropertyChangedFor(nameof(IsPermissionStep))]
+    [NotifyPropertyChangedFor(nameof(IsProfile))]
+    [NotifyPropertyChangedFor(nameof(RequiresPermissionAction))]
+    [NotifyPropertyChangedFor(nameof(StepTitle))]
+    [NotifyPropertyChangedFor(nameof(StepDescription))]
+    [NotifyPropertyChangedFor(nameof(StepButtonText))]
+    [NotifyPropertyChangedFor(nameof(CurrentPermissionStepNumber))]
+    private PermissionStep _currentPermissionStep = PermissionStep.None;
 
-    [ObservableProperty]
-    private bool _showPermissionsPanel;
+    public int CurrentPermissionStepNumber => CurrentPermissionStep switch
+    {
+        PermissionStep.AutoStart => 1,
+        PermissionStep.BackgroundRunning => 2,
+        PermissionStep.OtherPermissions => 3,
+        _ => 0
+    };
 
-    [ObservableProperty]
-    private string _permissionInfo = string.Empty;
+    public bool IsAutoStartStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.AutoStart;
+    public bool IsBackgroundStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.BackgroundRunning;
+    public bool IsPermissionStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.OtherPermissions;
+    public bool IsProfile => IsLoggedIn && CurrentPermissionStep == PermissionStep.None;
+    public bool RequiresPermissionAction => IsLoggedIn && CurrentPermissionStep != PermissionStep.None;
 
-    [ObservableProperty]
-    private string _permissionCommands = string.Empty;
+    public string StepTitle => CurrentPermissionStep switch
+    {
+        PermissionStep.AutoStart => "Enable Auto-Start",
+        PermissionStep.BackgroundRunning => "Enable Background Guard",
+        PermissionStep.OtherPermissions => GetPlatformPermissionTitle(),
+        _ => string.Empty
+    };
 
-    [ObservableProperty]
-    private string _shellAccessInfo = string.Empty;
+    public string StepDescription => CurrentPermissionStep switch
+    {
+        PermissionStep.AutoStart => "Auto-start ensures tracking resumes automatically after a reboot or system restart.",
+        PermissionStep.BackgroundRunning => "The background guard keeps the service alive even when the window is closed.",
+        PermissionStep.OtherPermissions => GetPlatformPermissionDescription(),
+        _ => string.Empty
+    };
 
-    [ObservableProperty]
-    private string _autoStartStatusText = string.Empty;
+    public string StepButtonText => CurrentPermissionStep switch
+    {
+        PermissionStep.AutoStart => "Enable Auto-Start",
+        PermissionStep.BackgroundRunning => "Enable Background Guard",
+        PermissionStep.OtherPermissions => GetPlatformPermissionButtonText(),
+        _ => string.Empty
+    };
+
+    private string _stepStatusText = string.Empty;
+    public string StepStatusText
+    {
+        get => _stepStatusText;
+        set => SetProperty(ref _stepStatusText, value);
+    }
+
+    private bool _isStepWorking;
+    public bool IsStepWorking
+    {
+        get => _isStepWorking;
+        set => SetProperty(ref _isStepWorking, value);
+    }
 
     public MainViewModel(
         AppConfig config,
@@ -96,78 +150,90 @@ public partial class MainViewModel : ViewModelBase
         if (info != null)
         {
             IsLoggedIn = true;
-            ShowLoginForm = false;
             EmployeeName = info.Name;
             EmployeeDepartment = info.Department;
             EmployeeRole = info.Role;
             EmployeeAvatar = info.Avatar ?? string.Empty;
-            EmployeeAvatarColor = info.AvatarColor ?? "#7C3AED";
+            EmployeeAvatarColor = info.AvatarColor ?? "#8B5CF6";
 
-            // Resume tracking for previously logged-in session
             _logCollector.SetEmployeeInfo(info.EmployeeId, info.Name, info.Token ?? string.Empty);
             _logCollector.StartTracking();
 
-            // Re-enforce auto-start
-            _autoStart.EnableAutoStartForced();
-            IsAutoStartEnabled = true;
-            AutoStartStatusText = "Auto-start enabled (protected)";
+            // Resume from previous permission progress
+            CurrentPermissionStep = await GetNextPermissionStep();
+            if (IsProfile)
+            {
+                _autoStart.EnableAutoStartForced();
+            }
         }
         else
         {
             IsLoggedIn = false;
-            ShowLoginForm = true;
+            CurrentPermissionStep = PermissionStep.None;
         }
-
-        // Initialize permission & auto-start status
-        RefreshStatus();
     }
 
-    private void RefreshStatus()
+    private async Task<PermissionStep> GetNextPermissionStep()
     {
-        IsAutoStartEnabled = _autoStart.IsAutoStartEnabled();
-        AutoStartStatusText = IsAutoStartEnabled ? "Auto-start enabled" : "Auto-start not enabled";
+        var permAuto = await _store.GetStatusAsync("perm_auto_start", CancellationToken.None);
+        var permBg = await _store.GetStatusAsync("perm_background", CancellationToken.None);
+        var permOther = await _store.GetStatusAsync("perm_other", CancellationToken.None);
 
-        // Build permission info
-        var permLines = new List<string>();
-
-        if (_appDetector.MissingPermissions.Count > 0)
+        if (permAuto != "true")
         {
-            permLines.Add("Missing App Detection Permissions:");
-            permLines.AddRange(_appDetector.MissingPermissions);
-            permLines.Add("");
-            permLines.Add("To fix:");
-            permLines.AddRange(_appDetector.PermissionGrantInstructions);
+            var autoOk = _autoStart.IsAutoStartEnabled();
+            if (autoOk) await _store.SetStatusAsync("perm_auto_start", "true", CancellationToken.None);
+            else return PermissionStep.AutoStart;
         }
 
+        if (permBg != "true")
+        {
+            var bgOk = IsBackgroundGuardConfigured();
+            if (bgOk) await _store.SetStatusAsync("perm_background", "true", CancellationToken.None);
+            else return PermissionStep.BackgroundRunning;
+        }
+
+        if (permOther != "true")
+        {
+            var otherOk = !HasMissingPermissions();
+            if (otherOk) await _store.SetStatusAsync("perm_other", "true", CancellationToken.None);
+            else return PermissionStep.OtherPermissions;
+        }
+
+        return PermissionStep.None;
+    }
+
+    private static bool IsBackgroundGuardConfigured()
+    {
+        if (OperatingSystem.IsLinux())
+        {
+            var svcPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".config", "systemd", "user", "alpha-ai-tracker.service");
+            return File.Exists(svcPath);
+        }
+        if (OperatingSystem.IsWindows())
+        {
+            return Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Windows\CurrentVersion\Run")?.GetValue("AlphaAITracker") != null;
+        }
+        return false;
+    }
+
+    private bool HasMissingPermissions()
+    {
+        // Accessing the members triggers initialization if needed
+        var missing = _appDetector.MissingPermissions;
         var shellPerms = _shellCollector.GetAccessibleShells();
-        var accessibleCount = shellPerms.Count(kvp => kvp.Value);
-        permLines.Add($"Shell histories accessible: {accessibleCount}/{shellPerms.Count}");
-
-        if (_shellCollector.MissingPermissionInstructions.Count > 0)
-        {
-            permLines.Add("");
-            permLines.Add("Shell Permission Instructions:");
-            permLines.AddRange(_shellCollector.MissingPermissionInstructions);
-        }
-
-        PermissionInfo = string.Join("\n", permLines);
-        ShellAccessInfo = string.Join(", ",
-            shellPerms.Select(kvp => $"{kvp.Key}={(kvp.Value ? "✅" : "❌")}"));
+        var allAccessible = shellPerms.All(kvp => kvp.Value);
+        return missing.Count > 0 || !allAccessible;
     }
 
-    [RelayCommand]
-    private void ShowLogin()
-    {
-        ShowLoginForm = true;
-        StatusMessage = string.Empty;
-        EmployeeId = string.Empty;
-        SecretKey = string.Empty;
-    }
+    // ─── Auth Commands ───
 
     [RelayCommand]
     private void CancelLogin()
     {
-        ShowLoginForm = false;
         StatusMessage = string.Empty;
     }
 
@@ -220,7 +286,6 @@ public partial class MainViewModel : ViewModelBase
 
             var emp = loginResp.Employee;
 
-            // Save to SQLite
             var employeeInfo = new EmployeeInfo
             {
                 Id = emp.Id,
@@ -237,24 +302,19 @@ public partial class MainViewModel : ViewModelBase
 
             await _store.SaveEmployeeInfoAsync(employeeInfo, CancellationToken.None);
 
-            // Start tracking NOW — only after successful login
             _logCollector.SetEmployeeInfo(emp.EmployeeId, emp.Name, loginResp.Token ?? string.Empty);
             _logCollector.StartTracking();
 
-            // Force-register auto-start (not deletable)
-            _autoStart.EnableAutoStartForced();
-            IsAutoStartEnabled = true;
-            AutoStartStatusText = "Auto-start enabled (protected)";
-
-            // Update UI
             IsLoggedIn = true;
-            ShowLoginForm = false;
             EmployeeName = emp.Name;
             EmployeeDepartment = emp.Department;
             EmployeeRole = emp.Role;
             EmployeeAvatar = emp.Avatar ?? string.Empty;
-            EmployeeAvatarColor = emp.AvatarColor ?? "#7C3AED";
+            EmployeeAvatarColor = emp.AvatarColor ?? "#8B5CF6";
             StatusMessage = string.Empty;
+
+            // Advance through permission steps
+            CurrentPermissionStep = await GetNextPermissionStep();
         }
         catch (HttpRequestException ex)
         {
@@ -277,7 +337,6 @@ public partial class MainViewModel : ViewModelBase
     [RelayCommand]
     private async Task LogoutAsync()
     {
-        // Notify server to untrack before clearing local data
         try
         {
             var info = await _store.GetEmployeeInfoAsync(CancellationToken.None);
@@ -287,203 +346,243 @@ public partial class MainViewModel : ViewModelBase
                 var payload = new { employeeId = info.EmployeeId, token = info.Token ?? "" };
                 var json = JsonSerializer.Serialize(payload);
                 var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
-
-                // Fire-and-forget — best effort to notify server
-                var response = await _httpClient.PostAsync($"{serverUrl}/api/v1/auth/employee-disconnect", content);
+                await _httpClient.PostAsync($"{serverUrl}/api/v1/auth/employee-disconnect", content);
             }
         }
-        catch
-        {
-            // Best effort — don't block logout if server is unreachable
-        }
+        catch { }
 
-        // Stop tracking immediately
         _logCollector.StopTracking();
+
+        // Clear permission progress
+        await _store.SetStatusAsync("perm_auto_start", "false", CancellationToken.None);
+        await _store.SetStatusAsync("perm_background", "false", CancellationToken.None);
+        await _store.SetStatusAsync("perm_other", "false", CancellationToken.None);
 
         await _store.ClearEmployeeInfoAsync(CancellationToken.None);
         IsLoggedIn = false;
-        ShowLoginForm = false;
+        CurrentPermissionStep = PermissionStep.None;
         EmployeeName = string.Empty;
         EmployeeDepartment = string.Empty;
         EmployeeRole = string.Empty;
         EmployeeAvatar = string.Empty;
         EmployeeAvatarColor = string.Empty;
         StatusMessage = string.Empty;
+        StepStatusText = string.Empty;
     }
 
-    // ─── Permission Commands ───
+    // ─── Permission Step Execution ───
 
     [RelayCommand]
-    private void TogglePermissionsPanel()
+    private async Task GrantCurrentStepPermissionAsync()
     {
-        ShowPermissionsPanel = !ShowPermissionsPanel;
-        if (ShowPermissionsPanel)
-            RefreshStatus();
-    }
+        IsStepWorking = true;
+        StepStatusText = "Working...";
 
-    [RelayCommand]
-    private void RefreshPermissionStatus()
-    {
-        RefreshStatus();
-        StatusMessage = "Permission status refreshed.";
-    }
-
-    /// <summary>
-    /// Windows: Open Windows Security/Accessibility settings.
-    /// </summary>
-    /// <summary>
-    /// Windows: Request admin elevation via UAC popup.
-    /// Uses a lightweight command to trigger UAC without re-launching the GUI app.
-    /// </summary>
-    [RelayCommand]
-    private void RequestWindowsPermissions()
-    {
         try
         {
-            // Run a lightweight admin command to trigger UAC without spawning another GUI instance
-            var psi = new System.Diagnostics.ProcessStartInfo
+            switch (CurrentPermissionStep)
             {
-                FileName = "cmd.exe",
-                Arguments = "/c echo Alpha AI Tracker is requesting admin permissions... && whoami",
-                UseShellExecute = true,
-                Verb = "runas",        // Triggers native UAC popup
-                WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden
-            };
-            System.Diagnostics.Process.Start(psi);
+                case PermissionStep.AutoStart:
+                    await GrantAutoStartAsync();
+                    break;
+                case PermissionStep.BackgroundRunning:
+                    await GrantBackgroundRunningAsync();
+                    break;
+                case PermissionStep.OtherPermissions:
+                    await GrantOtherPermissionsAsync();
+                    break;
+            }
 
-            // Also open the privacy settings page for accessibility permissions
-            var settingsPsi = new System.Diagnostics.ProcessStartInfo
+            // Re-evaluate progress
+            CurrentPermissionStep = await GetNextPermissionStep();
+            if (IsProfile)
             {
-                FileName = "ms-settings:privacy-accessibility",
-                UseShellExecute = true
-            };
-            System.Diagnostics.Process.Start(settingsPsi);
-
-            PermissionCommands = """
-                ✅ UAC elevation prompt was shown.
-                Click "Yes" to grant administrator permissions.
-
-                Also opened Windows Settings for Accessibility permissions.
-                Enable Alpha AI Tracker in the list.
-
-                This allows:
-                • Reading all process and app usage data
-                • Accessing shell/command history
-                • Running persistently in the background
-                """;
-        }
-        catch (System.ComponentModel.Win32Exception)
-        {
-            PermissionCommands = "⚠️ UAC prompt was cancelled by user.\n\nClick the button again and accept the UAC prompt to grant permissions.";
+                StepStatusText = string.Empty;
+            }
         }
         catch (Exception ex)
         {
-            PermissionCommands = $"Failed to open permissions: {ex.Message}";
+            StepStatusText = $"Failed: {ex.Message}";
         }
-
-        ShowPermissionsPanel = true;
+        finally
+        {
+            IsStepWorking = false;
+        }
     }
 
-    /// <summary>
-    /// Linux: Request permissions via pkexec (PolKit) which shows a native GTK password dialog.
-    /// User enters their admin password directly in the popup.
-    /// </summary>
-    [RelayCommand]
-    private void ShowLinuxPermissionCommands()
+    private Task GrantAutoStartAsync()
     {
-        try
-        {
-            var exePath = Environment.ProcessPath ?? "AlphaAITracker";
-
-            // Use pkexec to get root privileges — shows native PolKit password dialog
-            var psi = new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = "pkexec",
-                Arguments = $"chmod +r /home/*/.bash_history /home/*/.zsh_history /home/*/.local/share/fish/fish_history 2>/dev/null; setcap CAP_DAC_READ_SEARCH+ep \"{exePath}\"",
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-            System.Diagnostics.Process.Start(psi);
-
-            PermissionCommands = """
-                ✅ PolKit password prompt was shown.
-                Enter your administrator password to grant:
-                • Read access to shell history files
-                • Process detection permissions
-                • Full background persistence
-                """;
-        }
-        catch (Exception ex)
-        {
-            PermissionCommands = $"Failed to launch pkexec: {ex.Message}\n\nMake sure 'pkexec' is installed (part of polkit).";
-        }
-
-        ShowPermissionsPanel = true;
+        var ok = _autoStart.EnableAutoStartForced();
+        if (!ok) throw new InvalidOperationException("Failed to enable auto-start. Try running as administrator.");
+        StepStatusText = "Auto-start enabled successfully.";
+        return Task.CompletedTask;
     }
 
-    /// <summary>
-    /// macOS: Show commands to grant permissions and install launchd plist.
-    /// </summary>
-    [RelayCommand]
-    private void ShowMacOSPermissionCommands()
+    private Task GrantBackgroundRunningAsync()
     {
-        PermissionCommands = """
-            ═══ macOS Permission Setup ═══
-
-            1. GRANT PERMISSIONS:
-
-            Open System Settings → Privacy & Security:
-
-            a) Accessibility:
-               - Click the "+" button
-               - Add Alpha AI Tracker from Applications
-               - Toggle the switch ON
-
-            b) Full Disk Access:
-               - Click the "+" button
-               - Add Alpha AI Tracker from Applications
-               - Toggle the switch ON
-               (Required for reading shell history files)
-
-            c) Screen Recording (optional, for window titles):
-               - Add Alpha AI Tracker
-               - Toggle the switch ON
-
-            2. AUTO-START:
-
-            # The app creates a launchd plist at:
-            ~/Library/LaunchAgents/com.alphaai.tracker.plist
-
-            # Load it manually if needed:
-            launchctl load ~/Library/LaunchAgents/com.alphaai.tracker.plist
-
-            3. VERIFY:
-
-            # Check if running:
-            ps aux | grep AlphaAITracker
-
-            # Check launchd status:
-            launchctl list | grep com.alphaai.tracker
-            """;
-
-        ShowPermissionsPanel = true;
+        _autoStart.EnableAutoStartForced();
+        StepStatusText = "Background guard enabled successfully.";
+        return Task.CompletedTask;
     }
 
-    [RelayCommand]
-    private void ToggleAutoStart()
+    private async Task GrantOtherPermissionsAsync()
     {
-        if (IsAutoStartEnabled)
+        var exited = false;
+
+        if (OperatingSystem.IsLinux())
         {
-            _autoStart.DisableAutoStart();
-            IsAutoStartEnabled = false;
-            AutoStartStatusText = "Auto-start disabled";
+            exited = await GrantLinuxPermissionsAsync();
+        }
+        else if (OperatingSystem.IsWindows())
+        {
+            GrantWindowsPermissions();
+            exited = true;
+        }
+        else if (OperatingSystem.IsMacOS())
+        {
+            ShowMacOSPermissionInstructions();
+            exited = true;
+        }
+
+        // Wait for the process to finish, then re-check
+        if (exited)
+        {
+            await Task.Delay(2000); // brief settle time
+        }
+
+        _appDetector.ForceRecheck();
+
+        if (HasMissingPermissions())
+        {
+            StepStatusText = "Permissions still missing. Please retry.";
         }
         else
         {
-            _autoStart.EnableAutoStartForced();
-            IsAutoStartEnabled = true;
-            AutoStartStatusText = "Auto-start enabled (protected)";
+            StepStatusText = "All permissions granted.";
         }
+    }
+
+    private async Task<bool> GrantLinuxPermissionsAsync()
+    {
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+        // Determine if we're running via `dotnet run` (ProcessPath == dotnet host)
+        var processPath = Environment.ProcessPath ?? string.Empty;
+        var isDotnetRun = processPath.EndsWith("dotnet", StringComparison.OrdinalIgnoreCase) ||
+                          processPath.EndsWith("dotnet.exe", StringComparison.OrdinalIgnoreCase);
+
+        // Write temp script so pkexec arguments are clean
+        var tmpScript = Path.Combine(Path.GetTempPath(), "alpha_perm_" + Guid.NewGuid().ToString("N") + ".sh");
+        try
+        {
+            var scriptBuilder = new System.Text.StringBuilder();
+            scriptBuilder.Append("#!/bin/sh\n");
+            scriptBuilder.Append($"chmod +r \"{home}/.bash_history\" \"{home}/.zsh_history\" \"{home}/.local/share/fish/fish_history\" 2>/dev/null\n");
+
+            if (!isDotnetRun)
+            {
+                // Only setcap when running as a published/installed binary
+                scriptBuilder.Append($"setcap CAP_DAC_READ_SEARCH+ep \"{processPath}\"\n");
+            }
+
+            var script = scriptBuilder.ToString();
+            await File.WriteAllTextAsync(tmpScript, script);
+
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "pkexec",
+                Arguments = $"bash {tmpScript}",
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            StepStatusText = "PolKit password dialog opened. Enter your password to grant permissions.";
+            using var proc = System.Diagnostics.Process.Start(psi);
+            if (proc == null)
+            {
+                StepStatusText = "Failed to launch PolKit. Is pkexec installed?";
+                return false;
+            }
+
+            // Wait up to 2 minutes for user to complete the dialog
+            var exited = proc.WaitForExit(120_000);
+            if (!exited)
+            {
+                try { proc.Kill(); } catch { }
+                StepStatusText = "PolKit timed out. Please try again.";
+                return false;
+            }
+
+            return proc.ExitCode == 0;
+        }
+        catch (Exception ex)
+        {
+            StepStatusText = $"Error: {ex.Message}";
+            return false;
+        }
+        finally
+        {
+            try { if (File.Exists(tmpScript)) File.Delete(tmpScript); } catch { }
+        }
+    }
+
+    private void GrantWindowsPermissions()
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "cmd.exe",
+            Arguments = "/c echo Granting Alpha AI Tracker permissions... && whoami",
+            UseShellExecute = true,
+            Verb = "runas",
+            WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden
+        };
+        System.Diagnostics.Process.Start(psi);
+
+        var settingsPsi = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "ms-settings:privacy-accessibility",
+            UseShellExecute = true
+        };
+        System.Diagnostics.Process.Start(settingsPsi);
+    }
+
+    private void ShowMacOSPermissionInstructions()
+    {
+        StepStatusText = """
+            Open System Settings → Privacy & Security:
+            1. Accessibility → Add Alpha AI Tracker → Enable
+            2. Full Disk Access → Add Alpha AI Tracker → Enable
+            3. Screen Recording → Add Alpha AI Tracker → Enable (optional)
+            """;
+    }
+
+    // ─── Platform Helpers ───
+
+    private static string GetPlatformPermissionTitle()
+    {
+        if (OperatingSystem.IsLinux()) return "Grant Linux Permissions";
+        if (OperatingSystem.IsWindows()) return "Grant Windows Permissions";
+        if (OperatingSystem.IsMacOS()) return "Grant macOS Permissions";
+        return "Grant Permissions";
+    }
+
+    private static string GetPlatformPermissionDescription()
+    {
+        if (OperatingSystem.IsLinux())
+            return "Grant process detection and shell history access via administrator privileges.";
+        if (OperatingSystem.IsWindows())
+            return "Grant administrator permissions for full monitoring access.";
+        if (OperatingSystem.IsMacOS())
+            return "Enable Accessibility, Full Disk Access, and Screen Recording in System Settings.";
+        return "Grant required permissions for monitoring.";
+    }
+
+    private static string GetPlatformPermissionButtonText()
+    {
+        if (OperatingSystem.IsLinux()) return "Grant via PolKit";
+        if (OperatingSystem.IsWindows()) return "Grant via UAC";
+        if (OperatingSystem.IsMacOS()) return "Show Instructions";
+        return "Grant Permissions";
     }
 }
 
