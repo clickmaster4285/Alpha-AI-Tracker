@@ -1,4 +1,4 @@
-﻿using Avalonia;
+using Avalonia;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -134,41 +134,7 @@ await host.StartAsync(CancellationToken.None);
 // Set service provider for App to resolve ViewModels from DI
 App.ServiceProvider = host.Services;
 
-// Enable auto-start registration (GUI only, not background mode)
-if (!isBackground)
-{
-    try
-    {
-        var autoStart = host.Services.GetRequiredService<AutoStartService>();
-        if (!autoStart.IsAutoStartEnabled())
-        {
-            autoStart.EnableAutoStart();
-        }
-    }
-    catch (Exception ex)
-    {
-        var loggerFactory = host.Services.GetRequiredService<ILoggerFactory>();
-        var logger = loggerFactory.CreateLogger("AutoStart");
-        logger.LogWarning(ex, "Failed to enable auto-start");
-    }
-}
-
-if (isBackground)
-{
-    // Headless mode: keep background services running until Ctrl+C
-    var tcs = new TaskCompletionSource();
-    Console.CancelKeyPress += (_, e) =>
-    {
-        e.Cancel = true;
-        tcs.TrySetResult();
-    };
-    AppDomain.CurrentDomain.ProcessExit += (_, _) => tcs.TrySetResult();
-    await tcs.Task;
-}
-else
-{
-    BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
-}
+BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
 
 await host.StopAsync(CancellationToken.None);
 host.Dispose();

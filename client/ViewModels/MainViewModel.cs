@@ -60,11 +60,11 @@ public partial class MainViewModel : ViewModelBase
 
     // ─── Permission Step Flow ───
 
-    public enum PermissionStep { None, AutoStart, BackgroundRunning, OtherPermissions }
+    public enum PermissionStep { None, AutoStart, BackgroundRunning, Dependencies, OtherPermissions }
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsAutoStartStep))]
-    [NotifyPropertyChangedFor(nameof(IsBackgroundStep))]
+    [NotifyPropertyChangedFor(nameof(IsDependencyStep))]
     [NotifyPropertyChangedFor(nameof(IsPermissionStep))]
     [NotifyPropertyChangedFor(nameof(IsProfile))]
     [NotifyPropertyChangedFor(nameof(RequiresPermissionAction))]
@@ -72,18 +72,23 @@ public partial class MainViewModel : ViewModelBase
     [NotifyPropertyChangedFor(nameof(StepDescription))]
     [NotifyPropertyChangedFor(nameof(StepButtonText))]
     [NotifyPropertyChangedFor(nameof(CurrentPermissionStepNumber))]
+    [NotifyPropertyChangedFor(nameof(TotalPermissionSteps))]
     private PermissionStep _currentPermissionStep = PermissionStep.None;
 
     public int CurrentPermissionStepNumber => CurrentPermissionStep switch
     {
         PermissionStep.AutoStart => 1,
         PermissionStep.BackgroundRunning => 2,
-        PermissionStep.OtherPermissions => 3,
+        PermissionStep.Dependencies => 3,
+        PermissionStep.OtherPermissions => OperatingSystem.IsLinux() ? 4 : 3,
         _ => 0
     };
 
+    public int TotalPermissionSteps => OperatingSystem.IsLinux() ? 4 : 3;
+
     public bool IsAutoStartStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.AutoStart;
     public bool IsBackgroundStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.BackgroundRunning;
+    public bool IsDependencyStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.Dependencies;
     public bool IsPermissionStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.OtherPermissions;
     public bool IsProfile => IsLoggedIn && CurrentPermissionStep == PermissionStep.None;
     public bool RequiresPermissionAction => IsLoggedIn && CurrentPermissionStep != PermissionStep.None;
@@ -92,6 +97,7 @@ public partial class MainViewModel : ViewModelBase
     {
         PermissionStep.AutoStart => "Enable Auto-Start",
         PermissionStep.BackgroundRunning => "Enable Background Guard",
+        PermissionStep.Dependencies => "Install Required Dependencies",
         PermissionStep.OtherPermissions => GetPlatformPermissionTitle(),
         _ => string.Empty
     };
@@ -100,6 +106,7 @@ public partial class MainViewModel : ViewModelBase
     {
         PermissionStep.AutoStart => "Auto-start ensures tracking resumes automatically after a reboot or system restart.",
         PermissionStep.BackgroundRunning => "The background guard keeps the service alive even when the window is closed.",
+        PermissionStep.Dependencies => "The following dependencies are missing and must be installed to grant permissions.",
         PermissionStep.OtherPermissions => GetPlatformPermissionDescription(),
         _ => string.Empty
     };
@@ -117,6 +124,13 @@ public partial class MainViewModel : ViewModelBase
     {
         get => _stepStatusText;
         set => SetProperty(ref _stepStatusText, value);
+    }
+
+    private string _missingDependenciesList = string.Empty;
+    public string MissingDependenciesList
+    {
+        get => _missingDependenciesList;
+        set => SetProperty(ref _missingDependenciesList, value);
     }
 
     private bool _isStepWorking;
@@ -159,8 +173,19 @@ public partial class MainViewModel : ViewModelBase
             _logCollector.SetEmployeeInfo(info.EmployeeId, info.Name, info.Token ?? string.Empty);
             _logCollector.StartTracking();
 
-            // Resume from previous permission progress
+            // Reset stale permission statuses so they get freshly re-evaluated
+            // (GetNextPermissionStep() no longer reads stored statuses, but this
+            //  ensures the stored values match reality for any other consumers)
+            await _store.SetStatusAsync("perm_auto_start", "false", ct);
+            await _store.SetStatusAsync("perm_background", "false", ct);
+            await _store.SetStatusAsync("perm_other", "false", ct);
+
+            // Evaluate which permissions are actually configured vs missing.
+            // Does NOT trust any previous stored status.
             CurrentPermissionStep = await GetNextPermissionStep();
+
+            // If all permissions are already granted (e.g. from a previous session
+            // where the user completed the flow), re-enforce auto-start
             if (IsProfile)
             {
                 _autoStart.EnableAutoStartForced();
@@ -173,33 +198,43 @@ public partial class MainViewModel : ViewModelBase
         }
     }
 
+    /// <summary>
+    /// Check each permission condition and return the first incomplete step.
+    /// Always re-validates the ACTUAL condition — never trusts stored status alone.
+    /// If a permission was previously granted but is now revoked (e.g. user removed
+    /// auto-start or systemd service was deleted), it will show up again.
+    /// </summary>
     private async Task<PermissionStep> GetNextPermissionStep()
     {
-        var permAuto = await _store.GetStatusAsync("perm_auto_start", CancellationToken.None);
-        var permBg = await _store.GetStatusAsync("perm_background", CancellationToken.None);
-        var permOther = await _store.GetStatusAsync("perm_other", CancellationToken.None);
+        // Check auto-start (Step 1)
+        var autoOk = _autoStart.IsAutoStartEnabled();
+        if (!autoOk)
+            return PermissionStep.AutoStart;
+        await _store.SetStatusAsync("perm_auto_start", "true", CancellationToken.None);
 
-        if (permAuto != "true")
+        // Check background guard (Step 2)
+        var bgOk = IsBackgroundGuardConfigured();
+        if (!bgOk)
+            return PermissionStep.BackgroundRunning;
+        await _store.SetStatusAsync("perm_background", "true", CancellationToken.None);
+
+        if (OperatingSystem.IsLinux())
         {
-            var autoOk = _autoStart.IsAutoStartEnabled();
-            if (autoOk) await _store.SetStatusAsync("perm_auto_start", "true", CancellationToken.None);
-            else return PermissionStep.AutoStart;
+            var missingDeps = GetMissingLinuxDependencies();
+            if (missingDeps.Count > 0)
+            {
+                MissingDependenciesList = string.Join(", ", missingDeps);
+                return PermissionStep.Dependencies;
+            }
         }
 
-        if (permBg != "true")
-        {
-            var bgOk = IsBackgroundGuardConfigured();
-            if (bgOk) await _store.SetStatusAsync("perm_background", "true", CancellationToken.None);
-            else return PermissionStep.BackgroundRunning;
-        }
+        // Check other permissions (Step 3 or 4)
+        var otherOk = !HasMissingPermissions();
+        if (!otherOk)
+            return PermissionStep.OtherPermissions;
+        await _store.SetStatusAsync("perm_other", "true", CancellationToken.None);
 
-        if (permOther != "true")
-        {
-            var otherOk = !HasMissingPermissions();
-            if (otherOk) await _store.SetStatusAsync("perm_other", "true", CancellationToken.None);
-            else return PermissionStep.OtherPermissions;
-        }
-
+        // All permissions are granted
         return PermissionStep.None;
     }
 
@@ -220,13 +255,227 @@ public partial class MainViewModel : ViewModelBase
         return false;
     }
 
+    private List<string> GetMissingLinuxDependencies()
+    {
+        var missing = new List<string>();
+        if (!IsCommandAvailable("pkexec")) missing.Add("policykit-1");
+        if (!IsCommandAvailable("loginctl")) missing.Add("systemd");
+        if (!IsCommandAvailable("gsettings")) missing.Add("libglib2.0-bin");
+        if (!IsCommandAvailable("setcap")) missing.Add("libcap2-bin");
+        return missing;
+    }
+
+    private static bool IsCommandAvailable(string command)
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "sh",
+                Arguments = $"-c \"command -v {command}\"",
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var proc = System.Diagnostics.Process.Start(psi);
+            proc?.WaitForExit(2000);
+            return proc?.ExitCode == 0;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// Check for any missing OS-level permissions.
+    /// Combines detection from:
+    /// - InstalledAppDetector (dpkg-query, registry access, etc.)
+    /// - ShellCommandCollector (shell history file access)
+    /// - Direct OS permission checks (/proc access on Linux, etc.)
+    /// </summary>
     private bool HasMissingPermissions()
     {
-        // Accessing the members triggers initialization if needed
+        // 1. Check InstalledAppDetector for known permission gaps
         var missing = _appDetector.MissingPermissions;
+        if (missing.Count > 0) return true;
+
+        // 2. Check if shell collectors can access their history files
         var shellPerms = _shellCollector.GetAccessibleShells();
-        var allAccessible = shellPerms.All(kvp => kvp.Value);
-        return missing.Count > 0 || !allAccessible;
+        if (!shellPerms.All(kvp => kvp.Value)) return true;
+
+        // 3. Platform-specific checks
+        if (OperatingSystem.IsLinux())
+        {
+            return CheckLinuxPermissions();
+        }
+        if (OperatingSystem.IsWindows())
+        {
+            return CheckWindowsPermissions();
+        }
+        if (OperatingSystem.IsMacOS())
+        {
+            return CheckMacOSPermissions();
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Linux: Check Wayland accessibility and other OS-level permissions.
+    /// Under Wayland, window title tracking requires toolkit accessibility enabled.
+    /// </summary>
+    private static bool CheckLinuxPermissions()
+    {
+        var sessionType = Environment.GetEnvironmentVariable("XDG_SESSION_TYPE");
+        if (string.IsNullOrEmpty(sessionType))
+        {
+            // Can't determine session type — check via logind
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "loginctl",
+                    Arguments = "show-session $(loginctl | grep $(whoami) | awk '{print $1}') -p Type | cut -d= -f2",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using var proc = System.Diagnostics.Process.Start(psi);
+                if (proc != null)
+                {
+                    var output = proc.StandardOutput.ReadToEnd().Trim();
+                    proc.WaitForExit(2000);
+                    if (!string.IsNullOrEmpty(output))
+                        sessionType = output;
+                }
+            }
+            catch { }
+        }
+
+        // Wayland: check toolkit accessibility (needed for window titles)
+        if (string.Equals(sessionType, "wayland", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "gsettings",
+                    Arguments = "get org.gnome.desktop.interface toolkit-accessibility",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using var proc = System.Diagnostics.Process.Start(psi);
+                if (proc != null)
+                {
+                    var output = proc.StandardOutput.ReadToEnd()?.Trim();
+                    proc.WaitForExit(2000);
+                    if (!string.Equals(output, "true", StringComparison.OrdinalIgnoreCase))
+                        return true; // Wayland accessibility NOT enabled
+                }
+            }
+            catch
+            {
+                // gsettings unavailable — assume no missing perms
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Windows: Check if we can enumerate processes properly.
+    /// </summary>
+    private static bool CheckWindowsPermissions()
+    {
+        try
+        {
+            // Try to open a system process handle (requires PROCESS_QUERY_INFORMATION)
+            // If this fails, we have restricted permissions
+            var processes = System.Diagnostics.Process.GetProcesses();
+            return false; // We can see processes → OK
+        }
+        catch
+        {
+            return true; // Need admin/UAC elevation
+        }
+    }
+
+    /// <summary>
+    /// macOS: Check accessibility and full disk access permissions.
+    /// </summary>
+    private static bool CheckMacOSPermissions()
+    {
+        try
+        {
+            // Try to use `osascript` to get frontmost app (requires Accessibility)
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "/usr/bin/osascript",
+                Arguments = "-e 'tell application \"System Events\" to get name of first application process whose frontmost is true'",
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var proc = System.Diagnostics.Process.Start(psi);
+            if (proc == null) return true;
+            var output = proc.StandardOutput.ReadToEnd();
+            proc.WaitForExit(5000);
+
+            if (proc.ExitCode != 0 || string.IsNullOrWhiteSpace(output))
+                return true; // Accessibility not granted
+            return false; // Can interact with System Events → OK
+        }
+        catch
+        {
+            return true; // osascript not available → missing perms
+        }
+    }
+
+    /// <summary>
+    /// Build a detailed message about what permissions are still missing.
+    /// This gives the user actionable feedback instead of a generic retry message.
+    /// </summary>
+    private string GetMissingPermissionsMessage()
+    {
+        var issues = new List<string>();
+
+        // Check InstalledAppDetector missing permissions
+        var detectorMissing = _appDetector.MissingPermissions;
+        if (detectorMissing.Count > 0)
+        {
+            var grantInstructions = _appDetector.PermissionGrantInstructions;
+            issues.AddRange(grantInstructions);
+        }
+
+        // Check shell history accessibility
+        var shellPerms = _shellCollector.GetAccessibleShells();
+        var inaccessibleShells = shellPerms
+            .Where(kvp => !kvp.Value && kvp.Key.EndsWith("_history"))
+            .Select(kvp => kvp.Key.Replace("_history", ""))
+            .ToList();
+        if (inaccessibleShells.Count > 0)
+        {
+            issues.Add($"Cannot read shell history files: {string.Join(", ", inaccessibleShells)}. The pkexec script should have fixed this.");
+        }
+
+        // Check platform-specific issues
+        if (OperatingSystem.IsLinux())
+        {
+            var sessionType = Environment.GetEnvironmentVariable("XDG_SESSION_TYPE") ?? "unknown";
+            if (string.Equals(sessionType, "wayland", StringComparison.OrdinalIgnoreCase))
+            {
+                issues.Add("Wayland toolkit accessibility may still be disabled. The pkexec script attempted to enable it. " +
+                           "If this persists, manually run in a terminal:\n" +
+                           "   gsettings set org.gnome.desktop.interface toolkit-accessibility true\n" +
+                           "Or enable it in GNOME Settings → Accessibility → 'Toolkit Accessibility'.");
+            }
+        }
+
+        if (issues.Count == 0)
+        {
+            return "Permissions still missing. Please try again or check system settings.";
+        }
+
+        return "Permissions still missing:\n" + string.Join("\n", issues.Select(i => "• " + i));
     }
 
     // ─── Auth Commands ───
@@ -388,6 +637,9 @@ public partial class MainViewModel : ViewModelBase
                 case PermissionStep.BackgroundRunning:
                     await GrantBackgroundRunningAsync();
                     break;
+                case PermissionStep.Dependencies:
+                    await InstallDependenciesAsync();
+                    break;
                 case PermissionStep.OtherPermissions:
                     await GrantOtherPermissionsAsync();
                     break;
@@ -425,6 +677,43 @@ public partial class MainViewModel : ViewModelBase
         return Task.CompletedTask;
     }
 
+    private async Task InstallDependenciesAsync()
+    {
+        var missingDeps = GetMissingLinuxDependencies();
+        if (missingDeps.Count == 0) return;
+
+        var deps = string.Join(" ", missingDeps);
+        var psi = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "pkexec",
+            Arguments = $"apt-get install -y {deps}",
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        StepStatusText = "PolKit password dialog opened. Enter your password to install dependencies.";
+        using var proc = System.Diagnostics.Process.Start(psi);
+        if (proc != null)
+        {
+            await proc.WaitForExitAsync();
+            if (proc.ExitCode == 0)
+                StepStatusText = "Dependencies installed successfully.";
+            else
+                StepStatusText = "Failed to install dependencies.";
+        }
+    }
+
+    [RelayCommand]
+    private void ShowManualInstallCommand()
+    {
+        var missingDeps = GetMissingLinuxDependencies();
+        if (missingDeps.Count > 0)
+        {
+            var deps = string.Join(" ", missingDeps);
+            StepStatusText = $"sudo apt-get install -y {deps}";
+        }
+    }
+
     private async Task GrantOtherPermissionsAsync()
     {
         var exited = false;
@@ -454,7 +743,7 @@ public partial class MainViewModel : ViewModelBase
 
         if (HasMissingPermissions())
         {
-            StepStatusText = "Permissions still missing. Please retry.";
+            StepStatusText = GetMissingPermissionsMessage();
         }
         else
         {
@@ -465,11 +754,15 @@ public partial class MainViewModel : ViewModelBase
     private async Task<bool> GrantLinuxPermissionsAsync()
     {
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var currentUser = Environment.UserName;
 
         // Determine if we're running via `dotnet run` (ProcessPath == dotnet host)
         var processPath = Environment.ProcessPath ?? string.Empty;
         var isDotnetRun = processPath.EndsWith("dotnet", StringComparison.OrdinalIgnoreCase) ||
                           processPath.EndsWith("dotnet.exe", StringComparison.OrdinalIgnoreCase);
+
+        // Detect session type to decide which permissions to grant
+        var sessionType = Environment.GetEnvironmentVariable("XDG_SESSION_TYPE") ?? "x11";
 
         // Write temp script so pkexec arguments are clean
         var tmpScript = Path.Combine(Path.GetTempPath(), "alpha_perm_" + Guid.NewGuid().ToString("N") + ".sh");
@@ -477,12 +770,25 @@ public partial class MainViewModel : ViewModelBase
         {
             var scriptBuilder = new System.Text.StringBuilder();
             scriptBuilder.Append("#!/bin/sh\n");
-            scriptBuilder.Append($"chmod +r \"{home}/.bash_history\" \"{home}/.zsh_history\" \"{home}/.local/share/fish/fish_history\" 2>/dev/null\n");
 
+            // 1. Make shell history files readable (chmod +r as root ensures it works)
+            scriptBuilder.AppendLine($"chmod +r \"{home}/.bash_history\" 2>/dev/null || true");
+            scriptBuilder.AppendLine($"chmod +r \"{home}/.zsh_history\" 2>/dev/null || true");
+            scriptBuilder.AppendLine($"chmod +r \"{home}/.local/share/fish/fish_history\" 2>/dev/null || true");
+
+            // 2. Enable Wayland toolkit accessibility (needed for window title tracking)
+            //    Must run as $USER because gsettings/dconf are per-user settings, not root
+            if (string.Equals(sessionType, "wayland", StringComparison.OrdinalIgnoreCase))
+            {
+                scriptBuilder.AppendLine($"sudo -u \"{currentUser}\" gsettings set org.gnome.desktop.interface toolkit-accessibility true 2>/dev/null || true");
+                scriptBuilder.AppendLine($"sudo -u \"{currentUser}\" dconf write /org/gnome/desktop/interface/toolkit-accessibility true 2>/dev/null || true");
+            }
+
+            // 3. Grant capability for process detection (DAC_READ_SEARCH)
+            //    Only available for published/installed binaries — dotnet run skips this
             if (!isDotnetRun)
             {
-                // Only setcap when running as a published/installed binary
-                scriptBuilder.Append($"setcap CAP_DAC_READ_SEARCH+ep \"{processPath}\"\n");
+                scriptBuilder.AppendLine($"setcap CAP_DAC_READ_SEARCH+ep \"{processPath}\" 2>/dev/null || true");
             }
 
             var script = scriptBuilder.ToString();
@@ -537,13 +843,6 @@ public partial class MainViewModel : ViewModelBase
             WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden
         };
         System.Diagnostics.Process.Start(psi);
-
-        var settingsPsi = new System.Diagnostics.ProcessStartInfo
-        {
-            FileName = "ms-settings:privacy-accessibility",
-            UseShellExecute = true
-        };
-        System.Diagnostics.Process.Start(settingsPsi);
     }
 
     private void ShowMacOSPermissionInstructions()

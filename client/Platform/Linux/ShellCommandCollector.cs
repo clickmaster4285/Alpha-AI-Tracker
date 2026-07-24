@@ -71,9 +71,48 @@ public class ShellCommandCollector : IShellCommandCollector
         {
             try
             {
-                result[$"{name}_history"] = File.Exists(path);
+                // Check if the shell is actually installed AND the history file is readable.
+                // Only check shells the user uses (have the shell binary installed).
+                var shellInstalled = IsShellInstalled(name);
+                if (!shellInstalled)
+                {
+                    // Shell not installed at all — skip this check (not a missing permission)
+                    result[$"{name}_history"] = true;
+                    continue;
+                }
+
+                // Check if the history file exists AND is readable
+                if (!File.Exists(path))
+                {
+                    // Shell installed but no history file yet — that's OK
+                    result[$"{name}_history"] = true;
+                    continue;
+                }
+
+                // Try to actually open and read a small portion to verify read access
+                bool readable = false;
+                try
+                {
+                    using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    var buffer = new byte[1];
+                    readable = fs.Read(buffer, 0, 1) > 0;
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    readable = false;
+                }
+                catch
+                {
+                    // Other IO errors — assume not accessible
+                    readable = false;
+                }
+
+                result[$"{name}_history"] = readable;
             }
-            catch { result[$"{name}_history"] = false; }
+            catch
+            {
+                result[$"{name}_history"] = false;
+            }
         }
 
         try
@@ -83,6 +122,18 @@ public class ShellCommandCollector : IShellCommandCollector
         catch { result["proc_shells"] = false; }
 
         return result;
+    }
+
+    private static bool IsShellInstalled(string shellName)
+    {
+        // Check if the shell binary exists in standard locations
+        var paths = new[]
+        {
+            "/bin/" + shellName,
+            "/usr/bin/" + shellName,
+            "/usr/local/bin/" + shellName
+        };
+        return paths.Any(File.Exists);
     }
 
     public IReadOnlyList<string> MissingPermissionInstructions

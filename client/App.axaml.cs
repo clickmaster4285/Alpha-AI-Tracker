@@ -33,10 +33,55 @@ public partial class App : Application
                 await viewModel.InitializeAsync(CancellationToken.None);
             }).GetAwaiter().GetResult();
 
-            desktop.MainWindow = new MainWindow
+            var mainWindow = new MainWindow
             {
                 DataContext = viewModel,
             };
+
+            // Intercept close to hide instead
+            mainWindow.Closing += (s, e) =>
+            {
+                e.Cancel = true;
+                mainWindow.Hide();
+            };
+
+            desktop.ShutdownMode = Avalonia.Controls.ShutdownMode.OnExplicitShutdown;
+
+            var trayIcon = new Avalonia.Controls.TrayIcon
+            {
+                Icon = new Avalonia.Controls.WindowIcon(Avalonia.Platform.AssetLoader.Open(new Uri("avares://client/Assets/avalonia-logo.ico"))),
+                ToolTipText = "Alpha AI Tracker"
+            };
+
+            var showItem = new Avalonia.Controls.NativeMenuItem("Show Alpha AI Tracker");
+            showItem.Click += (s, e) =>
+            {
+                mainWindow.Show();
+                mainWindow.Activate();
+            };
+
+            var exitItem = new Avalonia.Controls.NativeMenuItem("Exit");
+            exitItem.Click += (s, e) =>
+            {
+                trayIcon.Dispose();
+                desktop.Shutdown();
+            };
+
+            var menu = new Avalonia.Controls.NativeMenu();
+            menu.Items.Add(showItem);
+            menu.Items.Add(exitItem);
+
+            trayIcon.Menu = menu;
+            trayIcon.IsVisible = true;
+            
+            var trayIcons = new Avalonia.Controls.TrayIcons { trayIcon };
+            Avalonia.Controls.TrayIcon.SetIcons(this, trayIcons);
+
+            var args = Environment.GetCommandLineArgs();
+            if (!args.Contains("--background") && !args.Contains("--minimized"))
+            {
+                mainWindow.Show();
+            }
         }
 
         base.OnFrameworkInitializationCompleted();

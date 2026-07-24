@@ -88,7 +88,6 @@
             <ScrollViewer VerticalScrollBarVisibility="Auto">
                 <Grid RowDefinitions="Auto,*" Margin="24,32">
 
-                    <!-- Step counter (shown during permission flow) -->
                     <Border IsVisible="{Binding RequiresPermissionAction}"
                             Background="{StaticResource CardBrush}"
                             CornerRadius="{StaticResource RadiusLg}"
@@ -99,7 +98,8 @@
                                    HorizontalAlignment="Center">
                             <Run Text="Step "/>
                             <Run Text="{Binding CurrentPermissionStepNumber}"/>
-                            <Run Text=" of 3"/>
+                            <Run Text=" of "/>
+                            <Run Text="{Binding TotalPermissionSteps}"/>
                         </TextBlock>
                     </Border>
 
@@ -166,8 +166,8 @@
                             </StackPanel>
                         </Border>
 
-                        <!-- ── Step 3: Other Permissions ── -->
-                        <Border Classes="fade-in" IsVisible="{Binding IsPermissionStep}">
+                        <!-- ── Step 3: Dependencies (Linux Only) ── -->
+                        <Border Classes="fade-in" IsVisible="{Binding IsDependencyStep}">
                             <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center"
                                         MaxWidth="360" Spacing="14">
                                 <Border Background="{StaticResource WarningBrush}"
@@ -175,6 +175,45 @@
                                         Width="48" Height="48" HorizontalAlignment="Center"
                                         BoxShadow="{StaticResource CardShadow}">
                                     <TextBlock Text="3" FontSize="20" FontWeight="Bold"
+                                               Foreground="{StaticResource WarningFgBrush}"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Border>
+                                <TextBlock Text="{Binding StepTitle}" FontSize="20" FontWeight="Bold"
+                                           Foreground="{StaticResource FgBrush}"
+                                           HorizontalAlignment="Center"/>
+                                <TextBlock Text="{Binding StepDescription}" FontSize="13"
+                                           Foreground="{StaticResource MutedFgBrush}"
+                                           TextWrapping="Wrap" HorizontalAlignment="Center"
+                                           TextAlignment="Center"/>
+                                <TextBlock Text="{Binding MissingDependenciesList}" FontSize="14" FontWeight="Bold"
+                                           Foreground="{StaticResource DestructiveBrush}"
+                                           TextWrapping="Wrap" HorizontalAlignment="Center"
+                                           TextAlignment="Center" Margin="0,4,0,4"/>
+                                <Button Classes="primary"
+                                        Command="{Binding GrantCurrentStepPermissionCommand}"
+                                        IsEnabled="{Binding IsStepWorking, Converter={StaticResource BoolInvert}}"
+                                        Content="Install Automatically"
+                                        HorizontalAlignment="Center" MinWidth="200" Margin="0,8,0,0"/>
+                                <Button Classes="secondary"
+                                        Command="{Binding ShowManualInstallCommand}"
+                                        Content="Install Manually"
+                                        HorizontalAlignment="Center" MinWidth="200"/>
+                                <TextBox Text="{Binding StepStatusText}" FontSize="12" IsReadOnly="True"
+                                         Foreground="{StaticResource MutedFgBrush}" Background="Transparent"
+                                         HorizontalAlignment="Stretch" TextWrapping="Wrap" BorderThickness="0"
+                                         IsVisible="{Binding StepStatusText, Converter={StaticResource StringNotEmpty}}"/>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- ── Step 4: Other Permissions ── -->
+                        <Border Classes="fade-in" IsVisible="{Binding IsPermissionStep}">
+                            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center"
+                                        MaxWidth="360" Spacing="14">
+                                <Border Background="{StaticResource WarningBrush}"
+                                        CornerRadius="{StaticResource RadiusLg}"
+                                        Width="48" Height="48" HorizontalAlignment="Center"
+                                        BoxShadow="{StaticResource CardShadow}">
+                                    <TextBlock Text="{Binding CurrentPermissionStepNumber}" FontSize="20" FontWeight="Bold"
                                                Foreground="{StaticResource WarningFgBrush}"
                                                HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                 </Border>

@@ -309,7 +309,9 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
             }
             catch (InvalidOperationException)
             {
-                _missingPerms.Add("dpkg_not_found");
+                // dpkg not available on this system (e.g., Fedora, Arch)
+                // This is not a permission issue — silently skip
+                Debug.WriteLine("dpkg-query not found — non-Debian system, skipping dpkg detection");
             }
             catch { }
 
