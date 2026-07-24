@@ -224,17 +224,13 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
             }
             catch (UnauthorizedAccessException)
             {
-                _missingPerms.Add("registry_uninstall");
-                _permInstructions.Add(
-                    "Run the application as Administrator to detect all installed applications via registry.");
+                // Ignore, standard users can't read all keys but we can read what is accessible
             }
             catch { }
         }
         catch (UnauthorizedAccessException)
         {
-            _missingPerms.Add("start_menu_enum");
-            _permInstructions.Add(
-                "Run the application as Administrator to enumerate Start Menu programs.");
+            // Ignore, standard users can't read all start menu folders
         }
         catch { }
     }

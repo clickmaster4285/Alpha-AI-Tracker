@@ -297,9 +297,8 @@ public partial class MainViewModel : ViewModelBase
         var missing = _appDetector.MissingPermissions;
         if (missing.Count > 0) return true;
 
-        // 2. Check if shell collectors can access their history files
-        var shellPerms = _shellCollector.GetAccessibleShells();
-        if (!shellPerms.All(kvp => kvp.Value)) return true;
+        // 2. Check if shell collectors can access their history files (Optional)
+        // We do not block on this since missing history files (e.g. no WSL installed) is normal.
 
         // 3. Platform-specific checks
         if (OperatingSystem.IsLinux())

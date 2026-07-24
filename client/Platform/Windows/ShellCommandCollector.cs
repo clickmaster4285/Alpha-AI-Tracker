@@ -39,10 +39,7 @@ public partial class ShellCommandCollector : IShellCommandCollector
         }
         catch (UnauthorizedAccessException)
         {
-            if (!_missingPerms.Contains("powershell_history"))
-            {
-                _missingPerms.Add("powershell_history");
-            }
+            // Ignore, we collect what we can access
         }
         catch { }
 
@@ -185,8 +182,7 @@ public partial class ShellCommandCollector : IShellCommandCollector
         }
         catch (UnauthorizedAccessException)
         {
-            if (!_missingPerms.Contains("cmd_history"))
-                _missingPerms.Add("cmd_history");
+            // Ignore, we collect what we can access
         }
         catch { }
 
