@@ -1,7 +1,8 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-07-25  
-> **Service completion (honest):** ~40%
+> **Last audited:** 2026-07-25 (app_items + clean up)  
+> **Changelog:** 2026-07-25: Added migration 008 (app_items table). Removed all BrowserContext/FileExplorerContext/UrlRecord/UrlVisit/ShellCommand types, handlers, services, repos. Replaced with single AppItem model. Router simplified to only /app-sessions/sync and /app-items/sync for Phase 2. Shell commands endpoint removed.  
+> **Service completion (honest):** ~46%
 
 ---
 
@@ -58,9 +59,10 @@ server/
 ├── migrations/                  # SQL migration files, run in sorted order on startup
 │   ├── 001_init.sql             # Initial schema: users, departments, sequences, triggers
 │   ├── 002_employees.sql        # Separate employees table, migrate non-admin users
-│   ├── 003_activity_logs.sql    # Activity logs table (synced from clients)
+│   ├── 003_activity_logs.sql    # [REMOVED — was activity_logs table]
 │   ├── 004_employee_department_id.sql  # FK from employees → departments
-│   └── 005_soft_delete.sql      # deleted_at column on all tables
+│   ├── 005_soft_delete.sql      # deleted_at column on all tables
+│   └── 006_new_schema.sql       # 9 new tables + DROP TABLE activity_logs CASCADE
 │
 └── internal/
     ├── config/config.go         # Loads env vars, builds Config struct with typed fields
@@ -70,24 +72,25 @@ server/
     ├── models/                  # Database models (structs with db/json tags)
     │   ├── user.go              # User + UserPublic (safe for API)
     │   ├── employee.go          # Employee + EmployeePublic
-    │   └── activity_log.go      # ActivityLog
+    │   ├── device_hardware_info.go # Phase 1: DeviceHardwareInfo, InstalledApplication, NetworkInfo, SessionEvent
+    │   └── app_session.go         # Phase 2: AppSession, BrowserContext, FileExplorerContext, UrlRecord, UrlVisit
     │
     ├── dto/                     # Request/Response DTOs
     │   ├── user_dto.go          # LoginRequest, CreateUserRequest, UserResponse, etc.
     │   ├── employee_dto.go      # EmployeeLoginRequest, GenerateSecretResponse, etc.
-    │   └── activity_log_dto.go  # SyncActivityLogsRequest, ActivityLogResponse, etc.
+    │   └── new_schema_dto.go    # Phase 1 & 2: all sync request/response DTOs + AppSessionListResponse
     │
     ├── repository/              # Data access layer (raw SQL via pgx)
     │   ├── user_repo.go         # User CRUD, CountCompanyAdmins, IsUniqueEmail
     │   ├── employee_repo.go     # Employee CRUD, GenerateEmployeeID, GetDepartments
-    │   ├── activity_log_repo.go # BulkInsert, List (with filtering/pagination)
+    │   ├── new_schema_repo.go   # Phase 1 & 2: bulk insert for 9 tables + ListAppSessions
     │   └── department_repo.go   # Department CRUD with employee count (LEFT JOIN)
     │
     ├── services/                # Business logic layer
     │   ├── auth_service.go      # Login, token generation/validation, EnsureCompanyAdmin
     │   ├── user_service.go      # User CRUD with email uniqueness checks
     │   ├── employee_service.go  # Employee CRUD, GenerateSecret (Redis)
-    │   ├── activity_log_service.go  # SyncLogs (bulk insert), List
+    │   ├── new_schema_service.go # Phase 1 & 2: sync handlers for 9 tables + ListAppSessions
     │   ├── department_service.go    # Department CRUD
     │   └── redis_interface.go   # Interface for Redis operations (decouples auth handler)
     │
@@ -95,7 +98,7 @@ server/
     │   ├── auth_handler.go      # Login, Logout, Me, CheckAuth, EmployeeLogin, EmployeeDisconnect
     │   ├── user_handler.go      # List, Get, Create, Update, Delete users
     │   ├── employee_handler.go  # List, Get, Create, Update, Delete, GenerateSecret
-    │   ├── activity_log_handler.go  # SyncLogs (POST), ListLogs (GET)
+    │   ├── new_schema_handler.go # Phase 1 & 2: sync endpoints (9 total) + ListAppSessions
     │   └── department_handler.go    # List, Create, Update, Delete departments
     │
     ├── middleware/auth.go       # JWTAuth (required), OptionalAuth (optional)

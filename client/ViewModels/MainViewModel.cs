@@ -15,7 +15,6 @@ public partial class MainViewModel : ViewModelBase
     private readonly ILogStore _store;
     private readonly HttpClient _httpClient;
     private readonly IInstalledAppDetector _appDetector;
-    private readonly IShellCommandCollector _shellCollector;
     private readonly AutoStartService _autoStart;
     private readonly LogCollectorService _logCollector;
 
@@ -145,7 +144,6 @@ public partial class MainViewModel : ViewModelBase
         ILogStore store,
         HttpClient httpClient,
         IInstalledAppDetector appDetector,
-        IShellCommandCollector shellCollector,
         AutoStartService autoStart,
         LogCollectorService logCollector)
     {
@@ -153,7 +151,6 @@ public partial class MainViewModel : ViewModelBase
         _store = store;
         _httpClient = httpClient;
         _appDetector = appDetector;
-        _shellCollector = shellCollector;
         _autoStart = autoStart;
         _logCollector = logCollector;
     }
@@ -443,17 +440,6 @@ public partial class MainViewModel : ViewModelBase
         {
             var grantInstructions = _appDetector.PermissionGrantInstructions;
             issues.AddRange(grantInstructions);
-        }
-
-        // Check shell history accessibility
-        var shellPerms = _shellCollector.GetAccessibleShells();
-        var inaccessibleShells = shellPerms
-            .Where(kvp => !kvp.Value && kvp.Key.EndsWith("_history"))
-            .Select(kvp => kvp.Key.Replace("_history", ""))
-            .ToList();
-        if (inaccessibleShells.Count > 0)
-        {
-            issues.Add($"Cannot read shell history files: {string.Join(", ", inaccessibleShells)}. The pkexec script should have fixed this.");
         }
 
         // Check platform-specific issues
