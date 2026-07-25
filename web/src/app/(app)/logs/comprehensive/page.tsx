@@ -2,18 +2,14 @@
 
 import { useState, useMemo } from 'react';
 import { motion } from 'framer-motion';
-import { Search, ChevronDown, ChevronUp, Loader2, Monitor, Cpu, HardDrive } from 'lucide-react';
+import { Search, ChevronDown, ChevronUp, Loader2, Monitor, Globe, FolderOpen } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
-import { activityLogsApi, employeesApi, departmentsApi, type ActivityLog } from '@/lib/api';
-
-const TABS = ['App Log', 'System Log', 'Productive/Unproductive'] as const;
-type Tab = typeof TABS[number];
+import { appSessionsApi, employeesApi, type AppSession } from '@/lib/api';
 
 export default function ComprehensiveLogs() {
-  const [tab, setTab] = useState<Tab>('App Log');
   const [selectedEmployee, setSelectedEmployee] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
-  const [expandedApp, setExpandedApp] = useState<string | null>(null);
+  const [expandedSession, setExpandedSession] = useState<string | null>(null);
   const [page, setPage] = useState(1);
 
   // Fetch employees for dropdown
@@ -23,17 +19,10 @@ export default function ComprehensiveLogs() {
   });
   const employees = employeesData?.data || [];
 
-  // Fetch departments for filter
-  const { data: deptResponse } = useQuery({
-    queryKey: ['departments'],
-    queryFn: () => departmentsApi.list(),
-  });
-  const departments = deptResponse?.departments || [];
-
-  // Fetch activity logs
-  const { data: logsData, isLoading: logsLoading, error: logsError } = useQuery({
-    queryKey: ['activity-logs', { employeeId: selectedEmployee, search: searchQuery, page }],
-    queryFn: () => activityLogsApi.list({
+  // Fetch app sessions (replaces old activity-logs)
+  const { data: sessionsData, isLoading, error } = useQuery({
+    queryKey: ['app-sessions', { employeeId: selectedEmployee, search: searchQuery, page }],
+    queryFn: () => appSessionsApi.list({
       employeeId: selectedEmployee || undefined,
       search: searchQuery || undefined,
       page,
@@ -41,34 +30,8 @@ export default function ComprehensiveLogs() {
     }),
   });
 
-  const logs = logsData?.data || [];
-  const totalPages = logsData?.totalPages || 1;
-
-  // Group logs by process name for App Log view
-  const groupedLogs = useMemo(() => {
-    const groups = new Map<string, ActivityLog[]>();
-    logs.forEach(log => {
-      const key = log.processName;
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key)!.push(log);
-    });
-    return Array.from(groups.entries()).map(([name, entries]) => ({
-      application: name,
-      entries,
-      totalDuration: entries.length > 0
-        ? formatDuration(entries[entries.length - 1].timestamp, entries[0].timestamp)
-        : '0m',
-    }));
-  }, [logs]);
-
-  // Separate foreground (productive) and background (unproductive) logs
-  const productiveEntries = useMemo(() => {
-    return logs.filter(l => l.isForeground).slice(0, 20);
-  }, [logs]);
-
-  const unproductiveEntries = useMemo(() => {
-    return logs.filter(l => !l.isForeground).slice(0, 20);
-  }, [logs]);
+  const sessions = sessionsData?.data || [];
+  const totalPages = sessionsData?.totalPages || 1;
 
   const selectedEmp = employees.find(e => e.id === selectedEmployee);
 
@@ -98,82 +61,75 @@ export default function ComprehensiveLogs() {
           </div>
         </div>
         <div className="text-sm text-muted-foreground bg-card border border-border rounded-lg px-3 py-2">
-          {logs.length} log entries
+          {sessions.length} app sessions
         </div>
       </div>
 
-      {/* Tabs */}
-      <div className="flex border-b border-border gap-1">
-        {TABS.map(t => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={`px-4 py-2.5 text-sm font-medium transition-colors relative
-              ${tab === t ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}`}
-          >
-            {t}
-            {tab === t && <motion.div layoutId="log-tab" className="absolute bottom-0 left-0 right-0 h-0.5 gradient-primary rounded-full" />}
-          </button>
-        ))}
-      </div>
-
       {/* Loading */}
-      {logsLoading && (
+      {isLoading && (
         <div className="flex items-center justify-center py-12">
           <Loader2 className="w-6 h-6 animate-spin text-primary" />
         </div>
       )}
 
       {/* Error */}
-      {logsError && (
+      {error && (
         <div className="text-center py-12">
-          <p className="text-destructive">Failed to load logs: {(logsError as Error).message}</p>
+          <p className="text-destructive">Failed to load app sessions: {(error as Error).message}</p>
         </div>
       )}
 
-      {/* Content */}
-      {!logsLoading && !logsError && tab === 'App Log' && (
+      {/* App Sessions Table */}
+      {!isLoading && !error && (
         <div className="bg-card rounded-xl border border-border overflow-hidden">
-          {groupedLogs.length === 0 ? (
+          {sessions.length === 0 ? (
             <div className="text-center py-12 text-muted-foreground text-sm">
-              No activity logs found
+              No app sessions found
             </div>
           ) : (
             <table className="w-full">
               <thead>
                 <tr className="border-b border-border">
                   <th className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground">Application</th>
-                  <th className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground">Process Details</th>
                   <th className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground">Employee</th>
-                  <th className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground">Time</th>
+                  <th className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground">Platform</th>
+                  <th className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground">Duration</th>
                 </tr>
               </thead>
               <tbody>
-                {groupedLogs.slice(0, 20).map(group => (
-                  <tr key={group.application} className="border-b border-border last:border-0 hover:bg-muted/30">
+                {sessions.map(session => (
+                  <tr key={session.id} className="border-b border-border last:border-0">
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">
                         <div className="w-6 h-6 rounded bg-accent flex items-center justify-center text-[10px] font-bold text-accent-foreground">
                           <Monitor className="w-3.5 h-3.5" />
                         </div>
-                        <span className="text-sm font-medium text-foreground">{group.application}</span>
+                        <span className="text-sm font-medium text-foreground">{session.processName}</span>
                       </div>
-                    </td>
-                    <td className="px-4 py-3">
-                      {group.entries.slice(0, 3).map((entry, i) => (
-                        <p key={i} className="text-sm text-muted-foreground">
-                          {entry.windowTitle || entry.processName}
-                        </p>
-                      ))}
-                      {group.entries.length > 3 && (
-                        <p className="text-xs text-muted-foreground mt-1">+{group.entries.length - 3} more entries</p>
+                      {session.appDisplayName && session.appDisplayName !== session.processName && (
+                        <p className="text-xs text-muted-foreground ml-8">{session.appDisplayName}</p>
                       )}
                     </td>
                     <td className="px-4 py-3 text-sm text-foreground">
-                      {group.entries[0]?.employeeName || group.entries[0]?.employeeId || '-'}
+                      {session.employeeId}
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className="px-2 py-0.5 rounded text-xs bg-primary/10 text-primary">
+                        {session.platform || 'unknown'}
+                      </span>
                     </td>
                     <td className="px-4 py-3 text-sm text-muted-foreground">
-                      {new Date(group.entries[0]?.timestamp || '').toLocaleTimeString()}
+                      <div className="flex items-center gap-1">
+                        {new Date(session.startedAt).toLocaleTimeString()}
+                        {session.endedAt && (
+                          <span className="text-xs">
+                            → {new Date(session.endedAt).toLocaleTimeString()}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs">
+                        {formatDuration(session.startedAt, session.endedAt || new Date().toISOString())}
+                      </p>
                     </td>
                   </tr>
                 ))}
@@ -202,121 +158,6 @@ export default function ComprehensiveLogs() {
               </div>
             </div>
           )}
-        </div>
-      )}
-
-      {!logsLoading && !logsError && tab === 'System Log' && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {logs.slice(0, 20).map(log => (
-            <div key={log.id} className="bg-card rounded-xl border border-border p-4">
-              <div className="flex items-center gap-3 mb-2">
-                <div className="w-8 h-8 rounded-lg bg-accent flex items-center justify-center">
-                  <Cpu className="w-4 h-4 text-accent-foreground" />
-                </div>
-                <div>
-                  <p className="text-sm font-medium text-foreground">{log.processName}</p>
-                  <p className="text-xs text-muted-foreground">{log.employeeName || log.employeeId}</p>
-                </div>
-              </div>
-              <div className="flex items-center gap-3 text-sm text-muted-foreground mb-1">
-                <span className="px-2 py-0.5 rounded text-xs bg-primary/10 text-primary">{log.platform}</span>
-                <span>{log.cpuPercent.toFixed(1)}% CPU</span>
-                <span>{(log.memoryBytes / 1024 / 1024).toFixed(0)} MB</span>
-              </div>
-              {log.windowTitle && (
-                <p className="text-xs text-muted-foreground mt-1">
-                  <span className="font-medium">Window:</span> {log.windowTitle}
-                </p>
-              )}
-              <p className="text-xs text-muted-foreground mt-1">
-                {new Date(log.timestamp).toLocaleString()}
-              </p>
-            </div>
-          ))}
-          {logs.length === 0 && (
-            <div className="col-span-2 text-center py-12 text-muted-foreground text-sm">
-              No system logs found
-            </div>
-          )}
-        </div>
-      )}
-
-      {!logsLoading && !logsError && tab === 'Productive/Unproductive' && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="bg-card rounded-xl border border-border p-4">
-            <h4 className="font-display font-semibold text-foreground mb-3 flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-success" />
-              Productive (Foreground)
-            </h4>
-            {productiveEntries.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No productive entries</p>
-            ) : (
-              productiveEntries.map(entry => (
-                <div key={entry.id} className="border-b border-border last:border-0">
-                  <button
-                    onClick={() => setExpandedApp(expandedApp === entry.id ? null : entry.id)}
-                    className="w-full flex items-center justify-between py-3 text-sm"
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium text-foreground">{entry.processName}</span>
-                      <span className="text-muted-foreground">{formatDuration(entry.timestamp, entry.timestamp)}</span>
-                    </div>
-                    {expandedApp === entry.id ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
-                  </button>
-                  {expandedApp === entry.id && (
-                    <div className="pb-3 pl-4 space-y-1">
-                      <p className="text-sm text-muted-foreground">
-                        <span className="font-medium">Window:</span> {entry.windowTitle || 'N/A'}
-                      </p>
-                      <p className="text-sm text-muted-foreground">
-                        <span className="font-medium">Employee:</span> {entry.employeeName || entry.employeeId}
-                      </p>
-                      <p className="text-sm text-muted-foreground">
-                        <span className="font-medium">Time:</span> {new Date(entry.timestamp).toLocaleString()}
-                      </p>
-                    </div>
-                  )}
-                </div>
-              ))
-            )}
-          </div>
-          <div className="bg-card rounded-xl border border-border p-4">
-            <h4 className="font-display font-semibold text-foreground mb-3 flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-warning" />
-              Non Productive (Background)
-            </h4>
-            {unproductiveEntries.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No non-productive entries</p>
-            ) : (
-              unproductiveEntries.map(entry => (
-                <div key={entry.id} className="border-b border-border last:border-0">
-                  <button
-                    onClick={() => setExpandedApp(expandedApp === entry.id ? null : entry.id)}
-                    className="w-full flex items-center justify-between py-3 text-sm"
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium text-foreground">{entry.processName}</span>
-                      <span className="text-muted-foreground">{formatDuration(entry.timestamp, entry.timestamp)}</span>
-                    </div>
-                    {expandedApp === entry.id ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
-                  </button>
-                  {expandedApp === entry.id && (
-                    <div className="pb-3 pl-4 space-y-1">
-                      <p className="text-sm text-muted-foreground">
-                        <span className="font-medium">Window:</span> {entry.windowTitle || 'N/A'}
-                      </p>
-                      <p className="text-sm text-muted-foreground">
-                        <span className="font-medium">Employee:</span> {entry.employeeName || entry.employeeId}
-                      </p>
-                      <p className="text-sm text-muted-foreground">
-                        <span className="font-medium">Time:</span> {new Date(entry.timestamp).toLocaleString()}
-                      </p>
-                    </div>
-                  )}
-                </div>
-              ))
-            )}
-          </div>
         </div>
       )}
     </div>
