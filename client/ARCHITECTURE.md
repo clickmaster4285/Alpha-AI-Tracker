@@ -1,7 +1,8 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-07-25  
-> **Service completion (honest):** ~35%
+> **Last audited:** 2026-07-25 (data quality + app_items refactor)  
+> **Changelog:** 2026-07-25: Data quality fixes. device_hw now collects mac/gpu/storage. installed_apps scans actual OS DB (not running procs). network gets public IP + dedup. shell_commands removed entirely. Replaced browser_contexts/file_explorer_contexts/urls/url_visits with single generic app_items table (self-referencing parent_item_id). IShellCommandCollector removed from DI.  
+> **Service completion (honest):** ~48%
 
 ---
 
@@ -71,7 +72,9 @@ client/
 │   │   ├── IInstalledAppDetector.cs    # Installed app detection + permission status
 │   │   └── IShellCommandCollector.cs   # Shell command collection + accessibility status
 │   ├── Models/
-│   │   ├── ActivityLog.cs              # Core data model (14 fields)
+│   │   ├── ActivityLog.cs              # Intermediate collection DTO (used by IActivityCollector, not persisted)
+│   │   ├── AppSession.cs               # App session + BrowserContext + FileExplorerContext + UrlRecord + UrlVisit
+│   │   ├── DeviceHardwareInfo.cs       # Phase 1: DeviceHardwareInfo + InstalledApplication + NetworkInfo + SessionEvent
 │   │   ├── EmployeeInfo.cs             # Employee login info (persisted in SQLite)
 │   │   ├── SessionInfo.cs              # Static session ID (generated once per app launch)
 │   │   └── ShellCommand.cs             # Shell command model (15 fields)
@@ -92,13 +95,13 @@ client/
 │       └── ShellCommandCollector.cs     # bash/zsh/fish history files + /proc/*/cmdline for running shells
 │
 ├── Services/
-│   ├── LogCollectorService.cs           # BackgroundService: collect → filter → store → sync → cleanup cycle (30s loop)
+│   ├── LogCollectorService.cs           # BackgroundService: collect → filter → store app_sessions → sync → cleanup cycle (30s loop)
 │   ├── BackgroundGuardService.cs        # Watchdog: re-installs auto-start/systemd if removed (60s check)
 │   └── AutoStartService.cs              # Platform-specific auto-start: Run key, .desktop, launchd plist
 │
 ├── Storage/
-│   ├── DatabaseSchema.cs                # Raw SQL for all table creation (activity_logs, shell_commands, employee_info, etc.)
-│   └── SqliteLogStore.cs                # ILogStore implementation using Microsoft.Data.Sqlite
+│   ├── DatabaseSchema.cs                # Raw SQL for all table creation (9 new tables + shell_commands + employee_info + app_status + permission_status)
+│   └── SqliteLogStore.cs                # ILogStore implementation using Microsoft.Data.Sqlite (45+ methods)
 │
 ├── ViewModels/
 │   ├── ViewModelBase.cs                 # Base class (extends ObservableObject from CommunityToolkit.Mvvm)
