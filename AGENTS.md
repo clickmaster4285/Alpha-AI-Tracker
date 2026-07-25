@@ -1,8 +1,8 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-07-25  
-> **Audit commit:** (not available — working tree was clean at start of audit)  
-> **Overall completion (honest):** ~20% across all 3 services (not 5%, but far from production-ready)
+> **Last audited:** 2026-07-25 (data quality + arch refactor)  
+> **Changelog:** 2026-07-25: Data quality fixes (device_hw now collects mac/gpu/storage; installed_apps scans actual OS registry/DB, not running procs; network_info has public IP + dedup; shell_commands removed entirely). Replaced browser_contexts/file_explorer_contexts/urls/url_visits with single generic app_items table (self-referencing parent_item_id). Server endpoints consolidated.  
+> **Overall completion (honest):** ~28% across all 3 services
 
 ---
 
@@ -60,8 +60,12 @@ flowchart LR
 |---|---|---|---|
 | Employee login (client → server) | REST POST `/api/v1/auth/employee-login` | emp_id + secret_key (Redis-validated) | JSON `{employeeId, secretKey}` → `{employee, token}` |
 | Employee disconnect | REST POST `/api/v1/auth/employee-disconnect` | JWT token in body | JSON `{employeeId, token}` |
-| Activity log sync (client → server) | REST POST `/api/v1/activity-logs/sync` | JWT token in request body | JSON `{employeeId, token, logs: [...]}` |
-| Shell command sync (client → server) | REST POST `/api/v1/shell-commands/sync` | JWT token in request body | **⚠️ Server endpoint does not exist** |
+| Device hardware sync (client → server) | REST POST `/api/v1/device-hardware/sync` | JWT token in request body | JSON `{employeeId, token, entries: [...]}` |
+| Installed apps sync (client → server) | REST POST `/api/v1/installed-apps/sync` | JWT token in request body | JSON `{employeeId, token, entries: [...]}` |
+| Network info sync (client → server) | REST POST `/api/v1/network-info/sync` | JWT token in request body | JSON `{employeeId, token, entries: [...]}` |
+| Session events sync (client → server) | REST POST `/api/v1/session-events/sync` | JWT token in request body | JSON `{employeeId, token, entries: [...]}` |
+| App sessions sync (client → server) | REST POST `/api/v1/app-sessions/sync` | JWT token in request body | JSON `{employeeId, token, entries: [...]}` |
+| App items sync (client → server) | REST POST `/api/v1/app-items/sync` | JWT token in request body | JSON `{employeeId, token, entries: [...]}` |
 
 ### Server ↔ Web
 
@@ -76,44 +80,52 @@ flowchart LR
 
 ### Inconsistencies Found
 
-1. **Shell commands** — Client sends to `/api/v1/shell-commands/sync`. No server endpoint or DB table exists.
-2. **Employee disconnect** — Client sends `POST /api/v1/auth/employee-disconnect` with `{employeeId, token}`, route exists on server.
-3. **Field naming** — Client uses `employeeId` in snake_case for the auth payload, server expects `employeeId` too (consistent). Activity log entries: client sends `processName`, `windowTitle`, etc. (camelCase), server DTO matches. **Consistent by convention, no validation schema enforces it.**
+1. **Shell commands REMOVED** — Shell command collection/sync removed from client. No endpoint exists on server. All related Go/C# code removed.
+2. **Old child tables removed** — `browser_contexts`, `file_explorer_contexts`, `urls`, `url_visits` tables and all Go/C# code replaced by single generic `app_items` table.
+3. **Employee disconnect** — Client sends `POST /api/v1/auth/employee-disconnect` with `{employeeId, token}`, route exists on server.
+4. **activity_logs removed** — The old `activity_logs` table (server Postgres + client SQLite) and all Go/C# code referencing it have been removed. Replaced by relational `app_sessions`.
+5. **Field naming** — Client uses `employeeId` in snake_case for the auth payload, server expects `employeeId` too (consistent). Activity log entries: client sends `processName`, `windowTitle`, etc. (camelCase), server DTO matches. **Consistent by convention, no validation schema enforces it.**
 
 ---
 
 ## 5. Current Completion State
 
-### Server — ~40% complete
+### Server — ~46% complete
 
 **What works:**
-- All 5 migrations run on startup
-- Full CRUD for users, employees, departments, activity logs
+- Migrations 001-008 run on startup (006 drops activity_logs, 008 adds app_items)
+- Full CRUD for users, employees, departments
 - Web admin auth (email/password → httpOnly cookie with encrypted JWT)
 - Employee auth (Redis one-time secret → JWT token)
-- Activity log ingestion and listing with filtering/pagination
+- 7 ingestion endpoints: device_hardware, installed_apps, network_info, session_events, app_sessions, app_items (+ synced_at for all)
+- App sessions + app items listing with filtering/pagination
 - Company admin auto-initialization on first run
 - Graceful shutdown
 
 **What's missing:**
 - **No tests** (0 test files)
-- **No shell commands table or sync endpoint**
 - **No rate limiting** on any endpoint (including login)
 - **No structured logging** — uses `log.Printf` only
-- **No Redis fallback** — if Redis is down, employee auth is completely broken (server warns but doesn't degrade gracefully)
+- **No Redis fallback** — if Redis is down, employee auth is completely broken
 - **No observability** — no metrics, tracing, health check depth
 - **No request validation library** — manual field checks in handlers
-- **No cleanup job** for old activity logs (data grows unbounded)
+- **No cleanup job** for old data (grows unbounded)
+- **Old browser_contexts/file_explorer_contexts/urls/url_visits code removed** — replaced by app_items
 
-### Client — ~35% complete
+### Client — ~48% complete
 
 **What works:**
 - Cross-platform process collection (Win/Linux/macOS)
-- Shell command history reading (all platforms)
-- SQLite local storage with schema
+- SQLite local storage with relational schema (device_hw, installed_apps, network, session_events, app_sessions, app_items)
+- Models: DeviceHardwareInfo (with mac/gpu/storage), InstalledApplication (with metadata), NetworkInfo (with public IP), SessionEvent, AppSession, AppItem (generic, self-referencing)
 - Encrypted config system (AES-256-GCM, transport→machine key migration)
 - Login/logout flow with server
-- Log sync every ~5 min
+- Batched sync engine (every ~5 min, FK-ordered, 500-row batches, stop-on-failure per table)
+- **Device hardware**: now collects mac_address, storage_devices, gpu_model from OS
+- **Installed apps**: scans actual OS databases (registry, dpkg, snap, .desktop) — not running processes
+- **Network info**: has public IP lookup, dedup by IP change, mac_address removed (in device_hw)
+- **Shell commands REMOVED** — no longer collected or synced
+- **Generic app_items** replaces browser_contexts + file_explorer_contexts + urls + url_visits
 - Auto-start persistence (all platforms)
 - Background guard watchdog
 - Tray icon (minimize to tray on close)
@@ -121,15 +133,14 @@ flowchart LR
 
 **What's missing:**
 - **No tests** (0 test files)
-- **Shell commands sync** — client sends to non-existent server endpoint (silently fails every 5 min)
 - **No auto-update mechanism**
 - **No crash reporting** — unhandled exceptions crash silently
-- **No offline queue analysis** — if server is unreachable, logs buffer locally but with no back-pressure handling
+- **No offline queue analysis** — if server is unreachable, logs buffer locally with no back-pressure handling
 - **No encryption at rest** — SQLite encryption (sqlcipher) is commented out
-- **macOS CPU measurement** — macOS process collector skips CPU measurement entirely (always 0%)
-- **macOS window titles** — only captures foreground window, missing EnumWindows equivalent
+- **macOS CPU measurement** — macOS process collector skips CPU measurement (always 0%)
+- **macOS window titles** — only captures foreground window
 
-### Web — ~15% complete
+### Web — ~16% complete
 
 **What works:**
 - ~30 page routes exist with polished UI
@@ -137,7 +148,7 @@ flowchart LR
 - Auth check on mount (Redux + server cookie)
 - Users page — real API calls via TanStack Query (CRUD + generate secret)
 - Departments page — real API calls (CRUD)
-- Logs/Comprehensive page — real API calls
+- Logs/Comprehensive page — real API calls (now using new app_sessions API)
 - Sidebar with permission-based filtering (client-side only)
 - Dashboard shows mock stats and chart
 
@@ -184,10 +195,11 @@ flowchart LR
 | **No tests anywhere** | 🔴 High | 0 test files across all 3 projects. Any refactor is blind. |
 | **No observability** | 🟠 Medium | No structured logging, metrics, tracing. Debugging production issues requires SSH + log scraping. |
 | **Client-side only RBAC** | 🟠 Medium | Permissions are enforced only in the web frontend localStorage. A malicious user can trivially bypass them. |
-| **No rate limiting** | 🟠 Medium | Login endpoint and activity log sync have no rate limiting. Brute-force / DoS is trivial. |
+| **No rate limiting** | 🟠 Medium | Login endpoint and all sync endpoints have no rate limiting. Brute-force / DoS is trivial. |
 | **Mock data dominance** | 🟠 Medium | ~90% of web pages use mock data, giving a false sense of completeness. |
 | **Default passwords** | 🟠 Medium | `AlphaAI@2024!` is the compiled-in default. Easy to forget to change. |
 | **No offline/retry strategy** | 🟢 Low | Client retries sync every cycle but has no exponential backoff or dedup. |
+| **activity_logs REMOVED** | 🟢 Low | `activity_logs` table (Postgres + SQLite) and all Go/C# code removed. Migration 006 drops the table with no rollback. The web comprehensive page now queries `app_sessions`. |
 | **Horizontal scaling** | 🟢 Low | Server uses Redis for employee secrets (short TTL), so scaling is straightforward — but DB queries have no query analysis. |
 
 ---

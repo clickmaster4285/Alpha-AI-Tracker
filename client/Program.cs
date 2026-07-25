@@ -91,27 +91,21 @@ builder.Services.AddSingleton<HttpClient>(sp =>
 // Installed App Detector (cross-platform)
 builder.Services.AddSingleton<IInstalledAppDetector, InstalledAppDetector>();
 
-// Platform-specific services
+// Platform-specific services (IShellCommandCollector removed per user request)
 if (OperatingSystem.IsWindows())
 {
     builder.Services.AddSingleton<IActivityCollector>(
         _ => new client.Platform.Windows.ProcessCollector(config.ClientId));
-    builder.Services.AddSingleton<IShellCommandCollector>(
-        _ => new client.Platform.Windows.ShellCommandCollector(config.ClientId));
 }
 else if (OperatingSystem.IsLinux())
 {
     builder.Services.AddSingleton<IActivityCollector>(
         _ => new client.Platform.Linux.ProcessCollector(config.ClientId));
-    builder.Services.AddSingleton<IShellCommandCollector>(
-        _ => new client.Platform.Linux.ShellCommandCollector(config.ClientId));
 }
 else if (OperatingSystem.IsMacOS())
 {
     builder.Services.AddSingleton<IActivityCollector>(
         _ => new client.Platform.MacOS.ProcessCollector(config.ClientId));
-    builder.Services.AddSingleton<IShellCommandCollector>(
-        _ => new client.Platform.MacOS.ShellCommandCollector(config.ClientId));
 }
 else
 {
