@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.RegularExpressions;
+using client.Core.Models;
 
 namespace client.Core;
 
@@ -15,6 +16,14 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
     private readonly List<string> _permInstructions = new();
     private bool _initialized;
     private readonly object _lock = new();
+
+    public IReadOnlyList<InstalledApplication> GetAllInstalledApplications()
+    {
+        EnsureInitialized();
+        return _installedApps.ToList();
+    }
+
+    private readonly List<InstalledApplication> _installedApps = new();
 
     public IReadOnlySet<string> KnownInstalledAppNames
     {
@@ -163,6 +172,36 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
         return false;
     }
 
+    private static InstalledApplication? AppFromDesktopFile(string filePath)
+    {
+        try
+        {
+            var lines = File.ReadAllLines(filePath);
+            string? name = null, exec = null;
+            foreach (var line in lines)
+            {
+                if (line.StartsWith("Name=", StringComparison.OrdinalIgnoreCase) && name == null)
+                    name = line["Name=".Length..].Trim();
+                if (line.StartsWith("Exec=", StringComparison.OrdinalIgnoreCase))
+                    exec = line["Exec=".Length..].Trim();
+            }
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                return new InstalledApplication
+                {
+                    AppName = name,
+                    InstallPath = exec ?? filePath,
+                    Publisher = "",
+                    AppVersion = "",
+                    ChangeType = "seen",
+                    DetectedAt = DateTime.UtcNow,
+                };
+            }
+        }
+        catch { }
+        return null;
+    }
+
     private void DetectInstalledWindows()
     {
         try
@@ -205,6 +244,7 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
             }
 
             // 3. Try to enumerate installed apps via registry (may require admin)
+            //    This provides the richest metadata (version, publisher, path, uninstall string)
             try
             {
                 using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
@@ -214,24 +254,29 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                     foreach (var subKeyName in key.GetSubKeyNames())
                     {
                         using var subKey = key.OpenSubKey(subKeyName);
-                        if (subKey?.GetValue("DisplayName") is string displayName &&
+                        if (subKey == null) continue;
+                        if (subKey.GetValue("DisplayName") is string displayName &&
                             !string.IsNullOrWhiteSpace(displayName))
                         {
                             _knownApps.Add(displayName);
+                            _installedApps.Add(new InstalledApplication
+                            {
+                                AppName = displayName,
+                                AppVersion = subKey.GetValue("DisplayVersion") as string ?? "",
+                                Publisher = subKey.GetValue("Publisher") as string ?? "",
+                                InstallPath = subKey.GetValue("InstallLocation") as string ?? "",
+                                UninstallString = subKey.GetValue("UninstallString") as string ?? "",
+                                ChangeType = "installed",
+                                DetectedAt = DateTime.UtcNow,
+                            });
                         }
                     }
                 }
             }
-            catch (UnauthorizedAccessException)
-            {
-                // Ignore, standard users can't read all keys but we can read what is accessible
-            }
+            catch (UnauthorizedAccessException) { }
             catch { }
         }
-        catch (UnauthorizedAccessException)
-        {
-            // Ignore, standard users can't read all start menu folders
-        }
+        catch (UnauthorizedAccessException) { }
         catch { }
     }
 
@@ -254,31 +299,22 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                 if (!Directory.Exists(desktopPath)) continue;
                 foreach (var file in Directory.GetFiles(desktopPath, "*.desktop"))
                 {
-                    try
+                    var app = AppFromDesktopFile(file);
+                    if (app != null)
                     {
-                        var lines = File.ReadAllLines(file);
-                        foreach (var line in lines)
-                        {
-                            if (line.StartsWith("Name=", StringComparison.OrdinalIgnoreCase))
-                            {
-                                var name = line["Name=".Length..].Trim();
-                                if (!string.IsNullOrWhiteSpace(name))
-                                    _knownApps.Add(name);
-                                break;
-                            }
-                        }
+                        _knownApps.Add(app.AppName);
+                        _installedApps.Add(app);
                     }
-                    catch { }
                 }
             }
 
-            // 2. Try dpkg for installed packages
+            // 2. Try dpkg for installed packages (name + version)
             try
             {
                 var psi = new ProcessStartInfo
                 {
                     FileName = "dpkg-query",
-                    Arguments = "-W -f=${Package}\\n",
+                    Arguments = "-W -f=${Package}\t${Version}\t${Maintainer}\n",
                     RedirectStandardOutput = true,
                     UseShellExecute = false,
                     CreateNoWindow = true
@@ -290,9 +326,24 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                     proc.WaitForExit(3000);
                     foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
                     {
-                        var pkg = line.Trim();
-                        if (!string.IsNullOrWhiteSpace(pkg))
-                            _knownApps.Add(pkg);
+                        var parts = line.Split('\t');
+                        if (parts.Length >= 1)
+                        {
+                            var pkg = parts[0].Trim();
+                            if (!string.IsNullOrWhiteSpace(pkg))
+                                _knownApps.Add(pkg);
+                            if (parts.Length >= 2)
+                            {
+                                _installedApps.Add(new InstalledApplication
+                                {
+                                    AppName = pkg,
+                                    AppVersion = parts[1].Trim(),
+                                    Publisher = parts.Length >= 3 ? parts[2].Trim() : "",
+                                    ChangeType = "installed",
+                                    DetectedAt = DateTime.UtcNow,
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -300,18 +351,16 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
             {
                 _missingPerms.Add("dpkg_query");
                 _permInstructions.Add(
-                    "Run: sudo dpkg-query -W -f='${Package}\\n' to enumerate installed packages.\n" +
+                    "Run: sudo dpkg-query -W -f='${Package}\t${Version}\n' to enumerate installed packages.\n" +
                     "Or grant the application permission: sudo setcap CAP_DAC_READ_SEARCH+ep $(readlink -f /proc/$(pidof AlphaAITracker)/exe)");
             }
             catch (InvalidOperationException)
             {
-                // dpkg not available on this system (e.g., Fedora, Arch)
-                // This is not a permission issue — silently skip
                 Debug.WriteLine("dpkg-query not found — non-Debian system, skipping dpkg detection");
             }
             catch { }
 
-            // 3. Try snap list
+            // 3. Try snap list (name + version)
             try
             {
                 var psi = new ProcessStartInfo
@@ -331,7 +380,16 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                     {
                         var parts = line.Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
                         if (parts.Length >= 1 && !parts[0].Equals("Name", StringComparison.OrdinalIgnoreCase))
+                        {
                             _knownApps.Add(parts[0]);
+                            _installedApps.Add(new InstalledApplication
+                            {
+                                AppName = parts[0],
+                                AppVersion = parts.Length >= 2 ? parts[1] : "",
+                                ChangeType = "installed",
+                                DetectedAt = DateTime.UtcNow,
+                            });
+                        }
                     }
                 }
             }
@@ -355,7 +413,16 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                 {
                     var name = Path.GetFileNameWithoutExtension(app);
                     if (!string.IsNullOrWhiteSpace(name))
+                    {
                         _knownApps.Add(name);
+                        _installedApps.Add(new InstalledApplication
+                        {
+                            AppName = name,
+                            InstallPath = app,
+                            ChangeType = "installed",
+                            DetectedAt = DateTime.UtcNow,
+                        });
+                    }
                 }
             }
 
@@ -368,7 +435,16 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                 {
                     var name = Path.GetFileNameWithoutExtension(app);
                     if (!string.IsNullOrWhiteSpace(name))
+                    {
                         _knownApps.Add(name);
+                        _installedApps.Add(new InstalledApplication
+                        {
+                            AppName = name,
+                            InstallPath = app,
+                            ChangeType = "installed",
+                            DetectedAt = DateTime.UtcNow,
+                        });
+                    }
                 }
             }
 
@@ -392,7 +468,15 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                     {
                         var pkg = line.Trim();
                         if (!string.IsNullOrWhiteSpace(pkg))
+                        {
                             _knownApps.Add(pkg);
+                            _installedApps.Add(new InstalledApplication
+                            {
+                                AppName = pkg,
+                                ChangeType = "installed",
+                                DetectedAt = DateTime.UtcNow,
+                            });
+                        }
                     }
                 }
             }

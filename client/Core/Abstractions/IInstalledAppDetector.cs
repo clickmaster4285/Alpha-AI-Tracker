@@ -1,3 +1,5 @@
+using client.Core.Models;
+
 namespace client.Core.Abstractions;
 
 /// <summary>
@@ -16,6 +18,12 @@ public interface IInstalledAppDetector
     /// Returns a list of known installed application names for fast pre-filtering.
     /// </summary>
     IReadOnlySet<string> KnownInstalledAppNames { get; }
+
+    /// <summary>
+    /// Returns full InstalledApplication objects with metadata (version, publisher, path, etc.)
+    /// from the actual installed application database/registry, NOT from running processes.
+    /// </summary>
+    IReadOnlyList<InstalledApplication> GetAllInstalledApplications();
 
     /// <summary>
     /// Returns a description of what permissions are currently missing

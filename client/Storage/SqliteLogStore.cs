@@ -15,12 +15,6 @@ public class SqliteLogStore : ILogStore, IDisposable
     {
         _dbPath = dbPath;
         var cs = $"Data Source={dbPath};Mode=ReadWriteCreate;Cache=Shared";
-
-        // Encryption (e.g. sqlcipher) not supported with default e_sqlite3.
-        // To enable, replace SQLitePCLRaw.provider.e_sqlite3 with
-        // SQLitePCLRaw.provider.e_sqlcipher and uncomment:
-        // if (!string.IsNullOrEmpty(encryptionKey)) cs += $";Password={encryptionKey}";
-
         _connectionString = cs;
     }
 
@@ -40,121 +34,427 @@ public class SqliteLogStore : ILogStore, IDisposable
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    public async Task StoreAsync(IReadOnlyList<ActivityLog> logs, CancellationToken ct)
+    // ────────────────────────────────────────
+    // Device Hardware Info
+    // ────────────────────────────────────────
+
+    public async Task StoreDeviceHardwareInfoAsync(IReadOnlyList<DeviceHardwareInfo> entries, CancellationToken ct)
     {
-        if (_connection == null || logs.Count == 0) return;
-
+        if (_connection == null || entries.Count == 0) return;
         var cmd = _connection.CreateCommand();
-        cmd.CommandText = DatabaseSchema.InsertSql;
-
-        var idParam = cmd.Parameters.Add("$id", SqliteType.Text);
-        var machineIdParam = cmd.Parameters.Add("$machine_id", SqliteType.Text);
-        var timestampParam = cmd.Parameters.Add("$timestamp", SqliteType.Text);
-        var processNameParam = cmd.Parameters.Add("$process_name", SqliteType.Text);
-        var windowTitleParam = cmd.Parameters.Add("$window_title", SqliteType.Text);
-        var processIdParam = cmd.Parameters.Add("$process_id", SqliteType.Integer);
-        var cpuParam = cmd.Parameters.Add("$cpu_percent", SqliteType.Real);
-        var memoryBytesParam = cmd.Parameters.Add("$memory_bytes", SqliteType.Integer);
-        var isForegroundParam = cmd.Parameters.Add("$is_foreground", SqliteType.Integer);
-        var userNameParam = cmd.Parameters.Add("$user_name", SqliteType.Text);
-        var platformParam = cmd.Parameters.Add("$platform", SqliteType.Text);
-        var sessionIdParam = cmd.Parameters.Add("$session_id", SqliteType.Text);
-        var employeeIdParam = cmd.Parameters.Add("$employee_id", SqliteType.Text);
-        var employeeNameParam = cmd.Parameters.Add("$employee_name", SqliteType.Text);
+        cmd.CommandText = DatabaseSchema.InsertDeviceHardwareInfoSql;
+        var pId = cmd.Parameters.Add("$id", SqliteType.Text);
+        var pMac = cmd.Parameters.Add("$mac_address", SqliteType.Text);
+        var pHost = cmd.Parameters.Add("$hostname", SqliteType.Text);
+        var pOsName = cmd.Parameters.Add("$os_name", SqliteType.Text);
+        var pOsVer = cmd.Parameters.Add("$os_version", SqliteType.Text);
+        var pCpuModel = cmd.Parameters.Add("$cpu_model", SqliteType.Text);
+        var pCpuCores = cmd.Parameters.Add("$cpu_cores", SqliteType.Integer);
+        var pRamMb = cmd.Parameters.Add("$ram_total_mb", SqliteType.Integer);
+        var pGpuModel = cmd.Parameters.Add("$gpu_model", SqliteType.Text);
+        var pGpuVram = cmd.Parameters.Add("$gpu_vram_mb", SqliteType.Integer);
+        var pCollectedAt = cmd.Parameters.Add("$collected_at", SqliteType.Text);
 
         await using var tx = await _connection.BeginTransactionAsync(ct);
         ((DbCommand)cmd).Transaction = tx;
-
-        foreach (var log in logs)
+        foreach (var e in entries)
         {
-            idParam.Value = log.Id;
-            machineIdParam.Value = log.MachineId;
-            timestampParam.Value = log.Timestamp.ToString("O");
-            processNameParam.Value = log.ProcessName;
-            windowTitleParam.Value = (object?)log.WindowTitle ?? DBNull.Value;
-            processIdParam.Value = log.ProcessId;
-            cpuParam.Value = log.CpuPercent;
-            memoryBytesParam.Value = log.MemoryBytes;
-            isForegroundParam.Value = log.IsForeground ? 1 : 0;
-            userNameParam.Value = log.UserName;
-            platformParam.Value = log.Platform;
-            sessionIdParam.Value = (object?)log.SessionId ?? DBNull.Value;
-            employeeIdParam.Value = (object?)log.EmployeeId ?? DBNull.Value;
-            employeeNameParam.Value = (object?)log.EmployeeName ?? DBNull.Value;
-
+            pId.Value = e.Id;
+            pMac.Value = e.MacAddress;
+            pHost.Value = e.Hostname;
+            pOsName.Value = e.OsName;
+            pOsVer.Value = e.OsVersion;
+            pCpuModel.Value = e.CpuModel;
+            pCpuCores.Value = e.CpuCores;
+            pRamMb.Value = e.RamTotalMb;
+            pGpuModel.Value = e.GpuModel;
+            pGpuVram.Value = e.GpuVramMb;
+            pCollectedAt.Value = e.CollectedAt.ToString("O");
             await cmd.ExecuteNonQueryAsync(ct);
         }
-
         await tx.CommitAsync(ct);
     }
 
-    public async Task<IReadOnlyList<ActivityLog>> GetUnsentAsync(int limit, CancellationToken ct)
+    public async Task<IReadOnlyList<DeviceHardwareInfo>> GetUnsentDeviceHardwareInfoAsync(int limit, CancellationToken ct)
     {
-        if (_connection == null) return Array.Empty<ActivityLog>();
-
+        if (_connection == null) return Array.Empty<DeviceHardwareInfo>();
         var cmd = _connection.CreateCommand();
-        cmd.CommandText = "SELECT * FROM activity_logs WHERE synced_at IS NULL ORDER BY timestamp ASC LIMIT $limit";
+        cmd.CommandText = "SELECT * FROM device_hardware_info WHERE is_synced = 0 ORDER BY collected_at ASC LIMIT $limit";
         cmd.Parameters.AddWithValue("$limit", limit);
-
-        var logs = new List<ActivityLog>();
+        var results = new List<DeviceHardwareInfo>();
         await using var reader = await cmd.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct))
-        {
-            logs.Add(MapReader(reader));
-        }
-
-        return logs;
+        while (await reader.ReadAsync(ct)) results.Add(MapDeviceHardwareReader(reader));
+        return results;
     }
 
-    public async Task MarkSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    public async Task MarkDeviceHardwareInfoSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
         if (_connection == null || ids.Count == 0) return;
-
         await using var tx = await _connection.BeginTransactionAsync(ct);
         var cmd = _connection.CreateCommand();
-        cmd.CommandText = "UPDATE activity_logs SET synced_at = datetime('now') WHERE id = $id";
-
-        var param = cmd.Parameters.Add("$id", SqliteType.Text);
-        foreach (var id in ids)
-        {
-            param.Value = id;
-            await cmd.ExecuteNonQueryAsync(ct);
-        }
-
+        cmd.CommandText = "UPDATE device_hardware_info SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
+        var p = cmd.Parameters.Add("$id", SqliteType.Text);
+        foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
         await tx.CommitAsync(ct);
     }
 
-    public async Task<long> GetCountAsync(CancellationToken ct)
-    {
-        if (_connection == null) return 0;
+    // ────────────────────────────────────────
+    // Installed Applications
+    // ────────────────────────────────────────
 
+    public async Task StoreInstalledApplicationsAsync(IReadOnlyList<InstalledApplication> entries, CancellationToken ct)
+    {
+        if (_connection == null || entries.Count == 0) return;
         var cmd = _connection.CreateCommand();
-        cmd.CommandText = "SELECT COUNT(*) FROM activity_logs";
-        var result = await cmd.ExecuteScalarAsync(ct);
-        return result is long l ? l : 0;
+        cmd.CommandText = DatabaseSchema.InsertInstalledApplicationSql;
+        var pId = cmd.Parameters.Add("$id", SqliteType.Text);
+        var pName = cmd.Parameters.Add("$app_name", SqliteType.Text);
+        var pVer = cmd.Parameters.Add("$app_version", SqliteType.Text);
+        var pPub = cmd.Parameters.Add("$publisher", SqliteType.Text);
+        var pPath = cmd.Parameters.Add("$install_path", SqliteType.Text);
+        var pDate = cmd.Parameters.Add("$install_date", SqliteType.Text);
+        var pUninst = cmd.Parameters.Add("$uninstall_string", SqliteType.Text);
+        var pChange = cmd.Parameters.Add("$change_type", SqliteType.Text);
+        var pDetected = cmd.Parameters.Add("$detected_at", SqliteType.Text);
+
+        await using var tx = await _connection.BeginTransactionAsync(ct);
+        ((DbCommand)cmd).Transaction = tx;
+        foreach (var e in entries)
+        {
+            pId.Value = e.Id;
+            pName.Value = e.AppName;
+            pVer.Value = e.AppVersion;
+            pPub.Value = e.Publisher;
+            pPath.Value = e.InstallPath;
+            pDate.Value = (object?)e.InstallDate?.ToString("O") ?? DBNull.Value;
+            pUninst.Value = e.UninstallString;
+            pChange.Value = e.ChangeType;
+            pDetected.Value = e.DetectedAt.ToString("O");
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        await tx.CommitAsync(ct);
     }
 
-    public async Task CleanupAsync(TimeSpan olderThan, CancellationToken ct)
+    public async Task<IReadOnlyList<InstalledApplication>> GetUnsentInstalledApplicationsAsync(int limit, CancellationToken ct)
     {
-        if (_connection == null) return;
-
-        var cutoff = DateTime.UtcNow - olderThan;
+        if (_connection == null) return Array.Empty<InstalledApplication>();
         var cmd = _connection.CreateCommand();
-        cmd.CommandText = "DELETE FROM activity_logs WHERE timestamp < $cutoff";
-        cmd.Parameters.AddWithValue("$cutoff", cutoff.ToString("O"));
-        await cmd.ExecuteNonQueryAsync(ct);
+        cmd.CommandText = "SELECT * FROM installed_applications WHERE is_synced = 0 ORDER BY detected_at ASC LIMIT $limit";
+        cmd.Parameters.AddWithValue("$limit", limit);
+        var results = new List<InstalledApplication>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct)) results.Add(MapInstalledAppReader(reader));
+        return results;
     }
 
-    public async Task CleanupSyncedAsync(TimeSpan olderThan, CancellationToken ct)
+    public async Task MarkInstalledApplicationsSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
-        if (_connection == null) return;
-
-        var cutoff = DateTime.UtcNow - olderThan;
+        if (_connection == null || ids.Count == 0) return;
+        await using var tx = await _connection.BeginTransactionAsync(ct);
         var cmd = _connection.CreateCommand();
-        cmd.CommandText = "DELETE FROM activity_logs WHERE synced_at IS NOT NULL AND timestamp < $cutoff";
-        cmd.Parameters.AddWithValue("$cutoff", cutoff.ToString("O"));
-        var deleted = await cmd.ExecuteNonQueryAsync(ct);
+        cmd.CommandText = "UPDATE installed_applications SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
+        var p = cmd.Parameters.Add("$id", SqliteType.Text);
+        foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
+        await tx.CommitAsync(ct);
     }
+
+    // ────────────────────────────────────────
+    // Network Info
+    // ────────────────────────────────────────
+
+    public async Task StoreNetworkInfoAsync(IReadOnlyList<NetworkInfo> entries, CancellationToken ct)
+    {
+        if (_connection == null || entries.Count == 0) return;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = DatabaseSchema.InsertNetworkInfoSql;
+        var pId = cmd.Parameters.Add("$id", SqliteType.Text);
+        var pPubIp = cmd.Parameters.Add("$public_ip", SqliteType.Text);
+        var pPrivIp = cmd.Parameters.Add("$private_ip", SqliteType.Text);
+        var pIfName = cmd.Parameters.Add("$network_interface_name", SqliteType.Text);
+        var pCollected = cmd.Parameters.Add("$collected_at", SqliteType.Text);
+
+        await using var tx = await _connection.BeginTransactionAsync(ct);
+        ((DbCommand)cmd).Transaction = tx;
+        foreach (var e in entries)
+        {
+            pId.Value = e.Id;
+            pPubIp.Value = e.PublicIp;
+            pPrivIp.Value = e.PrivateIp;
+            pIfName.Value = e.NetworkInterfaceName;
+            pCollected.Value = e.CollectedAt.ToString("O");
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        await tx.CommitAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<NetworkInfo>> GetUnsentNetworkInfoAsync(int limit, CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<NetworkInfo>();
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT * FROM network_info WHERE is_synced = 0 ORDER BY collected_at ASC LIMIT $limit";
+        cmd.Parameters.AddWithValue("$limit", limit);
+        var results = new List<NetworkInfo>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct)) results.Add(MapNetworkInfoReader(reader));
+        return results;
+    }
+
+    public async Task MarkNetworkInfoSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        if (_connection == null || ids.Count == 0) return;
+        await using var tx = await _connection.BeginTransactionAsync(ct);
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "UPDATE network_info SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
+        var p = cmd.Parameters.Add("$id", SqliteType.Text);
+        foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
+        await tx.CommitAsync(ct);
+    }
+
+    public async Task<NetworkInfo?> GetLastNetworkInfoAsync(CancellationToken ct)
+    {
+        if (_connection == null) return null;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = DatabaseSchema.GetLastNetworkInfoSql;
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (await reader.ReadAsync(ct))
+        {
+            return new NetworkInfo
+            {
+                Id = reader.GetString(reader.GetOrdinal("id")),
+                PublicIp = reader.GetString(reader.GetOrdinal("public_ip")),
+                PrivateIp = reader.GetString(reader.GetOrdinal("private_ip")),
+                NetworkInterfaceName = reader.GetString(reader.GetOrdinal("network_interface_name")),
+                CollectedAt = DateTime.Parse(reader.GetString(reader.GetOrdinal("collected_at"))),
+            };
+        }
+        return null;
+    }
+
+    // ────────────────────────────────────────
+    // Session Events
+    // ────────────────────────────────────────
+
+    public async Task StoreSessionEventsAsync(IReadOnlyList<SessionEvent> entries, CancellationToken ct)
+    {
+        if (_connection == null || entries.Count == 0) return;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = DatabaseSchema.InsertSessionEventSql;
+        var pId = cmd.Parameters.Add("$id", SqliteType.Text);
+        var pType = cmd.Parameters.Add("$event_type", SqliteType.Text);
+        var pUser = cmd.Parameters.Add("$os_username", SqliteType.Text);
+        var pEventAt = cmd.Parameters.Add("$event_at", SqliteType.Text);
+
+        await using var tx = await _connection.BeginTransactionAsync(ct);
+        ((DbCommand)cmd).Transaction = tx;
+        foreach (var e in entries)
+        {
+            pId.Value = e.Id;
+            pType.Value = e.EventType;
+            pUser.Value = e.OsUsername;
+            pEventAt.Value = e.EventAt.ToString("O");
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        await tx.CommitAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<SessionEvent>> GetUnsentSessionEventsAsync(int limit, CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<SessionEvent>();
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT * FROM session_events WHERE is_synced = 0 ORDER BY event_at ASC LIMIT $limit";
+        cmd.Parameters.AddWithValue("$limit", limit);
+        var results = new List<SessionEvent>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct)) results.Add(MapSessionEventReader(reader));
+        return results;
+    }
+
+    public async Task MarkSessionEventsSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        if (_connection == null || ids.Count == 0) return;
+        await using var tx = await _connection.BeginTransactionAsync(ct);
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "UPDATE session_events SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
+        var p = cmd.Parameters.Add("$id", SqliteType.Text);
+        foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
+        await tx.CommitAsync(ct);
+    }
+
+    // ────────────────────────────────────────
+    // App Sessions
+    // ────────────────────────────────────────
+
+    public async Task StoreAppSessionsAsync(IReadOnlyList<AppSession> entries, CancellationToken ct)
+    {
+        if (_connection == null || entries.Count == 0) return;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = DatabaseSchema.InsertAppSessionSql;
+        var pId = cmd.Parameters.Add("$id", SqliteType.Text);
+        var pProc = cmd.Parameters.Add("$process_name", SqliteType.Text);
+        var pDisp = cmd.Parameters.Add("$app_display_name", SqliteType.Text);
+        var pStart = cmd.Parameters.Add("$started_at", SqliteType.Text);
+        var pEnd = cmd.Parameters.Add("$ended_at", SqliteType.Text);
+        var pMac = cmd.Parameters.Add("$machine_id", SqliteType.Text);
+        var pEmpId = cmd.Parameters.Add("$employee_id", SqliteType.Text);
+        var pEmpName = cmd.Parameters.Add("$employee_name", SqliteType.Text);
+        var pSessId = cmd.Parameters.Add("$session_id", SqliteType.Text);
+        var pPlat = cmd.Parameters.Add("$platform", SqliteType.Text);
+
+        await using var tx = await _connection.BeginTransactionAsync(ct);
+        ((DbCommand)cmd).Transaction = tx;
+        foreach (var e in entries)
+        {
+            pId.Value = e.Id;
+            pProc.Value = e.ProcessName;
+            pDisp.Value = e.AppDisplayName;
+            pStart.Value = e.StartedAt.ToString("O");
+            pEnd.Value = e.EndedAt?.ToString("O") ?? (object)DBNull.Value;
+            pMac.Value = e.MachineId;
+            pEmpId.Value = (object?)e.EmployeeId ?? DBNull.Value;
+            pEmpName.Value = (object?)e.EmployeeName ?? DBNull.Value;
+            pSessId.Value = e.SessionId;
+            pPlat.Value = e.Platform;
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        await tx.CommitAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<AppSession>> GetUnsentAppSessionsAsync(int limit, CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<AppSession>();
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT * FROM app_sessions WHERE is_synced = 0 ORDER BY started_at ASC LIMIT $limit";
+        cmd.Parameters.AddWithValue("$limit", limit);
+        var results = new List<AppSession>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct)) results.Add(MapAppSessionReader(reader));
+        return results;
+    }
+
+    public async Task MarkAppSessionsSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        if (_connection == null || ids.Count == 0) return;
+        await using var tx = await _connection.BeginTransactionAsync(ct);
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "UPDATE app_sessions SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
+        var p = cmd.Parameters.Add("$id", SqliteType.Text);
+        foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
+        await tx.CommitAsync(ct);
+    }
+
+    // ────────────────────────────────────────
+    // App Items (generic child of app_sessions)
+    // ────────────────────────────────────────
+
+    public async Task StoreAppItemsAsync(IReadOnlyList<AppItem> entries, CancellationToken ct)
+    {
+        if (_connection == null || entries.Count == 0) return;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = DatabaseSchema.InsertAppItemSql;
+        var pId = cmd.Parameters.Add("$id", SqliteType.Text);
+        var pAppSess = cmd.Parameters.Add("$app_session_id", SqliteType.Text);
+        var pParent = cmd.Parameters.Add("$parent_item_id", SqliteType.Text);
+        var pType = cmd.Parameters.Add("$item_type", SqliteType.Text);
+        var pTitle = cmd.Parameters.Add("$title", SqliteType.Text);
+        var pIdent = cmd.Parameters.Add("$identifier", SqliteType.Text);
+        var pOpened = cmd.Parameters.Add("$opened_at", SqliteType.Text);
+        var pClosed = cmd.Parameters.Add("$closed_at", SqliteType.Text);
+
+        await using var tx = await _connection.BeginTransactionAsync(ct);
+        ((DbCommand)cmd).Transaction = tx;
+        foreach (var e in entries)
+        {
+            pId.Value = e.Id;
+            pAppSess.Value = e.AppSessionId;
+            pParent.Value = (object?)e.ParentItemId ?? DBNull.Value;
+            pType.Value = e.ItemType;
+            pTitle.Value = e.Title;
+            pIdent.Value = e.Identifier;
+            pOpened.Value = e.OpenedAt.ToString("O");
+            pClosed.Value = e.ClosedAt?.ToString("O") ?? (object)DBNull.Value;
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        await tx.CommitAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<AppItem>> GetUnsentAppItemsAsync(int limit, CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<AppItem>();
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT * FROM app_items WHERE is_synced = 0 ORDER BY opened_at ASC LIMIT $limit";
+        cmd.Parameters.AddWithValue("$limit", limit);
+        var results = new List<AppItem>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct)) results.Add(MapAppItemReader(reader));
+        return results;
+    }
+
+    public async Task MarkAppItemsSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        if (_connection == null || ids.Count == 0) return;
+        await using var tx = await _connection.BeginTransactionAsync(ct);
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "UPDATE app_items SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
+        var p = cmd.Parameters.Add("$id", SqliteType.Text);
+        foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
+        await tx.CommitAsync(ct);
+    }
+
+    // ────────────────────────────────────────
+    // Storage Devices (relational child of device_hardware_info)
+    // ────────────────────────────────────────
+
+    public async Task StoreStorageDevicesAsync(IReadOnlyList<StorageDevice> entries, CancellationToken ct)
+    {
+        if (_connection == null || entries.Count == 0) return;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = DatabaseSchema.InsertStorageDeviceSql;
+        var pId = cmd.Parameters.Add("$id", SqliteType.Text);
+        var pHwId = cmd.Parameters.Add("$device_hardware_id", SqliteType.Text);
+        var pType = cmd.Parameters.Add("$device_type", SqliteType.Text);
+        var pModel = cmd.Parameters.Add("$model", SqliteType.Text);
+        var pCap = cmd.Parameters.Add("$capacity_mb", SqliteType.Integer);
+
+        await using var tx = await _connection.BeginTransactionAsync(ct);
+        ((DbCommand)cmd).Transaction = tx;
+        foreach (var e in entries)
+        {
+            pId.Value = e.Id;
+            pHwId.Value = e.DeviceHardwareId;
+            pType.Value = e.DeviceType;
+            pModel.Value = e.Model;
+            pCap.Value = e.CapacityMb;
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        await tx.CommitAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<StorageDevice>> GetUnsentStorageDevicesAsync(int limit, CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<StorageDevice>();
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT * FROM storage_devices WHERE is_synced = 0 ORDER BY created_at ASC LIMIT $limit";
+        cmd.Parameters.AddWithValue("$limit", limit);
+        var results = new List<StorageDevice>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct)) results.Add(MapStorageDeviceReader(reader));
+        return results;
+    }
+
+    public async Task MarkStorageDevicesSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        if (_connection == null || ids.Count == 0) return;
+        await using var tx = await _connection.BeginTransactionAsync(ct);
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "UPDATE storage_devices SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
+        var p = cmd.Parameters.Add("$id", SqliteType.Text);
+        foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
+        await tx.CommitAsync(ct);
+    }
+
+    // ────────────────────────────────────────
+    // Status & Employee Info
+    // ────────────────────────────────────────
 
     public async Task SetStatusAsync(string key, string value, CancellationToken ct)
     {
@@ -180,6 +480,11 @@ public class SqliteLogStore : ILogStore, IDisposable
     {
         if (_connection == null) return;
 
+        // Dedup: clean up old entries older than 24 hours to prevent unbounded growth
+        var cleanupCmd = _connection.CreateCommand();
+        cleanupCmd.CommandText = "DELETE FROM permission_status WHERE checked_at < strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now', '-1 day')";
+        _ = await cleanupCmd.ExecuteNonQueryAsync(ct);
+
         await using var tx = await _connection.BeginTransactionAsync(ct);
         var cmd = _connection.CreateCommand();
         cmd.CommandText = DatabaseSchema.InsertPermissionSql;
@@ -190,7 +495,6 @@ public class SqliteLogStore : ILogStore, IDisposable
         if (OperatingSystem.IsWindows()) platform = "Windows";
         else if (OperatingSystem.IsMacOS()) platform = "macOS";
 
-        // Get current employee info
         var empInfo = await GetEmployeeInfoAsync(ct);
         var empId = empInfo?.EmployeeId;
         var empName = empInfo?.Name;
@@ -219,15 +523,10 @@ public class SqliteLogStore : ILogStore, IDisposable
         await SetStatusAsync("last_permission_check", DateTime.UtcNow.ToString("O"), ct);
     }
 
-    // ────────────────────────────────
-    // Employee Info
-    // ────────────────────────────────
-
     public async Task SaveEmployeeInfoAsync(EmployeeInfo employee, CancellationToken ct)
     {
         if (_connection == null) return;
 
-        // Clear old info first (only one employee at a time)
         var clearCmd = _connection.CreateCommand();
         clearCmd.CommandText = "DELETE FROM employee_info";
         await clearCmd.ExecuteNonQueryAsync(ct);
@@ -235,7 +534,7 @@ public class SqliteLogStore : ILogStore, IDisposable
         var cmd = _connection.CreateCommand();
         cmd.CommandText = @"
             INSERT INTO employee_info (id, employee_id, name, email, role, department, shift, avatar, avatar_color, token, logged_in_at)
-            VALUES ($id, $employee_id, $name, $email, $role, $department, $shift, $avatar, $avatar_color, $token, datetime('now'))
+            VALUES ($id, $employee_id, $name, $email, $role, $department, $shift, $avatar, $avatar_color, $token, strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
         ";
         cmd.Parameters.AddWithValue("$id", employee.Id);
         cmd.Parameters.AddWithValue("$employee_id", employee.EmployeeId);
@@ -249,7 +548,6 @@ public class SqliteLogStore : ILogStore, IDisposable
         cmd.Parameters.AddWithValue("$token", (object?)employee.Token ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
 
-        // Also set in app_status for quick access
         await SetStatusAsync("employee_id", employee.EmployeeId, ct);
         await SetStatusAsync("employee_name", employee.Name, ct);
         await SetStatusAsync("is_logged_in", "true", ct);
@@ -303,163 +601,127 @@ public class SqliteLogStore : ILogStore, IDisposable
         _connection?.Dispose();
     }
 
-    // ────────────────────────────────
-    // Shell Commands
-    // ────────────────────────────────
+    // ────────────────────────────────────────
+    // Readers
+    // ────────────────────────────────────────
 
-    public async Task StoreShellCommandsAsync(IReadOnlyList<ShellCommand> commands, CancellationToken ct)
+    private static DeviceHardwareInfo MapDeviceHardwareReader(SqliteDataReader r)
     {
-        if (_connection == null || commands.Count == 0) return;
-
-        var cmd = _connection.CreateCommand();
-        cmd.CommandText = DatabaseSchema.InsertShellCommandSql;
-
-        var idParam = cmd.Parameters.Add("$id", SqliteType.Text);
-        var machineIdParam = cmd.Parameters.Add("$machine_id", SqliteType.Text);
-        var timestampParam = cmd.Parameters.Add("$timestamp", SqliteType.Text);
-        var shellNameParam = cmd.Parameters.Add("$shell_name", SqliteType.Text);
-        var shellPidParam = cmd.Parameters.Add("$shell_pid", SqliteType.Text);
-        var commandParam = cmd.Parameters.Add("$command", SqliteType.Text);
-        var workDirParam = cmd.Parameters.Add("$working_directory", SqliteType.Text);
-        var exitCodeParam = cmd.Parameters.Add("$exit_code", SqliteType.Text);
-        var userNameParam = cmd.Parameters.Add("$user_name", SqliteType.Text);
-        var platformParam = cmd.Parameters.Add("$platform", SqliteType.Text);
-        var sessionIdParam = cmd.Parameters.Add("$session_id", SqliteType.Text);
-        var employeeIdParam = cmd.Parameters.Add("$employee_id", SqliteType.Text);
-        var employeeNameParam = cmd.Parameters.Add("$employee_name", SqliteType.Text);
-
-        await using var tx = await _connection.BeginTransactionAsync(ct);
-        ((System.Data.Common.DbCommand)cmd).Transaction = tx;
-
-        foreach (var sc in commands)
+        return new DeviceHardwareInfo
         {
-            idParam.Value = sc.Id;
-            machineIdParam.Value = sc.MachineId;
-            timestampParam.Value = sc.Timestamp.ToString("O");
-            shellNameParam.Value = sc.ShellName;
-            shellPidParam.Value = (object?)sc.ShellPid ?? DBNull.Value;
-            commandParam.Value = sc.Command;
-            workDirParam.Value = (object?)sc.WorkingDirectory ?? DBNull.Value;
-            exitCodeParam.Value = (object?)sc.ExitCode ?? DBNull.Value;
-            userNameParam.Value = sc.UserName;
-            platformParam.Value = sc.Platform;
-            sessionIdParam.Value = (object?)sc.SessionId ?? DBNull.Value;
-            employeeIdParam.Value = (object?)sc.EmployeeId ?? DBNull.Value;
-            employeeNameParam.Value = (object?)sc.EmployeeName ?? DBNull.Value;
-
-            await cmd.ExecuteNonQueryAsync(ct);
-        }
-
-        await tx.CommitAsync(ct);
-    }
-
-    public async Task<IReadOnlyList<ShellCommand>> GetUnsentShellCommandsAsync(int limit, CancellationToken ct)
-    {
-        if (_connection == null) return Array.Empty<ShellCommand>();
-
-        var cmd = _connection.CreateCommand();
-        cmd.CommandText = "SELECT * FROM shell_commands WHERE synced_at IS NULL ORDER BY timestamp ASC LIMIT $limit";
-        cmd.Parameters.AddWithValue("$limit", limit);
-
-        var commands = new List<ShellCommand>();
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct))
-        {
-            commands.Add(MapShellReader(reader));
-        }
-
-        return commands;
-    }
-
-    public async Task MarkShellCommandsSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
-    {
-        if (_connection == null || ids.Count == 0) return;
-
-        await using var tx = await _connection.BeginTransactionAsync(ct);
-        var cmd = _connection.CreateCommand();
-        cmd.CommandText = "UPDATE shell_commands SET synced_at = datetime('now') WHERE id = $id";
-
-        var param = cmd.Parameters.Add("$id", SqliteType.Text);
-        foreach (var id in ids)
-        {
-            param.Value = id;
-            await cmd.ExecuteNonQueryAsync(ct);
-        }
-
-        await tx.CommitAsync(ct);
-    }
-
-    public async Task CleanupShellCommandsSyncedAsync(TimeSpan olderThan, CancellationToken ct)
-    {
-        if (_connection == null) return;
-
-        var cutoff = DateTime.UtcNow - olderThan;
-        var cmd = _connection.CreateCommand();
-        cmd.CommandText = "DELETE FROM shell_commands WHERE synced_at IS NOT NULL AND timestamp < $cutoff";
-        cmd.Parameters.AddWithValue("$cutoff", cutoff.ToString("O"));
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
-    public async Task<long> GetShellCommandCountAsync(CancellationToken ct)
-    {
-        if (_connection == null) return 0;
-
-        var cmd = _connection.CreateCommand();
-        cmd.CommandText = "SELECT COUNT(*) FROM shell_commands";
-        var result = await cmd.ExecuteScalarAsync(ct);
-        return result is long l ? l : 0;
-    }
-
-    private static ActivityLog MapReader(SqliteDataReader reader)
-    {
-        return new ActivityLog
-        {
-            Id = reader.GetString(reader.GetOrdinal("id")),
-            MachineId = reader.GetString(reader.GetOrdinal("machine_id")),
-            Timestamp = DateTime.Parse(reader.GetString(reader.GetOrdinal("timestamp"))),
-            ProcessName = reader.GetString(reader.GetOrdinal("process_name")),
-            WindowTitle = reader.IsDBNull(reader.GetOrdinal("window_title"))
-                ? null : reader.GetString(reader.GetOrdinal("window_title")),
-            ProcessId = reader.GetInt32(reader.GetOrdinal("process_id")),
-            CpuPercent = reader.GetDouble(reader.GetOrdinal("cpu_percent")),
-            MemoryBytes = reader.GetInt64(reader.GetOrdinal("memory_bytes")),
-            IsForeground = reader.GetInt32(reader.GetOrdinal("is_foreground")) == 1,
-            UserName = reader.IsDBNull(reader.GetOrdinal("user_name"))
-                ? string.Empty : reader.GetString(reader.GetOrdinal("user_name")),
-            Platform = reader.GetString(reader.GetOrdinal("platform")),
-            SessionId = reader.IsDBNull(reader.GetOrdinal("session_id"))
-                ? null : reader.GetString(reader.GetOrdinal("session_id")),
-            EmployeeId = reader.IsDBNull(reader.GetOrdinal("employee_id"))
-                ? null : reader.GetString(reader.GetOrdinal("employee_id")),
-            EmployeeName = reader.IsDBNull(reader.GetOrdinal("employee_name"))
-                ? null : reader.GetString(reader.GetOrdinal("employee_name"))
+            Id = r.GetString(r.GetOrdinal("id")),
+            MacAddress = r.GetString(r.GetOrdinal("mac_address")),
+            Hostname = r.GetString(r.GetOrdinal("hostname")),
+            OsName = r.GetString(r.GetOrdinal("os_name")),
+            OsVersion = r.GetString(r.GetOrdinal("os_version")),
+            CpuModel = r.GetString(r.GetOrdinal("cpu_model")),
+            CpuCores = r.GetInt32(r.GetOrdinal("cpu_cores")),
+            RamTotalMb = r.GetInt64(r.GetOrdinal("ram_total_mb")),
+            GpuModel = r.GetString(r.GetOrdinal("gpu_model")),
+            GpuVramMb = r.GetInt64(r.GetOrdinal("gpu_vram_mb")),
+            CollectedAt = DateTime.Parse(r.GetString(r.GetOrdinal("collected_at"))),
+            IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
+            SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
+            CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),
         };
     }
 
-    private static ShellCommand MapShellReader(SqliteDataReader reader)
+    private static InstalledApplication MapInstalledAppReader(SqliteDataReader r)
     {
-        return new ShellCommand
+        return new InstalledApplication
         {
-            Id = reader.GetString(reader.GetOrdinal("id")),
-            MachineId = reader.GetString(reader.GetOrdinal("machine_id")),
-            Timestamp = DateTime.Parse(reader.GetString(reader.GetOrdinal("timestamp"))),
-            ShellName = reader.GetString(reader.GetOrdinal("shell_name")),
-            ShellPid = reader.IsDBNull(reader.GetOrdinal("shell_pid"))
-                ? null : reader.GetString(reader.GetOrdinal("shell_pid")),
-            Command = reader.GetString(reader.GetOrdinal("command")),
-            WorkingDirectory = reader.IsDBNull(reader.GetOrdinal("working_directory"))
-                ? null : reader.GetString(reader.GetOrdinal("working_directory")),
-            ExitCode = reader.IsDBNull(reader.GetOrdinal("exit_code"))
-                ? null : reader.GetString(reader.GetOrdinal("exit_code")),
-            UserName = reader.IsDBNull(reader.GetOrdinal("user_name"))
-                ? string.Empty : reader.GetString(reader.GetOrdinal("user_name")),
-            Platform = reader.GetString(reader.GetOrdinal("platform")),
-            SessionId = reader.IsDBNull(reader.GetOrdinal("session_id"))
-                ? null : reader.GetString(reader.GetOrdinal("session_id")),
-            EmployeeId = reader.IsDBNull(reader.GetOrdinal("employee_id"))
-                ? null : reader.GetString(reader.GetOrdinal("employee_id")),
-            EmployeeName = reader.IsDBNull(reader.GetOrdinal("employee_name"))
-                ? null : reader.GetString(reader.GetOrdinal("employee_name"))
+            Id = r.GetString(r.GetOrdinal("id")),
+            AppName = r.GetString(r.GetOrdinal("app_name")),
+            AppVersion = r.GetString(r.GetOrdinal("app_version")),
+            Publisher = r.GetString(r.GetOrdinal("publisher")),
+            InstallPath = r.GetString(r.GetOrdinal("install_path")),
+            InstallDate = r.IsDBNull(r.GetOrdinal("install_date")) ? null : DateTime.Parse(r.GetString(r.GetOrdinal("install_date"))),
+            UninstallString = r.GetString(r.GetOrdinal("uninstall_string")),
+            ChangeType = r.GetString(r.GetOrdinal("change_type")),
+            DetectedAt = DateTime.Parse(r.GetString(r.GetOrdinal("detected_at"))),
+            IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
+            SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
+            CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),
+        };
+    }
+
+    private static NetworkInfo MapNetworkInfoReader(SqliteDataReader r)
+    {
+        return new NetworkInfo
+        {
+            Id = r.GetString(r.GetOrdinal("id")),
+            PublicIp = r.GetString(r.GetOrdinal("public_ip")),
+            PrivateIp = r.GetString(r.GetOrdinal("private_ip")),
+            NetworkInterfaceName = r.GetString(r.GetOrdinal("network_interface_name")),
+            CollectedAt = DateTime.Parse(r.GetString(r.GetOrdinal("collected_at"))),
+            IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
+            SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
+            CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),
+        };
+    }
+
+    private static SessionEvent MapSessionEventReader(SqliteDataReader r)
+    {
+        return new SessionEvent
+        {
+            Id = r.GetString(r.GetOrdinal("id")),
+            EventType = r.GetString(r.GetOrdinal("event_type")),
+            OsUsername = r.GetString(r.GetOrdinal("os_username")),
+            EventAt = DateTime.Parse(r.GetString(r.GetOrdinal("event_at"))),
+            IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
+            SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
+            CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),
+        };
+    }
+
+    private static AppSession MapAppSessionReader(SqliteDataReader r)
+    {
+        return new AppSession
+        {
+            Id = r.GetString(r.GetOrdinal("id")),
+            ProcessName = r.GetString(r.GetOrdinal("process_name")),
+            AppDisplayName = r.GetString(r.GetOrdinal("app_display_name")),
+            StartedAt = DateTime.Parse(r.GetString(r.GetOrdinal("started_at"))),
+            EndedAt = r.IsDBNull(r.GetOrdinal("ended_at")) ? null : DateTime.Parse(r.GetString(r.GetOrdinal("ended_at"))),
+            MachineId = r.GetString(r.GetOrdinal("machine_id")),
+            EmployeeId = r.IsDBNull(r.GetOrdinal("employee_id")) ? null : r.GetString(r.GetOrdinal("employee_id")),
+            EmployeeName = r.IsDBNull(r.GetOrdinal("employee_name")) ? null : r.GetString(r.GetOrdinal("employee_name")),
+            SessionId = r.GetString(r.GetOrdinal("session_id")),
+            Platform = r.GetString(r.GetOrdinal("platform")),
+            IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
+            SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
+            CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),
+        };
+    }    private static StorageDevice MapStorageDeviceReader(SqliteDataReader r)
+    {
+        return new StorageDevice
+        {
+            Id = r.GetString(r.GetOrdinal("id")),
+            DeviceHardwareId = r.GetString(r.GetOrdinal("device_hardware_id")),
+            DeviceType = r.GetString(r.GetOrdinal("device_type")),
+            Model = r.GetString(r.GetOrdinal("model")),
+            CapacityMb = r.GetInt64(r.GetOrdinal("capacity_mb")),
+            IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
+            SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
+            CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),
+        };
+    }
+
+    private static AppItem MapAppItemReader(SqliteDataReader r)
+    {
+        return new AppItem
+        {
+            Id = r.GetString(r.GetOrdinal("id")),
+            AppSessionId = r.GetString(r.GetOrdinal("app_session_id")),
+            ParentItemId = r.IsDBNull(r.GetOrdinal("parent_item_id")) ? null : r.GetString(r.GetOrdinal("parent_item_id")),
+            ItemType = r.GetString(r.GetOrdinal("item_type")),
+            Title = r.GetString(r.GetOrdinal("title")),
+            Identifier = r.GetString(r.GetOrdinal("identifier")),
+            OpenedAt = DateTime.Parse(r.GetString(r.GetOrdinal("opened_at"))),
+            ClosedAt = r.IsDBNull(r.GetOrdinal("closed_at")) ? null : DateTime.Parse(r.GetString(r.GetOrdinal("closed_at"))),
+            IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
+            SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
+            CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),
         };
     }
 }
