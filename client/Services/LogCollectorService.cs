@@ -3,11 +3,20 @@ using Microsoft.Extensions.Logging;
 using client.Configuration;
 using client.Core.Abstractions;
 using client.Core.Models;
+using System.Runtime.InteropServices;
 
 namespace client.Services;
 
 public class LogCollectorService : BackgroundService
 {
+    // ─── Windows Power Management ───
+    // Prevents the OS from suspending/sleeping while employee activity is being tracked.
+    [DllImport("kernel32.dll")]
+    private static extern uint SetThreadExecutionState(uint esFlags);
+
+    private const uint ES_CONTINUOUS = 0x80000000;
+    private const uint ES_SYSTEM_REQUIRED = 0x00000001;
+
     private readonly AppConfig _config;
     private readonly IActivityCollector _collector;
     private readonly ILogStore _store;
@@ -51,6 +60,20 @@ public class LogCollectorService : BackgroundService
             _cycleCount = 0; // Reset cycle counter so sync/cleanup timing starts fresh
             _logger.LogInformation("Tracking started");
         }
+
+        // ─── Prevent Windows from suspending/sleeping while tracking is active ───
+        if (OperatingSystem.IsWindows())
+        {
+            try
+            {
+                SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
+                _logger.LogInformation("Windows execution state set to prevent sleep");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Failed to set Windows execution state");
+            }
+        }
     }
 
     /// <summary>
@@ -65,6 +88,16 @@ public class LogCollectorService : BackgroundService
             _currentEmployeeName = null;
             _currentToken = null;
             _logger.LogInformation("Tracking stopped");
+        }
+
+        // ─── Restore normal Windows power management ───
+        if (OperatingSystem.IsWindows())
+        {
+            try
+            {
+                SetThreadExecutionState(ES_CONTINUOUS);
+            }
+            catch { }
         }
     }
 
@@ -321,6 +354,10 @@ public class LogCollectorService : BackgroundService
                 await _store.MarkSentAsync(syncedIds, ct);
                 _logger.LogDebug("Synced {Count} logs to server", unsentLogs.Count);
             }
+            else if ((int)response.StatusCode == 401 || (int)response.StatusCode == 403)
+            {
+                _logger.LogWarning("Authentication failed (status {Status}) — token expired or invalid. Background sync will retry on next cycle; re-login required.", (int)response.StatusCode);
+            }
             else
             {
                 var body = await response.Content.ReadAsStringAsync(ct);
@@ -385,6 +422,10 @@ public class LogCollectorService : BackgroundService
                 var syncedIds = unsent.Select(c => c.Id).ToList();
                 await _store.MarkShellCommandsSentAsync(syncedIds, ct);
                 _logger.LogDebug("Synced {Count} shell commands to server", unsent.Count);
+            }
+            else if ((int)response.StatusCode == 401 || (int)response.StatusCode == 403)
+            {
+                _logger.LogWarning("Shell sync auth failed (status {Status}) — token expired or invalid. Re-login required.", (int)response.StatusCode);
             }
             else
             {

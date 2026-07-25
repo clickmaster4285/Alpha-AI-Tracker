@@ -84,7 +84,7 @@ builder.Services.AddSingleton<ILogStore>(sp =>
 builder.Services.AddSingleton<HttpClient>(sp =>
 {
     var client = new HttpClient();
-    client.Timeout = TimeSpan.FromSeconds(10);
+    client.Timeout = TimeSpan.FromSeconds(30);
     return client;
 });
 
@@ -129,16 +129,22 @@ builder.Services.AddTransient<MainViewModel>();
 
 var host = builder.Build();
 
-await host.StartAsync(CancellationToken.None);
+try
+{
+    await host.StartAsync(CancellationToken.None);
 
-// Set service provider for App to resolve ViewModels from DI
-App.ServiceProvider = host.Services;
+    // Set service provider for App to resolve ViewModels from DI
+    App.ServiceProvider = host.Services;
 
-BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+    BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
 
-await host.StopAsync(CancellationToken.None);
-host.Dispose();
-appMutex.Dispose();
+    await host.StopAsync(CancellationToken.None);
+    host.Dispose();
+}
+finally
+{
+    appMutex.Dispose();
+}
 
 static AppBuilder BuildAvaloniaApp()
     => AppBuilder.Configure<App>()

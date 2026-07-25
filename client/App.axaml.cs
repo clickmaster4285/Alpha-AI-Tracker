@@ -10,6 +10,7 @@ namespace client;
 public partial class App : Application
 {
     public static IServiceProvider? ServiceProvider { get; internal set; }
+    public static bool AllowShutdown { get; set; }
 
     public override void Initialize()
     {
@@ -38,11 +39,14 @@ public partial class App : Application
                 DataContext = viewModel,
             };
 
-            // Intercept close to hide instead
+            // Intercept close to hide instead (only block normal window-close, not explicit shutdown)
             mainWindow.Closing += (s, e) =>
             {
-                e.Cancel = true;
-                mainWindow.Hide();
+                if (!AllowShutdown)
+                {
+                    e.Cancel = true;
+                    mainWindow.Hide();
+                }
             };
 
             desktop.ShutdownMode = Avalonia.Controls.ShutdownMode.OnExplicitShutdown;
@@ -63,7 +67,7 @@ public partial class App : Application
             var exitItem = new Avalonia.Controls.NativeMenuItem("Exit");
             exitItem.Click += (s, e) =>
             {
-                trayIcon.Dispose();
+                AllowShutdown = true;
                 desktop.Shutdown();
             };
 

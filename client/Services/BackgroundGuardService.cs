@@ -156,8 +156,6 @@ public class BackgroundGuardService : BackgroundService, IDisposable
             var serviceContent = $"""
                 [Unit]
                 Description=Alpha AI Tracker - Employee Monitoring Service
-                After=graphical-session.target
-                Wants=graphical-session.target
 
                 [Service]
                 Type=simple
