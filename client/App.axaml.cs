@@ -64,16 +64,15 @@ public partial class App : Application
                 mainWindow.Activate();
             };
 
-            var exitItem = new Avalonia.Controls.NativeMenuItem("Exit");
-            exitItem.Click += (s, e) =>
+            var hideItem = new Avalonia.Controls.NativeMenuItem("Hide");
+            hideItem.Click += (s, e) =>
             {
-                AllowShutdown = true;
-                desktop.Shutdown();
+                mainWindow.Hide();
             };
 
             var menu = new Avalonia.Controls.NativeMenu();
             menu.Items.Add(showItem);
-            menu.Items.Add(exitItem);
+            menu.Items.Add(hideItem);
 
             trayIcon.Menu = menu;
             trayIcon.IsVisible = true;
