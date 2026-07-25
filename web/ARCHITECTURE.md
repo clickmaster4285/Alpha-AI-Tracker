@@ -1,7 +1,8 @@
 # Web Architecture — Alpha AI Tracker Dashboard
 
-> **Last audited:** 2026-07-25  
-> **Service completion (honest):** ~15%
+> **Last audited:** 2026-07-25 (updated by Phase 5)  
+> **Changelog:** 2026-07-25: Updated comprehensive/logs page to use new app_sessions API (replaced old activityLogsApi). Added appSessionsApi to api.ts with AppSession types. Tabs removed (system log and productive/unproductive tabs not yet implemented for new schema).  
+> **Service completion (honest):** ~16%
 
 ---
 

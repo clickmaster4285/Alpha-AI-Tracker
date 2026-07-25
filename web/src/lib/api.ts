@@ -246,38 +246,33 @@ export const employeeAuthApi = {
 };
 
 // ──────────────────────────
-// Activity Logs API
+// App Sessions API (replaces Activity Logs)
 // ──────────────────────────
 
-export interface ActivityLog {
+export interface AppSession {
   id: string;
   employeeId: string;
-  employeeName?: string;
-  machineId: string;
-  timestamp: string;
   processName: string;
-  windowTitle?: string;
-  processId: number;
-  cpuPercent: number;
-  memoryBytes: number;
-  isForeground: boolean;
-  userName: string;
+  appDisplayName: string;
+  startedAt: string;
+  endedAt?: string;
+  machineId: string;
+  sessionId: string;
   platform: string;
-  sessionId?: string;
-  syncedAt: string;
+  syncedAt?: string;
 }
 
-export interface ActivityLogListResponse {
-  data: ActivityLog[];
+export interface AppSessionListResponse {
+  data: AppSession[];
   total: number;
   page: number;
   perPage: number;
   totalPages: number;
 }
 
-export const activityLogsApi = {
-  list: (params?: { page?: number; perPage?: number; employeeId?: string; search?: string; platform?: string; foreground?: boolean; startDate?: string; endDate?: string }) =>
-    request<ActivityLogListResponse>('/activity-logs', { params: params as Record<string, string | number | boolean | undefined> }),
+export const appSessionsApi = {
+  list: (params?: { page?: number; perPage?: number; employeeId?: string; search?: string; platform?: string }) =>
+    request<AppSessionListResponse>('/app-sessions', { params: params as Record<string, string | number | undefined> }),
 };
 
 // ──────────────────────────
