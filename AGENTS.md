@@ -1,491 +1,246 @@
-# AGENTS.md
+# Alpha AI Tracker — Project Map
 
-## Project overview
-
-Alpha AI Tracker — an employee monitoring & productivity dashboard. Three sub-projects:
-
-- **`server/`** — Go + Echo backend (PostgreSQL + Redis) — the primary API server
-- **`web/`** — Next.js 15 + React 18 frontend (admin UI)
-- **`client/`** — Avalonia UI desktop app (.NET 10/C#) — installed on employee machines
+> **Last audited:** 2026-07-25  
+> **Audit commit:** (not available — working tree was clean at start of audit)  
+> **Overall completion (honest):** ~20% across all 3 services (not 5%, but far from production-ready)
 
 ---
 
-## Commands
+## 1. Project Overview
 
-### Web (run from `web/`)
+Alpha AI Tracker is an employee monitoring and productivity analytics system consisting of three services:
 
-```bash
-cd web
-npm run dev      # dev server (port 3000)
-npm run build    # production build
-npm run lint     # ESLint via next lint
+1. **Desktop Client** (`client/`) — Installed on employee machines. Collects process activity, window titles, CPU/memory usage, and shell/terminal commands. Sends data to the central server via REST.
+2. **Server** (`server/`) — Go + Echo + PostgreSQL + Redis. Central API hub. Receives and stores client data, exposes admin-facing REST API for the web dashboard. Handles authentication for both web admins and employee desktop clients.
+3. **Web Dashboard** (`web/`) — Next.js 15 App Router. Admin-facing UI for viewing employee data, managing departments, generating login secrets, and analytics. Most pages currently render mock localStorage data rather than calling the real API.
+
+---
+
+## 2. System Architecture Diagram
+
+```mermaid
+flowchart LR
+    EMP[Employee Machine\nDesktop Client\n.NET 10 / Avalonia UI] -->|REST / JSON\nPOST /api/v1/activity-logs/sync\nPOST /api/v1/shell-commands/sync *| SRV[Go Server\nEcho v4 / PostgreSQL\nPort 8080]
+    EMP -->|POST /api/v1/auth/employee-login| SRV
+
+    SRV -->|Query / Store| PG[(PostgreSQL)]
+    SRV -->|Store/Validate\nOne-Time Secrets| RD[(Redis\n5-min TTL)]
+
+    WEB[Web Dashboard\nNext.js 15 / React 18\nPort 3000] -->|REST / JSON\nhttpOnly Cookie Auth\nvia Next.js Rewrites proxy| SRV
+
+    note_ws[⚠️ WebSocket / SSE / polling:\nNOT IMPLEMENTED\nWeb dashboard polls no API\nfor real-time updates]
+    
+    style EMP fill:#2d2a4e,color:#fff
+    style SRV fill:#1a3a4a,color:#fff
+    style WEB fill:#3a2a1a,color:#fff
+    style PG fill:#2d4a2d,color:#fff
+    style RD fill:#4a2d2d,color:#fff
+    style note_ws fill:#5a3a3a,color:#fff,stroke-dasharray: 5 5
 ```
 
-### Server (run from `server/`)
+> `*` — `/api/v1/shell-commands/sync` is called by the client but **does not exist** on the server (no route, no table).
+
+---
+
+## 3. Service Breakdown Table
+
+| Service | Stack | Responsibility | Entry Point | Internal Doc |
+|---|---|---|---|---|
+| **client/** | .NET 10, Avalonia 12.1, CommunityToolkit.Mvvm, Microsoft.Data.Sqlite | Employee-side data collection & sync | `Program.cs`, `App.axaml.cs` | [client/ARCHITECTURE.md](./client/ARCHITECTURE.md) |
+| **server/** | Go 1.25, Echo v4.15, pgx v5.10, go-redis v9.21 | Central API hub, data storage, auth | `cmd/server/main.go` | [server/ARCHITECTURE.md](./server/ARCHITECTURE.md) |
+| **web/** | Next.js 15.3.4, React 18, Redux Toolkit, TanStack Query | Admin dashboard & analytics | `next.config.ts`, `src/app/layout.tsx` | [web/ARCHITECTURE.md](./web/ARCHITECTURE.md) |
+
+---
+
+## 4. Cross-Service Contracts
+
+### Client ↔ Server
+
+| Direction | Protocol | Auth Method | Format |
+|---|---|---|---|
+| Employee login (client → server) | REST POST `/api/v1/auth/employee-login` | emp_id + secret_key (Redis-validated) | JSON `{employeeId, secretKey}` → `{employee, token}` |
+| Employee disconnect | REST POST `/api/v1/auth/employee-disconnect` | JWT token in body | JSON `{employeeId, token}` |
+| Activity log sync (client → server) | REST POST `/api/v1/activity-logs/sync` | JWT token in request body | JSON `{employeeId, token, logs: [...]}` |
+| Shell command sync (client → server) | REST POST `/api/v1/shell-commands/sync` | JWT token in request body | **⚠️ Server endpoint does not exist** |
+
+### Server ↔ Web
+
+| Direction | Protocol | Auth Method | Format |
+|---|---|---|---|
+| Web admin login | REST POST `/api/v1/auth/login` | email + password → httpOnly cookie | JSON `{email, password}` → sets cookie |
+| All web API calls | REST via Next.js rewrites (`/api/*` proxy) | httpOnly cookie (auto-sent) | JSON request/response |
+
+### Contract Documentation
+
+**No formal contract documentation exists** beyond what is implicit in the Go DTO files (`server/internal/dto/`) and the TypeScript API client (`web/src/lib/api.ts`). These are manually kept in sync by the developer — there is no schema generation, OpenAPI spec, or shared type system.
+
+### Inconsistencies Found
+
+1. **Shell commands** — Client sends to `/api/v1/shell-commands/sync`. No server endpoint or DB table exists.
+2. **Employee disconnect** — Client sends `POST /api/v1/auth/employee-disconnect` with `{employeeId, token}`, route exists on server.
+3. **Field naming** — Client uses `employeeId` in snake_case for the auth payload, server expects `employeeId` too (consistent). Activity log entries: client sends `processName`, `windowTitle`, etc. (camelCase), server DTO matches. **Consistent by convention, no validation schema enforces it.**
+
+---
+
+## 5. Current Completion State
+
+### Server — ~40% complete
+
+**What works:**
+- All 5 migrations run on startup
+- Full CRUD for users, employees, departments, activity logs
+- Web admin auth (email/password → httpOnly cookie with encrypted JWT)
+- Employee auth (Redis one-time secret → JWT token)
+- Activity log ingestion and listing with filtering/pagination
+- Company admin auto-initialization on first run
+- Graceful shutdown
+
+**What's missing:**
+- **No tests** (0 test files)
+- **No shell commands table or sync endpoint**
+- **No rate limiting** on any endpoint (including login)
+- **No structured logging** — uses `log.Printf` only
+- **No Redis fallback** — if Redis is down, employee auth is completely broken (server warns but doesn't degrade gracefully)
+- **No observability** — no metrics, tracing, health check depth
+- **No request validation library** — manual field checks in handlers
+- **No cleanup job** for old activity logs (data grows unbounded)
+
+### Client — ~35% complete
+
+**What works:**
+- Cross-platform process collection (Win/Linux/macOS)
+- Shell command history reading (all platforms)
+- SQLite local storage with schema
+- Encrypted config system (AES-256-GCM, transport→machine key migration)
+- Login/logout flow with server
+- Log sync every ~5 min
+- Auto-start persistence (all platforms)
+- Background guard watchdog
+- Tray icon (minimize to tray on close)
+- Windows power management (prevents sleep)
+
+**What's missing:**
+- **No tests** (0 test files)
+- **Shell commands sync** — client sends to non-existent server endpoint (silently fails every 5 min)
+- **No auto-update mechanism**
+- **No crash reporting** — unhandled exceptions crash silently
+- **No offline queue analysis** — if server is unreachable, logs buffer locally but with no back-pressure handling
+- **No encryption at rest** — SQLite encryption (sqlcipher) is commented out
+- **macOS CPU measurement** — macOS process collector skips CPU measurement entirely (always 0%)
+- **macOS window titles** — only captures foreground window, missing EnumWindows equivalent
+
+### Web — ~15% complete
+
+**What works:**
+- ~30 page routes exist with polished UI
+- Login page with animated hero section
+- Auth check on mount (Redux + server cookie)
+- Users page — real API calls via TanStack Query (CRUD + generate secret)
+- Departments page — real API calls (CRUD)
+- Logs/Comprehensive page — real API calls
+- Sidebar with permission-based filtering (client-side only)
+- Dashboard shows mock stats and chart
+
+**What's missing (most pages):**
+- **~25 of 30+ pages use mock localStorage data** — not connected to real API
+- **Client-side only permissions** — no server enforcement
+- **No error boundaries** — uncaught React errors crash the page
+- **No loading/empty/error states** on most mock-data pages
+- **No real-time updates** — no polling, WebSocket, or SSE
+- **No accessibility testing** — many interactive elements lack aria attributes
+- **No unit tests** — 0 test files
+- **GitHub release download** fetches from `clickmaster4285/Alpha-AI-Tracker`, not the org repo
+
+---
+
+## 6. Global Conventions
+
+*Extracted from observed patterns, not documented anywhere:*
+
+| Convention | Observed Pattern |
+|---|---|
+| **API versioning** | All routes under `/api/v1` |
+| **Error responses** | `{code, message, detail?}` via `dto.APIError` (server) |
+| **Auth** | httpOnly cookies for web, JWT in request body for employee clients |
+| **Naming (Go)** | PascalCase exports, camelCase JSON fields |
+| **Naming (TypeScript)** | camelCase variables, PascalCase components |
+| **Naming (C#)** | PascalCase for classes/methods, `_camelCase` for private fields |
+| **Soft delete** | `deleted_at TIMESTAMPTZ` on all tables, filtered in queries |
+| **Migrations** | Sequential numbered SQL files in `server/migrations/` |
+| **Go module** | `github.com/alpha-ai-tracker/server` |
+| **Git branch** | Currently on `setup` branch — no PR/branch convention visible |
+| **Commit style** | Descriptive lowercase messages: "now remove the exit btn on the tray on windows", "fixit" |
+| **Monorepo tooling** | No shared tooling (no Turborepo, Nx, etc.). Each service has its own build system. |
+
+---
+
+## 7. Known Gaps / Risks
+
+### Cross-Cutting
+
+| Gap | Severity | Details |
+|---|---|---|
+| **Shell commands sync** | 🔴 High | Client sends to non-existent endpoint. Shell command data is lost forever. |
+| **No tests anywhere** | 🔴 High | 0 test files across all 3 projects. Any refactor is blind. |
+| **No observability** | 🟠 Medium | No structured logging, metrics, tracing. Debugging production issues requires SSH + log scraping. |
+| **Client-side only RBAC** | 🟠 Medium | Permissions are enforced only in the web frontend localStorage. A malicious user can trivially bypass them. |
+| **No rate limiting** | 🟠 Medium | Login endpoint and activity log sync have no rate limiting. Brute-force / DoS is trivial. |
+| **Mock data dominance** | 🟠 Medium | ~90% of web pages use mock data, giving a false sense of completeness. |
+| **Default passwords** | 🟠 Medium | `AlphaAI@2024!` is the compiled-in default. Easy to forget to change. |
+| **No offline/retry strategy** | 🟢 Low | Client retries sync every cycle but has no exponential backoff or dedup. |
+| **Horizontal scaling** | 🟢 Low | Server uses Redis for employee secrets (short TTL), so scaling is straightforward — but DB queries have no query analysis. |
+
+---
+
+## 8. How to Run Locally
+
+### Prerequisites
+
+- Go 1.22+ (tested 1.25), PostgreSQL 16+, Redis 7+
+- Node.js 20+, npm
+- .NET 10 SDK (for client development with `dotnet run`)
+- Docker (optional, for PostgreSQL/Redis)
+
+### 1. Start PostgreSQL and Redis
+
+```bash
+# Using Docker (recommended)
+docker run -d --name pg -e POSTGRES_USER=alpha_ai -e POSTGRES_PASSWORD=yourpassword -e POSTGRES_DB=alpha_ai_tracker -p 5432:5432 postgres:16
+docker run -d --name redis -p 6379:6379 redis:7
+```
+
+### 2. Server
 
 ```bash
 cd server
-make setup       # copy .env.example → .env, install deps, build
-make run         # build & start the server (port 8080)
-make dev         # hot-reload dev mode (requires air)
-make test        # run tests
+cp .env.example .env
+# Edit .env — set DB_PASSWORD and JWT_SECRET
+make setup
+make run
+# Server starts on http://localhost:8080
 ```
 
-Prerequisites: Go 1.22+, PostgreSQL 16+, Redis 7+.
+### 3. Web Dashboard
 
-### Client (run from `client/`)
+```bash
+cd web
+npm install
+npm run dev
+# Dev server on http://localhost:3000
+```
+
+If server runs on a different host, set `NEXT_PUBLIC_API_URL` in `web/.env`.
+
+### 4. Desktop Client
 
 ```bash
 cd client
-dotnet build    # build the Avalonia desktop app
-dotnet run      # run locally
+# Ensure .env has ALPHA_SERVER_URL=http://localhost:8080
+dotnet run
 ```
 
----
-
-## Architecture
-
-### Server (`server/`)
-
-- **Go + Echo v4** — HTTP framework
-- **PostgreSQL via pgx v5** — database driver with connection pooling
-- **Redis via go-redis v9** — employee login secret storage (5-min TTL, one-time use)
-- **Clean/onion architecture**: Handler → Service → Repository → Database
-- **Three auth flows**: Web admin (email+password, httpOnly cookie) + Employee desktop (emp_id+secret_key via Redis, JWT token) + Employee API token (validated in handler body for log sync)
-- **Company admin auto-init**: on first run, creates a `company_admin` user using credentials from `.env`
-- **Employee ID format**: `EMP-XXXXX` (auto-generated by DB sequence)
-- **API versioning**: all endpoints under `/api/v1/`
-
-#### Directory structure
-
-```
-server/
-├── cmd/server/main.go              # Entry point
-├── internal/
-│   ├── config/config.go            # Environment-based config (godotenv)
-│   ├── database/postgres.go        # Pool + migration runner
-│   ├── redis/redis.go              # Redis client wrapper (employee secrets)
-│   ├── middleware/auth.go          # JWT cookie/header middleware
-│   ├── models/
-│   │   ├── user.go                 # User model (web admin auth only)
-│   │   ├── employee.go            # Employee model (tracked workers, dept_id FK)
-│   │   └── activity_log.go        # Activity log model (synced from desktop clients)
-│   ├── repository/
-│   │   ├── user_repo.go            # User CRUD (admins only)
-│   │   ├── employee_repo.go       # Employee CRUD with JOINs to departments
-│   │   ├── activity_log_repo.go   # Activity log bulk insert & list
-│   │   └── department_repo.go     # Departments CRUD with employee count
-│   ├── services/
-│   │   ├── auth_service.go         # Web login, JWT, admin init, employee token
-│   │   ├── user_service.go         # User business logic
-│   │   ├── employee_service.go     # Employee CRUD + secret generation (uses department_id)
-│   │   ├── activity_log_service.go # Log sync from clients + list
-│   │   ├── department_service.go   # Department CRUD
-│   │   └── redis_interface.go      # Redis interface for auth handler
-│   ├── handlers/
-│   │   ├── auth_handler.go         # Web login/logout + employee-login + employee-disconnect + DepartmentID
-│   │   ├── user_handler.go         # Admin user CRUD endpoints
-│   │   ├── employee_handler.go     # Employee CRUD + generate-secret
-│   │   ├── activity_log_handler.go # POST /sync + GET /activity-logs (token-validated)
-│   │   └── department_handler.go   # Departments CRUD endpoints
-│   ├── router/router.go            # Route definitions
-│   └── dto/
-│       ├── user_dto.go             # User request/response DTOs
-│       ├── employee_dto.go         # Employee request/response DTOs (includes departmentId)
-│       └── activity_log_dto.go     # Activity log sync & list DTOs
-├── migrations/
-│   ├── 001_init.sql                # Initial schema (users, departments)
-│   ├── 002_employees.sql           # Employees table + data migration
-│   ├── 003_activity_logs.sql       # Activity logs table for desktop client sync
-│   └── 004_employee_department_id.sql  # department_id FK in employees table
-├── .env.example                    # Environment variable template
-├── Makefile                        # Build automation
-└── go.mod / go.sum
-```
-
-#### API Endpoints
-
-| Method | Path                                    | Auth     | Description                              |
-|--------|-----------------------------------------|----------|------------------------------------------|
-| GET    | `/api/v1/health`                        | No       | Health check                             |
-| POST   | `/api/v1/auth/login`                    | No       | Web admin login (sets httpOnly cookie)   |
-| POST   | `/api/v1/auth/employee-login`           | No       | Employee login (emp_id + secret_key)     |
-| POST   | `/api/v1/auth/employee-disconnect`      | No       | Employee disconnect (token-validated)    |
-| GET    | `/api/v1/auth/check`                    | Optional | Auth status check                        |
-| POST   | `/api/v1/auth/logout`                   | Yes      | Logout (clears cookie)                   |
-| GET    | `/api/v1/auth/me`                       | Yes      | Current admin user profile               |
-| GET    | `/api/v1/users`                         | Yes      | List admin users (paginated)             |
-| GET    | `/api/v1/users/:id`                     | Yes      | Get admin user by ID                     |
-| POST   | `/api/v1/users`                         | Yes      | Create admin user                        |
-| PUT    | `/api/v1/users/:id`                     | Yes      | Update admin user                        |
-| DELETE | `/api/v1/users/:id`                     | Yes      | Delete admin user                        |
-| GET    | `/api/v1/employees`                     | Yes      | List employees (paginated, JOIN dept)    |
-| GET    | `/api/v1/employees/:id`                 | Yes      | Get employee by ID                       |
-| POST   | `/api/v1/employees`                     | Yes      | Create employee                          |
-| PUT    | `/api/v1/employees/:id`                 | Yes      | Update employee (supports department_id) |
-| DELETE | `/api/v1/employees/:id`                 | Yes      | Delete employee                          |
-| POST   | `/api/v1/employees/:id/generate-secret` | Yes      | Generate one-time login secret (Redis)   |
-| GET    | `/api/v1/activity-logs`                 | Yes      | List activity logs (paginated, filterable)|
-| POST   | `/api/v1/activity-logs/sync`            | No*      | Desktop client log sync (token in body)  |
-| GET    | `/api/v1/departments`                   | Yes      | List departments (with employee count)   |
-| POST   | `/api/v1/departments`                   | Yes      | Create department                        |
-| PUT    | `/api/v1/departments/:id`               | Yes      | Update department                        |
-| DELETE | `/api/v1/departments/:id`               | Yes      | Delete department                        |
-
-*\* Log sync endpoint authenticates via employee JWT token passed in request body, not via cookie middleware.*
-
-#### Employee Auth Flow (Desktop Client)
-
-1. **Web admin** clicks "Generate Login Secret" on employee → `POST /api/v1/employees/:id/generate-secret`
-2. **Server** generates random 12-char hex secret, stores in Redis with 5-min TTL
-3. **Web admin** copies secret and shares with employee
-4. **Employee** opens desktop client, enters `EMP-XXXXX` + secret key
-5. **Client** calls `POST /api/v1/auth/employee-login` with {employeeId, secretKey}
-6. **Server** validates secret from Redis (one-time use, auto-deletes on success), sets tracking_status="tracked"
-7. **Server** returns employee info + JWT token (includes DepartmentID)
-8. **Client** stores employee info in local SQLite, shows dashboard
-9. **Log sync**: Every ~5 min, client sends unsent logs (synced_at IS NULL) to `POST /api/v1/activity-logs/sync` with 100-log batches
-10. **On sync success**: Client marks logs as synced (sets synced_at)
-11. **Cleanup**: Synced logs older than 24h are auto-deleted from client SQLite
-
-#### Activity Log Sync Flow
-
-1. `LogCollectorService` collects process activity every 30s, attaches `employee_id` + `employee_name`
-2. Every ~5 min (10 cycles), `SyncUnsentLogs()` is called:
-   - Reads up to 100 unsent logs from SQLite (synced_at IS NULL)
-   - Sends to `POST /api/v1/activity-logs/sync` with employee token
-   - On 200 OK: marks all sent logs as synced (updates synced_at)
-3. Every ~60 min (120 cycles), `CleanupSyncedLogs()` runs:
-   - Deletes logs where synced_at IS NOT NULL AND timestamp < 24h ago
-4. On disconnect: sends `POST /api/v1/auth/employee-disconnect` — server sets untracked + offline
-
-#### Departments (Dynamic CRUD)
-
-Departments are now fully dynamic via REST API:
-- `GET /api/v1/departments` returns `{ departments: [{id, name, employeeCount}], total }`
-- `POST /api/v1/departments` creates a new department
-- `PUT /api/v1/departments/:id` renames a department
-- `DELETE /api/v1/departments/:id` removes a department
-- Employee `department_id` is a foreign key to `departments(id)`
-- Department name is resolved via LEFT JOIN for display
-
-#### Environment Variables
-
-| Variable              | Default                     | Description                    |
-|-----------------------|-----------------------------|--------------------------------|
-| `SERVER_PORT`         | `8080`                      | Server port                    |
-| `SERVER_HOST`         | `0.0.0.0`                  | Server host                    |
-| `DB_HOST`             | `localhost`                 | PostgreSQL host                |
-| `DB_PORT`             | `5432`                      | PostgreSQL port                |
-| `DB_USER`             | `alpha_ai`                  | DB user                        |
-| `DB_PASSWORD`         | *(required)*                | DB password                    |
-| `DB_NAME`             | `alpha_ai_tracker`          | Database name                  |
-| `DB_SSLMODE`          | `disable`                   | PostgreSQL SSL mode            |
-| `REDIS_HOST`          | `localhost`                 | Redis host                     |
-| `REDIS_PORT`          | `6379`                      | Redis port                     |
-| `REDIS_PASSWORD`      | *(empty)*                   | Redis password                 |
-| `REDIS_DB`            | `0`                         | Redis database index           |
-| `JWT_SECRET`          | *(required)*                | JWT signing secret             |
-| `JWT_ACCESS_EXPIRY`   | `24h`                       | JWT token expiry               |
-| `ADMIN_EMAIL`         | `admin@alphai.com`          | Company admin email            |
-| `ADMIN_PASSWORD`      | `AlphaAI@2024!`             | Company admin password         |
-| `ADMIN_NAME`          | `Company Admin`             | Company admin display name     |
-| `CORS_ALLOWED_ORIGINS`| `http://localhost:3000`     | CORS origins (comma-separated) |
-| `LOG_LEVEL`           | `info`                      | Log level                      |
-
----
-
-### Web (`web/`)
-
-- **Next.js 15 + React 18** — App Router with `(app)` route group for authenticated pages
-- **Redux Toolkit** — auth state management (authSlice with async thunks)
-- **TanStack Query v5** — server data fetching and caching
-- **shadcn/ui** components in `src/components/ui/`
-- **Sonner toast** — toast notifications via `toast()`
-- **All pages use `"use client"`** — fully client-side rendering
-- **Path alias**: `@/*` → `src/*`
-- **Fonts**: Plus Jakarta Sans (display), Inter (body)
-
-#### Auth flow
-
-1. On app load, `AuthProvider` dispatches `checkAuth()` thunk → calls `GET /api/v1/auth/check`
-2. If cookie is valid → user is authenticated → protected routes render
-3. If cookie is missing/expired → `isAuthenticated` is false → redirect to `/login`
-4. Login sends `POST /api/v1/auth/login` → server sets httpOnly `auth_token` cookie
-5. Logout sends `POST /api/v1/auth/logout` → cookie cleared
-6. Redux `auth` slice holds the current user, loading state, and error
-
-#### Protected routes
-
-`ProtectedRoute` component wraps `(app)/layout.tsx`. It:
-- Shows a loading spinner while checking auth
-- Redirects to `/login?redirect=<path>` if not authenticated
-- Checks module-based permissions via `usePermissions()`
-
-#### Employee management (Users page)
-
-The `/users` page manages **employees** (not web admin users):
-- Lists employees from `GET /api/v1/employees` (JOINs with departments for name)
-- Create/Edit/Delete employees via employees API
-- **Department dropdown** is dynamically loaded from `GET /api/v1/departments`
-- Employee form uses `departmentId` (integer FK) instead of department name string
-- **"Generate Login Secret"** action button per employee → calls `POST /api/v1/employees/:id/generate-secret`
-- Shows generated secret in a dialog with copy-to-clipboard (expires in 5 min)
-
-#### Departments page
-
-The `/departments` page now has full dynamic CRUD:
-- Lists departments from `GET /api/v1/departments` with employee count
-- Add department (POST), Edit department (PUT), Delete department (DELETE)
-- All operations use TanStack Query mutations with cache invalidation
-
-#### Logs / Comprehensive page
-
-The `/logs/comprehensive` page now fetches real data from server:
-- Employee dropdown dynamically loaded from employees API
-- Activity logs fetched from `GET /api/v1/activity-logs` with filtering
-- Three tabs: App Log (grouped by process), System Log (detail cards), Productive/Unproductive (foreground vs background)
-- Search by process name or window title
-- Pagination support
-- Shows employee name, CPU%, memory, platform for each entry
-
-#### Adding a new page
-
-1. Add route under `src/app/(app)/`
-2. Register module key in `ALL_MODULES` in `permissions.tsx`
-3. Add nav entry in `AppSidebar.tsx`
-4. Add page title in `AppLayout.tsx`
-
----
-
-### Client (`client/`)
-
-- **.NET 10 Avalonia UI desktop app** — installed on employee machines
-- **SQLite** via `Microsoft.Data.Sqlite` for local activity log storage + employee info persistence
-- **MVVM** with `CommunityToolkit.Mvvm` and `Microsoft.Extensions.Hosting` DI
-- **Value converters** in `client/Converters/` for XAML bindings
-
-#### Log sync architecture
-
-The client actively syncs two types of data to the server:
-
-**Activity logs (installed apps only):**
-1. **Collection**: `LogCollectorService` collects process activity every ~30s
-2. **Installed app filter**: Only processes matching known installed applications (via `IInstalledAppDetector`) are stored — system scripts and random binaries are excluded
-3. **Shell/terminal commands**: Collected per-platform via `IShellCommandCollector` — bash/zsh/fish history files (Linux/macOS) or PSReadLine/cmd history (Windows)
-4. **Employee association**: Each log/command is tagged with `employee_id` and `employee_name` from SQLite store
-5. **Local storage**: Logs stored in SQLite `activity_logs` table; shell commands in `shell_commands` table, both with `synced_at = NULL`
-6. **Sync**: Every ~5 min, up to 100 unsent logs/commands are sent to server
-7. **Mark sent**: On server acknowledgement, `synced_at` is set to current time
-8. **Cleanup**: Synced entries older than 24h are automatically deleted from local SQLite
-9. **Permission status**: Also associated with current employee via `employee_id`/`employee_name`
-
-#### Tracking Lifecycle
-
-**Tracking starts ONLY after employee login.** The app does NOT collect any data before login:
-
-1. App starts → `LogCollectorService.ExecuteAsync()` begins but waits in idle loop (checks `_trackingEnabled` every 5s)
-2. Employee logs in → `MainViewModel` calls `LogCollectorService.SetEmployeeInfo()` + `LogCollectorService.StartTracking()`
-3. Tracking active → process collection, shell command reading, and sync cycles begin
-4. Employee disconnects → `MainViewModel` calls `LogCollectorService.StopTracking()` — clears employee info, stops collection immediately
-5. App restarts → `MainViewModel.InitializeAsync()` checks SQLite for previous session — if found, auto-resumes tracking
-
-#### Background resilience & "Not Deletable" Auto-Start
-
-The client has multiple layers of persistence making auto-start effectively non-removable:
-
-**Auto-start registration (on login):**
-- **Windows**: Registry `HKCU\...\Run` + Scheduled Task (`AlphaAITracker-Startup`) with `RUNLEVEL HIGHEST`
-- **Linux**: `~/.config/autostart/alpha-ai-tracker.desktop` + `systemctl --user enable` systemd service
-- **macOS**: `~/Library/LaunchAgents/com.alphaai.tracker.plist` + `launchctl load`
-
-**Background guard (`BackgroundGuardService`):**
-- **Watchdog**: Health checks every 60s
-- **Auto-reinstall**: If auto-start is removed by user or malware, `EnableAutoStartForced()` is called immediately (within 60s)
-- **Linux**: Installs `systemctl --user` service with `Restart=always` — auto-restarts if killed
-- **Windows**: Scheduled Task + restart watchdog script
-- **macOS**: launchd `KeepAlive=true`
-
-**Force permissions (platform-specific direct popups):**
-- **Windows**: Button triggers UAC elevation prompt via `cmd.exe` + `Verb = "runas"` — direct popup, no navigation. Also opens `ms-settings:privacy-accessibility` for grant lists.
-- **Linux**: Button launches `pkexec` which spawns a native PolKit (GTK) password dialog — user enters admin password directly in the popup.
-- **macOS**: Shows step-by-step instructions for System Settings → Privacy & Security.
-- Permission panel is expandable from the main window footer.
-
-#### Directory structure
-
-```
-client/
-├── Program.cs                         # Entry point, DI registration
-├── App.axaml / App.axaml.cs           # Application lifecycle, DI ServiceProvider
-├── ViewLocator.cs                     # ViewModel → View resolution
-├── Configuration/
-│   ├── AppConfig.cs                   # App configuration from env vars
-│   └── EnvLoader.cs                   # .env file loader
-├── Core/
-│   ├── Abstractions/
-│   │   ├── IActivityCollector.cs      # Process activity collection interface
-│   │   ├── ILogStore.cs               # Storage interface (logs + shell cmds + employee info)
-│   │   ├── IInstalledAppDetector.cs   # Interface for detecting installed applications
-│   │   └── IShellCommandCollector.cs  # Interface for collecting shell/terminal commands
-│   ├── Models/
-│   │   ├── ActivityLog.cs             # Activity log entry (includes EmployeeId, EmployeeName)
-│   │   ├── ShellCommand.cs            # Shell/terminal command entry
-│   │   ├── SessionInfo.cs             # Session tracking
-│   │   └── EmployeeInfo.cs            # Employee login info (SQLite-persisted)
-│   ├── InstalledAppDetector.cs        # Cross-platform impl: registry, dpkg, snap, brew, .desktop files
-│   └── ProcessFilter.cs               # Process filtering utilities
-├── Platform/
-│   ├── Windows/
-│   │   ├── ProcessCollector.cs        # Windows process activity collector
-│   │   └── ShellCommandCollector.cs   # Windows: PSReadLine history + cmd command history
-│   ├── MacOS/
-│   │   ├── ProcessCollector.cs        # macOS process activity collector
-│   │   └── ShellCommandCollector.cs   # macOS: bash/zsh/fish history file reader
-│   └── Linux/
-│       ├── ProcessCollector.cs        # Linux process activity collector
-│       └── ShellCommandCollector.cs   # Linux: bash/zsh/fish history + /proc/ cmdline reader
-├── Storage/
-│   ├── DatabaseSchema.cs              # SQLite schema (activity_logs + shell_commands + employee_id)
-│   └── SqliteLogStore.cs              # SQLite implementation + shell command storage
-├── Services/
-│   ├── LogCollectorService.cs         # Collection + installed-app filter + shell cmd collect + sync + cleanup
-│   ├── AutoStartService.cs            # Auto-start registration per platform (registry/.desktop/launchd)
-│   └── BackgroundGuardService.cs      # systemd/WinSched/macOS-launchd watchdog, auto-restart
-├── ViewModels/
-│   └── MainViewModel.cs               # Login state, employee info, permissions, auto-start toggle
-├── Views/
-│   └── MainWindow.axaml / .cs         # UI: login flow + employee info + permission panel
-├── Converters/
-│   ├── BoolInvertConverter.cs         # Invert boolean for XAML visibility
-│   ├── StringNotEmptyConverter.cs     # Show when string is not empty
-│   └── LoadingToTextConverter.cs      # Show "Authenticating..." when loading
-└── publish/                           # Installer build scripts
-    ├── installer-windows.iss          # Inno Setup script (auto-kills running instances)
-    ├── build-installer.sh             # Cross-platform installer builder
-    ├── build-deb.sh                   # Linux .deb builder (prerm kills running instances)
-    └── build-dmg.sh                   # macOS .dmg builder
-```
-
-#### Client Employee Login Flow
-
-1. App starts, checks SQLite for existing `employee_info` record
-2. If logged in → shows employee info panel, **auto-resumes tracking** (`StartTracking()`) + re-enforces auto-start
-3. If not logged in → shows "Not Connected" state with **Login** button — NO tracking happens
-4. Click Login → shows form with **Employee ID** (EMP-XXXXX) and **Secret Key** fields
-5. Submits to `POST /api/v1/auth/employee-login` on the server
-6. On success → saves employee + JWT token to local SQLite, calls `SetEmployeeInfo()` + `StartTracking()` + `EnableAutoStartForced()`
-7. Shows employee info panel with avatar, name, department, role
-8. **Disconnect** button: calls `StopTracking()` (immediately halts collection), sends disconnect to server (untrack + offline), then clears SQLite
-
-#### Installed App Detection
-
-The `InstalledAppDetector` identifies installed applications using platform-specific heuristics:
-- **Windows**: Start Menu programs, `Program Files` directories, Windows Registry Uninstall keys
-- **Linux**: `.desktop` files in standard paths, `dpkg-query` package list, `snap list`
-- **macOS**: `/Applications/*.app` bundles, `brew list` packages
-- Plus a curated list of ~120 known app names (browsers, terminals, IDEs, dev tools, etc.)
-- Only processes matching installed apps are stored in SQLite, excluding random scripts/binaries
-
-#### Shell Command Collection
-
-Each platform collects shell/terminal commands:
-- **Windows**: `PSReadLine` history file (`ConsoleHost_history.txt`) + cmd `doskey` history
-- **Linux**: `~/.bash_history`, `~/.zsh_history`, `~/.local/share/fish/fish_history`; also reads `/proc/*/cmdline` for running shell commands
-- **macOS**: `~/.bash_history`, `~/.zsh_history`, `~/.local/share/fish/fish_history`
-- Commands are synced to server every ~5 min via `POST /api/v1/shell-commands/sync`
-- Synced commands older than 24h are auto-deleted from local SQLite
-
-#### Installer behavior
-
-- **Windows**: Inno Setup installer auto-kills any running `client.exe` or `AlphaAITracker.exe` via `taskkill /F /IM` in `InitializeSetup` and `InitializeUninstall` (see `installer-windows.iss`)
-- **Linux**: `.deb` postrm script auto-kills running instances via `kill -9` before uninstall (see `build-deb.sh`)
-- **Mutex**: `AlphaAITracker` named mutex prevents multiple instances
-
----
-
-## Database & Error Handling Conventions
-
-### Transactions
-
-All **write operations** (Create, Update, Delete) MUST use database transactions for atomicity:
-
-```go
-tx, err := r.pool.Begin(ctx)
-if err != nil {
-    return nil, fmt.Errorf("begin tx: %w", err)
-}
-defer tx.Rollback(ctx) // no-op after Commit
-
-// ... perform operations against `tx` (not `r.pool`) ...
-
-if err := tx.Commit(ctx); err != nil {
-    return nil, fmt.Errorf("commit tx: %w", err)
-}
-return result, nil
-```
-
-- Use `tx.Exec`, `tx.Query`, `tx.QueryRow` instead of `r.pool.*` inside transactions
-- Use a `queryable` interface (pool or tx) for shared helpers
-- Read operations (List, GetByID) may use the pool directly
-
-### Row Scanning
-
-**NEVER** use `pgx.RowToStructByName` or `pgx.RowToStructByPos` for queries involving:
-- `LEFT JOIN` (nullable columns from the joined table)
-- `COALESCE` (returns technically nullable type)
-- Tables with nullable columns (`VARCHAR` without `NOT NULL`)
-
-Instead, always use **manual `rows.Scan()`** or a custom `CollectOneRow` callback with explicit field order that matches the SELECT column order exactly:
-
-```go
-pgx.CollectOneRow(rows, func(row pgx.CollectableRow) (models.Employee, error) {
-    var e models.Employee
-    err := row.Scan(
-        &e.ID, &e.EmployeeID, // ... all fields in SELECT order
-    )
-    return e, err
-})
-```
-
-For `List` queries, use a `for rows.Next()` loop with `rows.Scan()` and always check `rows.Err()` after the loop.
-
-### Error Handling
-
-- **Handlers**: Always log errors via `log.Printf` before returning JSON responses. Use a `logAndReturnError` helper pattern.
-- **Duplicate detection**: Check for PostgreSQL error code `23505` (unique_violation) using `*pgconn.PgError` with `errors.As()`.
-- **Duplicate prevention**: Validate email/name uniqueness in service layer BEFORE calling repo.Create (but always rely on DB constraints + transactions as the final safeguard).
-- **Log format**: `[module] message: error` — e.g., `[employee] Failed to create employee: email already exists: test@test.com`
-- **HTTP status codes**: Use appropriate codes — 409 Conflict for duplicates, 404 Not Found for missing resources, 400 Bad Request for validation errors, 500 Internal Server Error for unexpected failures.
-
-### Duplicate Prevention Rules
-
-1. Add `UNIQUE` constraints at the database level (PostgreSQL)
-2. Check uniqueness in the service layer before write operations
-3. Catch duplicate-key errors (`23505`) from the repository layer and wrap with descriptive messages
-4. Return `409 Conflict` from the handler for duplicates
-5. Always use transactions so the unique check + insert are atomic
-
-### Soft Delete Convention
-
-**All tables use soft delete.** Never hard-delete rows — always set `deleted_at = NOW()`.
-
-- Every table has a `deleted_at TIMESTAMPTZ` column (NULL = active, set = deleted)
-- All `DELETE` repo methods must be converted to `UPDATE ... SET deleted_at = NOW() WHERE ... AND deleted_at IS NULL`
-- All `SELECT` queries must include `WHERE deleted_at IS NULL` (or `AND deleted_at IS NULL` when combined with other filters)
-- All `INSERT ... RETURNING` and `UPDATE ... RETURNING` must include `deleted_at` in the SELECT list
-- The `deleted_at` field is exposed in API responses as `"deletedAt": null` (active) or `"deletedAt": "2024-01-15T10:30:00Z"` (deleted)
-- When checking uniqueness (email, etc.), always filter `deleted_at IS NULL` so soft-deleted records don't block new creation
-- The `Department` employee count subquery must also filter `deleted_at IS NULL` on the `employees` table
-
----
-
-## Style conventions
-
-- Tailwind CSS with CSS variables for theming (light/dark via `class` strategy)
-- Use `cn()` from `src/lib/utils.ts` to merge class names
-- Custom animations defined in `tailwind.config.ts`: `fade-in`, `slide-in-left`, `pulse-soft`
-- Sidebar uses custom `sidebar-*` CSS variable tokens
-- API client in `src/lib/api.ts` uses `credentials: 'include'` for cookie auth
-- Redux store in `src/lib/store/redux.ts`
-- TanStack Query keys prefixed by resource name: `['employees', params]`, `['departments']`, `['activity-logs', params]`
+### Notes
+
+- No `docker-compose.yml` exists — you must start PostgreSQL and Redis manually.
+- The client requires a running server with at least one employee created via the web admin.
+- Login to the web dashboard with the default credentials from `.env` (admin@alphai.com / AlphaAI@2024!).

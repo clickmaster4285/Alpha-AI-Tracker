@@ -1,0 +1,42 @@
+CONTEXT — READ FIRST:
+Read @AGENTS.md, @client/ARCHITECTURE.md, @server/ARCHITECTURE.md, @web/ARCHITECTURE.md in full 
+before touching any code. These are the current source of truth for this project's architecture, 
+written by a previous session (possibly a different AI tool than you). Trust them as the baseline, 
+but if you find code that contradicts what a doc says, the CODE is correct — the doc is stale and 
+you must fix it in step 3.
+
+Do not ask me to re-explain the project. Everything you need is in those 4 files. If something is 
+genuinely missing or ambiguous, say so explicitly rather than guessing.
+
+TASK FOR THIS SESSION:
+[requirements]
+
+RULES WHILE WORKING:
+- Stay inside the existing architecture and conventions described in the docs unless the task 
+  explicitly requires changing them (e.g., new endpoint, new table, new IPC method). If you 
+  introduce a new pattern, note it — it needs to go in the docs too.
+- Don't refactor unrelated code "while you're in there." Scope creep makes the next tool's handoff 
+  harder to audit.
+- If you hit something blocking (missing dependency, unclear requirement, existing bug in the way), 
+  stop and report it rather than working around it silently.
+
+AFTER CHANGES — UPDATE DOCS:
+Update @AGENTS.md, @client/ARCHITECTURE.md, @server/ARCHITECTURE.md, @web/ARCHITECTURE.md to reflect 
+exactly what changed in this session:
+- Only touch the sections affected by this session's work — don't rewrite unrelated sections.
+- If you added/changed an API route, DB table/column, config value, or cross-service contract, 
+  update it in every file where it's referenced (a server route change often needs edits in both 
+  server/ARCHITECTURE.md and client or web's "how it talks to server" section).
+- Update the "Current Completion State" / completion % in AGENTS.md if this session materially 
+  moved it.
+- Add or update each file's "Immediate next steps" list — remove what you just finished, add 
+  whatever this session surfaced as the next logical step.
+- Update the "Last audited: <date>, commit <hash if available>" line at the bottom of each file 
+  you touch.
+- If you deliberately deviated from something the old doc said, note it as a one-line changelog 
+  entry at the top of that file's "Immediate next steps" section — e.g. "2026-07-25: switched 
+  client sync from polling to WebSocket, see Sync section below" — so the next tool session isn't 
+  confused by the discrepancy.
+
+Before finishing, list exactly which doc sections you changed and why, so I can verify before the 
+next session (possibly a different tool) picks this up.
