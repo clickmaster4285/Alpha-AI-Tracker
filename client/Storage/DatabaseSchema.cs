@@ -3,38 +3,148 @@ namespace client.Storage;
 internal static class DatabaseSchema
 {
     internal const string CreateTableSql = @"
-        CREATE TABLE IF NOT EXISTS activity_logs (
-            id              TEXT PRIMARY KEY,
-            machine_id      TEXT NOT NULL,
-            timestamp       TEXT NOT NULL,
-            process_name    TEXT NOT NULL,
-            window_title    TEXT,
-            process_id      INTEGER NOT NULL,
-            cpu_percent     REAL DEFAULT 0,
-            memory_bytes    INTEGER DEFAULT 0,
-            is_foreground   INTEGER DEFAULT 0,
-            user_name       TEXT,
-            platform        TEXT NOT NULL,
-            session_id      TEXT,
-            employee_id     TEXT,
-            employee_name   TEXT,
-            synced_at       TEXT,
-            created_at      TEXT DEFAULT (datetime('now'))
+        -- DEVICE & SYSTEM INFO TABLES
+
+        CREATE TABLE IF NOT EXISTS device_hardware_info (
+            id               TEXT PRIMARY KEY,
+            mac_address      TEXT NOT NULL DEFAULT '',
+            hostname         TEXT NOT NULL DEFAULT '',
+            os_name          TEXT NOT NULL DEFAULT '',
+            os_version       TEXT NOT NULL DEFAULT '',
+            cpu_model        TEXT NOT NULL DEFAULT '',
+            cpu_cores        INTEGER NOT NULL DEFAULT 0,
+            ram_total_mb     INTEGER NOT NULL DEFAULT 0,
+            gpu_model        TEXT NOT NULL DEFAULT '',
+            gpu_vram_mb      INTEGER NOT NULL DEFAULT 0,
+            collected_at     TEXT NOT NULL,
+            is_synced        INTEGER NOT NULL DEFAULT 0,
+            synced_at        TEXT,
+            created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
         );
 
-        CREATE INDEX IF NOT EXISTS idx_logs_unsent
-            ON activity_logs(synced_at, timestamp);
+        -- Relational storage devices (replaces JSON storage_devices column from device_hardware_info)
+        CREATE TABLE IF NOT EXISTS storage_devices (
+            id                  TEXT PRIMARY KEY,
+            device_hardware_id  TEXT NOT NULL REFERENCES device_hardware_info(id),
+            device_type         TEXT NOT NULL DEFAULT '',
+            model               TEXT NOT NULL DEFAULT '',
+            capacity_mb         INTEGER NOT NULL DEFAULT 0,
+            is_synced           INTEGER NOT NULL DEFAULT 0,
+            synced_at           TEXT,
+            created_at          TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+        );
 
-        CREATE INDEX IF NOT EXISTS idx_logs_timestamp
-            ON activity_logs(timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_storage_devices_hw
+            ON storage_devices(device_hardware_id);
 
-        CREATE INDEX IF NOT EXISTS idx_logs_machine
-            ON activity_logs(machine_id, timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_device_hw_unsent
+            ON device_hardware_info(is_synced, collected_at);
+
+        CREATE TABLE IF NOT EXISTS installed_applications (
+            id               TEXT PRIMARY KEY,
+            app_name         TEXT NOT NULL UNIQUE,
+            app_version      TEXT NOT NULL DEFAULT '',
+            publisher        TEXT NOT NULL DEFAULT '',
+            install_path     TEXT NOT NULL DEFAULT '',
+            install_date     TEXT,
+            uninstall_string TEXT NOT NULL DEFAULT '',
+            change_type      TEXT NOT NULL DEFAULT 'seen',
+            detected_at      TEXT NOT NULL,
+            is_synced        INTEGER NOT NULL DEFAULT 0,
+            synced_at        TEXT,
+            created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_installed_apps_unsent
+            ON installed_applications(is_synced, detected_at);
+
+        CREATE INDEX IF NOT EXISTS idx_installed_apps_name
+            ON installed_applications(app_name);
+
+        CREATE TABLE IF NOT EXISTS network_info (
+            id                   TEXT PRIMARY KEY,
+            public_ip            TEXT NOT NULL DEFAULT '',
+            private_ip           TEXT NOT NULL DEFAULT '',
+            network_interface_name TEXT NOT NULL DEFAULT '',
+            collected_at         TEXT NOT NULL,
+            is_synced            INTEGER NOT NULL DEFAULT 0,
+            synced_at            TEXT,
+            created_at           TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_network_unsent
+            ON network_info(is_synced, collected_at);
+
+        CREATE TABLE IF NOT EXISTS session_events (
+            id               TEXT PRIMARY KEY,
+            event_type       TEXT NOT NULL,
+            os_username      TEXT NOT NULL DEFAULT '',
+            event_at         TEXT NOT NULL,
+            is_synced        INTEGER NOT NULL DEFAULT 0,
+            synced_at        TEXT,
+            created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_session_events_unsent
+            ON session_events(is_synced, event_at);
+
+        -- APPLICATION LOGS
+
+        CREATE TABLE IF NOT EXISTS app_sessions (
+            id               TEXT PRIMARY KEY,
+            process_name     TEXT NOT NULL,
+            app_display_name TEXT NOT NULL DEFAULT '',
+            started_at       TEXT NOT NULL,
+            ended_at         TEXT,
+            machine_id       TEXT NOT NULL DEFAULT '',
+            employee_id      TEXT,
+            employee_name    TEXT,
+            session_id       TEXT NOT NULL DEFAULT '',
+            platform         TEXT NOT NULL DEFAULT '',
+            is_synced        INTEGER NOT NULL DEFAULT 0,
+            synced_at        TEXT,
+            created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_app_sessions_unsent
+            ON app_sessions(is_synced, started_at);
+
+        CREATE INDEX IF NOT EXISTS idx_app_sessions_employee
+            ON app_sessions(employee_id, started_at);
+
+        -- GENERIC APP ITEMS (replaces browser_contexts, file_explorer_contexts, urls, url_visits)
+        -- Self-referencing via parent_item_id for nesting: app_session -> tab -> terminal/browser_navigation
+        -- item_type: 'tab', 'browser_tab', 'browser_navigation', 'terminal', 'folder', 'file', etc.
+
+        CREATE TABLE IF NOT EXISTS app_items (
+            id                TEXT PRIMARY KEY,
+            app_session_id    TEXT NOT NULL REFERENCES app_sessions(id),
+            parent_item_id    TEXT REFERENCES app_items(id),
+            item_type         TEXT NOT NULL DEFAULT '',
+            title             TEXT NOT NULL DEFAULT '',
+            identifier        TEXT NOT NULL DEFAULT '',
+            opened_at         TEXT NOT NULL,
+            closed_at         TEXT,
+            is_synced         INTEGER NOT NULL DEFAULT 0,
+            synced_at         TEXT,
+            created_at        TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_app_items_unsent
+            ON app_items(is_synced, opened_at);
+
+        CREATE INDEX IF NOT EXISTS idx_app_items_app_session
+            ON app_items(app_session_id);
+
+        CREATE INDEX IF NOT EXISTS idx_app_items_parent
+            ON app_items(parent_item_id);
+
+        -- APP STATUS & PERMISSIONS
 
         CREATE TABLE IF NOT EXISTS app_status (
             key             TEXT PRIMARY KEY,
             value           TEXT NOT NULL,
-            updated_at      TEXT DEFAULT (datetime('now'))
+            updated_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
         );
 
         CREATE TABLE IF NOT EXISTS permission_status (
@@ -61,59 +171,141 @@ internal static class DatabaseSchema
             avatar          TEXT,
             avatar_color    TEXT,
             token           TEXT,
-            logged_in_at    TEXT DEFAULT (datetime('now'))
+            logged_in_at    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
         );
 
-        CREATE TABLE IF NOT EXISTS shell_commands (
-            id              TEXT PRIMARY KEY,
-            machine_id      TEXT NOT NULL,
-            timestamp       TEXT NOT NULL,
-            shell_name      TEXT NOT NULL,
-            shell_pid       TEXT,
-            command         TEXT NOT NULL,
-            working_directory TEXT,
-            exit_code       TEXT,
-            user_name       TEXT,
-            platform        TEXT NOT NULL,
-            session_id      TEXT,
-            employee_id     TEXT,
-            employee_name   TEXT,
-            synced_at       TEXT,
-            created_at      TEXT DEFAULT (datetime('now'))
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_shell_unsent
-            ON shell_commands(synced_at, timestamp);
-
-        CREATE INDEX IF NOT EXISTS idx_shell_timestamp
-            ON shell_commands(timestamp DESC);
+        -- shell_commands table intentionally removed — no longer collected
     ";
 
-    internal const string InsertShellCommandSql = @"
-        INSERT OR IGNORE INTO shell_commands
-            (id, machine_id, timestamp, shell_name, shell_pid,
-             command, working_directory, exit_code,
-             user_name, platform, session_id, employee_id, employee_name)
+    // PHASE 1: INSERT STATEMENTS
+
+    internal const string InsertDeviceHardwareInfoSql = @"
+        INSERT INTO device_hardware_info
+            (id, mac_address, hostname, os_name, os_version, cpu_model, cpu_cores,
+             ram_total_mb, gpu_model, gpu_vram_mb, collected_at)
         VALUES
-            ($id, $machine_id, $timestamp, $shell_name, $shell_pid,
-             $command, $working_directory, $exit_code,
-             $user_name, $platform, $session_id, $employee_id, $employee_name)
+            ($id, $mac_address, $hostname, $os_name, $os_version, $cpu_model, $cpu_cores,
+             $ram_total_mb, $gpu_model, $gpu_vram_mb, $collected_at)
     ";
 
-    internal const string InsertSql = @"
-        INSERT OR IGNORE INTO activity_logs
-            (id, machine_id, timestamp, process_name, window_title,
-             process_id, cpu_percent, memory_bytes, is_foreground,
-             user_name, platform, session_id, employee_id, employee_name)
+    internal const string InsertStorageDeviceSql = @"
+        INSERT INTO storage_devices
+            (id, device_hardware_id, device_type, model, capacity_mb)
         VALUES
-            ($id, $machine_id, $timestamp, $process_name, $window_title,
-             $process_id, $cpu_percent, $memory_bytes, $is_foreground,
-             $user_name, $platform, $session_id, $employee_id, $employee_name)
+            ($id, $device_hardware_id, $device_type, $model, $capacity_mb)
     ";
+
+    internal const string MarkDeviceHardwareSentSql = @"
+        UPDATE device_hardware_info
+        SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')
+        WHERE id IN ({0})
+    ";
+
+    internal const string MarkStorageDevicesSentSql = @"
+        UPDATE storage_devices
+        SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')
+        WHERE id IN ({0})
+    ";
+
+    internal const string InsertInstalledApplicationSql = @"
+        INSERT INTO installed_applications
+            (id, app_name, app_version, publisher, install_path, install_date,
+             uninstall_string, change_type, detected_at)
+        VALUES
+            ($id, $app_name, $app_version, $publisher, $install_path, $install_date,
+             $uninstall_string, $change_type, $detected_at)
+        ON CONFLICT(app_name) DO UPDATE SET
+            app_version = excluded.app_version,
+            publisher = COALESCE(NULLIF(excluded.publisher, ''), installed_applications.publisher),
+            install_path = COALESCE(NULLIF(excluded.install_path, ''), installed_applications.install_path),
+            change_type = CASE WHEN installed_applications.change_type = 'installed' THEN 'installed' ELSE excluded.change_type END,
+            detected_at = excluded.detected_at
+    ";
+
+    internal const string MarkInstalledAppsSentSql = @"
+        UPDATE installed_applications
+        SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')
+        WHERE id IN ({0})
+    ";
+
+    internal const string InsertNetworkInfoSql = @"
+        INSERT INTO network_info
+            (id, public_ip, private_ip, network_interface_name, collected_at)
+        VALUES
+            ($id, $public_ip, $private_ip, $network_interface_name, $collected_at)
+    ";
+
+    internal const string MarkNetworkInfoSentSql = @"
+        UPDATE network_info
+        SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')
+        WHERE id IN ({0})
+    ";
+
+    internal const string InsertSessionEventSql = @"
+        INSERT INTO session_events
+            (id, event_type, os_username, event_at)
+        VALUES
+            ($id, $event_type, $os_username, $event_at)
+    ";
+
+    internal const string MarkSessionEventsSentSql = @"
+        UPDATE session_events
+        SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')
+        WHERE id IN ({0})
+    ";
+
+    // PHASE 2: INSERT & QUERY STATEMENTS
+
+    internal const string InsertAppSessionSql = @"
+        INSERT INTO app_sessions
+            (id, process_name, app_display_name, started_at, ended_at,
+             machine_id, employee_id, employee_name, session_id, platform)
+        VALUES
+            ($id, $process_name, $app_display_name, $started_at, $ended_at,
+             $machine_id, $employee_id, $employee_name, $session_id, $platform)
+        ON CONFLICT(id) DO UPDATE SET
+            ended_at = COALESCE(excluded.ended_at, app_sessions.ended_at)
+    ";
+
+    internal const string UpdateAppSessionEndedSql = @"
+        UPDATE app_sessions
+        SET ended_at = $ended_at
+        WHERE id = $id
+    ";
+
+    internal const string MarkAppSessionsSentSql = @"
+        UPDATE app_sessions
+        SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')
+        WHERE id IN ({0})
+    ";
+
+    // APP ITEMS (generic child of app_sessions)
+
+    internal const string InsertAppItemSql = @"
+        INSERT OR IGNORE INTO app_items
+            (id, app_session_id, parent_item_id, item_type, title, identifier, opened_at, closed_at)
+        VALUES
+            ($id, $app_session_id, $parent_item_id, $item_type, $title, $identifier, $opened_at, $closed_at)
+    ";
+
+    internal const string MarkAppItemsSentSql = @"
+        UPDATE app_items
+        SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')
+        WHERE id IN ({0})
+    ";
+
+    internal const string GetLastNetworkInfoSql = @"
+        SELECT id, public_ip, private_ip, network_interface_name, collected_at
+        FROM network_info
+        ORDER BY collected_at DESC
+        LIMIT 1
+    ";
+
+    // UTILITY STATEMENTS
 
     internal const string UpsertStatusSql = @"
         INSERT INTO app_status (key, value, updated_at)
-        VALUES ($key, $value, datetime('now'))
+        VALUES ($key, $value, strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
         ON CONFLICT(key) DO UPDATE SET
             value = excluded.value,
             updated_at = excluded.updated_at
@@ -125,5 +317,4 @@ internal static class DatabaseSchema
         VALUES
             ($check_id, $session_id, $session_type, $platform, $checked_at, $method, $works, $details, $employee_id, $employee_name)
     ";
-
 }
