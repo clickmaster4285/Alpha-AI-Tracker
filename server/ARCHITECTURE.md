@@ -1,8 +1,8 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-07-25 (app_items + clean up)  
-> **Changelog:** 2026-07-25: Added migration 008 (app_items table). Removed all BrowserContext/FileExplorerContext/UrlRecord/UrlVisit/ShellCommand types, handlers, services, repos. Replaced with single AppItem model. Router simplified to only /app-sessions/sync and /app-items/sync for Phase 2. Shell commands endpoint removed.  
-> **Service completion (honest):** ~46%
+> **Last audited:** 2026-07-27 (installed_packages)  
+> **Changelog:** 2026-07-27: Added migration 009 (installed_packages table). New model/DTO/handler/service/repo for installed_packages. Split from installed_applications (GUI apps only). New route POST /api/v1/installed-packages/sync.  
+> **Service completion (honest):** ~47%
 
 ---
 
@@ -183,6 +183,12 @@ All endpoints are under `/api/v1`. Full route inventory:
 | POST | `/activity-logs/sync` | Public* | Client log sync (JWT in body) |
 | GET | `/activity-logs` | Protected | List logs (paginated, filterable) |
 
+### Installed Packages (Public — JWT in body)
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/installed-packages/sync` | CLI tools/runtimes/libs sync from client |
+
 ### Departments (Protected)
 
 | Method | Path | Purpose |
@@ -273,6 +279,23 @@ created_at      TIMESTAMPTZ
 PRIMARY KEY (id, employee_id)
 ```
 
+**`installed_packages`** — CLI tools, runtimes, and libraries from package managers (migration 009)
+```
+id              TEXT PK
+employee_id     VARCHAR(20) NOT NULL → FK → employees(employee_id)
+package_name    TEXT NOT NULL
+version         TEXT NOT NULL DEFAULT ''
+category        TEXT NOT NULL DEFAULT 'tool'
+source_manager  TEXT NOT NULL DEFAULT ''
+install_path    TEXT NOT NULL DEFAULT ''
+publisher       TEXT NOT NULL DEFAULT ''
+description     TEXT NOT NULL DEFAULT ''
+detected_at     TIMESTAMPTZ
+synced_at       TIMESTAMPTZ
+created_at      TIMESTAMPTZ
+deleted_at      TIMESTAMPTZ (soft delete)
+```
+
 **`schema_migrations`** — Migration tracking
 ```
 filename        VARCHAR(255) PK
@@ -287,7 +310,7 @@ applied_at      TIMESTAMPTZ DEFAULT NOW()
 
 ### Migration Tool
 
-**Custom runner** in `database/postgres.go`. Reads `.sql` files from `migrations/` directory, tracks applied migrations in `schema_migrations` table, runs in transaction order.
+**Custom runner** in `database/postgres.go`. Reads `.sql` files from `migrations/` directory (currently 9 files: 001–009), tracks applied migrations in `schema_migrations` table, runs in transaction order.
 
 ---
 
@@ -475,12 +498,13 @@ The server is **mostly stateless**:
 
 ## 11. Immediate Next Steps
 
-1. **Add shell commands table and sync endpoint** — the client is sending data that's silently dropped
-2. **Add rate limiting** — at minimum on `/auth/login` and `/activity-logs/sync`
+1. ~~**Add shell commands table and sync endpoint**~~ — deferred (shell commands removed from client)
+2. **Add rate limiting** — at minimum on `/auth/login` and sync endpoints
 3. **Fix the health check bug** — `c.RealIP()` is not a timestamp
 4. **Add structured logging** — replace `log.Printf` with `slog` (Go 1.21+ standard library)
 5. **Add request validation** — use `go-playground/validator` or similar
 6. **Cross-check employeeId in sync** — ensure the JWT userId matches the request employeeId
 7. **Add tests** — start with service-layer tests using mock repositories, then handler integration tests
-8. **Add data cleanup job** — periodic deletion of activity logs older than a configurable threshold
+8. **Add data cleanup job** — periodic deletion of old data
 9. **Add server-side permissions** — even a simple role check before allowing writes
+10. **Add installed packages listing endpoint** — for web dashboard to view packages

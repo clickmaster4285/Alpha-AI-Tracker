@@ -73,10 +73,6 @@ public partial class ProcessCollector : IActivityCollector
                 // Fallback to X11 window title if available
                 resolvedTitle ??= x11Titles.GetValueOrDefault(pid);
 
-                // Ultimate fallback: use process name so every user process gets logged
-                // (critical for Wayland where window detection is limited)
-                resolvedTitle ??= name;
-
                 var profile = ParentProcessResolver.GetChromeProfile(name, pid);
 
                 var title = profile != null && resolvedTitle != null

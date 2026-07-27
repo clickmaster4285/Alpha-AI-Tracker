@@ -120,6 +120,56 @@ func (r *NewSchemaRepo) BulkInsertInstalledApps(ctx context.Context, entries []m
 }
 
 // ────────────────────────────────
+// Installed Packages
+// ────────────────────────────────
+
+func (r *NewSchemaRepo) BulkInsertInstalledPackages(ctx context.Context, entries []models.InstalledPackage) (int, error) {
+	if len(entries) == 0 {
+		return 0, nil
+	}
+	batchSize := 500
+	inserted := 0
+	for i := 0; i < len(entries); i += batchSize {
+		end := i + batchSize
+		if end > len(entries) {
+			end = len(entries)
+		}
+		batch := entries[i:end]
+		valueStrings := make([]string, 0, len(batch))
+		args := make([]interface{}, 0, len(batch)*10)
+		argIdx := 1
+
+		for _, e := range batch {
+			valueStrings = append(valueStrings, fmt.Sprintf(
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
+				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9, argIdx+10,
+			))
+			args = append(args,
+				e.ID, e.EmployeeID, e.PackageName, e.Version, e.Category,
+				e.SourceManager, e.InstallPath, e.Publisher, e.Description, e.DetectedAt, time.Now(),
+			)
+			argIdx += 11
+		}
+
+		query := fmt.Sprintf(`
+			INSERT INTO installed_packages
+				(id, employee_id, package_name, version, category, source_manager,
+				 install_path, publisher, description, detected_at, synced_at)
+			VALUES %s
+			ON CONFLICT (id) DO NOTHING
+		`, strings.Join(valueStrings, ", "))
+
+		tag, err := r.pool.Exec(ctx, query, args...)
+		if err != nil {
+			return inserted, fmt.Errorf("bulk insert installed_packages: %w", err)
+		}
+		inserted += int(tag.RowsAffected())
+	}
+	return inserted, nil
+}
+
+// ────────────────────────────────
 // Network Info
 // ────────────────────────────────
 

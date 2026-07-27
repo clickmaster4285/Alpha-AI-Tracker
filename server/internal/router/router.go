@@ -58,6 +58,7 @@ func Setup(
 	// Phase 1 sync endpoints — authenticated by employee token in body (not cookie)
 	e.POST("/api/v1/device-hardware/sync", newSchemaHandler.SyncDeviceHardware)
 	e.POST("/api/v1/installed-apps/sync", newSchemaHandler.SyncInstalledApps)
+	e.POST("/api/v1/installed-packages/sync", newSchemaHandler.SyncInstalledPackages)
 	e.POST("/api/v1/network-info/sync", newSchemaHandler.SyncNetworkInfo)
 	e.POST("/api/v1/session-events/sync", newSchemaHandler.SyncSessionEvents)
 

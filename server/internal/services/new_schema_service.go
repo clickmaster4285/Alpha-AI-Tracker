@@ -112,6 +112,46 @@ func (s *NewSchemaService) SyncInstalledApps(ctx context.Context, req *dto.SyncI
 	return &dto.SyncBatchResponse{Synced: inserted, Message: fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries))}, nil
 }
 
+// ── installed_packages ──
+
+func (s *NewSchemaService) SyncInstalledPackages(ctx context.Context, req *dto.SyncInstalledPackagesRequest) (*dto.SyncBatchResponse, error) {
+	emp, err := s.employeeRepo.GetByEmployeeID(ctx, req.EmployeeID)
+	if err != nil {
+		return nil, fmt.Errorf("verify employee: %w", err)
+	}
+	if emp == nil {
+		return nil, fmt.Errorf("employee not found")
+	}
+	if len(req.Entries) == 0 {
+		return &dto.SyncBatchResponse{Synced: 0, Message: "No entries to sync"}, nil
+	}
+
+	now := time.Now()
+	entries := make([]models.InstalledPackage, 0, len(req.Entries))
+	for _, e := range req.Entries {
+		dets, _ := time.Parse(time.RFC3339, e.DetectedAt)
+		entries = append(entries, models.InstalledPackage{
+			ID:            e.ID,
+			EmployeeID:    req.EmployeeID,
+			PackageName:   e.PackageName,
+			Version:       e.Version,
+			Category:      e.Category,
+			SourceManager: e.SourceManager,
+			InstallPath:   e.InstallPath,
+			Publisher:     e.Publisher,
+			Description:   e.Description,
+			DetectedAt:    dets,
+			SyncedAt:      &now,
+		})
+	}
+
+	inserted, err := s.repo.BulkInsertInstalledPackages(ctx, entries)
+	if err != nil {
+		return nil, fmt.Errorf("bulk insert installed_packages: %w", err)
+	}
+	return &dto.SyncBatchResponse{Synced: inserted, Message: fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries))}, nil
+}
+
 // ── network_info ──
 
 func (s *NewSchemaService) SyncNetworkInfo(ctx context.Context, req *dto.SyncNetworkInfoRequest) (*dto.SyncBatchResponse, error) {

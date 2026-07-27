@@ -16,6 +16,11 @@ public class AppSession
     public string? EmployeeName { get; set; }
     public string SessionId { get; set; } = string.Empty;
     public string Platform { get; set; } = string.Empty;
+
+    /// <summary>FK → installed_applications.id, set when this session maps to a known GUI app</summary>
+    public string? InstalledAppId { get; set; }
+    /// <summary>FK → installed_packages.id, set when this session maps to a known CLI package</summary>
+    public string? InstalledPackageId { get; set; }
 }
 
 /// <summary>

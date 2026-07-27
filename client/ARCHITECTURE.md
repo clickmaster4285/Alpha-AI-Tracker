@@ -1,8 +1,14 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-07-25 (data quality + app_items refactor)  
-> **Changelog:** 2026-07-25: Data quality fixes. device_hw now collects mac/gpu/storage. installed_apps scans actual OS DB (not running procs). network gets public IP + dedup. shell_commands removed entirely. Replaced browser_contexts/file_explorer_contexts/urls/url_visits with single generic app_items table (self-referencing parent_item_id). IShellCommandCollector removed from DI.  
-> **Service completion (honest):** ~48%
+> **Last audited:** 2026-07-27 (binary_name FK, auto-detect, parent tracking)  
+> **Changelog:** 
+> - 2026-07-27: Added `binary_name` column to `installed_applications` for process→display-name resolution.
+> - 2026-07-27: Added `installed_app_id` / `installed_package_id` FK columns to `app_sessions`.
+> - 2026-07-27: Replaced in-memory `IsInstalledApp()` filter with SQLite-backed `ResolveAppInfo()` + auto-detect.
+> - 2026-07-27: Fixed Linux ProcessCollector `resolvedTitle ??= name` bug (was giving every process a fake title, bypassing window-title filters).
+> - 2026-07-27: Added process-tree-based parent-child tracking for terminal shells inside IDE/terminal-emulator sessions.
+> - 2026-07-27: Added `waydroid` / `gnome-software` to `NonAppProcesses` blocklist.
+> **Service completion (honest):** ~58%
 
 ---
 
@@ -69,17 +75,19 @@ client/
 │   ├── Abstractions/
 │   │   ├── IActivityCollector.cs       # Single method: CollectAsync → ActivityLog[]
 │   │   ├── ILogStore.cs                # 16 methods: store, retrieve unsent, mark sent, cleanup, employee info, shell commands
-│   │   ├── IInstalledAppDetector.cs    # Installed app detection + permission status
+│   │   ├── IInstalledAppDetector.cs    # GUI/desktop app detection + permission status
+│   │   ├── IPackageDetector.cs         # CLI tool/runtime/library detection from package managers
 │   │   └── IShellCommandCollector.cs   # Shell command collection + accessibility status
 │   ├── Models/
 │   │   ├── ActivityLog.cs              # Intermediate collection DTO (used by IActivityCollector, not persisted)
 │   │   ├── AppSession.cs               # App session + BrowserContext + FileExplorerContext + UrlRecord + UrlVisit
-│   │   ├── DeviceHardwareInfo.cs       # Phase 1: DeviceHardwareInfo + InstalledApplication + NetworkInfo + SessionEvent
+│   │   ├── DeviceHardwareInfo.cs       # Phase 1: DeviceHardwareInfo + InstalledApplication + InstalledPackage + NetworkInfo + SessionEvent
 │   │   ├── EmployeeInfo.cs             # Employee login info (persisted in SQLite)
 │   │   ├── SessionInfo.cs              # Static session ID (generated once per app launch)
 │   │   └── ShellCommand.cs             # Shell command model (15 fields)
 │   ├── EncryptedConfigService.cs       # AES-256-GCM encryption with transport key + machine-derived key
-│   ├── InstalledAppDetector.cs         # Cross-platform installed app detection (desktop files, dpkg, brew, registry)
+│   ├── InstalledAppDetector.cs         # Cross-platform installed app detection (desktop files, registry, .app bundles) — GUI only
+│   ├── PackageDetector.cs              # Cross-platform installed package detection (npm, pip, apt, brew, choco, winget, scoop, etc.)
 │   ├── ProcessFilter.cs                # Filters kernel/system processes from collection
 │   └── ParentProcessResolver.cs        # Resolves window titles from parent processes (e.g., terminal → shell)
 │
@@ -222,6 +230,65 @@ CREATE TABLE IF NOT EXISTS shell_commands (
 );
 ```
 
+**`installed_applications` table**
+```sql
+CREATE TABLE IF NOT EXISTS installed_applications (
+    id               TEXT PRIMARY KEY,
+    app_name         TEXT NOT NULL UNIQUE,
+    binary_name      TEXT NOT NULL DEFAULT '',      -- executable name e.g. "code" → maps "code" to "Visual Studio Code"
+    app_version      TEXT NOT NULL DEFAULT '',
+    publisher        TEXT NOT NULL DEFAULT '',
+    install_path     TEXT NOT NULL DEFAULT '',
+    install_date     TEXT,
+    uninstall_string TEXT NOT NULL DEFAULT '',
+    change_type      TEXT NOT NULL DEFAULT 'seen',
+    detected_at      TEXT NOT NULL,
+    is_synced        INTEGER NOT NULL DEFAULT 0,
+    synced_at        TEXT,
+    created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_installed_apps_binary ON installed_applications(binary_name);
+```
+
+**`installed_packages` table**
+```sql
+CREATE TABLE IF NOT EXISTS installed_packages (
+    id               TEXT PRIMARY KEY,
+    package_name     TEXT NOT NULL,
+    version          TEXT NOT NULL DEFAULT '',
+    category         TEXT NOT NULL DEFAULT 'tool',
+    source_manager   TEXT NOT NULL DEFAULT '',
+    install_path     TEXT NOT NULL DEFAULT '',
+    publisher        TEXT NOT NULL DEFAULT '',
+    description      TEXT NOT NULL DEFAULT '',
+    detected_at      TEXT NOT NULL,
+    is_synced        INTEGER NOT NULL DEFAULT 0,
+    synced_at        TEXT,
+    created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+);
+```
+
+**`app_sessions` table**
+```sql
+CREATE TABLE IF NOT EXISTS app_sessions (
+    id                  TEXT PRIMARY KEY,
+    process_name        TEXT NOT NULL,
+    app_display_name    TEXT NOT NULL DEFAULT '',      -- resolved from installed_applications.app_name (not window title)
+    started_at          TEXT NOT NULL,
+    ended_at            TEXT,
+    machine_id          TEXT NOT NULL DEFAULT '',
+    employee_id         TEXT,
+    employee_name       TEXT,
+    session_id          TEXT NOT NULL DEFAULT '',
+    platform            TEXT NOT NULL DEFAULT '',
+    installed_app_id    TEXT REFERENCES installed_applications(id),    -- FK to GUI app
+    installed_package_id TEXT REFERENCES installed_packages(id),       -- FK to CLI package
+    is_synced           INTEGER NOT NULL DEFAULT 0,
+    synced_at           TEXT,
+    created_at          TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+);
+```
+
 **`employee_info` table**
 ```sql
 CREATE TABLE IF NOT EXISTS employee_info (
@@ -278,8 +345,15 @@ CREATE TABLE IF NOT EXISTS employee_info (
 ### Filtering
 
 - **ProcessFilter.cs** — filters out kernel processes (`kthreadd`, `systemd-*`, etc.) and processes from different sessions
-- **LogCollectorService** — further filters to only installed applications (via `IInstalledAppDetector`) AND only entries with non-empty window titles
-- Shell processes (`bash`, `zsh`, `cmd`, etc.) are always tracked regardless of installed app status
+- **LogCollectorService** — resolves each process against the SQLite `installed_applications` (via `binary_name`) and `installed_packages` (via `package_name`):
+  - **Shell processes** (`bash`, `zsh`, `cmd`, etc.): always tracked (no window title needed)
+  - **GUI apps** (found in `installed_applications`): tracked only if they have a non-empty window title
+  - **CLI packages** (found in `installed_packages`): tracked regardless of window title
+  - **Unknown processes**: auto-detected via filesystem heuristics (`.desktop` files, standard install paths); if resolved, saved to `installed_applications`/`installed_packages` and tracked
+  - **Unresolvable processes**: silently skipped
+- `AppDisplayName` is set from the installed app's `app_name` (e.g., `"Visual Studio Code"`), not from the OS process name (`"code"`) or window title
+- `InstalledAppId` / `InstalledPackageId` FK columns link each session to its app/package record
+- [Linux only] Bug fixed: removed `resolvedTitle ??= name` fallback that previously assigned every process a fake window title, bypassing the window-title filter
 
 ### Batching / Offline Behavior
 
@@ -317,6 +391,13 @@ CREATE TABLE IF NOT EXISTS employee_info (
 |---|---|---|---|
 | `/api/v1/activity-logs/sync` | POST | `{employeeId, token, logs: [...]}` | ✅ Exists |
 | `/api/v1/shell-commands/sync` | POST | `{employeeId, token, commands: [...]}` | ❌ **Does not exist on server** |
+| `/api/v1/device-hardware/sync` | POST | `{employeeId, token, entries: [...]}` | ✅ Exists |
+| `/api/v1/installed-apps/sync` | POST | `{employeeId, token, entries: [...]}` | ✅ Exists |
+| `/api/v1/installed-packages/sync` | POST | `{employeeId, token, entries: [...]}` | ✅ Exists (new) |
+| `/api/v1/network-info/sync` | POST | `{employeeId, token, entries: [...]}` | ✅ Exists |
+| `/api/v1/session-events/sync` | POST | `{employeeId, token, entries: [...]}` | ✅ Exists |
+| `/api/v1/app-sessions/sync` | POST | `{employeeId, token, entries: [...]}` including `installedAppId` / `installedPackageId` | ✅ Exists |
+| `/api/v1/app-items/sync` | POST | `{employeeId, token, entries: [...]}` including `parentItemId` | ✅ Exists |
 | `/api/v1/auth/employee-disconnect` | POST | `{employeeId, token}` | ✅ Exists |
 
 ### Sync Frequency
@@ -326,6 +407,7 @@ CREATE TABLE IF NOT EXISTS employee_info (
 | Activity logs | Every ~5 min (10 cycles) | Max 100 logs |
 | Shell commands | Every ~5 min (10 cycles) | Max 100 commands |
 | Permission status | Every ~5 min (10 cycles) | All checks |
+| Installed packages | Every ~30 min (60 cycles) | Max 500 packages |
 | Cleanup (delete old synced) | Every ~60 min (120 cycles) | All matching |
 
 ---
@@ -377,11 +459,14 @@ CREATE TABLE IF NOT EXISTS employee_info (
 
 ## 10. Immediate Next Steps
 
-1. **Create the server-side shell commands table and sync endpoint** — currently client sends data that's silently lost
-2. **Add tests** — start with unit tests for `SqliteLogStore` and `ProcessFilter`, then integration tests for sync flow
-3. **Add crash reporting** — subscribe to `AppDomain.CurrentDomain.UnhandledException` and log to a file
-4. **Enable SQLite encryption** — uncomment the sqlcipher path in `SqliteLogStore` constructor and switch provider
-5. **Fix macOS CPU measurement** — sample `TotalProcessorTime` like Windows/Linux
+1. **Add tests** — start with unit tests for `SqliteLogStore`, `ProcessFilter`, and `PackageDetector`
+2. **Add crash reporting** — subscribe to `AppDomain.CurrentDomain.UnhandledException` and log to a file
+3. **Enable SQLite encryption** — uncomment the sqlcipher path in `SqliteLogStore` constructor and switch provider
+4. **Fix macOS CPU measurement** — sample `TotalProcessorTime` like Windows/Linux
+5. **Fix macOS window title capture** — only captures foreground window currently
 6. **Add file logging** — configure `ILogger` with a rolling file sink for production diagnostics
 7. **Add offline retry with backoff** — exponential backoff on sync failures to reduce server load
 8. **Consider auto-update** — integrate Velopack or Squirrel.Windows for silent updates
+9. ~~**Add process ancestry tracking** — persist parent PID chain from `ParentProcessResolver` into `AppItem`~~ ✅ DONE
+10. **Improve Chrome subprocess filtering** — use `/proc/<pid>/cmdline` check for `--type=` flag to reliably filter non-browser chrome processes
+11. **Add server-side columns** — migrate PostgreSQL `app_sessions` to accept `installed_app_id` and `installed_package_id` (currently client-only FKs)

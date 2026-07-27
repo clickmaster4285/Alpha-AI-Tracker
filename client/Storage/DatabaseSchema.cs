@@ -43,6 +43,7 @@ internal static class DatabaseSchema
         CREATE TABLE IF NOT EXISTS installed_applications (
             id               TEXT PRIMARY KEY,
             app_name         TEXT NOT NULL UNIQUE,
+            binary_name      TEXT NOT NULL DEFAULT '',
             app_version      TEXT NOT NULL DEFAULT '',
             publisher        TEXT NOT NULL DEFAULT '',
             install_path     TEXT NOT NULL DEFAULT '',
@@ -60,6 +61,33 @@ internal static class DatabaseSchema
 
         CREATE INDEX IF NOT EXISTS idx_installed_apps_name
             ON installed_applications(app_name);
+
+        CREATE INDEX IF NOT EXISTS idx_installed_apps_binary
+            ON installed_applications(binary_name);
+
+        CREATE TABLE IF NOT EXISTS installed_packages (
+            id               TEXT PRIMARY KEY,
+            package_name     TEXT NOT NULL,
+            version          TEXT NOT NULL DEFAULT '',
+            category         TEXT NOT NULL DEFAULT 'tool',
+            source_manager   TEXT NOT NULL DEFAULT '',
+            install_path     TEXT NOT NULL DEFAULT '',
+            publisher        TEXT NOT NULL DEFAULT '',
+            description      TEXT NOT NULL DEFAULT '',
+            detected_at      TEXT NOT NULL,
+            is_synced        INTEGER NOT NULL DEFAULT 0,
+            synced_at        TEXT,
+            created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_installed_packages_unsent
+            ON installed_packages(is_synced, detected_at);
+
+        CREATE INDEX IF NOT EXISTS idx_installed_packages_source
+            ON installed_packages(source_manager);
+
+        CREATE INDEX IF NOT EXISTS idx_installed_packages_category
+            ON installed_packages(category);
 
         CREATE TABLE IF NOT EXISTS network_info (
             id                   TEXT PRIMARY KEY,
@@ -91,19 +119,21 @@ internal static class DatabaseSchema
         -- APPLICATION LOGS
 
         CREATE TABLE IF NOT EXISTS app_sessions (
-            id               TEXT PRIMARY KEY,
-            process_name     TEXT NOT NULL,
-            app_display_name TEXT NOT NULL DEFAULT '',
-            started_at       TEXT NOT NULL,
-            ended_at         TEXT,
-            machine_id       TEXT NOT NULL DEFAULT '',
-            employee_id      TEXT,
-            employee_name    TEXT,
-            session_id       TEXT NOT NULL DEFAULT '',
-            platform         TEXT NOT NULL DEFAULT '',
-            is_synced        INTEGER NOT NULL DEFAULT 0,
-            synced_at        TEXT,
-            created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+            id                  TEXT PRIMARY KEY,
+            process_name        TEXT NOT NULL,
+            app_display_name    TEXT NOT NULL DEFAULT '',
+            started_at          TEXT NOT NULL,
+            ended_at            TEXT,
+            machine_id          TEXT NOT NULL DEFAULT '',
+            employee_id         TEXT,
+            employee_name       TEXT,
+            session_id          TEXT NOT NULL DEFAULT '',
+            platform            TEXT NOT NULL DEFAULT '',
+            installed_app_id    TEXT REFERENCES installed_applications(id),
+            installed_package_id TEXT REFERENCES installed_packages(id),
+            is_synced           INTEGER NOT NULL DEFAULT 0,
+            synced_at           TEXT,
+            created_at          TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
         );
 
         CREATE INDEX IF NOT EXISTS idx_app_sessions_unsent
@@ -209,12 +239,13 @@ internal static class DatabaseSchema
 
     internal const string InsertInstalledApplicationSql = @"
         INSERT INTO installed_applications
-            (id, app_name, app_version, publisher, install_path, install_date,
+            (id, app_name, binary_name, app_version, publisher, install_path, install_date,
              uninstall_string, change_type, detected_at)
         VALUES
-            ($id, $app_name, $app_version, $publisher, $install_path, $install_date,
+            ($id, $app_name, $binary_name, $app_version, $publisher, $install_path, $install_date,
              $uninstall_string, $change_type, $detected_at)
         ON CONFLICT(app_name) DO UPDATE SET
+            binary_name = COALESCE(NULLIF(excluded.binary_name, ''), installed_applications.binary_name),
             app_version = excluded.app_version,
             publisher = COALESCE(NULLIF(excluded.publisher, ''), installed_applications.publisher),
             install_path = COALESCE(NULLIF(excluded.install_path, ''), installed_applications.install_path),
@@ -224,6 +255,25 @@ internal static class DatabaseSchema
 
     internal const string MarkInstalledAppsSentSql = @"
         UPDATE installed_applications
+        SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')
+        WHERE id IN ({0})
+    ";
+
+    internal const string InsertInstalledPackageSql = @"
+        INSERT INTO installed_packages
+            (id, package_name, version, category, source_manager, install_path,
+             publisher, description, detected_at)
+        VALUES
+            ($id, $package_name, $version, $category, $source_manager, $install_path,
+             $publisher, $description, $detected_at)
+        ON CONFLICT(id) DO UPDATE SET
+            version = excluded.version,
+            category = excluded.category,
+            detected_at = excluded.detected_at
+    ";
+
+    internal const string MarkInstalledPackagesSentSql = @"
+        UPDATE installed_packages
         SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')
         WHERE id IN ({0})
     ";
@@ -259,10 +309,12 @@ internal static class DatabaseSchema
     internal const string InsertAppSessionSql = @"
         INSERT INTO app_sessions
             (id, process_name, app_display_name, started_at, ended_at,
-             machine_id, employee_id, employee_name, session_id, platform)
+             machine_id, employee_id, employee_name, session_id, platform,
+             installed_app_id, installed_package_id)
         VALUES
             ($id, $process_name, $app_display_name, $started_at, $ended_at,
-             $machine_id, $employee_id, $employee_name, $session_id, $platform)
+             $machine_id, $employee_id, $employee_name, $session_id, $platform,
+             $installed_app_id, $installed_package_id)
         ON CONFLICT(id) DO UPDATE SET
             ended_at = COALESCE(excluded.ended_at, app_sessions.ended_at)
     ";

@@ -1,8 +1,16 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-07-25 (data quality + arch refactor)  
-> **Changelog:** 2026-07-25: Data quality fixes (device_hw now collects mac/gpu/storage; installed_apps scans actual OS registry/DB, not running procs; network_info has public IP + dedup; shell_commands removed entirely). Replaced browser_contexts/file_explorer_contexts/urls/url_visits with single generic app_items table (self-referencing parent_item_id). Server endpoints consolidated.  
-> **Overall completion (honest):** ~28% across all 3 services
+> **Last audited:** 2026-07-27 (binary_name FK, auto-detect, parent tracking)  
+> **Changelog:** 
+> - 2026-07-27: Added `binary_name` to `installed_applications` model/SQLite table for process→display-name mapping.  
+> - 2026-07-27: Added `installed_app_id` / `installed_package_id` FK columns to `app_sessions` (client SQLite only).  
+> - 2026-07-27: Replaced in-memory `IsInstalledApp()` filter with SQLite-backed `ResolveAppInfo()` — processes not in DB get auto-detected via filesystem heuristics and saved before tracking.  
+> - 2026-07-27: Fixed Linux ProcessCollector `resolvedTitle ??= name` bug (was assigning fake titles to all processes, bypassing window-title filter).  
+> - 2026-07-27: Added process-tree-based parent-child tracking for terminal shells inside IDE/terminal-emulator sessions (via `ParentItemId` fixup pass).  
+> - 2026-07-27: Added `waydroid`/`gnome-software` to `NonAppProcesses` blocklist.  
+> - 2026-07-27: `AppDisplayName` now uses the real app name from `installed_applications.app_name` (e.g., "Visual Studio Code"), not the process name ("code") or window title.  
+> - 2026-07-27: Removed hardcoded `CommonKnownApps` list from `InstalledAppDetector` — app detection is now 100% dynamic from OS (.desktop files, registry, .app bundles).  
+> **Overall completion (honest):** ~34% across all 3 services
 
 ---
 
@@ -62,6 +70,7 @@ flowchart LR
 | Employee disconnect | REST POST `/api/v1/auth/employee-disconnect` | JWT token in body | JSON `{employeeId, token}` |
 | Device hardware sync (client → server) | REST POST `/api/v1/device-hardware/sync` | JWT token in request body | JSON `{employeeId, token, entries: [...]}` |
 | Installed apps sync (client → server) | REST POST `/api/v1/installed-apps/sync` | JWT token in request body | JSON `{employeeId, token, entries: [...]}` |
+| Installed packages sync (client → server) | REST POST `/api/v1/installed-packages/sync` | JWT token in request body | JSON `{employeeId, token, entries: [...]}` |
 | Network info sync (client → server) | REST POST `/api/v1/network-info/sync` | JWT token in request body | JSON `{employeeId, token, entries: [...]}` |
 | Session events sync (client → server) | REST POST `/api/v1/session-events/sync` | JWT token in request body | JSON `{employeeId, token, entries: [...]}` |
 | App sessions sync (client → server) | REST POST `/api/v1/app-sessions/sync` | JWT token in request body | JSON `{employeeId, token, entries: [...]}` |
@@ -90,14 +99,14 @@ flowchart LR
 
 ## 5. Current Completion State
 
-### Server — ~46% complete
+### Server — ~47% complete
 
 **What works:**
 - Migrations 001-008 run on startup (006 drops activity_logs, 008 adds app_items)
 - Full CRUD for users, employees, departments
 - Web admin auth (email/password → httpOnly cookie with encrypted JWT)
 - Employee auth (Redis one-time secret → JWT token)
-- 7 ingestion endpoints: device_hardware, installed_apps, network_info, session_events, app_sessions, app_items (+ synced_at for all)
+- 8 ingestion endpoints: device_hardware, installed_apps, installed_packages, network_info, session_events, app_sessions, app_items (+ synced_at for all)
 - App sessions + app items listing with filtering/pagination
 - Company admin auto-initialization on first run
 - Graceful shutdown
@@ -112,20 +121,25 @@ flowchart LR
 - **No cleanup job** for old data (grows unbounded)
 - **Old browser_contexts/file_explorer_contexts/urls/url_visits code removed** — replaced by app_items
 
-### Client — ~48% complete
+### Client — ~58% complete
 
 **What works:**
 - Cross-platform process collection (Win/Linux/macOS)
 - SQLite local storage with relational schema (device_hw, installed_apps, network, session_events, app_sessions, app_items)
-- Models: DeviceHardwareInfo (with mac/gpu/storage), InstalledApplication (with metadata), NetworkInfo (with public IP), SessionEvent, AppSession, AppItem (generic, self-referencing)
+- Models: DeviceHardwareInfo (with mac/gpu/storage), InstalledApplication (with metadata + binary_name), NetworkInfo (with public IP), SessionEvent, AppSession (with FK to installed_apps/packages), AppItem (self-referencing via parent_item_id)
 - Encrypted config system (AES-256-GCM, transport→machine key migration)
 - Login/logout flow with server
 - Batched sync engine (every ~5 min, FK-ordered, 500-row batches, stop-on-failure per table)
 - **Device hardware**: now collects mac_address, storage_devices, gpu_model from OS
-- **Installed apps**: scans actual OS databases (registry, dpkg, snap, .desktop) — not running processes
+- **Installed apps**: scans actual OS databases (registry, .desktop files, .app bundles) — GUI apps only, not running processes; binary_name mapping extracted from Exec= line
+- **Installed packages**: detects CLI tools/runtimes/libraries from npm/pip/apt/brew/choco/winget/scoop/cargo/snap/flatpak — separate table from installed_applications
 - **Network info**: has public IP lookup, dedup by IP change, mac_address removed (in device_hw)
 - **Shell commands REMOVED** — no longer collected or synced
 - **Generic app_items** replaces browser_contexts + file_explorer_contexts + urls + url_visits
+- **Process filtering**: SQLite-backed ResolveAppInfo() replaces in-memory IsInstalledApp() — processes not in DB auto-detected and saved before tracking
+- **AppDisplayName**: uses real app name from installed_applications (e.g., "Visual Studio Code"), not process name ("code") or window title
+- **Parent-child tracking**: shell processes inside IDEs/terminal-emulators linked via process tree → ParentItemId fixup pass
+- **Linux filtering fixed**: removed resolvedTitle ??= name fallback that was bypassing window-title filters
 - Auto-start persistence (all platforms)
 - Background guard watchdog
 - Tray icon (minimize to tray on close)
@@ -139,6 +153,7 @@ flowchart LR
 - **No encryption at rest** — SQLite encryption (sqlcipher) is commented out
 - **macOS CPU measurement** — macOS process collector skips CPU measurement (always 0%)
 - **macOS window titles** — only captures foreground window
+- **Improved Chrome subprocess filtering** — should check `/proc/<pid>/cmdline` for `--type=` to filter renderer/zygote reliably
 
 ### Web — ~16% complete
 

@@ -109,6 +109,7 @@ public class SqliteLogStore : ILogStore, IDisposable
         cmd.CommandText = DatabaseSchema.InsertInstalledApplicationSql;
         var pId = cmd.Parameters.Add("$id", SqliteType.Text);
         var pName = cmd.Parameters.Add("$app_name", SqliteType.Text);
+        var pBinary = cmd.Parameters.Add("$binary_name", SqliteType.Text);
         var pVer = cmd.Parameters.Add("$app_version", SqliteType.Text);
         var pPub = cmd.Parameters.Add("$publisher", SqliteType.Text);
         var pPath = cmd.Parameters.Add("$install_path", SqliteType.Text);
@@ -123,6 +124,7 @@ public class SqliteLogStore : ILogStore, IDisposable
         {
             pId.Value = e.Id;
             pName.Value = e.AppName;
+            pBinary.Value = e.BinaryName;
             pVer.Value = e.AppVersion;
             pPub.Value = e.Publisher;
             pPath.Value = e.InstallPath;
@@ -156,6 +158,159 @@ public class SqliteLogStore : ILogStore, IDisposable
         var p = cmd.Parameters.Add("$id", SqliteType.Text);
         foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
         await tx.CommitAsync(ct);
+    }
+
+    // ────────────────────────────────────────
+    // Installed Packages
+    // ────────────────────────────────────────
+
+    public async Task StoreInstalledPackagesAsync(IReadOnlyList<InstalledPackage> entries, CancellationToken ct)
+    {
+        if (_connection == null || entries.Count == 0) return;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = DatabaseSchema.InsertInstalledPackageSql;
+        var pId = cmd.Parameters.Add("$id", SqliteType.Text);
+        var pName = cmd.Parameters.Add("$package_name", SqliteType.Text);
+        var pVer = cmd.Parameters.Add("$version", SqliteType.Text);
+        var pCat = cmd.Parameters.Add("$category", SqliteType.Text);
+        var pSrc = cmd.Parameters.Add("$source_manager", SqliteType.Text);
+        var pPath = cmd.Parameters.Add("$install_path", SqliteType.Text);
+        var pPub = cmd.Parameters.Add("$publisher", SqliteType.Text);
+        var pDesc = cmd.Parameters.Add("$description", SqliteType.Text);
+        var pDetected = cmd.Parameters.Add("$detected_at", SqliteType.Text);
+
+        await using var tx = await _connection.BeginTransactionAsync(ct);
+        ((DbCommand)cmd).Transaction = tx;
+        foreach (var e in entries)
+        {
+            pId.Value = e.Id;
+            pName.Value = e.PackageName;
+            pVer.Value = e.Version;
+            pCat.Value = e.Category;
+            pSrc.Value = e.SourceManager;
+            pPath.Value = e.InstallPath;
+            pPub.Value = e.Publisher;
+            pDesc.Value = e.Description;
+            pDetected.Value = e.DetectedAt.ToString("O");
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        await tx.CommitAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<InstalledPackage>> GetUnsentInstalledPackagesAsync(int limit, CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<InstalledPackage>();
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT * FROM installed_packages WHERE is_synced = 0 ORDER BY detected_at ASC LIMIT $limit";
+        cmd.Parameters.AddWithValue("$limit", limit);
+        var results = new List<InstalledPackage>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct)) results.Add(MapInstalledPackageReader(reader));
+        return results;
+    }
+
+    public async Task MarkInstalledPackagesSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        if (_connection == null || ids.Count == 0) return;
+        await using var tx = await _connection.BeginTransactionAsync(ct);
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "UPDATE installed_packages SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
+        var p = cmd.Parameters.Add("$id", SqliteType.Text);
+        foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
+        await tx.CommitAsync(ct);
+    }
+
+    // ────────────────────────────────────────
+    // Installed App/Package Lookup
+    // ────────────────────────────────────────
+
+    public async Task<InstalledApplication?> GetInstalledAppByBinaryNameAsync(string binaryName, CancellationToken ct)
+    {
+        if (_connection == null || string.IsNullOrWhiteSpace(binaryName)) return null;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT * FROM installed_applications WHERE binary_name = $binary_name LIMIT 1";
+        cmd.Parameters.AddWithValue("$binary_name", binaryName);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (await reader.ReadAsync(ct))
+            return MapInstalledAppReader(reader);
+        return null;
+    }
+
+    public async Task<InstalledPackage?> GetInstalledPackageByNameAsync(string packageName, CancellationToken ct)
+    {
+        if (_connection == null || string.IsNullOrWhiteSpace(packageName)) return null;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT * FROM installed_packages WHERE package_name = $package_name LIMIT 1";
+        cmd.Parameters.AddWithValue("$package_name", packageName);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (await reader.ReadAsync(ct))
+            return MapInstalledPackageReader(reader);
+        return null;
+    }
+
+    public async Task<HashSet<string>> GetAllInstalledAppBinaryNamesAsync(CancellationToken ct)
+    {
+        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (_connection == null) return result;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT DISTINCT binary_name FROM installed_applications WHERE binary_name != ''";
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var name = reader.IsDBNull(0) ? null : reader.GetString(0);
+            if (!string.IsNullOrWhiteSpace(name)) result.Add(name);
+        }
+        return result;
+    }
+
+    public async Task<HashSet<string>> GetAllInstalledPackageNamesAsync(CancellationToken ct)
+    {
+        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (_connection == null) return result;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT DISTINCT package_name FROM installed_packages";
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var name = reader.IsDBNull(0) ? null : reader.GetString(0);
+            if (!string.IsNullOrWhiteSpace(name)) result.Add(name);
+        }
+        return result;
+    }
+
+    public async Task StoreInstalledAppAsync(InstalledApplication entry, CancellationToken ct)
+    {
+        if (_connection == null) return;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = DatabaseSchema.InsertInstalledApplicationSql;
+        cmd.Parameters.AddWithValue("$id", entry.Id);
+        cmd.Parameters.AddWithValue("$app_name", entry.AppName);
+        cmd.Parameters.AddWithValue("$binary_name", entry.BinaryName);
+        cmd.Parameters.AddWithValue("$app_version", entry.AppVersion);
+        cmd.Parameters.AddWithValue("$publisher", entry.Publisher);
+        cmd.Parameters.AddWithValue("$install_path", entry.InstallPath);
+        cmd.Parameters.AddWithValue("$install_date", (object?)entry.InstallDate?.ToString("O") ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$uninstall_string", entry.UninstallString);
+        cmd.Parameters.AddWithValue("$change_type", entry.ChangeType);
+        cmd.Parameters.AddWithValue("$detected_at", entry.DetectedAt.ToString("O"));
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task StoreInstalledPackageAsync(InstalledPackage entry, CancellationToken ct)
+    {
+        if (_connection == null) return;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = DatabaseSchema.InsertInstalledPackageSql;
+        cmd.Parameters.AddWithValue("$id", entry.Id);
+        cmd.Parameters.AddWithValue("$package_name", entry.PackageName);
+        cmd.Parameters.AddWithValue("$version", entry.Version);
+        cmd.Parameters.AddWithValue("$category", entry.Category);
+        cmd.Parameters.AddWithValue("$source_manager", entry.SourceManager);
+        cmd.Parameters.AddWithValue("$install_path", entry.InstallPath);
+        cmd.Parameters.AddWithValue("$publisher", entry.Publisher);
+        cmd.Parameters.AddWithValue("$description", entry.Description);
+        cmd.Parameters.AddWithValue("$detected_at", entry.DetectedAt.ToString("O"));
+        await cmd.ExecuteNonQueryAsync(ct);
     }
 
     // ────────────────────────────────────────
@@ -299,6 +454,8 @@ public class SqliteLogStore : ILogStore, IDisposable
         var pEmpName = cmd.Parameters.Add("$employee_name", SqliteType.Text);
         var pSessId = cmd.Parameters.Add("$session_id", SqliteType.Text);
         var pPlat = cmd.Parameters.Add("$platform", SqliteType.Text);
+        var pAppId = cmd.Parameters.Add("$installed_app_id", SqliteType.Text);
+        var pPkgId = cmd.Parameters.Add("$installed_package_id", SqliteType.Text);
 
         await using var tx = await _connection.BeginTransactionAsync(ct);
         ((DbCommand)cmd).Transaction = tx;
@@ -314,6 +471,8 @@ public class SqliteLogStore : ILogStore, IDisposable
             pEmpName.Value = (object?)e.EmployeeName ?? DBNull.Value;
             pSessId.Value = e.SessionId;
             pPlat.Value = e.Platform;
+            pAppId.Value = (object?)e.InstalledAppId ?? DBNull.Value;
+            pPkgId.Value = (object?)e.InstalledPackageId ?? DBNull.Value;
             await cmd.ExecuteNonQueryAsync(ct);
         }
         await tx.CommitAsync(ct);
@@ -398,6 +557,16 @@ public class SqliteLogStore : ILogStore, IDisposable
         var p = cmd.Parameters.Add("$id", SqliteType.Text);
         foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
         await tx.CommitAsync(ct);
+    }
+
+    public async Task UpdateAppItemParentAsync(string itemId, string parentItemId, CancellationToken ct)
+    {
+        if (_connection == null) return;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "UPDATE app_items SET parent_item_id = $parent_item_id WHERE id = $id";
+        cmd.Parameters.AddWithValue("$id", itemId);
+        cmd.Parameters.AddWithValue("$parent_item_id", parentItemId);
+        await cmd.ExecuteNonQueryAsync(ct);
     }
 
     // ────────────────────────────────────────
@@ -632,12 +801,32 @@ public class SqliteLogStore : ILogStore, IDisposable
         {
             Id = r.GetString(r.GetOrdinal("id")),
             AppName = r.GetString(r.GetOrdinal("app_name")),
+            BinaryName = r.IsDBNull(r.GetOrdinal("binary_name")) ? string.Empty : r.GetString(r.GetOrdinal("binary_name")),
             AppVersion = r.GetString(r.GetOrdinal("app_version")),
             Publisher = r.GetString(r.GetOrdinal("publisher")),
             InstallPath = r.GetString(r.GetOrdinal("install_path")),
             InstallDate = r.IsDBNull(r.GetOrdinal("install_date")) ? null : DateTime.Parse(r.GetString(r.GetOrdinal("install_date"))),
             UninstallString = r.GetString(r.GetOrdinal("uninstall_string")),
             ChangeType = r.GetString(r.GetOrdinal("change_type")),
+            DetectedAt = DateTime.Parse(r.GetString(r.GetOrdinal("detected_at"))),
+            IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
+            SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
+            CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),
+        };
+    }
+
+    private static InstalledPackage MapInstalledPackageReader(SqliteDataReader r)
+    {
+        return new InstalledPackage
+        {
+            Id = r.GetString(r.GetOrdinal("id")),
+            PackageName = r.GetString(r.GetOrdinal("package_name")),
+            Version = r.GetString(r.GetOrdinal("version")),
+            Category = r.GetString(r.GetOrdinal("category")),
+            SourceManager = r.GetString(r.GetOrdinal("source_manager")),
+            InstallPath = r.GetString(r.GetOrdinal("install_path")),
+            Publisher = r.GetString(r.GetOrdinal("publisher")),
+            Description = r.GetString(r.GetOrdinal("description")),
             DetectedAt = DateTime.Parse(r.GetString(r.GetOrdinal("detected_at"))),
             IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
             SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
@@ -688,6 +877,8 @@ public class SqliteLogStore : ILogStore, IDisposable
             EmployeeName = r.IsDBNull(r.GetOrdinal("employee_name")) ? null : r.GetString(r.GetOrdinal("employee_name")),
             SessionId = r.GetString(r.GetOrdinal("session_id")),
             Platform = r.GetString(r.GetOrdinal("platform")),
+            InstalledAppId = r.IsDBNull(r.GetOrdinal("installed_app_id")) ? null : r.GetString(r.GetOrdinal("installed_app_id")),
+            InstalledPackageId = r.IsDBNull(r.GetOrdinal("installed_package_id")) ? null : r.GetString(r.GetOrdinal("installed_package_id")),
             IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
             SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
             CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),

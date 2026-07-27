@@ -48,6 +48,21 @@ type NetworkInfo struct {
 	CreatedAt            time.Time `json:"createdAt" db:"created_at"`
 }
 
+type InstalledPackage struct {
+	ID            string     `json:"id" db:"id"`
+	EmployeeID    string     `json:"employeeId" db:"employee_id"`
+	PackageName   string     `json:"packageName" db:"package_name"`
+	Version       string     `json:"version" db:"version"`
+	Category      string     `json:"category" db:"category"`
+	SourceManager string     `json:"sourceManager" db:"source_manager"`
+	InstallPath   string     `json:"installPath" db:"install_path"`
+	Publisher     string     `json:"publisher" db:"publisher"`
+	Description   string     `json:"description" db:"description"`
+	DetectedAt    time.Time  `json:"detectedAt" db:"detected_at"`
+	SyncedAt      *time.Time `json:"syncedAt,omitempty" db:"synced_at"`
+	CreatedAt     time.Time  `json:"createdAt" db:"created_at"`
+}
+
 type SessionEvent struct {
 	ID         string    `json:"id" db:"id"`
 	EmployeeID string    `json:"employeeId" db:"employee_id"`

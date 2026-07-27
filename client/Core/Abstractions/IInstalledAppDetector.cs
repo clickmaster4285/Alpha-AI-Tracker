@@ -41,4 +41,11 @@ public interface IInstalledAppDetector
     /// Call this after the user grants permissions via PolKit/UAC.
     /// </summary>
     void ForceRecheck();
+
+    /// <summary>
+    /// Resolve the display name for a process by its executable binary name.
+    /// e.g., "code" → "Visual Studio Code", "firefox" → "Firefox"
+    /// Returns null if the binary name is not known.
+    /// </summary>
+    string? ResolveDisplayName(string processName);
 }

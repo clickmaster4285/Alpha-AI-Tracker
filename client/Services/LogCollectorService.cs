@@ -22,6 +22,7 @@ public class LogCollectorService : BackgroundService
     private readonly ILogger<LogCollectorService> _logger;
     private readonly HttpClient _httpClient;
     private readonly IInstalledAppDetector _appDetector;
+    private readonly IPackageDetector _packageDetector;
     private int _cycleCount;
     private string? _currentEmployeeId;
     private string? _currentEmployeeName;
@@ -39,6 +40,14 @@ public class LogCollectorService : BackgroundService
     // Session ended_at tracking: key = processName|displayName|machineId|sessionId → AppSession.Id
     private readonly Dictionary<string, string> _previousSessionKeys = new();
 
+    // Cached known binary names from installed_applications and installed_packages (refreshed from SQLite)
+    private HashSet<string> _knownAppBinaryNames = new(StringComparer.OrdinalIgnoreCase);
+    private HashSet<string> _knownPackageNames = new(StringComparer.OrdinalIgnoreCase);
+    private DateTime _lastKnownNamesRefresh = DateTime.MinValue;
+
+    // Parent-child mapping for terminal shells: childSessionId → parentSessionId
+    private readonly Dictionary<string, string> _shellParentMap = new();
+
     // System processes that are never application sessions
     private static readonly HashSet<string> NonAppProcesses = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -49,6 +58,7 @@ public class LogCollectorService : BackgroundService
         "gsd-keyboard", "gsd-media-keys", "gsd-mouse", "gsd-sound",
         "gsd-xsettings", "gsd-datetime", "gsd-housekeeping",
         "ibus-engine-libpinyin", "ibus-extension-gtk3",
+        "waydroid", "gnome-software",
     };
 
     public LogCollectorService(
@@ -57,7 +67,8 @@ public class LogCollectorService : BackgroundService
         ILogStore store,
         ILogger<LogCollectorService> logger,
         HttpClient httpClient,
-        IInstalledAppDetector appDetector)
+        IInstalledAppDetector appDetector,
+        IPackageDetector packageDetector)
     {
         _config = config;
         _collector = collector;
@@ -65,6 +76,7 @@ public class LogCollectorService : BackgroundService
         _logger = logger;
         _httpClient = httpClient;
         _appDetector = appDetector;
+        _packageDetector = packageDetector;
     }
 
     public void StartTracking()
@@ -163,20 +175,39 @@ public class LogCollectorService : BackgroundService
                     await RefreshEmployeeInfo(stoppingToken);
                 }
 
-                // ─── Collect process snapshots → track AppSessions with ended_at ───
+                // ─── Refresh known app/package names from SQLite ───
+                if ((DateTime.UtcNow - _lastKnownNamesRefresh).TotalMinutes > 1)
+                {
+                    await RefreshKnownNames(stoppingToken);
+                }
+
+                // ─── Collect process snapshots → resolve per-process ───
                 var allLogs = await _collector.CollectAsync(stoppingToken);
 
-                var installedAppLogs = allLogs
-                    .Where(l => IsInstalledApp(l.ProcessName, l.WindowTitle))
-                    .ToList();
+                // Resolve display name, FK, and filter for each process
+                var resolvedLogs = new List<(ActivityLog log, string? displayName, string? appId, string? pkgId)>();
+                foreach (var log in allLogs)
+                {
+                    var (isKnown, displayName, appId, pkgId) = await ResolveAppInfo(
+                        log.ProcessName, log.WindowTitle, stoppingToken);
 
-                var filteredLogs = installedAppLogs
-                    .Where(l => !string.IsNullOrWhiteSpace(l.WindowTitle))
-                    .ToList();
+                    if (!isKnown) continue;
+
+                    // Shell processes: always allowed (they may have no window title)
+                    // Installed packages (CLI tools): always allowed
+                    // Installed apps (GUI): only if they have a window title
+                    var isShell = IsShellProcess(log.ProcessName);
+                    var isPackage = pkgId != null;
+                    var hasWindow = !string.IsNullOrWhiteSpace(log.WindowTitle);
+
+                    if (!isShell && !isPackage && !hasWindow) continue;
+
+                    resolvedLogs.Add((log, displayName, appId, pkgId));
+                }
 
                 // Build set of current running session keys
                 var currentKeys = new Dictionary<string, string>();
-                foreach (var log in filteredLogs)
+                foreach (var (log, displayName, appId, pkgId) in resolvedLogs)
                 {
                     var key = $"{log.ProcessName}|{log.WindowTitle ?? ""}|{_config.ClientId}|{SessionInfo.SessionId}";
                     currentKeys[key] = string.Empty;
@@ -205,17 +236,22 @@ public class LogCollectorService : BackgroundService
                 // Create new sessions for apps not previously tracked
                 var newSessions = new List<AppSession>();
                 var newItems = new List<AppItem>();
-                foreach (var log in filteredLogs)
+                var processTree = new Dictionary<int, int>(); // pid → ppid for parent tracking
+
+                foreach (var (log, displayName, appId, pkgId) in resolvedLogs)
                 {
                     var key = $"{log.ProcessName}|{log.WindowTitle ?? ""}|{_config.ClientId}|{SessionInfo.SessionId}";
 
                     if (!string.IsNullOrEmpty(currentKeys.GetValueOrDefault(key)))
                         continue; // already tracked
 
+                    // Use the resolved display name (real app name) or fall back to window title or process name
+                    var appDisplayName = displayName ?? log.WindowTitle ?? log.ProcessName;
+
                     var session = new AppSession
                     {
                         ProcessName = log.ProcessName,
-                        AppDisplayName = log.WindowTitle ?? log.ProcessName,
+                        AppDisplayName = appDisplayName,
                         StartedAt = log.Timestamp,
                         EndedAt = null,
                         MachineId = _config.ClientId,
@@ -223,15 +259,43 @@ public class LogCollectorService : BackgroundService
                         EmployeeName = _currentEmployeeName,
                         SessionId = SessionInfo.SessionId,
                         Platform = log.Platform,
+                        InstalledAppId = appId,
+                        InstalledPackageId = pkgId,
                     };
                     newSessions.Add(session);
                     currentKeys[key] = session.Id;
 
-                    // Create a generic AppItem row for this session
+                    // Create AppItem with appropriate type
+                    string itemType;
+
+                    if (IsShellProcess(log.ProcessName))
+                    {
+                        itemType = "terminal";
+
+                        // Build process tree lazily on first shell encounter
+                        if (processTree.Count == 0)
+                            processTree = BuildSimpleProcessTree();
+
+                        // Walk parent PID chain to find parent session
+                        var parentSessionId = await ResolveShellParentAsync(
+                            log.ProcessId, log.ProcessName, processTree, newSessions, stoppingToken);
+                        if (parentSessionId != null)
+                            _shellParentMap[session.Id] = parentSessionId;
+                    }
+                    else if (appId != null)
+                    {
+                        itemType = "tab";
+                    }
+                    else
+                    {
+                        itemType = "terminal";
+                    }
+
                     newItems.Add(new AppItem
                     {
                         AppSessionId = session.Id,
-                        ItemType = IsShellProcess(log.ProcessName) ? "terminal" : "tab",
+                        ParentItemId = null, // set in fixup pass below
+                        ItemType = itemType,
                         Title = log.WindowTitle ?? log.ProcessName,
                         Identifier = log.ProcessName,
                         OpenedAt = log.Timestamp,
@@ -246,7 +310,31 @@ public class LogCollectorService : BackgroundService
                 if (newSessions.Count > 0)
                     await _store.StoreAppSessionsAsync(newSessions, stoppingToken);
                 if (newItems.Count > 0)
+                {
                     await _store.StoreAppItemsAsync(newItems, stoppingToken);
+
+                    // Fixup pass: set parent_item_id for shell items that have parent sessions
+                    // Build sessionId → firstItemId map
+                    var sessionToItem = new Dictionary<string, string>();
+                    foreach (var item in newItems)
+                    {
+                        if (!sessionToItem.ContainsKey(item.AppSessionId))
+                            sessionToItem[item.AppSessionId] = item.Id;
+                    }
+
+                    foreach (var (childSessionId, parentSessionId) in _shellParentMap)
+                    {
+                        if (sessionToItem.TryGetValue(parentSessionId, out var parentItemId))
+                        {
+                            if (sessionToItem.TryGetValue(childSessionId, out var childItemId))
+                            {
+                                await _store.UpdateAppItemParentAsync(childItemId, parentItemId, stoppingToken);
+                                _logger.LogDebug("Linked shell {Child} to parent app item {Parent}", childSessionId, parentItemId);
+                            }
+                        }
+                    }
+                    _shellParentMap.Clear();
+                }
 
                 // Update previous session keys for next cycle
                 _previousSessionKeys.Clear();
@@ -276,6 +364,12 @@ public class LogCollectorService : BackgroundService
                 if (_cycleCount % 30 == 0)
                 {
                     await CollectInstalledApplicationsAsync(stoppingToken);
+                }
+
+                // ─── Scan installed packages (every 60 cycles ~30 min) ───
+                if (_cycleCount % 60 == 0)
+                {
+                    await CollectInstalledPackagesAsync(stoppingToken);
                 }
 
                 // ─── Periodic sync & cleanup ───
@@ -308,28 +402,113 @@ public class LogCollectorService : BackgroundService
         _logger.LogInformation("LogCollectorService stopped");
     }
 
-    private bool IsInstalledApp(string processName, string? windowTitle)
+    private async Task RefreshKnownNames(CancellationToken ct)
     {
-        if (IsShellProcess(processName))
-            return true;
-
-        // Block known non-app system processes
-        if (NonAppProcesses.Contains(processName))
-            return false;
-
-        // Block chrome crashpad and zygote sub-processes (no window = not a user-facing tab)
-        if (processName.StartsWith("chrome", StringComparison.OrdinalIgnoreCase) &&
-            string.IsNullOrWhiteSpace(windowTitle))
-            return false;
-
         try
         {
-            return _appDetector.IsInstalledApplication(processName, GetExecutablePath(processName));
+            _knownAppBinaryNames = await _store.GetAllInstalledAppBinaryNamesAsync(ct);
+            _knownPackageNames = await _store.GetAllInstalledPackageNamesAsync(ct);
+            _lastKnownNamesRefresh = DateTime.UtcNow;
         }
         catch
         {
-            return !string.IsNullOrWhiteSpace(windowTitle);
+            // Non-critical — fall back to in-memory detector
         }
+    }
+
+    /// <summary>
+    /// Resolve app/package info for a process. Returns (isKnown, displayName, appId, pkgId).
+    /// If the process is not yet in the DB, attempts auto-detection and saves it.
+    /// </summary>
+    private async Task<(bool isKnown, string? displayName, string? appId, string? pkgId)> ResolveAppInfo(
+        string processName, string? windowTitle, CancellationToken ct)
+    {
+        if (IsShellProcess(processName))
+            return (true, null, null, null);
+
+        if (NonAppProcesses.Contains(processName))
+            return (false, null, null, null);
+
+        // Block chrome sub-processes without windows (renderer, zygote, etc.)
+        if (processName.StartsWith("chrome", StringComparison.OrdinalIgnoreCase) &&
+            string.IsNullOrWhiteSpace(windowTitle))
+            return (false, null, null, null);
+
+        // 1. Check known app binary names (fast in-memory path)
+        if (_knownAppBinaryNames.Contains(processName))
+        {
+            var app = await _store.GetInstalledAppByBinaryNameAsync(processName, ct);
+            if (app != null)
+                return (true, app.AppName, app.Id, null);
+        }
+
+        // 2. Check known package names (fast in-memory path)
+        if (_knownPackageNames.Contains(processName))
+        {
+            var pkg = await _store.GetInstalledPackageByNameAsync(processName, ct);
+            if (pkg != null)
+                return (true, pkg.PackageName, null, pkg.Id);
+        }
+
+        // 3. Try the in-memory detector as fallback
+        var execPath = GetExecutablePath(processName);
+        if (_appDetector.IsInstalledApplication(processName, execPath))
+        {
+            // Check if it's already in DB (may have been added with different binary_name)
+            var displayName = _appDetector.ResolveDisplayName(processName);
+            if (displayName == processName)
+            {
+                // The in-memory detector only has the binary name as display name
+                // Try a more specific lookup by path
+                displayName = await ResolveDisplayNameFromPath(processName, execPath, ct);
+            }
+
+            if (displayName != null && displayName != processName)
+            {
+                // Found a proper display name — save to DB as auto-detected app
+                var app = new InstalledApplication
+                {
+                    AppName = displayName,
+                    BinaryName = processName,
+                    InstallPath = execPath ?? "",
+                    ChangeType = "seen",
+                    DetectedAt = DateTime.UtcNow,
+                };
+                await _store.StoreInstalledAppAsync(app, ct);
+                _knownAppBinaryNames.Add(processName);
+                return (true, displayName, app.Id, null);
+            }
+            else
+            {
+                // Save with just the binary name as fallback
+                var app = new InstalledApplication
+                {
+                    AppName = processName,
+                    BinaryName = processName,
+                    InstallPath = execPath ?? "",
+                    ChangeType = "seen",
+                    DetectedAt = DateTime.UtcNow,
+                };
+                await _store.StoreInstalledAppAsync(app, ct);
+                _knownAppBinaryNames.Add(processName);
+                return (true, processName, app.Id, null);
+            }
+        }
+
+        // 4. Auto-detect: unknown process — try to resolve from the filesystem
+        if (!string.IsNullOrEmpty(execPath))
+        {
+            var autoApp = await AutoDetectInstalledApp(processName, execPath, ct);
+            if (autoApp != null)
+            {
+                await _store.StoreInstalledAppAsync(autoApp, ct);
+                _knownAppBinaryNames.Add(processName);
+                return (true, autoApp.AppName, autoApp.Id, null);
+            }
+        }
+
+        // 5. Not identifiable — skip
+        return (false, null, null, null);
     }
 
     private static bool IsShellProcess(string processName)
@@ -357,6 +536,268 @@ public class LogCollectorService : BackgroundService
             }
         }
         catch { }
+        return null;
+    }
+
+    private async Task<string?> ResolveDisplayNameFromPath(string processName, string? execPath, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(execPath)) return null;
+
+        if (OperatingSystem.IsLinux())
+        {
+            // Try to find a matching .desktop file by scanning standard locations
+            var desktopDirs = new[]
+            {
+                "/usr/share/applications/",
+                "/usr/local/share/applications/",
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share", "applications")
+            };
+            foreach (var dir in desktopDirs)
+            {
+                if (!Directory.Exists(dir)) continue;
+                foreach (var file in Directory.GetFiles(dir, "*.desktop"))
+                {
+                    try
+                    {
+                        var lines = await File.ReadAllLinesAsync(file, ct);
+                        string? name = null, exec = null;
+                        foreach (var line in lines)
+                        {
+                            if (line.StartsWith("Name=", StringComparison.OrdinalIgnoreCase) && name == null)
+                                name = line["Name=".Length..].Trim();
+                            if (line.StartsWith("Exec=", StringComparison.OrdinalIgnoreCase))
+                                exec = line["Exec=".Length..].Trim();
+                        }
+                        if (!string.IsNullOrEmpty(name) && !string.IsNullOrEmpty(exec))
+                        {
+                            var binary = ExtractBinaryFromExecLine(exec);
+                            if (string.Equals(binary, processName, StringComparison.OrdinalIgnoreCase))
+                                return name;
+                        }
+                    }
+                    catch { }
+                }
+            }
+        }
+        else if (OperatingSystem.IsWindows())
+        {
+            // On Windows, the InstallPath in registry might match
+            // We already checked the DB, so just return null for now
+        }
+        else if (OperatingSystem.IsMacOS())
+        {
+            // For macOS, the .app bundle name matches the binary name
+            // Already handled by InstalledAppDetector
+        }
+
+        return null;
+    }
+
+    private async Task<InstalledApplication?> AutoDetectInstalledApp(string processName, string execPath, CancellationToken ct)
+    {
+        try
+        {
+            if (OperatingSystem.IsLinux())
+            {
+                // Check if the executable is in a standard install path
+                if (execPath.StartsWith("/usr/bin/") || execPath.StartsWith("/usr/local/bin/") ||
+                    execPath.StartsWith("/opt/") || execPath.StartsWith("/snap/bin/") ||
+                    execPath.Contains("/flatpak/"))
+                {
+                    return new InstalledApplication
+                    {
+                        AppName = processName,
+                        BinaryName = processName,
+                        InstallPath = execPath,
+                        ChangeType = "seen",
+                        DetectedAt = DateTime.UtcNow,
+                    };
+                }
+
+                // Try to find a .desktop file for this binary
+                var desktopDirs = new[]
+                {
+                    "/usr/share/applications/",
+                    "/usr/local/share/applications/",
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share", "applications")
+                };
+                foreach (var dir in desktopDirs)
+                {
+                    if (!Directory.Exists(dir)) continue;
+                    foreach (var file in Directory.GetFiles(dir, "*.desktop"))
+                    {
+                        try
+                        {
+                            var lines = await File.ReadAllLinesAsync(file, ct);
+                            string? name = null, exec = null;
+                            foreach (var line in lines)
+                            {
+                                if (line.StartsWith("Name=", StringComparison.OrdinalIgnoreCase) && name == null)
+                                    name = line["Name=".Length..].Trim();
+                                if (line.StartsWith("Exec=", StringComparison.OrdinalIgnoreCase))
+                                    exec = line["Exec=".Length..].Trim();
+                            }
+                            if (!string.IsNullOrEmpty(name) && !string.IsNullOrEmpty(exec))
+                            {
+                                var binary = ExtractBinaryFromExecLine(exec);
+                                if (string.Equals(binary, processName, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    return new InstalledApplication
+                                    {
+                                        AppName = name,
+                                        BinaryName = processName,
+                                        InstallPath = execPath,
+                                        ChangeType = "seen",
+                                        DetectedAt = DateTime.UtcNow,
+                                    };
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            else if (OperatingSystem.IsWindows())
+            {
+                // Executable in standard Windows paths → likely an app
+                if (execPath.Contains("Program Files", StringComparison.OrdinalIgnoreCase) ||
+                    execPath.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase) ||
+                    execPath.Contains("\\Microsoft\\", StringComparison.OrdinalIgnoreCase))
+                {
+                    return new InstalledApplication
+                    {
+                        AppName = processName,
+                        BinaryName = processName,
+                        InstallPath = execPath,
+                        ChangeType = "seen",
+                        DetectedAt = DateTime.UtcNow,
+                    };
+                }
+            }
+            else if (OperatingSystem.IsMacOS())
+            {
+                if (execPath.Contains(".app/", StringComparison.OrdinalIgnoreCase) ||
+                    execPath.StartsWith("/Applications/", StringComparison.Ordinal))
+                {
+                    return new InstalledApplication
+                    {
+                        AppName = processName,
+                        BinaryName = processName,
+                        InstallPath = execPath,
+                        ChangeType = "seen",
+                        DetectedAt = DateTime.UtcNow,
+                    };
+                }
+            }
+        }
+        catch { }
+
+        return null;
+    }
+
+    private static string? ExtractBinaryFromExecLine(string? exec)
+    {
+        if (string.IsNullOrWhiteSpace(exec)) return null;
+        exec = exec.Trim();
+        var spaceIdx = exec.IndexOf(' ');
+        var firstPart = spaceIdx > 0 ? exec[..spaceIdx] : exec;
+        firstPart = firstPart.Trim('"');
+        var binary = Path.GetFileNameWithoutExtension(firstPart);
+        return string.IsNullOrWhiteSpace(binary) ? null : binary;
+    }
+
+    /// <summary>
+    /// Build a simple pid → ppid map from running processes.
+    /// Used for terminal parent-child tracking (terminal in VS Code, standalone terminal, etc.)
+    /// </summary>
+    private static Dictionary<int, int> BuildSimpleProcessTree()
+    {
+        var tree = new Dictionary<int, int>();
+        try
+        {
+            foreach (var proc in System.Diagnostics.Process.GetProcesses())
+            {
+                try
+                {
+                    if (OperatingSystem.IsLinux())
+                    {
+                        var statusPath = $"/proc/{proc.Id}/status";
+                        if (System.IO.File.Exists(statusPath))
+                        {
+                            foreach (var line in System.IO.File.ReadAllLines(statusPath))
+                            {
+                                if (line.StartsWith("PPid:"))
+                                {
+                                    var parts = line.Split('\t', StringSplitOptions.RemoveEmptyEntries);
+                                    if (parts.Length >= 2 && int.TryParse(parts[1], out var ppid))
+                                        tree[proc.Id] = ppid;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    // Windows parent PID tracked via other means in ParentProcessResolver
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return tree;
+    }
+
+    /// <summary>
+    /// Walk a shell process's parent PID chain to find a known app session that owns it.
+    /// e.g., bash inside VS Code integrated terminal → parent is code session.
+    /// Returns the parent AppSession.Id if found, null if standalone terminal.
+    /// </summary>
+    private async Task<string?> ResolveShellParentAsync(
+        int pid, string processName,
+        Dictionary<int, int> processTree,
+        IReadOnlyList<AppSession> newSessions,
+        CancellationToken ct)
+    {
+        try
+        {
+            var visited = new HashSet<int>();
+            var current = pid;
+
+            while (current > 0 && visited.Add(current))
+            {
+                if (!processTree.TryGetValue(current, out var ppid) || ppid <= 0)
+                    break;
+
+                if (visited.Contains(ppid))
+                    break;
+
+                try
+                {
+                    var parentProc = System.Diagnostics.Process.GetProcessById(ppid);
+                    var parentName = parentProc.ProcessName;
+
+                    // Look for a session with this parent name among new sessions
+                    foreach (var session in newSessions)
+                    {
+                        if (string.Equals(session.ProcessName, parentName, StringComparison.OrdinalIgnoreCase))
+                            return session.Id;
+                    }
+
+                    // Nested shell (e.g., bash inside zsh) — keep walking up
+                    if (IsShellProcess(parentName))
+                    {
+                        current = ppid;
+                        continue;
+                    }
+
+                    break;
+                }
+                catch
+                {
+                    break;
+                }
+            }
+        }
+        catch { }
+
         return null;
     }
 
@@ -785,6 +1226,32 @@ public class LogCollectorService : BackgroundService
     }
 
     // ────────────────────────────────────────────
+    // Installed Package Scanner
+    // ────────────────────────────────────────────
+
+    private async Task CollectInstalledPackagesAsync(CancellationToken ct)
+    {
+        try
+        {
+            _packageDetector.ForceRecheck();
+
+            var packages = _packageDetector.GetAllInstalledPackages();
+            if (packages.Count == 0)
+            {
+                _logger.LogDebug("No installed packages detected");
+                return;
+            }
+
+            await _store.StoreInstalledPackagesAsync(packages, ct);
+            _logger.LogDebug("Scanned {Count} installed packages", packages.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to scan installed packages");
+        }
+    }
+
+    // ────────────────────────────────────────────
     // Session Event Recording
     // ────────────────────────────────────────────
 
@@ -882,6 +1349,26 @@ public class LogCollectorService : BackgroundService
                 ct),
             ct);
 
+        await SyncTableBatch<InstalledPackage>(
+            () => _store.GetUnsentInstalledPackagesAsync(BATCH_SIZE, ct),
+            entries => SerializeAndSend(
+                serverUrl, "/api/v1/installed-packages/sync",
+                entries, e => new
+                {
+                    id = e.Id,
+                    packageName = e.PackageName,
+                    version = e.Version,
+                    category = e.Category,
+                    sourceManager = e.SourceManager,
+                    installPath = e.InstallPath,
+                    publisher = e.Publisher,
+                    description = e.Description,
+                    detectedAt = e.DetectedAt.ToString("O"),
+                },
+                ids => _store.MarkInstalledPackagesSentAsync(ids, ct),
+                ct),
+            ct);
+
         await SyncTableBatch<NetworkInfo>(
             () => _store.GetUnsentNetworkInfoAsync(BATCH_SIZE, ct),
             entries => SerializeAndSend(
@@ -958,6 +1445,8 @@ public class LogCollectorService : BackgroundService
                 employeeName = _currentEmployeeName,
                 sessionId = e.SessionId,
                 platform = e.Platform,
+                installedAppId = e.InstalledAppId,
+                installedPackageId = e.InstalledPackageId,
             }).ToList()
         };
 

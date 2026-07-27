@@ -25,6 +25,8 @@ public class InstalledApplication
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string AppName { get; set; } = string.Empty;
+    /// <summary>Executable binary name (e.g., \"code\" for Visual Studio Code)</summary>
+    public string BinaryName { get; set; } = string.Empty;
     public string AppVersion { get; set; } = string.Empty;
     public string Publisher { get; set; } = string.Empty;
     public string InstallPath { get; set; } = string.Empty;
@@ -59,6 +61,24 @@ public class StorageDevice
     public string DeviceType { get; set; } = string.Empty;
     public string Model { get; set; } = string.Empty;
     public long CapacityMb { get; set; }
+    public bool IsSynced { get; set; }
+    public string? SyncedAt { get; set; }
+    public string CreatedAt { get; set; } = string.Empty;
+}
+
+public class InstalledPackage
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string PackageName { get; set; } = string.Empty;
+    public string Version { get; set; } = string.Empty;
+    /// <summary>"runtime" | "tool" | "library" | "system"</summary>
+    public string Category { get; set; } = "tool";
+    /// <summary>"npm" | "pip" | "apt" | "brew" | "choco" | "winget" | "scoop" | "cargo" | "snap" | "flatpak"</summary>
+    public string SourceManager { get; set; } = string.Empty;
+    public string InstallPath { get; set; } = string.Empty;
+    public string Publisher { get; set; } = string.Empty;
+    public string Description { get; set; } = string.Empty;
+    public DateTime DetectedAt { get; set; } = DateTime.UtcNow;
     public bool IsSynced { get; set; }
     public string? SyncedAt { get; set; }
     public string CreatedAt { get; set; } = string.Empty;

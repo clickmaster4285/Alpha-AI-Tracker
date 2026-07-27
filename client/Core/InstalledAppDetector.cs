@@ -12,10 +12,19 @@ namespace client.Core;
 public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
 {
     private readonly HashSet<string> _knownApps = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _binaryToDisplayName = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<string> _missingPerms = new();
     private readonly List<string> _permInstructions = new();
     private bool _initialized;
     private readonly object _lock = new();
+
+    /// <summary>Resolve the display name for a process by its executable binary name (e.g., \"code\" → \"Visual Studio Code\")</summary>
+    public string? ResolveDisplayName(string processName)
+    {
+        EnsureInitialized();
+        if (string.IsNullOrWhiteSpace(processName)) return null;
+        return _binaryToDisplayName.GetValueOrDefault(processName);
+    }
 
     public IReadOnlyList<InstalledApplication> GetAllInstalledApplications()
     {
@@ -103,8 +112,6 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                 Debug.WriteLine($"InstalledAppDetector init error: {ex.Message}");
             }
 
-            // Always add common known apps
-            _knownApps.AddRange(CommonKnownApps);
             _initialized = true;
         }
     }
@@ -172,7 +179,7 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
         return false;
     }
 
-    private static InstalledApplication? AppFromDesktopFile(string filePath)
+    private void AddAppFromDesktopFile(string filePath)
     {
         try
         {
@@ -187,19 +194,43 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
             }
             if (!string.IsNullOrWhiteSpace(name))
             {
-                return new InstalledApplication
+                var binaryName = ExtractBinaryFromExec(exec);
+                _knownApps.Add(name);
+                if (!string.IsNullOrEmpty(binaryName))
+                {
+                    _knownApps.Add(binaryName);
+                    _binaryToDisplayName[binaryName] = name;
+                }
+                _installedApps.Add(new InstalledApplication
                 {
                     AppName = name,
+                    BinaryName = binaryName ?? "",
                     InstallPath = exec ?? filePath,
                     Publisher = "",
                     AppVersion = "",
                     ChangeType = "seen",
                     DetectedAt = DateTime.UtcNow,
-                };
+                });
             }
         }
         catch { }
-        return null;
+    }
+
+    private static string? ExtractBinaryFromExec(string? exec)
+    {
+        if (string.IsNullOrWhiteSpace(exec)) return null;
+        // Exec=code %F  →  "code"
+        // Exec=/usr/bin/firefox %u  →  "firefox"
+        // Exec="my app" --flag  →  "my app"
+        exec = exec.Trim();
+        // Remove trailing % flags like %F, %u, %U, %f
+        var spaceIdx = exec.IndexOf(' ');
+        var firstPart = spaceIdx > 0 ? exec[..spaceIdx] : exec;
+        // Strip quotes
+        firstPart = firstPart.Trim('"');
+        // If it's a full path, get the file name without extension
+        var binary = Path.GetFileNameWithoutExtension(firstPart);
+        return string.IsNullOrWhiteSpace(binary) ? null : binary;
     }
 
     private void DetectInstalledWindows()
@@ -215,7 +246,10 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                 {
                     var name = Path.GetFileNameWithoutExtension(lnk);
                     if (!string.IsNullOrWhiteSpace(name))
+                    {
                         _knownApps.Add(name);
+                        _binaryToDisplayName[name] = name;
+                    }
                 }
             }
 
@@ -227,7 +261,10 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                 {
                     var name = Path.GetFileName(dir);
                     if (!string.IsNullOrWhiteSpace(name))
+                    {
                         _knownApps.Add(name);
+                        _binaryToDisplayName[name] = name;
+                    }
                 }
             }
 
@@ -239,7 +276,10 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                 {
                     var name = Path.GetFileName(dir);
                     if (!string.IsNullOrWhiteSpace(name))
+                    {
                         _knownApps.Add(name);
+                        _binaryToDisplayName[name] = name;
+                    }
                 }
             }
 
@@ -258,13 +298,24 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                         if (subKey.GetValue("DisplayName") is string displayName &&
                             !string.IsNullOrWhiteSpace(displayName))
                         {
+                            // Extract binary name from install location or display icon
+                            var installPath = subKey.GetValue("InstallLocation") as string ?? "";
+                            var displayIcon = subKey.GetValue("DisplayIcon") as string ?? "";
+                            var binaryName = ExtractBinaryFromPath(installPath) ?? ExtractBinaryFromPath(displayIcon) ?? "";
+
                             _knownApps.Add(displayName);
+                            if (!string.IsNullOrEmpty(binaryName))
+                            {
+                                _knownApps.Add(binaryName);
+                                _binaryToDisplayName[binaryName] = displayName;
+                            }
                             _installedApps.Add(new InstalledApplication
                             {
                                 AppName = displayName,
+                                BinaryName = binaryName,
                                 AppVersion = subKey.GetValue("DisplayVersion") as string ?? "",
                                 Publisher = subKey.GetValue("Publisher") as string ?? "",
-                                InstallPath = subKey.GetValue("InstallLocation") as string ?? "",
+                                InstallPath = installPath,
                                 UninstallString = subKey.GetValue("UninstallString") as string ?? "",
                                 ChangeType = "installed",
                                 DetectedAt = DateTime.UtcNow,
@@ -278,6 +329,27 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
         }
         catch (UnauthorizedAccessException) { }
         catch { }
+    }
+
+    private static string? ExtractBinaryFromPath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return null;
+        try
+        {
+            // Try to find an .exe in the path
+            if (path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                return Path.GetFileNameWithoutExtension(path);
+            // If it's a directory, look for common exe names
+            if (Directory.Exists(path))
+            {
+                var dirName = Path.GetFileName(path);
+                var exeCandidate = Path.Combine(path, dirName + ".exe");
+                if (File.Exists(exeCandidate))
+                    return dirName;
+            }
+        }
+        catch { }
+        return null;
     }
 
     private void DetectInstalledLinux()
@@ -299,101 +371,11 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                 if (!Directory.Exists(desktopPath)) continue;
                 foreach (var file in Directory.GetFiles(desktopPath, "*.desktop"))
                 {
-                    var app = AppFromDesktopFile(file);
-                    if (app != null)
-                    {
-                        _knownApps.Add(app.AppName);
-                        _installedApps.Add(app);
-                    }
+                    AddAppFromDesktopFile(file);
                 }
             }
 
-            // 2. Try dpkg for installed packages (name + version)
-            try
-            {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = "dpkg-query",
-                    Arguments = "-W -f=${Package}\t${Version}\t${Maintainer}\n",
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-                using var proc = Process.Start(psi);
-                if (proc != null)
-                {
-                    var output = proc.StandardOutput.ReadToEnd();
-                    proc.WaitForExit(3000);
-                    foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-                    {
-                        var parts = line.Split('\t');
-                        if (parts.Length >= 1)
-                        {
-                            var pkg = parts[0].Trim();
-                            if (!string.IsNullOrWhiteSpace(pkg))
-                                _knownApps.Add(pkg);
-                            if (parts.Length >= 2)
-                            {
-                                _installedApps.Add(new InstalledApplication
-                                {
-                                    AppName = pkg,
-                                    AppVersion = parts[1].Trim(),
-                                    Publisher = parts.Length >= 3 ? parts[2].Trim() : "",
-                                    ChangeType = "installed",
-                                    DetectedAt = DateTime.UtcNow,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            catch (UnauthorizedAccessException)
-            {
-                _missingPerms.Add("dpkg_query");
-                _permInstructions.Add(
-                    "Run: sudo dpkg-query -W -f='${Package}\t${Version}\n' to enumerate installed packages.\n" +
-                    "Or grant the application permission: sudo setcap CAP_DAC_READ_SEARCH+ep $(readlink -f /proc/$(pidof AlphaAITracker)/exe)");
-            }
-            catch (InvalidOperationException)
-            {
-                Debug.WriteLine("dpkg-query not found — non-Debian system, skipping dpkg detection");
-            }
-            catch { }
-
-            // 3. Try snap list (name + version)
-            try
-            {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = "snap",
-                    Arguments = "list",
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-                using var proc = Process.Start(psi);
-                if (proc != null)
-                {
-                    var output = proc.StandardOutput.ReadToEnd();
-                    proc.WaitForExit(3000);
-                    foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-                    {
-                        var parts = line.Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
-                        if (parts.Length >= 1 && !parts[0].Equals("Name", StringComparison.OrdinalIgnoreCase))
-                        {
-                            _knownApps.Add(parts[0]);
-                            _installedApps.Add(new InstalledApplication
-                            {
-                                AppName = parts[0],
-                                AppVersion = parts.Length >= 2 ? parts[1] : "",
-                                ChangeType = "installed",
-                                DetectedAt = DateTime.UtcNow,
-                            });
-                        }
-                    }
-                }
-            }
-            catch { }
+            // NOTE: dpkg, snap, flatpak package detection moved to PackageDetector
         }
         catch (Exception ex)
         {
@@ -414,10 +396,14 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                     var name = Path.GetFileNameWithoutExtension(app);
                     if (!string.IsNullOrWhiteSpace(name))
                     {
+                        var binaryName = name.ToLowerInvariant();
                         _knownApps.Add(name);
+                        _knownApps.Add(binaryName);
+                        _binaryToDisplayName[binaryName] = name;
                         _installedApps.Add(new InstalledApplication
                         {
                             AppName = name,
+                            BinaryName = binaryName,
                             InstallPath = app,
                             ChangeType = "installed",
                             DetectedAt = DateTime.UtcNow,
@@ -436,10 +422,14 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                     var name = Path.GetFileNameWithoutExtension(app);
                     if (!string.IsNullOrWhiteSpace(name))
                     {
+                        var binaryName = name.ToLowerInvariant();
                         _knownApps.Add(name);
+                        _knownApps.Add(binaryName);
+                        _binaryToDisplayName[binaryName] = name;
                         _installedApps.Add(new InstalledApplication
                         {
                             AppName = name,
+                            BinaryName = binaryName,
                             InstallPath = app,
                             ChangeType = "installed",
                             DetectedAt = DateTime.UtcNow,
@@ -448,39 +438,7 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                 }
             }
 
-            // Try brew list (if Homebrew is installed)
-            try
-            {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = "brew",
-                    Arguments = "list --formula --quiet",
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-                using var proc = Process.Start(psi);
-                if (proc != null)
-                {
-                    var output = proc.StandardOutput.ReadToEnd();
-                    proc.WaitForExit(5000);
-                    foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-                    {
-                        var pkg = line.Trim();
-                        if (!string.IsNullOrWhiteSpace(pkg))
-                        {
-                            _knownApps.Add(pkg);
-                            _installedApps.Add(new InstalledApplication
-                            {
-                                AppName = pkg,
-                                ChangeType = "installed",
-                                DetectedAt = DateTime.UtcNow,
-                            });
-                        }
-                    }
-                }
-            }
-            catch { }
+            // NOTE: brew and macports package detection moved to PackageDetector
         }
         catch (Exception ex)
         {
@@ -488,45 +446,4 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
         }
     }
 
-    // Common known applications that should always be tracked
-    private static readonly string[] CommonKnownApps =
-    [
-        // Browsers
-        "chrome", "firefox", "msedge", "brave", "opera", "vivaldi", "safari", "tor",
-        // Terminals
-        "cmd", "powershell", "pwsh", "wsl", "bash", "zsh", "sh", "dash", "fish",
-        "gnome-terminal", "konsole", "alacritty", "kitty", "iterm2", "terminal",
-        "xterm", "rxvt", "urxvt", "st", "tmux", "screen",
-        // IDEs / Editors
-        "code", "cursor", "windsurf", "zed", "vim", "nvim", "emacs", "nano",
-        "notepad", "notepad++", "sublime_text", "sublimetext", "atom", "brackets",
-        "visualstudio", "devenv", "rider", "idea", "idea64", "pycharm", "webstorm",
-        "android-studio", "xcode", "xed",
-        // Office
-        "winword", "excel", "powerpnt", "outlook", "teams", "slack", "discord",
-        "zoom", "skype", "whatsapp", "telegram",
-        // File managers
-        "explorer", "nautilus", "nemo", "thunar", "pcmanfm", "dolphin", "krusader",
-        "finder",
-        // Design
-        "photoshop", "illustrator", "figma", "sketch", "gimp", "inkscape", "blender",
-        // Dev tools
-        "git", "docker", "kubectl", "node", "npm", "yarn", "pnpm", "python", "python3",
-        "java", "javac", "dotnet", "go", "rustc", "cargo", "gcc", "g++", "clang",
-        "make", "cmake", "mvn", "gradle",
-        // Media
-        "vlc", "mpv", "spotify", "itunes", "music", "photos", "preview",
-        // System
-        "settings", "control", "msconfig", "regedit", "taskmgr", "perfmon",
-        "resmon", "diskmgmt", "devmgmt", "services",
-    ];
-}
-
-internal static class HashSetExtensions
-{
-    public static void AddRange<T>(this HashSet<T> set, IEnumerable<T> items)
-    {
-        foreach (var item in items)
-            set.Add(item);
-    }
 }

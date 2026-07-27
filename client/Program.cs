@@ -91,6 +91,9 @@ builder.Services.AddSingleton<HttpClient>(sp =>
 // Installed App Detector (cross-platform)
 builder.Services.AddSingleton<IInstalledAppDetector, InstalledAppDetector>();
 
+// Package Detector (cross-platform — npm, pip, apt, brew, etc.)
+builder.Services.AddSingleton<IPackageDetector, PackageDetector>();
+
 // Platform-specific services (IShellCommandCollector removed per user request)
 if (OperatingSystem.IsWindows())
 {

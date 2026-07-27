@@ -16,6 +16,10 @@ public interface ILogStore
     Task<IReadOnlyList<InstalledApplication>> GetUnsentInstalledApplicationsAsync(int limit, CancellationToken ct);
     Task MarkInstalledApplicationsSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
 
+    Task StoreInstalledPackagesAsync(IReadOnlyList<InstalledPackage> entries, CancellationToken ct);
+    Task<IReadOnlyList<InstalledPackage>> GetUnsentInstalledPackagesAsync(int limit, CancellationToken ct);
+    Task MarkInstalledPackagesSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
+
     Task StoreNetworkInfoAsync(IReadOnlyList<NetworkInfo> entries, CancellationToken ct);
     Task<IReadOnlyList<NetworkInfo>> GetUnsentNetworkInfoAsync(int limit, CancellationToken ct);
     Task MarkNetworkInfoSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
@@ -30,6 +34,26 @@ public interface ILogStore
     Task<IReadOnlyList<StorageDevice>> GetUnsentStorageDevicesAsync(int limit, CancellationToken ct);
     Task MarkStorageDevicesSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
 
+    // ── Installed App/Package Lookup (binary name → display name mapping) ──
+
+    /// <summary>Look up an installed app by its executable binary name (e.g., \"code\" → Visual Studio Code)</summary>
+    Task<InstalledApplication?> GetInstalledAppByBinaryNameAsync(string binaryName, CancellationToken ct);
+
+    /// <summary>Look up an installed package by its package name</summary>
+    Task<InstalledPackage?> GetInstalledPackageByNameAsync(string packageName, CancellationToken ct);
+
+    /// <summary>Get all installed app binary names for fast in-memory filtering</summary>
+    Task<HashSet<string>> GetAllInstalledAppBinaryNamesAsync(CancellationToken ct);
+
+    /// <summary>Get all installed package names for fast in-memory filtering</summary>
+    Task<HashSet<string>> GetAllInstalledPackageNamesAsync(CancellationToken ct);
+
+    /// <summary>Store a single auto-detected installed app (called when a running process is not yet in the DB)</summary>
+    Task StoreInstalledAppAsync(InstalledApplication entry, CancellationToken ct);
+
+    /// <summary>Store a single auto-detected installed package (called when a running process is not yet in the DB)</summary>
+    Task StoreInstalledPackageAsync(InstalledPackage entry, CancellationToken ct);
+
     // ── Application Logs ──
 
     Task StoreAppSessionsAsync(IReadOnlyList<AppSession> entries, CancellationToken ct);
@@ -41,6 +65,9 @@ public interface ILogStore
     Task StoreAppItemsAsync(IReadOnlyList<AppItem> entries, CancellationToken ct);
     Task<IReadOnlyList<AppItem>> GetUnsentAppItemsAsync(int limit, CancellationToken ct);
     Task MarkAppItemsSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
+
+    /// <summary>Update an app item's parent_item_id (for post-creation parent-child linking)</summary>
+    Task UpdateAppItemParentAsync(string itemId, string parentItemId, CancellationToken ct);
 
     // ── Network dedup helper ──
 

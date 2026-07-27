@@ -108,6 +108,38 @@ type NetworkInfoEntry struct {
 	CollectedAt          string `json:"collectedAt"`
 }
 
+type InstalledPackageEntry struct {
+	ID            string `json:"id"`
+	PackageName   string `json:"packageName"`
+	Version       string `json:"version"`
+	Category      string `json:"category"`
+	SourceManager string `json:"sourceManager"`
+	InstallPath   string `json:"installPath"`
+	Publisher     string `json:"publisher"`
+	Description   string `json:"description"`
+	DetectedAt    string `json:"detectedAt"`
+}
+
+type SyncInstalledPackagesRequest struct {
+	EmployeeID string                  `json:"employeeId"`
+	Token      string                  `json:"token"`
+	Entries    []InstalledPackageEntry `json:"entries"`
+}
+
+type InstalledPackageResponse struct {
+	ID            string     `json:"id"`
+	EmployeeID    string     `json:"employeeId"`
+	PackageName   string     `json:"packageName"`
+	Version       string     `json:"version"`
+	Category      string     `json:"category"`
+	SourceManager string     `json:"sourceManager"`
+	InstallPath   string     `json:"installPath"`
+	Publisher     string     `json:"publisher"`
+	Description   string     `json:"description"`
+	DetectedAt    time.Time  `json:"detectedAt"`
+	SyncedAt      *time.Time `json:"syncedAt,omitempty"`
+}
+
 type SyncNetworkInfoRequest struct {
 	EmployeeID string            `json:"employeeId"`
 	Token      string            `json:"token"`

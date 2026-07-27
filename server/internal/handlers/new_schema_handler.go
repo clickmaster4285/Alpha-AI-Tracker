@@ -76,6 +76,33 @@ func (h *NewSchemaHandler) SyncInstalledApps(c echo.Context) error {
 }
 
 // ────────────────────────────────
+// Phase 1: Installed Packages
+// ────────────────────────────────
+
+func (h *NewSchemaHandler) SyncInstalledPackages(c echo.Context) error {
+	var req dto.SyncInstalledPackagesRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Invalid request body"})
+	}
+	if req.EmployeeID == "" || req.Token == "" {
+		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Employee ID and token are required"})
+	}
+	claims, err := h.authService.ValidateToken(req.Token)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid or expired token"})
+	}
+	if claims.UserID == "" {
+		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid token claims"})
+	}
+	resp, err := h.service.SyncInstalledPackages(c.Request().Context(), &req)
+	if err != nil {
+		log.Printf("[new_schema] SyncInstalledPackages error: %v", err)
+		return c.JSON(http.StatusInternalServerError, dto.APIError{Code: http.StatusInternalServerError, Message: "Failed to sync", Detail: err.Error()})
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// ────────────────────────────────
 // Phase 1: Network Info
 // ────────────────────────────────
 
