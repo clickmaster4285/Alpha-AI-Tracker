@@ -1,3 +1,4 @@
+using client.Core;
 using client.Core.Models;
 
 namespace client.Core.Abstractions;
@@ -48,11 +49,13 @@ public interface ILogStore
     /// <summary>Get all installed package names for fast in-memory filtering</summary>
     Task<HashSet<string>> GetAllInstalledPackageNamesAsync(CancellationToken ct);
 
-    /// <summary>Store a single auto-detected installed app (called when a running process is not yet in the DB)</summary>
-    Task StoreInstalledAppAsync(InstalledApplication entry, CancellationToken ct);
+    /// <summary>Store a single auto-detected installed app (called when a running process is not yet in the DB).
+    /// Returns the actual stored ID (may differ from entry.Id if app_name already existed via ON CONFLICT).</summary>
+    Task<string> StoreInstalledAppAsync(InstalledApplication entry, CancellationToken ct);
 
-    /// <summary>Store a single auto-detected installed package (called when a running process is not yet in the DB)</summary>
-    Task StoreInstalledPackageAsync(InstalledPackage entry, CancellationToken ct);
+    /// <summary>Store a single auto-detected installed package (called when a running process is not yet in the DB).
+    /// Returns the actual stored ID.</summary>
+    Task<string> StoreInstalledPackageAsync(InstalledPackage entry, CancellationToken ct);
 
     // ── Application Logs ──
 
@@ -68,6 +71,18 @@ public interface ILogStore
 
     /// <summary>Update an app item's parent_item_id (for post-creation parent-child linking)</summary>
     Task UpdateAppItemParentAsync(string itemId, string parentItemId, CancellationToken ct);
+
+    /// <summary>Open sessions with PID for hierarchy resolution (ended_at IS NULL).</summary>
+    Task<IReadOnlyList<OpenSessionRecord>> GetOpenSessionRecordsAsync(CancellationToken ct);
+
+    /// <summary>Find an open context child item by type+identifier under a session.</summary>
+    Task<AppItem?> GetOpenAppItemAsync(string appSessionId, string itemType, string identifier, CancellationToken ct);
+
+    /// <summary>Update title/identifier on an existing open app item (URL/path change).</summary>
+    Task UpdateAppItemContextAsync(string itemId, string title, string identifier, CancellationToken ct);
+
+    /// <summary>Whether any storage device rows exist for the latest hardware record.</summary>
+    Task<bool> HasStorageDevicesAsync(CancellationToken ct);
 
     // ── Network dedup helper ──
 

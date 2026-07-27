@@ -2,9 +2,9 @@
 
 import { useState, useMemo } from 'react';
 import { motion } from 'framer-motion';
-import { Search, ChevronDown, ChevronUp, Loader2, Monitor, Globe, FolderOpen } from 'lucide-react';
+import { Search, ChevronDown, ChevronUp, Loader2, Monitor, Globe, FolderOpen, ExternalLink } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
-import { appSessionsApi, employeesApi, type AppSession } from '@/lib/api';
+import { appSessionsApi, appItemsApi, employeesApi, type AppSession, type AppItem } from '@/lib/api';
 
 export default function ComprehensiveLogs() {
   const [selectedEmployee, setSelectedEmployee] = useState('');
@@ -33,7 +33,29 @@ export default function ComprehensiveLogs() {
   const sessions = sessionsData?.data || [];
   const totalPages = sessionsData?.totalPages || 1;
 
+  // Fetch app items for URL display
+  const { data: itemsData } = useQuery({
+    queryKey: ['app-items', { employeeId: selectedEmployee, itemType: 'browser_navigation' }],
+    queryFn: () => appItemsApi.list({
+      employeeId: selectedEmployee || undefined,
+      itemType: 'browser_navigation',
+      perPage: 100,
+    }),
+    enabled: !!selectedEmployee,
+  });
+
+  const browserNavItems = (itemsData?.data || []) as AppItem[];
   const selectedEmp = employees.find(e => e.id === selectedEmployee);
+
+  // Group URLs by session for display
+  const urlsBySession = useMemo(() => {
+    const map = new Map<string, AppItem[]>();
+    for (const item of browserNavItems) {
+      if (!map.has(item.appSessionId)) map.set(item.appSessionId, []);
+      map.get(item.appSessionId)!.push(item);
+    }
+    return map;
+  }, [browserNavItems]);
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -108,6 +130,31 @@ export default function ComprehensiveLogs() {
                       </div>
                       {session.appDisplayName && session.appDisplayName !== session.processName && (
                         <p className="text-xs text-muted-foreground ml-8">{session.appDisplayName}</p>
+                      )}
+                      {urlsBySession.get(session.id)?.length > 0 && (
+                        <div className="mt-1 ml-8 space-y-0.5">
+                          {urlsBySession.get(session.id)!.slice(0, 3).map((item) => {
+                            const isUrl = item.identifier.startsWith('http://') || item.identifier.startsWith('https://');
+                            return (
+                              <span key={item.id} className="text-xs text-muted-foreground flex items-center gap-1">
+                                {isUrl ? (
+                                  <a href={item.identifier} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 flex items-center gap-1">
+                                    <ExternalLink className="w-3 h-3" />
+                                    {item.title || item.identifier}
+                                  </a>
+                                ) : (
+                                  <>
+                                    <Globe className="w-3 h-3" />
+                                    {item.title || item.identifier}
+                                  </>
+                                )}
+                              </span>
+                            );
+                          })}
+                          {urlsBySession.get(session.id)!.length > 3 && (
+                            <p className="text-xs text-muted-foreground">+{urlsBySession.get(session.id)!.length - 3} more</p>
+                          )}
+                        </div>
                       )}
                     </td>
                     <td className="px-4 py-3 text-sm text-foreground">

@@ -1,14 +1,21 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-07-27 (binary_name FK, auto-detect, parent tracking)  
+> **Last audited:** 2026-07-27 (build tool tracking, Wayland-native app tracking, file manager path resolution)
 > **Changelog:** 
+> - 2026-07-27: Added `ActivityContextParser`, `AppProcessClassifier`, `SessionHierarchyResolver` for browser URL / file path / process-tree hierarchy.
+> - 2026-07-27: Sessions keyed by PID; `process_id` persisted on `app_sessions` and `app_items`.
 > - 2026-07-27: Added `binary_name` column to `installed_applications` for process→display-name resolution.
 > - 2026-07-27: Added `installed_app_id` / `installed_package_id` FK columns to `app_sessions`.
 > - 2026-07-27: Replaced in-memory `IsInstalledApp()` filter with SQLite-backed `ResolveAppInfo()` + auto-detect.
 > - 2026-07-27: Fixed Linux ProcessCollector `resolvedTitle ??= name` bug (was giving every process a fake title, bypassing window-title filters).
 > - 2026-07-27: Added process-tree-based parent-child tracking for terminal shells inside IDE/terminal-emulator sessions.
 > - 2026-07-27: Added `waydroid` / `gnome-software` to `NonAppProcesses` blocklist.
-> **Service completion (honest):** ~58%
+> - 2026-07-27: **Added `BuildToolProcesses` set** (`make`, `go`, `npm`, `npx`, `cargo`, `pip`, `tsc`, etc.) — build tools are auto-registered as `installed_packages` (category=`tool`) and tracked without a window title.
+> - 2026-07-27: **Fixed process filter** — known-app processes (`appId != null`) and build tools are now tracked even without a window title. Previously, Wayland-native apps (VSCode, Chrome, Nautilus) were silently dropped because they don't appear in X11 window list.
+> - 2026-07-27: **Broadened `AutoDetectInstalledApp`** — now accepts `/home/*` and `/media/*` paths as valid install locations (covers project-local compiled binaries like `./bin/alpha-ai-server`).
+> - 2026-07-27: **Fixed file manager path resolution** — `ParseFileManagerContext` now resolves folder display names to absolute paths by searching `~/`, `~/Documents`, `~/Desktop`, `/media/<user>/`, etc.
+> - 2026-07-27: **Fixed `SessionHierarchyResolver`** — `ResolveParent` now walks through build tools and runtime packages as intermediate PPID steps; `ShouldLinkTo` now accepts build tools as children of IDEs and terminals.
+> **Service completion (honest):** ~70%
 
 ---
 
@@ -89,7 +96,10 @@ client/
 │   ├── InstalledAppDetector.cs         # Cross-platform installed app detection (desktop files, registry, .app bundles) — GUI only
 │   ├── PackageDetector.cs              # Cross-platform installed package detection (npm, pip, apt, brew, choco, winget, scoop, etc.)
 │   ├── ProcessFilter.cs                # Filters kernel/system processes from collection
-│   └── ParentProcessResolver.cs        # Resolves window titles from parent processes (e.g., terminal → shell)
+│   ├── ParentProcessResolver.cs        # Resolves window titles from parent processes (e.g., terminal → shell)
+│   ├── AppProcessClassifier.cs         # Browser/file-manager/IDE/shell/runtime classification + item_type
+│   ├── ActivityContextParser.cs        # URL + file path extraction from window titles
+│   └── SessionHierarchyResolver.cs     # PID-tree parent linking (node→terminal→IDE)
 │
 ├── Platform/
 │   ├── Windows/
@@ -344,16 +354,19 @@ CREATE TABLE IF NOT EXISTS employee_info (
 
 ### Filtering
 
-- **ProcessFilter.cs** — filters out kernel processes (`kthreadd`, `systemd-*`, etc.) and processes from different sessions
-- **LogCollectorService** — resolves each process against the SQLite `installed_applications` (via `binary_name`) and `installed_packages` (via `package_name`):
+- **ProcessFilter.cs** — filters out kernel/system processes
+- **LogCollectorService** — resolves each process against SQLite `installed_applications` (via `binary_name`) and `installed_packages` (via `package_name`):
   - **Shell processes** (`bash`, `zsh`, `cmd`, etc.): always tracked (no window title needed)
-  - **GUI apps** (found in `installed_applications`): tracked only if they have a non-empty window title
+  - **GUI apps with window title** (found in `installed_applications` AND have a window): tracked with full context
+  - **GUI apps WITHOUT window title** (found in `installed_applications` but NOT in X11 window list): still tracked — Wayland-native apps like VSCode and Chrome don't appear in X11 client list
   - **CLI packages** (found in `installed_packages`): tracked regardless of window title
-  - **Unknown processes**: auto-detected via filesystem heuristics (`.desktop` files, standard install paths); if resolved, saved to `installed_applications`/`installed_packages` and tracked
-  - **Unresolvable processes**: silently skipped
+  - **Build tools** (`make`, `go`, `npm`, `npx`, `cargo`, `pip`, `tsc`, etc.): auto-registered as `installed_packages` (category=`tool`) and tracked even without a window
+  - **Runtime packages** (`node`, `dotnet`, `python`, etc.): auto-registered as `installed_packages` (category=`runtime`) and tracked
+  - **Unknown processes with exec path**: auto-detected via filesystem heuristics (`.desktop` files, standard install paths including `/home/` and `/media/`); saved and tracked
+  - **Unresolvable processes**: silently skipped (no known identity, no window, not a shell/build tool)
 - `AppDisplayName` is set from the installed app's `app_name` (e.g., `"Visual Studio Code"`), not from the OS process name (`"code"`) or window title
 - `InstalledAppId` / `InstalledPackageId` FK columns link each session to its app/package record
-- [Linux only] Bug fixed: removed `resolvedTitle ??= name` fallback that previously assigned every process a fake window title, bypassing the window-title filter
+- **Wayland note**: Linux window title enumeration uses X11 `xprop _NET_CLIENT_LIST`. On Wayland, only XWayland windows appear (not native Wayland windows). Foreground detection via AT-SPI/gdbus still works for the active window.
 
 ### Batching / Offline Behavior
 
@@ -469,4 +482,6 @@ CREATE TABLE IF NOT EXISTS employee_info (
 8. **Consider auto-update** — integrate Velopack or Squirrel.Windows for silent updates
 9. ~~**Add process ancestry tracking** — persist parent PID chain from `ParentProcessResolver` into `AppItem`~~ ✅ DONE
 10. **Improve Chrome subprocess filtering** — use `/proc/<pid>/cmdline` check for `--type=` flag to reliably filter non-browser chrome processes
-11. **Add server-side columns** — migrate PostgreSQL `app_sessions` to accept `installed_app_id` and `installed_package_id` (currently client-only FKs)
+11. **Browser extension for full URL capture** — window-title parsing is best-effort; MV3 extension + native messaging for production-grade URLs. Currently only page title and a heuristic `title:X` identifier are stored, not actual URLs.
+12. **AT-SPI for Wayland window enumeration** — currently only the foreground window is captured via AT-SPI. All-windows enumeration via AT-SPI Registry would fix background Chrome tabs, Nautilus paths, etc.
+13. **File manager via `xdg-open` hook or inotify** — watch `~/.local/share/recently-used.xbel` for recently opened files/folders as a supplement to window title parsing.

@@ -1,8 +1,8 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-07-27 (installed_packages)  
-> **Changelog:** 2026-07-27: Added migration 009 (installed_packages table). New model/DTO/handler/service/repo for installed_packages. Split from installed_applications (GUI apps only). New route POST /api/v1/installed-packages/sync.  
-> **Service completion (honest):** ~47%
+> **Last audited:** 2026-07-27 (session process IDs, app_items upsert)  
+> **Changelog:** 2026-07-27: Migration 010 adds `process_id`/`parent_process_id` to `app_sessions`. App-items sync uses upsert on conflict. App-session sync upserts `ended_at` and `parent_process_id`.  
+> **Service completion (honest):** ~50%
 
 ---
 

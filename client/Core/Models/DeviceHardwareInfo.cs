@@ -15,6 +15,7 @@ public class DeviceHardwareInfo
 
     public string GpuModel { get; set; } = string.Empty;
     public long GpuVramMb { get; set; }
+    public string StorageDevices { get; set; } = "[]";
     public DateTime CollectedAt { get; set; } = DateTime.UtcNow;
     public bool IsSynced { get; set; }
     public string? SyncedAt { get; set; }

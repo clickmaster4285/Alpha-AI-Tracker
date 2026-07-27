@@ -1,5 +1,6 @@
 using System.Data.Common;
 using Microsoft.Data.Sqlite;
+using client.Core;
 using client.Core.Abstractions;
 using client.Core.Models;
 
@@ -32,6 +33,37 @@ public class SqliteLogStore : ILogStore, IDisposable
         var cmd = _connection.CreateCommand();
         cmd.CommandText = DatabaseSchema.CreateTableSql;
         await cmd.ExecuteNonQueryAsync(ct);
+
+        await RunMigrationsAsync(ct);
+    }
+
+    private async Task RunMigrationsAsync(CancellationToken ct)
+    {
+        if (_connection == null) return;
+
+        foreach (var statement in DatabaseSchema.MigrateSql.Split(';', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var sql = statement.Trim();
+            if (string.IsNullOrEmpty(sql)) continue;
+            try
+            {
+                var cmd = _connection.CreateCommand();
+                cmd.CommandText = sql;
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+            catch (SqliteException ex) when (ex.SqliteErrorCode == 1 && ex.Message.Contains("duplicate column", StringComparison.OrdinalIgnoreCase))
+            {
+                // Column already exists from a prior migration
+            }
+        }
+
+        var indexCmd = _connection.CreateCommand();
+        indexCmd.CommandText = @"
+            CREATE INDEX IF NOT EXISTS idx_app_sessions_process_id ON app_sessions(process_id);
+            CREATE INDEX IF NOT EXISTS idx_app_sessions_open ON app_sessions(ended_at, process_id);
+            CREATE INDEX IF NOT EXISTS idx_app_items_context ON app_items(app_session_id, item_type, identifier);
+        ";
+        await indexCmd.ExecuteNonQueryAsync(ct);
     }
 
     // ────────────────────────────────────────
@@ -278,9 +310,9 @@ public class SqliteLogStore : ILogStore, IDisposable
         return result;
     }
 
-    public async Task StoreInstalledAppAsync(InstalledApplication entry, CancellationToken ct)
+    public async Task<string> StoreInstalledAppAsync(InstalledApplication entry, CancellationToken ct)
     {
-        if (_connection == null) return;
+        if (_connection == null) return entry.Id;
         var cmd = _connection.CreateCommand();
         cmd.CommandText = DatabaseSchema.InsertInstalledApplicationSql;
         cmd.Parameters.AddWithValue("$id", entry.Id);
@@ -294,11 +326,21 @@ public class SqliteLogStore : ILogStore, IDisposable
         cmd.Parameters.AddWithValue("$change_type", entry.ChangeType);
         cmd.Parameters.AddWithValue("$detected_at", entry.DetectedAt.ToString("O"));
         await cmd.ExecuteNonQueryAsync(ct);
+        
+        // 🟡 CRITICAL: After upsert, look up the actual stored ID.
+        // InsertInstalledApplicationSql uses ON CONFLICT(app_name) DO UPDATE SET
+        // which preserves the existing row's ID when app_name already exists.
+        // We must query by app_name (the conflict key) to find the actual stored ID.
+        var lookupCmd = _connection.CreateCommand();
+        lookupCmd.CommandText = "SELECT id FROM installed_applications WHERE app_name = $app_name LIMIT 1";
+        lookupCmd.Parameters.AddWithValue("$app_name", entry.AppName);
+        var actualId = await lookupCmd.ExecuteScalarAsync(ct);
+        return actualId as string ?? entry.Id;
     }
 
-    public async Task StoreInstalledPackageAsync(InstalledPackage entry, CancellationToken ct)
+    public async Task<string> StoreInstalledPackageAsync(InstalledPackage entry, CancellationToken ct)
     {
-        if (_connection == null) return;
+        if (_connection == null) return entry.Id;
         var cmd = _connection.CreateCommand();
         cmd.CommandText = DatabaseSchema.InsertInstalledPackageSql;
         cmd.Parameters.AddWithValue("$id", entry.Id);
@@ -311,6 +353,10 @@ public class SqliteLogStore : ILogStore, IDisposable
         cmd.Parameters.AddWithValue("$description", entry.Description);
         cmd.Parameters.AddWithValue("$detected_at", entry.DetectedAt.ToString("O"));
         await cmd.ExecuteNonQueryAsync(ct);
+        
+        // InsertInstalledPackageSql uses ON CONFLICT(id) which won't conflict
+        // with our new GUID. The stored ID always matches entry.Id.
+        return entry.Id;
     }
 
     // ────────────────────────────────────────
@@ -442,39 +488,71 @@ public class SqliteLogStore : ILogStore, IDisposable
     public async Task StoreAppSessionsAsync(IReadOnlyList<AppSession> entries, CancellationToken ct)
     {
         if (_connection == null || entries.Count == 0) return;
-        var cmd = _connection.CreateCommand();
-        cmd.CommandText = DatabaseSchema.InsertAppSessionSql;
-        var pId = cmd.Parameters.Add("$id", SqliteType.Text);
-        var pProc = cmd.Parameters.Add("$process_name", SqliteType.Text);
-        var pDisp = cmd.Parameters.Add("$app_display_name", SqliteType.Text);
-        var pStart = cmd.Parameters.Add("$started_at", SqliteType.Text);
-        var pEnd = cmd.Parameters.Add("$ended_at", SqliteType.Text);
-        var pMac = cmd.Parameters.Add("$machine_id", SqliteType.Text);
-        var pEmpId = cmd.Parameters.Add("$employee_id", SqliteType.Text);
-        var pEmpName = cmd.Parameters.Add("$employee_name", SqliteType.Text);
-        var pSessId = cmd.Parameters.Add("$session_id", SqliteType.Text);
-        var pPlat = cmd.Parameters.Add("$platform", SqliteType.Text);
-        var pAppId = cmd.Parameters.Add("$installed_app_id", SqliteType.Text);
-        var pPkgId = cmd.Parameters.Add("$installed_package_id", SqliteType.Text);
+        
+        // Separate close sessions (update only ended_at) from new sessions
+        var closeSessions = entries.Where(e => e.EndedAt.HasValue && 
+            string.IsNullOrWhiteSpace(e.ProcessName)).ToList();
+        var newSessions = entries.Where(e => !closeSessions.Contains(e)).ToList();
 
         await using var tx = await _connection.BeginTransactionAsync(ct);
-        ((DbCommand)cmd).Transaction = tx;
-        foreach (var e in entries)
+
+        // Handle close sessions via simple UPDATE (avoids FK constraint on upsert INSERT)
+        if (closeSessions.Count > 0)
         {
-            pId.Value = e.Id;
-            pProc.Value = e.ProcessName;
-            pDisp.Value = e.AppDisplayName;
-            pStart.Value = e.StartedAt.ToString("O");
-            pEnd.Value = e.EndedAt?.ToString("O") ?? (object)DBNull.Value;
-            pMac.Value = e.MachineId;
-            pEmpId.Value = (object?)e.EmployeeId ?? DBNull.Value;
-            pEmpName.Value = (object?)e.EmployeeName ?? DBNull.Value;
-            pSessId.Value = e.SessionId;
-            pPlat.Value = e.Platform;
-            pAppId.Value = (object?)e.InstalledAppId ?? DBNull.Value;
-            pPkgId.Value = (object?)e.InstalledPackageId ?? DBNull.Value;
-            await cmd.ExecuteNonQueryAsync(ct);
+            var updateCmd = _connection.CreateCommand();
+            updateCmd.CommandText = DatabaseSchema.UpdateAppSessionEndedSql;
+            ((DbCommand)updateCmd).Transaction = tx;
+            var pId = updateCmd.Parameters.Add("$id", SqliteType.Text);
+            var pEnd = updateCmd.Parameters.Add("$ended_at", SqliteType.Text);
+            foreach (var e in closeSessions)
+            {
+                pId.Value = e.Id;
+                pEnd.Value = e.EndedAt!.Value.ToString("O");
+                await updateCmd.ExecuteNonQueryAsync(ct);
+            }
         }
+
+        // Handle new sessions via INSERT ON CONFLICT DO UPDATE (for existing sessions that need updates)
+        if (newSessions.Count > 0)
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = DatabaseSchema.InsertAppSessionSql;
+            ((DbCommand)cmd).Transaction = tx;
+            var pId = cmd.Parameters.Add("$id", SqliteType.Text);
+            var pProc = cmd.Parameters.Add("$process_name", SqliteType.Text);
+            var pDisp = cmd.Parameters.Add("$app_display_name", SqliteType.Text);
+            var pStart = cmd.Parameters.Add("$started_at", SqliteType.Text);
+            var pEnd = cmd.Parameters.Add("$ended_at", SqliteType.Text);
+            var pMac = cmd.Parameters.Add("$machine_id", SqliteType.Text);
+            var pEmpId = cmd.Parameters.Add("$employee_id", SqliteType.Text);
+            var pEmpName = cmd.Parameters.Add("$employee_name", SqliteType.Text);
+            var pSessId = cmd.Parameters.Add("$session_id", SqliteType.Text);
+            var pPlat = cmd.Parameters.Add("$platform", SqliteType.Text);
+            var pAppId = cmd.Parameters.Add("$installed_app_id", SqliteType.Text);
+            var pPkgId = cmd.Parameters.Add("$installed_package_id", SqliteType.Text);
+            var pPid = cmd.Parameters.Add("$process_id", SqliteType.Integer);
+            var pPPid = cmd.Parameters.Add("$parent_process_id", SqliteType.Integer);
+
+            foreach (var e in newSessions)
+            {
+                pId.Value = e.Id;
+                pProc.Value = e.ProcessName;
+                pDisp.Value = e.AppDisplayName;
+                pStart.Value = e.StartedAt.ToString("O");
+                pEnd.Value = e.EndedAt?.ToString("O") ?? (object)DBNull.Value;
+                pMac.Value = e.MachineId;
+                pEmpId.Value = (object?)e.EmployeeId ?? DBNull.Value;
+                pEmpName.Value = (object?)e.EmployeeName ?? DBNull.Value;
+                pSessId.Value = e.SessionId;
+                pPlat.Value = e.Platform;
+                pAppId.Value = (object?)e.InstalledAppId ?? DBNull.Value;
+                pPkgId.Value = (object?)e.InstalledPackageId ?? DBNull.Value;
+                pPid.Value = e.ProcessId.HasValue ? e.ProcessId.Value : DBNull.Value;
+                pPPid.Value = e.ParentProcessId.HasValue ? e.ParentProcessId.Value : DBNull.Value;
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+        }
+
         await tx.CommitAsync(ct);
     }
 
@@ -518,6 +596,7 @@ public class SqliteLogStore : ILogStore, IDisposable
         var pIdent = cmd.Parameters.Add("$identifier", SqliteType.Text);
         var pOpened = cmd.Parameters.Add("$opened_at", SqliteType.Text);
         var pClosed = cmd.Parameters.Add("$closed_at", SqliteType.Text);
+        var pProcId = cmd.Parameters.Add("$process_id", SqliteType.Integer);
 
         await using var tx = await _connection.BeginTransactionAsync(ct);
         ((DbCommand)cmd).Transaction = tx;
@@ -531,6 +610,7 @@ public class SqliteLogStore : ILogStore, IDisposable
             pIdent.Value = e.Identifier;
             pOpened.Value = e.OpenedAt.ToString("O");
             pClosed.Value = e.ClosedAt?.ToString("O") ?? (object)DBNull.Value;
+            pProcId.Value = e.ProcessId.HasValue ? e.ProcessId.Value : DBNull.Value;
             await cmd.ExecuteNonQueryAsync(ct);
         }
         await tx.CommitAsync(ct);
@@ -563,10 +643,74 @@ public class SqliteLogStore : ILogStore, IDisposable
     {
         if (_connection == null) return;
         var cmd = _connection.CreateCommand();
-        cmd.CommandText = "UPDATE app_items SET parent_item_id = $parent_item_id WHERE id = $id";
+        cmd.CommandText = "UPDATE app_items SET parent_item_id = $parent_item_id, is_synced = 0 WHERE id = $id";
         cmd.Parameters.AddWithValue("$id", itemId);
         cmd.Parameters.AddWithValue("$parent_item_id", parentItemId);
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<OpenSessionRecord>> GetOpenSessionRecordsAsync(CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<OpenSessionRecord>();
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = @"
+            SELECT s.id, s.process_name, s.process_id, i.id AS item_id, i.item_type
+            FROM app_sessions s
+            INNER JOIN app_items i ON i.app_session_id = s.id AND i.parent_item_id IS NULL
+            WHERE s.ended_at IS NULL AND s.process_id IS NOT NULL
+            ORDER BY s.started_at ASC";
+        var results = new List<OpenSessionRecord>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            results.Add(new OpenSessionRecord
+            {
+                AppSessionId = reader.GetString(0),
+                ProcessName = reader.GetString(1),
+                ProcessId = reader.GetInt32(2),
+                RootItemId = reader.GetString(3),
+                ItemType = reader.GetString(4),
+            });
+        }
+        return results;
+    }
+
+    public async Task<AppItem?> GetOpenAppItemAsync(string appSessionId, string itemType, string identifier, CancellationToken ct)
+    {
+        if (_connection == null) return null;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = @"
+            SELECT * FROM app_items
+            WHERE app_session_id = $session_id AND item_type = $item_type
+              AND identifier = $identifier AND closed_at IS NULL
+            LIMIT 1";
+        cmd.Parameters.AddWithValue("$session_id", appSessionId);
+        cmd.Parameters.AddWithValue("$item_type", itemType);
+        cmd.Parameters.AddWithValue("$identifier", identifier);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        return await reader.ReadAsync(ct) ? MapAppItemReader(reader) : null;
+    }
+
+    public async Task UpdateAppItemContextAsync(string itemId, string title, string identifier, CancellationToken ct)
+    {
+        if (_connection == null) return;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = @"
+            UPDATE app_items SET title = $title, identifier = $identifier, is_synced = 0
+            WHERE id = $id";
+        cmd.Parameters.AddWithValue("$id", itemId);
+        cmd.Parameters.AddWithValue("$title", title);
+        cmd.Parameters.AddWithValue("$identifier", identifier);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<bool> HasStorageDevicesAsync(CancellationToken ct)
+    {
+        if (_connection == null) return false;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM storage_devices";
+        var count = Convert.ToInt32(await cmd.ExecuteScalarAsync(ct));
+        return count > 0;
     }
 
     // ────────────────────────────────────────
@@ -879,6 +1023,8 @@ public class SqliteLogStore : ILogStore, IDisposable
             Platform = r.GetString(r.GetOrdinal("platform")),
             InstalledAppId = r.IsDBNull(r.GetOrdinal("installed_app_id")) ? null : r.GetString(r.GetOrdinal("installed_app_id")),
             InstalledPackageId = r.IsDBNull(r.GetOrdinal("installed_package_id")) ? null : r.GetString(r.GetOrdinal("installed_package_id")),
+            ProcessId = TryGetInt(r, "process_id"),
+            ParentProcessId = TryGetInt(r, "parent_process_id"),
             IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
             SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
             CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),
@@ -910,9 +1056,23 @@ public class SqliteLogStore : ILogStore, IDisposable
             Identifier = r.GetString(r.GetOrdinal("identifier")),
             OpenedAt = DateTime.Parse(r.GetString(r.GetOrdinal("opened_at"))),
             ClosedAt = r.IsDBNull(r.GetOrdinal("closed_at")) ? null : DateTime.Parse(r.GetString(r.GetOrdinal("closed_at"))),
+            ProcessId = TryGetInt(r, "process_id"),
             IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
             SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
             CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),
         };
+    }
+
+    private static int? TryGetInt(SqliteDataReader r, string column)
+    {
+        try
+        {
+            var ordinal = r.GetOrdinal(column);
+            return r.IsDBNull(ordinal) ? null : r.GetInt32(ordinal);
+        }
+        catch (IndexOutOfRangeException)
+        {
+            return null;
+        }
     }
 }

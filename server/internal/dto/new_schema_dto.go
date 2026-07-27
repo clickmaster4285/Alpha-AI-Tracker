@@ -188,14 +188,16 @@ type SessionEventResponse struct {
 // ────────────────────────────────
 
 type AppSessionEntry struct {
-	ID             string  `json:"id"`
-	ProcessName    string  `json:"processName"`
-	AppDisplayName string  `json:"appDisplayName"`
-	StartedAt      string  `json:"startedAt"`
-	EndedAt        *string `json:"endedAt,omitempty"`
-	MachineID      string  `json:"machineId"`
-	SessionID      string  `json:"sessionId"`
-	Platform       string  `json:"platform"`
+	ID              string  `json:"id"`
+	ProcessName     string  `json:"processName"`
+	AppDisplayName  string  `json:"appDisplayName"`
+	StartedAt       string  `json:"startedAt"`
+	EndedAt         *string `json:"endedAt,omitempty"`
+	MachineID       string  `json:"machineId"`
+	SessionID       string  `json:"sessionId"`
+	Platform        string  `json:"platform"`
+	ProcessID       *int    `json:"processId,omitempty"`
+	ParentProcessID *int    `json:"parentProcessId,omitempty"`
 }
 
 type SyncAppSessionsRequest struct {
@@ -211,10 +213,12 @@ type AppSessionResponse struct {
 	AppDisplayName string     `json:"appDisplayName"`
 	StartedAt      time.Time  `json:"startedAt"`
 	EndedAt        *time.Time `json:"endedAt,omitempty"`
-	MachineID      string     `json:"machineId"`
-	SessionID      string     `json:"sessionId"`
-	Platform       string     `json:"platform"`
-	SyncedAt       *time.Time `json:"syncedAt,omitempty"`
+	MachineID       string     `json:"machineId"`
+	SessionID       string     `json:"sessionId"`
+	Platform        string     `json:"platform"`
+	ProcessID       *int       `json:"processId,omitempty"`
+	ParentProcessID *int       `json:"parentProcessId,omitempty"`
+	SyncedAt        *time.Time `json:"syncedAt,omitempty"`
 }
 
 // ────────────────────────────────
@@ -399,4 +403,12 @@ type AppSessionListResponse struct {
 	Page       int                  `json:"page"`
 	PerPage    int                  `json:"perPage"`
 	TotalPages int                  `json:"totalPages"`
+}
+
+type AppItemListResponse struct {
+	Data       []AppItemResponse `json:"data"`
+	Total      int               `json:"total"`
+	Page       int               `json:"page"`
+	PerPage    int               `json:"perPage"`
+	TotalPages int               `json:"totalPages"`
 }

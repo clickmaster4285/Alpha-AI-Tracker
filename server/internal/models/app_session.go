@@ -12,6 +12,8 @@ type AppSession struct {
 	MachineID      string     `json:"machineId" db:"machine_id"`
 	SessionID      string     `json:"sessionId" db:"session_id"`
 	Platform       string     `json:"platform" db:"platform"`
+	ProcessID      *int       `json:"processId,omitempty" db:"process_id"`
+	ParentProcessID *int      `json:"parentProcessId,omitempty" db:"parent_process_id"`
 	SyncedAt       *time.Time `json:"syncedAt,omitempty" db:"synced_at"`
 	CreatedAt      time.Time  `json:"createdAt" db:"created_at"`
 }

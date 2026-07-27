@@ -1,7 +1,9 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-07-27 (binary_name FK, auto-detect, parent tracking)  
+> **Last audited:** 2026-07-27 (build tool tracking, Wayland-native app fix, file manager path, PPID walk fix)  
 > **Changelog:** 
+> - 2026-07-27: Full activity hierarchy engine — PID-persisted sessions, `SessionHierarchyResolver` (node→terminal→IDE), browser `browser_navigation` URL items, file manager `folder`/`file` path items, 30s context dedup cooldown.
+> - 2026-07-27: Added `process_id` / `parent_process_id` to `app_sessions` (client SQLite + server migration 010).
 > - 2026-07-27: Added `binary_name` to `installed_applications` model/SQLite table for process→display-name mapping.  
 > - 2026-07-27: Added `installed_app_id` / `installed_package_id` FK columns to `app_sessions` (client SQLite only).  
 > - 2026-07-27: Replaced in-memory `IsInstalledApp()` filter with SQLite-backed `ResolveAppInfo()` — processes not in DB get auto-detected via filesystem heuristics and saved before tracking.  
@@ -10,7 +12,12 @@
 > - 2026-07-27: Added `waydroid`/`gnome-software` to `NonAppProcesses` blocklist.  
 > - 2026-07-27: `AppDisplayName` now uses the real app name from `installed_applications.app_name` (e.g., "Visual Studio Code"), not the process name ("code") or window title.  
 > - 2026-07-27: Removed hardcoded `CommonKnownApps` list from `InstalledAppDetector` — app detection is now 100% dynamic from OS (.desktop files, registry, .app bundles).  
-> **Overall completion (honest):** ~34% across all 3 services
+> - 2026-07-27: **Added `BuildToolProcesses` set** — `make`, `go`, `npm`, `npx`, `cargo`, `pip`, `tsc`, `rustc`, etc. Auto-registered as `installed_packages` (category=`tool`) on first sight, tracked without window.
+> - 2026-07-27: **Fixed process filter bug** — processes with `appId != null` or `IsBuildTool()` are now tracked even without a window title. Wayland-native apps (VSCode, Chrome) don't appear in X11 window list and were silently dropped.
+> - 2026-07-27: **Broadened auto-detect paths** — `/home/*` and `/media/*` now accepted as valid install locations (project-local compiled binaries like `alpha-ai-server` in `./bin/`).
+> - 2026-07-27: **Fixed file manager path resolution** — folder display names now resolved to absolute paths by checking `~/`, `~/Documents`, `~/Desktop`, `/media/<user>/`.
+> - 2026-07-27: **Fixed `SessionHierarchyResolver`** — PPID walk now traverses build tools and runtimes as intermediate steps; `ShouldLinkTo` accepts build tools as children of IDEs and terminals.
+> **Overall completion (honest):** ~40% across all 3 services
 
 ---
 
@@ -99,10 +106,10 @@ flowchart LR
 
 ## 5. Current Completion State
 
-### Server — ~47% complete
+### Server — ~50% complete
 
 **What works:**
-- Migrations 001-008 run on startup (006 drops activity_logs, 008 adds app_items)
+- Migrations 001-010 run on startup (010 adds `process_id`/`parent_process_id` on app_sessions)
 - Full CRUD for users, employees, departments
 - Web admin auth (email/password → httpOnly cookie with encrypted JWT)
 - Employee auth (Redis one-time secret → JWT token)
@@ -121,11 +128,18 @@ flowchart LR
 - **No cleanup job** for old data (grows unbounded)
 - **Old browser_contexts/file_explorer_contexts/urls/url_visits code removed** — replaced by app_items
 
-### Client — ~58% complete
+### Client — ~65% complete
 
 **What works:**
 - Cross-platform process collection (Win/Linux/macOS)
 - SQLite local storage with relational schema (device_hw, installed_apps, network, session_events, app_sessions, app_items)
+- **PID-based session tracking** with `process_id` / `parent_process_id` on `app_sessions`
+- **Hierarchy resolver**: node/bash → terminal → IDE via `parent_item_id` + OS process tree
+- **Build tool tracking**: `make`, `go`, `npm`, `npx`, `cargo`, `pip`, `tsc` etc. auto-registered as packages and tracked (no window required); parent-linked to terminal → IDE
+- **Wayland-native app tracking**: known GUI apps (VSCode, Chrome) tracked even without a window title — they don't appear in X11's `_NET_CLIENT_LIST` on Wayland
+- **Browser context**: `browser_tab` + `browser_navigation` items (URL from title / domain heuristic)
+- **File explorer context**: `folder` + `file` items; folder display names resolved to absolute paths via filesystem search
+- **Runtime auto-register**: `node`, `python3`, etc. auto-added to `installed_packages` when seen running
 - Models: DeviceHardwareInfo (with mac/gpu/storage), InstalledApplication (with metadata + binary_name), NetworkInfo (with public IP), SessionEvent, AppSession (with FK to installed_apps/packages), AppItem (self-referencing via parent_item_id)
 - Encrypted config system (AES-256-GCM, transport→machine key migration)
 - Login/logout flow with server
@@ -138,7 +152,7 @@ flowchart LR
 - **Generic app_items** replaces browser_contexts + file_explorer_contexts + urls + url_visits
 - **Process filtering**: SQLite-backed ResolveAppInfo() replaces in-memory IsInstalledApp() — processes not in DB auto-detected and saved before tracking
 - **AppDisplayName**: uses real app name from installed_applications (e.g., "Visual Studio Code"), not process name ("code") or window title
-- **Parent-child tracking**: shell processes inside IDEs/terminal-emulators linked via process tree → ParentItemId fixup pass
+- **Parent-child tracking**: `SessionHierarchyResolver` walks PPID chain + open-session PID registry; links via `parent_item_id` (nullable for standalone terminals)
 - **Linux filtering fixed**: removed resolvedTitle ??= name fallback that was bypassing window-title filters
 - Auto-start persistence (all platforms)
 - Background guard watchdog

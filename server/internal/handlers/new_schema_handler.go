@@ -236,3 +236,31 @@ func (h *NewSchemaHandler) ListAppSessions(c echo.Context) error {
 	}
 	return c.JSON(http.StatusOK, result)
 }
+
+// ────────────────────────────────
+// List App Items (browser URLs, file paths, etc.)
+// ────────────────────────────────
+
+func (h *NewSchemaHandler) ListAppItems(c echo.Context) error {
+	page, _ := strconv.Atoi(c.QueryParam("page"))
+	perPage, _ := strconv.Atoi(c.QueryParam("perPage"))
+
+	params := repository.AppItemListParams{
+		EmployeeID:   c.QueryParam("employeeId"),
+		AppSessionID: c.QueryParam("appSessionId"),
+		ItemType:     c.QueryParam("itemType"),
+		Search:       c.QueryParam("search"),
+		Page:         page,
+		PerPage:      perPage,
+	}
+
+	result, err := h.service.ListAppItems(c.Request().Context(), params)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, dto.APIError{
+			Code:    http.StatusInternalServerError,
+			Message: "Failed to list app items",
+			Detail:  err.Error(),
+		})
+	}
+	return c.JSON(http.StatusOK, result)
+}

@@ -131,6 +131,8 @@ internal static class DatabaseSchema
             platform            TEXT NOT NULL DEFAULT '',
             installed_app_id    TEXT REFERENCES installed_applications(id),
             installed_package_id TEXT REFERENCES installed_packages(id),
+            process_id          INTEGER,
+            parent_process_id   INTEGER,
             is_synced           INTEGER NOT NULL DEFAULT 0,
             synced_at           TEXT,
             created_at          TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
@@ -141,6 +143,12 @@ internal static class DatabaseSchema
 
         CREATE INDEX IF NOT EXISTS idx_app_sessions_employee
             ON app_sessions(employee_id, started_at);
+
+        CREATE INDEX IF NOT EXISTS idx_app_sessions_process_id
+            ON app_sessions(process_id);
+
+        CREATE INDEX IF NOT EXISTS idx_app_sessions_open
+            ON app_sessions(ended_at, process_id);
 
         -- GENERIC APP ITEMS (replaces browser_contexts, file_explorer_contexts, urls, url_visits)
         -- Self-referencing via parent_item_id for nesting: app_session -> tab -> terminal/browser_navigation
@@ -155,6 +163,7 @@ internal static class DatabaseSchema
             identifier        TEXT NOT NULL DEFAULT '',
             opened_at         TEXT NOT NULL,
             closed_at         TEXT,
+            process_id        INTEGER,
             is_synced         INTEGER NOT NULL DEFAULT 0,
             synced_at         TEXT,
             created_at        TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
@@ -168,6 +177,9 @@ internal static class DatabaseSchema
 
         CREATE INDEX IF NOT EXISTS idx_app_items_parent
             ON app_items(parent_item_id);
+
+        CREATE INDEX IF NOT EXISTS idx_app_items_context
+            ON app_items(app_session_id, item_type, identifier);
 
         -- APP STATUS & PERMISSIONS
 
@@ -205,6 +217,12 @@ internal static class DatabaseSchema
         );
 
         -- shell_commands table intentionally removed — no longer collected
+    ";
+
+    internal const string MigrateSql = @"
+        ALTER TABLE app_sessions ADD COLUMN process_id INTEGER;
+        ALTER TABLE app_sessions ADD COLUMN parent_process_id INTEGER;
+        ALTER TABLE app_items ADD COLUMN process_id INTEGER;
     ";
 
     // PHASE 1: INSERT STATEMENTS
@@ -310,13 +328,14 @@ internal static class DatabaseSchema
         INSERT INTO app_sessions
             (id, process_name, app_display_name, started_at, ended_at,
              machine_id, employee_id, employee_name, session_id, platform,
-             installed_app_id, installed_package_id)
+             installed_app_id, installed_package_id, process_id, parent_process_id)
         VALUES
             ($id, $process_name, $app_display_name, $started_at, $ended_at,
              $machine_id, $employee_id, $employee_name, $session_id, $platform,
-             $installed_app_id, $installed_package_id)
+             $installed_app_id, $installed_package_id, $process_id, $parent_process_id)
         ON CONFLICT(id) DO UPDATE SET
-            ended_at = COALESCE(excluded.ended_at, app_sessions.ended_at)
+            ended_at = COALESCE(excluded.ended_at, app_sessions.ended_at),
+            parent_process_id = COALESCE(excluded.parent_process_id, app_sessions.parent_process_id)
     ";
 
     internal const string UpdateAppSessionEndedSql = @"
@@ -334,10 +353,15 @@ internal static class DatabaseSchema
     // APP ITEMS (generic child of app_sessions)
 
     internal const string InsertAppItemSql = @"
-        INSERT OR IGNORE INTO app_items
-            (id, app_session_id, parent_item_id, item_type, title, identifier, opened_at, closed_at)
+        INSERT INTO app_items
+            (id, app_session_id, parent_item_id, item_type, title, identifier, opened_at, closed_at, process_id)
         VALUES
-            ($id, $app_session_id, $parent_item_id, $item_type, $title, $identifier, $opened_at, $closed_at)
+            ($id, $app_session_id, $parent_item_id, $item_type, $title, $identifier, $opened_at, $closed_at, $process_id)
+        ON CONFLICT(id) DO UPDATE SET
+            title = excluded.title,
+            identifier = excluded.identifier,
+            parent_item_id = COALESCE(excluded.parent_item_id, app_items.parent_item_id),
+            closed_at = COALESCE(excluded.closed_at, app_items.closed_at)
     ";
 
     internal const string MarkAppItemsSentSql = @"

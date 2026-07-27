@@ -104,6 +104,9 @@ func Setup(
 	// App Sessions listing (protected — web admin access, replaces old activity-logs)
 	protected.GET("/app-sessions", newSchemaHandler.ListAppSessions)
 
+	// App Items listing (protected — web admin access, shows browser URLs, file paths, etc.)
+	protected.GET("/app-items", newSchemaHandler.ListAppItems)
+
 	// Departments
 	depts := protected.Group("/departments")
 	depts.GET("", departmentHandler.ListDepartments)

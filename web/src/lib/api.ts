@@ -275,6 +275,32 @@ export const appSessionsApi = {
     request<AppSessionListResponse>('/app-sessions', { params: params as Record<string, string | number | undefined> }),
 };
 
+export interface AppItem {
+  id: string;
+  employeeId: string;
+  appSessionId: string;
+  parentItemId?: string;
+  itemType: string;
+  title: string;
+  identifier: string;
+  openedAt: string;
+  closedAt?: string;
+  syncedAt?: string;
+}
+
+export interface AppItemListResponse {
+  data: AppItem[];
+  total: number;
+  page: number;
+  perPage: number;
+  totalPages: number;
+}
+
+export const appItemsApi = {
+  list: (params?: { page?: number; perPage?: number; employeeId?: string; appSessionId?: string; itemType?: string; search?: string }) =>
+    request<AppItemListResponse>('/app-items', { params: params as Record<string, string | number | undefined> }),
+};
+
 // ──────────────────────────
 // Health API
 // ──────────────────────────

@@ -1,2 +1,0 @@
-1. on linux version the auto start not working
-2. on linux version the logout/restart/poweroff not working when the tracker tool is running

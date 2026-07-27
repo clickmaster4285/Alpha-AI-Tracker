@@ -21,6 +21,12 @@ public class AppSession
     public string? InstalledAppId { get; set; }
     /// <summary>FK → installed_packages.id, set when this session maps to a known CLI package</summary>
     public string? InstalledPackageId { get; set; }
+
+    /// <summary>OS process ID at session start (for hierarchy linking across cycles)</summary>
+    public int? ProcessId { get; set; }
+
+    /// <summary>Parent OS process ID when nested under another session</summary>
+    public int? ParentProcessId { get; set; }
 }
 
 /// <summary>
@@ -45,4 +51,7 @@ public class AppItem
     public bool IsSynced { get; set; }
     public string? SyncedAt { get; set; }
     public string CreatedAt { get; set; } = string.Empty;
+
+    /// <summary>OS process ID for process/runtime items nested under a terminal</summary>
+    public int? ProcessId { get; set; }
 }

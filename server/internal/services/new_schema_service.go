@@ -249,16 +249,18 @@ func (s *NewSchemaService) SyncAppSessions(ctx context.Context, req *dto.SyncApp
 			}
 		}
 		entries = append(entries, models.AppSession{
-			ID:             e.ID,
-			EmployeeID:     req.EmployeeID,
-			ProcessName:    e.ProcessName,
-			AppDisplayName: e.AppDisplayName,
-			StartedAt:      started,
-			EndedAt:        ended,
-			MachineID:      e.MachineID,
-			SessionID:      e.SessionID,
-			Platform:       e.Platform,
-			SyncedAt:       &now,
+			ID:              e.ID,
+			EmployeeID:      req.EmployeeID,
+			ProcessName:     e.ProcessName,
+			AppDisplayName:  e.AppDisplayName,
+			StartedAt:       started,
+			EndedAt:         ended,
+			MachineID:       e.MachineID,
+			SessionID:       e.SessionID,
+			Platform:        e.Platform,
+			ProcessID:       e.ProcessID,
+			ParentProcessID: e.ParentProcessID,
+			SyncedAt:        &now,
 		})
 	}
 
@@ -325,21 +327,71 @@ func (s *NewSchemaService) ListAppSessions(ctx context.Context, params repositor
 	sessions := make([]dto.AppSessionResponse, len(result.Sessions))
 	for i, s := range result.Sessions {
 		sessions[i] = dto.AppSessionResponse{
-			ID:             s.ID,
-			EmployeeID:     s.EmployeeID,
-			ProcessName:    s.ProcessName,
-			AppDisplayName: s.AppDisplayName,
-			StartedAt:      s.StartedAt,
-			EndedAt:        s.EndedAt,
-			MachineID:      s.MachineID,
-			SessionID:      s.SessionID,
-			Platform:       s.Platform,
-			SyncedAt:       s.SyncedAt,
+			ID:              s.ID,
+			EmployeeID:      s.EmployeeID,
+			ProcessName:     s.ProcessName,
+			AppDisplayName:  s.AppDisplayName,
+			StartedAt:       s.StartedAt,
+			EndedAt:         s.EndedAt,
+			MachineID:       s.MachineID,
+			SessionID:       s.SessionID,
+			Platform:        s.Platform,
+			ProcessID:       s.ProcessID,
+			ParentProcessID: s.ParentProcessID,
+			SyncedAt:        s.SyncedAt,
 		}
 	}
 
 	return &dto.AppSessionListResponse{
 		Data:       sessions,
+		Total:      result.Total,
+		Page:       result.Page,
+		PerPage:    result.PerPage,
+		TotalPages: result.TotalPages,
+	}, nil
+}
+
+// ── List app items (for web dashboard — URLs, file paths, etc.) ──
+
+func (s *NewSchemaService) ListAppItems(ctx context.Context, params repository.AppItemListParams) (*dto.AppItemListResponse, error) {
+	result, err := s.repo.ListAppItems(ctx, params)
+	if err != nil {
+		return nil, fmt.Errorf("list app_items: %w", err)
+	}
+
+	items := make([]dto.AppItemResponse, len(result.Items))
+	for i, item := range result.Items {
+		var closedAt *time.Time
+		if item.ClosedAt != nil {
+			t := *item.ClosedAt
+			closedAt = &t
+		}
+		var syncedAt *time.Time
+		if item.SyncedAt != nil {
+			t := *item.SyncedAt
+			syncedAt = &t
+		}
+		var parentItemID *string
+		if item.ParentItemID != nil {
+			t := *item.ParentItemID
+			parentItemID = &t
+		}
+		items[i] = dto.AppItemResponse{
+			ID:           item.ID,
+			EmployeeID:   item.EmployeeID,
+			AppSessionID: item.AppSessionID,
+			ParentItemID: parentItemID,
+			ItemType:     item.ItemType,
+			Title:        item.Title,
+			Identifier:   item.Identifier,
+			OpenedAt:     item.OpenedAt,
+			ClosedAt:     closedAt,
+			SyncedAt:     syncedAt,
+		}
+	}
+
+	return &dto.AppItemListResponse{
+		Data:       items,
 		Total:      result.Total,
 		Page:       result.Page,
 		PerPage:    result.PerPage,
