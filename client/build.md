@@ -137,7 +137,7 @@ systemctl --user disable alpha-ai-tracker.service
 ### Kill Immediately
 
 ```bash
-killall client
+killall -9 client
 ```
 
 ### Remove Auto-Start on Desktop Login
