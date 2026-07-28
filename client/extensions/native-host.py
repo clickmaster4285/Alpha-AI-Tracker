@@ -46,18 +46,22 @@ def forward_to_tracker(payload):
     """Forward a message to the tracker client via Unix socket.
     Creates a fresh connection for each message (NativeMessageService closes
     the accepted socket after handling one message).
+
+    Uses a context manager to guarantee sock.close() is called even on
+    exceptions (e.g. socket.timeout). Without this, the open connection
+    leaks on the NativeMessageService side and stalls its single-threaded
+    accept loop, eventually filling the backlog and causing ECONNREFUSED.
     """
     try:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(SOCKET_TIMEOUT)
-        sock.connect(SOCKET_PATH)
-        sock.sendall(json.dumps(payload).encode("utf-8"))
-        # Read response
-        response = sock.recv(4096)
-        sock.close()
-        if response:
-            return json.loads(response.decode("utf-8"))
-        return {"status": "ok"}
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(SOCKET_TIMEOUT)
+            sock.connect(SOCKET_PATH)
+            sock.sendall(json.dumps(payload).encode("utf-8"))
+            # Read response
+            response = sock.recv(4096)
+            if response:
+                return json.loads(response.decode("utf-8"))
+            return {"status": "ok"}
     except (FileNotFoundError, ConnectionRefusedError):
         # Tracker client not running — silently drop
         return {"status": "error", "detail": "tracker not running"}

@@ -54,6 +54,14 @@ public partial class ProcessCollector : IActivityCollector
                 var name = proc.ProcessName;
                 var pid = proc.Id;
 
+                // 🟡 FIX 2026-07-28: Filter out Chrome/Chromium headless subprocesses
+                // (renderer, GPU, utility, zygote, etc.) on Linux by reading /proc/pid/cmdline.
+                // Process.ProcessName returns just "chrome" for ALL Chrome processes on Linux,
+                // so we must check the actual cmdline for --type= flag.
+                // Chromium-based browsers spawn --type=renderer, --type=zygote, --type=gpu-process, etc.
+                if (IsChromeSubprocess(pid, name))
+                    continue;
+
                 long mem = 0;
                 try { mem = proc.WorkingSet64; } catch { }
 
@@ -582,6 +590,48 @@ except:
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Check if a process is a headless Chrome/Chromium subprocess (renderer, GPU, utility,
+    /// zygote, etc.) by reading /proc/{pid}/cmdline for --type= flags.
+    /// Process.ProcessName returns just "chrome" for ALL Chrome processes on Linux,
+    /// so cmdline inspection is the only reliable way to identify subprocesses.
+    /// </summary>
+    private static bool IsChromeSubprocess(int pid, string processName)
+    {
+        if (!string.Equals(processName, "chrome", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(processName, "chromium-browser", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(processName, "chromium", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(processName, "brave-browser", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(processName, "microsoft-edge", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(processName, "microsoft-edge-stable", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(processName, "vivaldi", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(processName, "opera", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        try
+        {
+            var cmdlinePath = $"/proc/{pid}/cmdline";
+            if (!File.Exists(cmdlinePath)) return false;
+
+            var cmdline = File.ReadAllText(cmdlinePath);
+            // Chromium-based browsers pass --type=renderer, --type=zygote, --type=gpu-process, etc.
+            // The main browser process does NOT have --type= in its cmdline.
+            if (cmdline.Contains("--type=", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            // Also check for --contentproc (Firefox child processes)
+            if (cmdline.Contains("--contentproc", StringComparison.OrdinalIgnoreCase) ||
+                cmdline.Contains("-contentproc", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        catch
+        {
+            // Process may have exited between GetProcesses and this check
+        }
+
+        return false;
     }
 
     [GeneratedRegex(@"0x[0-9a-f]+", RegexOptions.IgnoreCase)]

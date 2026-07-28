@@ -80,8 +80,10 @@ public class NativeMessageService : BackgroundService
 
                     while (!stoppingToken.IsCancellationRequested)
                     {
-                        using var handler = await listener.AcceptAsync(stoppingToken);
-                        await HandleConnectionAsync(handler, stoppingToken);
+                        var handler = await listener.AcceptAsync(stoppingToken);
+                        // Fire-and-forget: accept loop never blocks on a slow client.
+                        // Each connection is handled concurrently in its own task.
+                        _ = HandleConnectionAsync(handler, stoppingToken);
                     }
                 }
                 catch (SocketException ex) when (stoppingToken.IsCancellationRequested)
@@ -111,46 +113,64 @@ public class NativeMessageService : BackgroundService
 
     private async Task HandleConnectionAsync(Socket handler, CancellationToken ct)
     {
-        try
+        using (handler) // dispose handler when done
         {
-            var buffer = new byte[8192];
-            var bytesRead = await handler.ReceiveAsync(buffer, SocketFlags.None, ct);
-            if (bytesRead == 0) return;
-
-            var json = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-            var msg = JsonSerializer.Deserialize<BrowserMessage>(json);
-            if (msg == null) return;
-
-            _logger.LogDebug("Browser event: {Action} tab={TabId} url={Url}",
-                msg.Action, msg.TabId, TruncateUrl(msg.Url, 80));
-
-            // 🟡 FIX: Always send a response, even if processing throws.
-            // If no response is sent, native-host.py blocks waiting for it
-            // and the entire messaging pipeline stalls after a few timeouts.
             try
             {
-                await ProcessMessageAsync(msg, ct);
+                var buffer = new byte[8192];
+
+                // FIX 2026-07-28: 5-second receive timeout so the accept loop never
+                // stalls permanently. If a client connects but doesn't send data within
+                // 5 seconds, we disconnect and the loop immediately accepts the next.
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(5));
+
+                var bytesRead = await handler.ReceiveAsync(buffer, SocketFlags.None, timeoutCts.Token);
+                if (bytesRead == 0) return;
+
+                var json = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                var msg = JsonSerializer.Deserialize<BrowserMessage>(json);
+                if (msg == null) return;
+
+                _logger.LogDebug("Browser event: {Action} tab={TabId} url={Url}",
+                    msg.Action, msg.TabId, TruncateUrl(msg.Url, 80));
+
+                // Always send a response, even if processing throws.
+                // If no response is sent, native-host.py blocks waiting for it
+                // and the entire messaging pipeline stalls after a few timeouts.
+                try
+                {
+                    await ProcessMessageAsync(msg, ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Error processing browser message: {Action} tab={TabId}",
+                        msg.Action, msg.TabId);
+                }
+                finally
+                {
+                    // Always send acknowledgment — native-host.py blocks on this response
+                    var response = JsonSerializer.Serialize(new { status = "ok", tabId = msg.TabId });
+                    var responseBytes = Encoding.UTF8.GetBytes(response);
+                    await handler.SendAsync(responseBytes, SocketFlags.None, ct);
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // Server shutting down — exit silently
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogDebug("Receive timed out after 5s — client disconnected without sending data");
+            }
+            catch (JsonException ex)
+            {
+                _logger.LogDebug(ex, "Invalid JSON from browser extension");
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Error processing browser message: {Action} tab={TabId}",
-                    msg.Action, msg.TabId);
+                _logger.LogWarning(ex, "Error handling browser extension message");
             }
-            finally
-            {
-                // Always send acknowledgment — native-host.py blocks on this response
-                var response = JsonSerializer.Serialize(new { status = "ok", tabId = msg.TabId });
-                var responseBytes = Encoding.UTF8.GetBytes(response);
-                await handler.SendAsync(responseBytes, SocketFlags.None, ct);
-            }
-        }
-        catch (JsonException ex)
-        {
-            _logger.LogDebug(ex, "Invalid JSON from browser extension");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Error handling browser extension message");
         }
     }
 

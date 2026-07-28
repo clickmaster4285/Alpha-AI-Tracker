@@ -18,7 +18,7 @@ namespace client.Services;
 /// 2. BackgroundGuardService detects these exist → starts protecting them
 /// 3. If user/process removes them → guard re-installs within 60 seconds
 /// </summary>
-public class BackgroundGuardService : BackgroundService, IDisposable
+    public class BackgroundGuardService : BackgroundService, IDisposable
 {
     private readonly ILogger<BackgroundGuardService> _logger;
     private readonly AutoStartService _autoStart;
@@ -82,11 +82,22 @@ public class BackgroundGuardService : BackgroundService, IDisposable
                 }
 
                 // Watchdog: systemd service — only if it was previously installed
+                // 🟡 FIX 2026-07-28: Do NOT check systemctl is-active or try to start the service.
+                // When running via `dotnet run` in development, the systemd service unit file
+                // exists (from a prior install) but the service is NOT managed by systemd —
+                // the current process is running directly. Starting it via systemctl would
+                // launch a parallel instance that fails on the mutex and enters Restart=always
+                // loop, filling the journal with crash logs.
+                // Instead, only ensure the unit file exists so it's available on next boot/when
+                // the user runs in --background mode. The user manually starts via systemctl.
                 if (_systemdWasInstalled && _systemdServiceName != null)
                 {
-                    if (!IsSystemdActive(_systemdServiceName))
+                    var svcPath = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                        ".config", "systemd", "user", _systemdServiceName);
+                    if (!File.Exists(svcPath))
                     {
-                        _logger.LogWarning("Systemd service inactive or missing, reinstalling...");
+                        _logger.LogWarning("Systemd unit file was deleted, recreating...");
                         await InstallSystemdServiceAsync(stoppingToken);
                     }
                 }

@@ -1,7 +1,14 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-07-28 (heartbeat crash recovery — session ended_at fix for poweroff/crash)  
+> **Last audited:** 2026-07-28 (browser extension journey — native messaging pipeline, two-strategy setup, process-based detection)  
 > **Changelog:** 
+> - 2026-07-28: **Added browser extension journey tracking** — Chrome MV3 extension + NativeMessageService + native-host.py pipeline captures real-time browser navigation (URLs, tabs, titles). Stored as `browser_tab`/`browser_navigation` in `app_items` with `url`/`domain` fields.
+> - 2026-07-28: **Added `NativeMessageService`** — BackgroundService listening on Unix socket for browser events. `_tabSessionCache` maps browser:tabId→AppSession. Handles tab create/update/activate/close events.
+> - 2026-07-28: **Added `BrowserExtensionService`** — Browser detection + two-strategy extension install (--load-extension → profile injection). Async-safe. Extension detection via process monitoring.
+> - 2026-07-28: **Added `url`/`domain` columns to `app_items`** schema + server DTOs.
+> - 2026-07-28: **Fixed `InstallNativeHostManuallyAsync`** — computes extension ID into `allowed_origins`.
+> - 2026-07-28: **Fixed extension active detection** — replaced socket-based `fuser` with process-based `pgrep native-host.py + pgrep chrome`.
+> - 2026-07-28: **Removed `--enable-automation`** from Chrome launch to silence GCM noise.
 > - 2026-07-28: **Added crash-safe session ended_at tracking** — heartbeat persisted every cycle (`last_heartbeat_at` in `app_status`), `ReconcileStaleSessionsOnBootAsync()` called on startup detects stale heartbeats and closes orphaned sessions with the last heartbeat time as approximate crash time. Includes cross-platform `GetSystemUptime()` for diagnostic logging. Handles poweroff, process crash, and fast restart.
 > - 2026-07-27: Added `ActivityContextParser`, `AppProcessClassifier`, `SessionHierarchyResolver` for browser URL / file path / process-tree hierarchy.
 > - 2026-07-27: Sessions keyed by PID; `process_id` persisted on `app_sessions` and `app_items`.
@@ -115,6 +122,8 @@ client/
 │
 ├── Services/
 │   ├── LogCollectorService.cs           # BackgroundService: collect → filter → store app_sessions → sync → cleanup cycle (30s loop)
+│   ├── NativeMessageService.cs          # BackgroundService: Unix socket listener for browser navigation events (Native Messaging bridge)
+│   ├── BrowserExtensionService.cs       # Browser detection + extension install (two-strategy: --load-extension / profile injection)
 │   ├── BackgroundGuardService.cs        # Watchdog: re-installs auto-start/systemd if removed (60s check)
 │   └── AutoStartService.cs              # Platform-specific auto-start: Run key, .desktop, launchd plist
 │

@@ -163,10 +163,13 @@ public class BrowserExtensionService
                 }
 
                 // Launch browser — extension should load from profile
+                // 🟡 FIX 2026-07-28: Removed --no-first-run (causes profile corruption on Chrome 150+).
+                // Added --disable-gcm to suppress GCM DEPRECATED_ENDPOINT noise from Chrome's internal
+                // push notification system (not needed by our extension).
                 var psi = new ProcessStartInfo
                 {
                     FileName = browser.BinaryPath,
-                    Arguments = "--no-first-run",
+                    Arguments = "--disable-gcm",
                     UseShellExecute = false,
                     CreateNoWindow = true,
                 };
@@ -223,7 +226,11 @@ public class BrowserExtensionService
         try
         {
             var extDir = Path.GetFullPath(browser.ExtensionDir);
-            var args = $"--load-extension=\"{extDir}\" --enable-automation --no-first-run";
+                // 🟡 FIX 2026-07-28: Removed --no-first-run which caused "incorrect profile type"
+                // on Chrome 150+, triggering cascade of GCM DEPRECATED_ENDPOINT errors and
+                // eventually Mojo IPC crashes (WidgetHost) that kill the extension service worker.
+                // Added --disable-gcm to suppress GCM noise from Chrome's internal push system.
+                var args = $"--load-extension=\"{extDir}\" --disable-gcm";
 
             var psi = new ProcessStartInfo
             {
