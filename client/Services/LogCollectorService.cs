@@ -1440,8 +1440,9 @@ public class LogCollectorService : BackgroundService
             }
 
             // Heartbeat is stale — the process (and possibly the machine) restarted.
-            // Close all open sessions with the last heartbeat time as approximate crash time.
-            var openRecords = await _store.GetOpenSessionRecordsAsync(ct);
+            // Use GetAllOpenSessionRecordsAsync (no process_id filter) to catch ALL
+            // orphaned sessions, including those that never had a PID assigned.
+            var openRecords = await _store.GetAllOpenSessionRecordsAsync(ct);
             if (openRecords.Count == 0)
             {
                 _logger.LogDebug("No open sessions to reconcile after stale heartbeat");
@@ -1449,20 +1450,28 @@ public class LogCollectorService : BackgroundService
             }
 
             var uptime = GetSystemUptime();
-            var closeList = openRecords.Select(r => new AppSession
+            var sessionIds = new List<string>();
+            var closeList = openRecords.Select(r =>
             {
-                Id = r.AppSessionId,
-                // Setting ProcessName to empty signals to StoreAppSessionsAsync
-                // that this is a close-only update, not a new session insert.
-                ProcessName = string.Empty,
-                EndedAt = lastHeartbeat,
+                sessionIds.Add(r.AppSessionId);
+                return new AppSession
+                {
+                    Id = r.AppSessionId,
+                    // Setting ProcessName to empty signals to StoreAppSessionsAsync
+                    // that this is a close-only update, not a new session insert.
+                    ProcessName = string.Empty,
+                    EndedAt = lastHeartbeat,
+                };
             }).ToList();
 
             await _store.StoreAppSessionsAsync(closeList, ct);
 
+            // Also close all app_items belonging to these sessions
+            await _store.CloseAppItemsBySessionIdsAsync(sessionIds, lastHeartbeat, ct);
+
             _logger.LogWarning(
-                "⚠️ Crash recovery: reconciled {Count} stale sessions — " +
-                "ended_at set to {CrashTime}, heartbeat was {Elapsed:F0}s stale, system uptime={Uptime}",
+                "⚠️ Crash recovery: reconciled {Count} stale sessions + their app_items — " +
+                "ended_at/closed_at set to {CrashTime}, heartbeat was {Elapsed:F0}s stale, system uptime={Uptime}",
                 closeList.Count, lastHeartbeat.ToString("O"), elapsed.TotalSeconds, uptime);
         }
         catch (Exception ex)

@@ -654,7 +654,7 @@ public class SqliteLogStore : ILogStore, IDisposable
         if (_connection == null) return Array.Empty<OpenSessionRecord>();
         var cmd = _connection.CreateCommand();
         cmd.CommandText = @"
-            SELECT s.id, s.process_name, s.process_id, i.id AS item_id, i.item_type
+            SELECT s.id, s.process_name, COALESCE(s.process_id, 0), i.id AS item_id, i.item_type
             FROM app_sessions s
             INNER JOIN app_items i ON i.app_session_id = s.id AND i.parent_item_id IS NULL
             WHERE s.ended_at IS NULL AND s.process_id IS NOT NULL
@@ -673,6 +673,51 @@ public class SqliteLogStore : ILogStore, IDisposable
             });
         }
         return results;
+    }
+
+    public async Task<IReadOnlyList<OpenSessionRecord>> GetAllOpenSessionRecordsAsync(CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<OpenSessionRecord>();
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = @"
+            SELECT s.id, s.process_name, COALESCE(s.process_id, 0), '' AS item_id, '' AS item_type
+            FROM app_sessions s
+            WHERE s.ended_at IS NULL
+            ORDER BY s.started_at ASC";
+        var results = new List<OpenSessionRecord>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            results.Add(new OpenSessionRecord
+            {
+                AppSessionId = reader.GetString(0),
+                ProcessName = reader.GetString(1),
+                ProcessId = reader.GetInt32(2),
+                RootItemId = reader.GetString(3),
+                ItemType = reader.GetString(4),
+            });
+        }
+        return results;
+    }
+
+    public async Task CloseAppItemsBySessionIdsAsync(IReadOnlyList<string> sessionIds, DateTime closedAt, CancellationToken ct)
+    {
+        if (_connection == null || sessionIds.Count == 0) return;
+        await using var tx = await _connection.BeginTransactionAsync(ct);
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = @"
+            UPDATE app_items SET closed_at = $closed_at, is_synced = 0
+            WHERE app_session_id = $session_id AND closed_at IS NULL";
+        ((DbCommand)cmd).Transaction = tx;
+        var pSessionId = cmd.Parameters.Add("$session_id", SqliteType.Text);
+        var pClosed = cmd.Parameters.Add("$closed_at", SqliteType.Text);
+        foreach (var sid in sessionIds)
+        {
+            pSessionId.Value = sid;
+            pClosed.Value = closedAt.ToString("O");
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        await tx.CommitAsync(ct);
     }
 
     public async Task<AppItem?> GetOpenAppItemAsync(string appSessionId, string itemType, string identifier, CancellationToken ct)

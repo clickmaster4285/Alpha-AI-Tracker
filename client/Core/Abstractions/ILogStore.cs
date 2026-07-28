@@ -75,6 +75,16 @@ public interface ILogStore
     /// <summary>Open sessions with PID for hierarchy resolution (ended_at IS NULL).</summary>
     Task<IReadOnlyList<OpenSessionRecord>> GetOpenSessionRecordsAsync(CancellationToken ct);
 
+    /// <summary>
+    /// ALL open sessions regardless of process_id (for crash recovery).
+    /// Unlike GetOpenSessionRecordsAsync, this does NOT filter by process_id IS NOT NULL,
+    /// so it catches sessions that never had a PID assigned.
+    /// </summary>
+    Task<IReadOnlyList<OpenSessionRecord>> GetAllOpenSessionRecordsAsync(CancellationToken ct);
+
+    /// <summary>Batch-close all app_items for a set of session IDs (for crash recovery).</summary>
+    Task CloseAppItemsBySessionIdsAsync(IReadOnlyList<string> sessionIds, DateTime closedAt, CancellationToken ct);
+
     /// <summary>Find an open context child item by type+identifier under a session.</summary>
     Task<AppItem?> GetOpenAppItemAsync(string appSessionId, string itemType, string identifier, CancellationToken ct);
 
