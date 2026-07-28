@@ -46,6 +46,8 @@ public class LogCollectorService : BackgroundService
 
     // Dedup cooldown for context child items (URL/path): key → last update UTC
     private readonly Dictionary<string, DateTime> _contextCooldown = new();
+    // Crash recovery grace period — heartbeat will be considered stale after this duration
+    private static readonly TimeSpan CrashGracePeriod = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan ContextCooldown = TimeSpan.FromSeconds(30);
 
     // System processes that are never application sessions
@@ -164,6 +166,11 @@ public class LogCollectorService : BackgroundService
 
         await _store.InitializeAsync(stoppingToken);
         await RefreshEmployeeInfo(stoppingToken);
+
+        // ─── Reconcile stale sessions from previous crashes ───
+        // Uses last_heartbeat_at timestamp to detect crashes/poweroffs and
+        // close orphaned sessions with the correct approximate ended_at time.
+        await ReconcileStaleSessionsOnBootAsync(stoppingToken);
 
         var interval = TimeSpan.FromSeconds(Math.Max(5, _config.CollectIntervalSec));
 
@@ -416,6 +423,17 @@ public class LogCollectorService : BackgroundService
                 {
                     await SyncUnsentData(stoppingToken);
                     await StorePermissionStatus(stoppingToken);
+                }
+
+                // ─── Write heartbeat for crash recovery ───
+                // Persists every cycle so a future crash can estimate when sessions died.
+                try
+                {
+                    await _store.SetStatusAsync("last_heartbeat_at", DateTime.UtcNow.ToString("O"), stoppingToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Failed to write heartbeat");
                 }
             }
             catch (OperationCanceledException)
@@ -1371,6 +1389,156 @@ public class LogCollectorService : BackgroundService
         {
             _logger.LogWarning(ex, "Failed to record session event: {EventType}", eventType);
         }
+    }
+
+    // ────────────────────────────────────────────
+    // Crash Recovery — Session Reconciliation
+    // Fixes ended_at timestamps when PC is abruptly powered off.
+    // Uses a persisted heartbeat timestamp + system uptime to detect
+    // crashes and estimate the crash time.
+    // ────────────────────────────────────────────
+
+    /// <summary>
+    /// Called once on startup before the main collection loop.
+    /// Checks if the last heartbeat is stale (process/machine restarted)
+    /// and closes any orphaned sessions with the last heartbeat time
+    /// as the approximate crash time.
+    ///
+    /// Handles:
+    /// - Power outage: uptime fresh, heartbeat stale → close with heartbeat time
+    /// - Process crash (not reboot): uptime normal, heartbeat stale → close with heartbeat time
+    /// - Fast restart (systemctl restart): heartbeat within grace period → preserve sessions
+    /// - First-ever run: no heartbeat in DB → skip
+    /// </summary>
+    private async Task ReconcileStaleSessionsOnBootAsync(CancellationToken ct)
+    {
+
+        try
+        {
+            var heartbeatStr = await _store.GetStatusAsync("last_heartbeat_at", ct);
+            if (string.IsNullOrEmpty(heartbeatStr))
+            {
+                _logger.LogDebug("No last_heartbeat_at found — first ever run, skipping reconciliation");
+                return;
+            }
+
+            if (!DateTime.TryParse(heartbeatStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var lastHeartbeat))
+            {
+                _logger.LogWarning("Invalid last_heartbeat_at value '{Value}', skipping reconciliation", heartbeatStr);
+                return;
+            }
+
+            var elapsed = DateTime.UtcNow - lastHeartbeat;
+
+            // If heartbeat is still fresh (within grace period), no crash happened
+            if (elapsed <= CrashGracePeriod)
+            {
+                _logger.LogDebug(
+                    "Last heartbeat was {Elapsed:F1}s ago — within {GracePeriod}s grace period, skipping reconciliation",
+                    elapsed.TotalSeconds, CrashGracePeriod.TotalSeconds);
+                return;
+            }
+
+            // Heartbeat is stale — the process (and possibly the machine) restarted.
+            // Close all open sessions with the last heartbeat time as approximate crash time.
+            var openRecords = await _store.GetOpenSessionRecordsAsync(ct);
+            if (openRecords.Count == 0)
+            {
+                _logger.LogDebug("No open sessions to reconcile after stale heartbeat");
+                return;
+            }
+
+            var uptime = GetSystemUptime();
+            var closeList = openRecords.Select(r => new AppSession
+            {
+                Id = r.AppSessionId,
+                // Setting ProcessName to empty signals to StoreAppSessionsAsync
+                // that this is a close-only update, not a new session insert.
+                ProcessName = string.Empty,
+                EndedAt = lastHeartbeat,
+            }).ToList();
+
+            await _store.StoreAppSessionsAsync(closeList, ct);
+
+            _logger.LogWarning(
+                "⚠️ Crash recovery: reconciled {Count} stale sessions — " +
+                "ended_at set to {CrashTime}, heartbeat was {Elapsed:F0}s stale, system uptime={Uptime}",
+                closeList.Count, lastHeartbeat.ToString("O"), elapsed.TotalSeconds, uptime);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to reconcile stale sessions on boot");
+        }
+    }
+
+    /// <summary>
+    /// Get system uptime for all supported platforms.
+    /// Used by ReconcileStaleSessionsOnBootAsync for diagnostic logging.
+    /// </summary>
+    private static string GetSystemUptime()
+    {
+        try
+        {
+            if (OperatingSystem.IsLinux() && File.Exists("/proc/uptime"))
+            {
+                var content = File.ReadAllText("/proc/uptime");
+                var parts = content.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length > 0 && double.TryParse(parts[0],
+                    System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out var seconds))
+                {
+                    var ts = TimeSpan.FromSeconds(seconds);
+                    return $"{ts.Days}d {ts.Hours}h {ts.Minutes}m {ts.Seconds}s";
+                }
+            }
+
+            if (OperatingSystem.IsWindows())
+            {
+                var ts = TimeSpan.FromMilliseconds(Environment.TickCount64);
+                return $"{ts.Days}d {ts.Hours}h {ts.Minutes}m {ts.Seconds}s";
+            }
+
+            if (OperatingSystem.IsMacOS())
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "sysctl",
+                    Arguments = "-n kern.boottime",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using var proc = System.Diagnostics.Process.Start(psi);
+                if (proc != null)
+                {
+                    var output = proc.StandardOutput.ReadToEnd();
+                    proc.WaitForExit(2000);
+                    // Output format: { sec = 1234567, usec = 123456 } 
+                    var secMarker = "sec = ";
+                    var secIdx = output.IndexOf(secMarker);
+                    if (secIdx >= 0)
+                    {
+                        var afterSec = output[(secIdx + secMarker.Length)..];
+                        var commaIdx = afterSec.IndexOf(',');
+                        var secStr = commaIdx > 0 ? afterSec[..commaIdx] : afterSec;
+                        secStr = secStr.Trim();
+                        if (long.TryParse(secStr, out var bootSec))
+                        {
+                            var bootTime = DateTimeOffset.FromUnixTimeSeconds(bootSec);
+                            var ts = DateTimeOffset.UtcNow - bootTime;
+                            return $"{ts.Days}d {ts.Hours}h {ts.Minutes}m {ts.Seconds}s";
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"GetSystemUptime error: {ex.Message}");
+        }
+
+        return "unknown";
     }
 
     /// <summary>

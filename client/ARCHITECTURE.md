@@ -1,7 +1,8 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-07-27 (build tool tracking, Wayland-native app tracking, file manager path resolution)
+> **Last audited:** 2026-07-28 (heartbeat crash recovery — session ended_at fix for poweroff/crash)  
 > **Changelog:** 
+> - 2026-07-28: **Added crash-safe session ended_at tracking** — heartbeat persisted every cycle (`last_heartbeat_at` in `app_status`), `ReconcileStaleSessionsOnBootAsync()` called on startup detects stale heartbeats and closes orphaned sessions with the last heartbeat time as approximate crash time. Includes cross-platform `GetSystemUptime()` for diagnostic logging. Handles poweroff, process crash, and fast restart.
 > - 2026-07-27: Added `ActivityContextParser`, `AppProcessClassifier`, `SessionHierarchyResolver` for browser URL / file path / process-tree hierarchy.
 > - 2026-07-27: Sessions keyed by PID; `process_id` persisted on `app_sessions` and `app_items`.
 > - 2026-07-27: Added `binary_name` column to `installed_applications` for process→display-name resolution.
@@ -15,7 +16,7 @@
 > - 2026-07-27: **Broadened `AutoDetectInstalledApp`** — now accepts `/home/*` and `/media/*` paths as valid install locations (covers project-local compiled binaries like `./bin/alpha-ai-server`).
 > - 2026-07-27: **Fixed file manager path resolution** — `ParseFileManagerContext` now resolves folder display names to absolute paths by searching `~/`, `~/Documents`, `~/Desktop`, `/media/<user>/`, etc.
 > - 2026-07-27: **Fixed `SessionHierarchyResolver`** — `ResolveParent` now walks through build tools and runtime packages as intermediate PPID steps; `ShouldLinkTo` now accepts build tools as children of IDEs and terminals.
-> **Service completion (honest):** ~70%
+> **Service completion (honest):** ~72%
 
 ---
 

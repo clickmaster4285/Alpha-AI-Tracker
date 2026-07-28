@@ -1,7 +1,8 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-07-27 (build tool tracking, Wayland-native app fix, file manager path, PPID walk fix)  
+> **Last audited:** 2026-07-28 (heartbeat crash recovery — session ended_at fix for poweroff/crash)  
 > **Changelog:** 
+> - 2026-07-28: **Added crash-safe session ended_at tracking** — heartbeat persisted every cycle (`last_heartbeat_at` in `app_status`), stale heartbeat detection on boot, and automatic reconciliation of orphaned sessions with the last heartbeat time as approximate crash time. Includes cross-platform `GetSystemUptime()` for diagnostic logging. Handles poweroff, process crash, and fast restart scenarios.
 > - 2026-07-27: Full activity hierarchy engine — PID-persisted sessions, `SessionHierarchyResolver` (node→terminal→IDE), browser `browser_navigation` URL items, file manager `folder`/`file` path items, 30s context dedup cooldown.
 > - 2026-07-27: Added `process_id` / `parent_process_id` to `app_sessions` (client SQLite + server migration 010).
 > - 2026-07-27: Added `binary_name` to `installed_applications` model/SQLite table for process→display-name mapping.  
@@ -17,7 +18,7 @@
 > - 2026-07-27: **Broadened auto-detect paths** — `/home/*` and `/media/*` now accepted as valid install locations (project-local compiled binaries like `alpha-ai-server` in `./bin/`).
 > - 2026-07-27: **Fixed file manager path resolution** — folder display names now resolved to absolute paths by checking `~/`, `~/Documents`, `~/Desktop`, `/media/<user>/`.
 > - 2026-07-27: **Fixed `SessionHierarchyResolver`** — PPID walk now traverses build tools and runtimes as intermediate steps; `ShouldLinkTo` accepts build tools as children of IDEs and terminals.
-> **Overall completion (honest):** ~40% across all 3 services
+> **Overall completion (honest):** ~41% across all 3 services
 
 ---
 
@@ -128,10 +129,11 @@ flowchart LR
 - **No cleanup job** for old data (grows unbounded)
 - **Old browser_contexts/file_explorer_contexts/urls/url_visits code removed** — replaced by app_items
 
-### Client — ~65% complete
+### Client — ~67% complete
 
 **What works:**
 - Cross-platform process collection (Win/Linux/macOS)
+- **Crash-safe session ended_at tracking** — heartbeat persisted every cycle, stale heartbeat detection on boot closes orphaned sessions with approximate crash time. Handles poweroff, process crash, and fast restart.
 - SQLite local storage with relational schema (device_hw, installed_apps, network, session_events, app_sessions, app_items)
 - **PID-based session tracking** with `process_id` / `parent_process_id` on `app_sessions`
 - **Hierarchy resolver**: node/bash → terminal → IDE via `parent_item_id` + OS process tree
