@@ -211,12 +211,12 @@ public partial class MainViewModel : ViewModelBase
             // Does NOT trust any previous stored status.
             CurrentPermissionStep = await GetNextPermissionStep();
 
-            // If all permissions are already granted, check browser extension status
-            if (IsProfile)
-            {
-                _autoStart.EnableAutoStartForced();
-                await ScanBrowsersAsync(ct);
-            }
+            // Forced auto-start — always ensure it's configured
+            _autoStart.EnableAutoStartForced();
+
+            // Scan for browsers regardless of permission status
+            // The browser setup UI shows alongside permission steps
+            await ScanBrowsersAsync(ct);
         }
         else
         {
@@ -579,6 +579,10 @@ public partial class MainViewModel : ViewModelBase
 
             // Advance through permission steps
             CurrentPermissionStep = await GetNextPermissionStep();
+
+            // Scan for browsers and enable auto-start after GUI login too
+            _autoStart.EnableAutoStartForced();
+            await ScanBrowsersAsync(CancellationToken.None);
         }
         catch (HttpRequestException ex)
         {
@@ -920,7 +924,7 @@ public partial class MainViewModel : ViewModelBase
             // Step 2: Launch browser with extension or show instructions
             if (browser.IsChromeBased)
             {
-                var result = _browserExt.InstallExtension(browser);
+                var result = await _browserExt.InstallExtensionAsync(browser);
                 if (result.Success)
                 {
                     if (result.WasRestarted)
@@ -950,7 +954,7 @@ public partial class MainViewModel : ViewModelBase
                 var ffManifestPath = Path.Combine(browser.ExtensionDir, "manifest.json");
                 var ffStep2 = "Click \"Load Temporary Add-on\u2026\"";
                 ExtensionInstructions = $"Firefox does not support automatic extension loading.\n\nTo install:\n\n1. Open about:debugging#/runtime/this-firefox in Firefox\n2. {ffStep2}\n3. Navigate to and select:\n   {ffManifestPath}\n\nFor permanent install, submit the extension to Mozilla Add-ons.\n\n(Launching Firefox now for convenience...)";
-                _browserExt.InstallExtension(browser);
+                await _browserExt.InstallExtensionAsync(browser);
             }
 
             // Re-scan after a brief delay to update browser status in the list

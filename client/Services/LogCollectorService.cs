@@ -588,6 +588,14 @@ public class LogCollectorService : BackgroundService
     private async Task<(bool isKnown, string? displayName, string? appId, string? pkgId, bool isBrowser)> ResolveAppInfoInner(
         string processName, string? windowTitle, bool isHeadlessSubProcess, CancellationToken ct)
     {
+        // 🟡 Filter out headless browser subprocesses (renderer, GPU, utility, zygote, etc.)
+        // at the very top — regardless of which resolution path matches.
+        // Chromium-based browsers spawn --type=renderer, --type=zygote, etc.
+        // Firefox uses --contentproc or -contentproc for its child processes.
+        // These should NEVER be tracked as separate browser sessions.
+        if (isHeadlessSubProcess && string.IsNullOrWhiteSpace(windowTitle))
+            return (false, null, null, null, false);
+
         if (AppProcessClassifier.IsShellProcess(processName))
         {
             var shellApp = await _store.GetInstalledAppByBinaryNameAsync(processName, ct);
@@ -1735,6 +1743,8 @@ public class LogCollectorService : BackgroundService
                     itemType = e.ItemType,
                     title = e.Title,
                     identifier = e.Identifier,
+                    url = e.Url,
+                    domain = e.Domain,
                     openedAt = e.OpenedAt.ToString("O"),
                     closedAt = e.ClosedAt?.ToString("O"),
                 },

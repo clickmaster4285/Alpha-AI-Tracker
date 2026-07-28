@@ -4,10 +4,16 @@ using Microsoft.Extensions.Logging;
 namespace client.Services;
 
 /// <summary>
-/// Detects installed browsers, manages extension auto-installation via --load-extension,
+/// Detects installed browsers, manages extension auto-installation,
 /// and tracks which browsers have the native messaging bridge connected.
-/// Chrome-based browsers: launched with --load-extension flag (works on Chrome 150+, Chromium, Brave, Edge).
-/// Firefox: shows step-by-step instructions (unsigned .xpi cannot auto-install).
+///
+/// Strategy (cross-browser, cross-platform):
+///   Chrome-based (Chrome, Chromium, Edge, Brave, Opera, Vivaldi):
+///     1. Kill running instance
+///     2. Try --load-extension=<dir> --enable-automation (works on all Chromium, blocked on branded Chrome 150+)
+///     3. Fallback: inject extension into Chrome's Preferences JSON (profile injection)
+///   Firefox:
+///     Native host installed, show step-by-step instructions (unsigned .xpi cannot auto-install)
 /// </summary>
 public class BrowserExtensionService
 {
@@ -104,12 +110,17 @@ public class BrowserExtensionService
     }
 
     /// <summary>
-    /// Inject the extension into Chrome's profile by editing the Preferences JSON file.
-    /// This is the only reliable method on Chrome 150+ (--load-extension is ignored).
-    /// Uses Python via bash for safe JSON manipulation (avoids C# JSON corruption risk).
-    /// Extension ID is computed from SHA256 of the absolute path (Chrome's algorithm).
+    /// Install (inject/load) the extension into the browser.
+    /// Async to avoid freezing the UI thread (Strategy 1 polls for native-host.py).
+    ///
+    /// Strategy (Chrome-based):
+    ///   1. Kill existing browser process
+    ///   2. Try launching with --load-extension + --enable-automation
+    ///      (Works on: Chromium, Brave, Edge, Opera, Vivaldi, and Chrome with automation flag)
+    ///   3. If that fails (branded Chrome 150+ blocks --load-extension),
+    ///      fall back to profile injection (Preferences JSON edit)
     /// </summary>
-    public BrowserInstallResult InstallExtension(DetectedBrowser browser)
+    public async Task<BrowserInstallResult> InstallExtensionAsync(DetectedBrowser browser)
     {
         if (!browser.CanInstall)
             return new BrowserInstallResult(false, false, "Browser is not in a state that can be installed.");
@@ -121,36 +132,70 @@ public class BrowserExtensionService
             if (alreadyRunning)
             {
                 _logger.LogInformation("{Name} is running — closing first", browser.Name);
-                KillChromeProcesses();
+                KillBrowserProcesses(browser.IsChromeBased ? "chrome" : "firefox");
                 for (int i = 0; i < 10 && IsChromeRunning(browser); i++)
-                    Thread.Sleep(500);
+                    await Task.Delay(500);
             }
 
             if (browser.IsChromeBased)
             {
-                // Inject extension into Chrome's Preferences using Python
+                // ─── Strategy 1: Try --load-extension (works on all Chromium browsers) ───
+                bool launchedWithFlag = await TryLaunchWithLoadExtensionAsync(browser);
+
+                if (launchedWithFlag)
+                {
+                    _logger.LogInformation(
+                        "Launched {Name} with --load-extension (Strategy 1)", browser.Name);
+                    return new BrowserInstallResult(true, alreadyRunning, "");
+                }
+
+                _logger.LogInformation(
+                    "--load-extension did not work for {Name}, trying profile injection (Strategy 2)",
+                    browser.Name);
+
+                // ─── Strategy 2: Fallback — inject into Preferences JSON ───
                 var injected = InjectExtensionViaPython(browser);
                 if (!injected)
                 {
-                    _logger.LogWarning("Failed to inject extension via Python");
-                    return new BrowserInstallResult(false, false, "Could not inject extension into Chrome profile.");
+                    _logger.LogWarning("Profile injection also failed for {Name}", browser.Name);
+                    return new BrowserInstallResult(false, false,
+                        "Could not inject extension into browser profile.");
+                }
+
+                // Launch browser — extension should load from profile
+                var psi = new ProcessStartInfo
+                {
+                    FileName = browser.BinaryPath,
+                    Arguments = "--no-first-run",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+
+                var proc = Process.Start(psi);
+                if (proc != null)
+                {
+                    _logger.LogInformation(
+                        "Launched {Name} with extension from profile (Strategy 2): PID {Pid}",
+                        browser.Name, proc.Id);
+                    return new BrowserInstallResult(true, alreadyRunning, "");
                 }
             }
-
-            // Launch Chrome normally (no flags needed — extension loads from profile)
-            var psi = new ProcessStartInfo
+            else
             {
-                FileName = browser.BinaryPath,
-                Arguments = browser.IsChromeBased ? "--no-first-run" : "",
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-
-            var proc = Process.Start(psi);
-            if (proc != null)
-            {
-                _logger.LogInformation("Launched {Name} with extension from profile: PID {Pid}", browser.Name, proc.Id);
-                return new BrowserInstallResult(true, alreadyRunning, "");
+                // Firefox — launch normally, show instructions
+                var ffPsi = new ProcessStartInfo
+                {
+                    FileName = browser.BinaryPath,
+                    Arguments = "",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                var ffProc = Process.Start(ffPsi);
+                if (ffProc != null)
+                {
+                    _logger.LogInformation("Launched {Name}: PID {Pid}", browser.Name, ffProc.Id);
+                    return new BrowserInstallResult(true, alreadyRunning, "");
+                }
             }
         }
         catch (Exception ex)
@@ -163,10 +208,185 @@ public class BrowserExtensionService
     }
 
     /// <summary>
+    /// Try launching the browser with --load-extension and --enable-automation flags.
+    /// Polls for native-host.py up to 7.5s to verify the extension actually loaded.
+    ///
+    /// Works on all Chromium-based browsers:
+    ///   - Chromium, Brave, Edge, Opera, Vivaldi: always works
+    ///   - Branded Google Chrome 150+: blocked, Chrome silently ignores --load-extension
+    ///
+    /// Detection: after launching, check if native-host.py was spawned by the new Chrome process.
+    /// If not detected within 7.5s, kills the Chrome instance and returns false for fallback.
+    /// </summary>
+    private async Task<bool> TryLaunchWithLoadExtensionAsync(DetectedBrowser browser)
+    {
+        try
+        {
+            var extDir = Path.GetFullPath(browser.ExtensionDir);
+            var args = $"--load-extension=\"{extDir}\" --enable-automation --no-first-run";
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = browser.BinaryPath,
+                Arguments = args,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+
+            var proc = Process.Start(psi);
+            if (proc == null) return false;
+
+            _logger.LogInformation(
+                "Launched {Name} with --load-extension (Strategy 1): PID {Pid}",
+                browser.Name, proc.Id);
+
+            // Poll for up to 7.5s to detect native-host.py
+            for (int i = 0; i < 15; i++)
+            {
+                await Task.Delay(500);
+
+                if (await IsNativeHostRunningForPidAsync(proc.Id))
+                {
+                    _logger.LogInformation(
+                        "Extension confirmed loaded for {Name} (native-host detected)", browser.Name);
+                    return true;
+                }
+            }
+
+            _logger.LogInformation(
+                "Extension was NOT loaded via --load-extension (Chrome blocked it). " +
+                "Killing instance and falling back to profile injection.");
+            KillBrowserProcesses("chrome");
+            await Task.Delay(1000);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "TryLaunchWithLoadExtension failed");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Check if native-host.py is running as a child (or descendant) of the given Chrome PID.
+    /// Uses pgrep on Linux, ps on macOS, wmic on Windows.
+    /// Returns false if the detection tool is unavailable (assume not loaded).
+    /// </summary>
+    private async Task<bool> IsNativeHostRunningForPidAsync(int parentPid)
+    {
+        try
+        {
+            if (OperatingSystem.IsLinux())
+            {
+                // pgrep -P <pid> shows child processes
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "pgrep",
+                    Arguments = $"-P {parentPid}",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                using var proc = Process.Start(psi);
+                if (proc != null)
+                {
+                    var children = (await proc.StandardOutput.ReadToEndAsync()).Trim();
+                    proc.WaitForExit(1000);
+
+                    if (!string.IsNullOrEmpty(children))
+                    {
+                        foreach (var childPid in children.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+                        {
+                            if (int.TryParse(childPid.Trim(), out var pid))
+                            {
+                                var checkPsi = new ProcessStartInfo
+                                {
+                                    FileName = "ps",
+                                    Arguments = $"-p {pid} -o comm= --no-headers",
+                                    RedirectStandardOutput = true,
+                                    UseShellExecute = false,
+                                    CreateNoWindow = true,
+                                };
+                                using var checkProc = Process.Start(checkPsi);
+                                if (checkProc != null)
+                                {
+                                    var comm = (await checkProc.StandardOutput.ReadToEndAsync()).Trim();
+                                    checkProc.WaitForExit(500);
+                                    if (comm.Contains("python3", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        var cmdPsi = new ProcessStartInfo
+                                        {
+                                            FileName = "ps",
+                                            Arguments = $"-p {pid} -o args= --no-headers",
+                                            RedirectStandardOutput = true,
+                                            UseShellExecute = false,
+                                            CreateNoWindow = true,
+                                        };
+                                        using var cmdProc = Process.Start(cmdPsi);
+                                        if (cmdProc != null)
+                                        {
+                                            var cmdline = (await cmdProc.StandardOutput.ReadToEndAsync()).Trim();
+                                            cmdProc.WaitForExit(500);
+                                            if (cmdline.Contains("native-host.py", StringComparison.OrdinalIgnoreCase))
+                                                return true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            else if (OperatingSystem.IsMacOS())
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "ps",
+                    Arguments = $"-o pid,comm -p {parentPid}",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                using var proc = Process.Start(psi);
+                if (proc != null)
+                {
+                    var output = (await proc.StandardOutput.ReadToEndAsync()).Trim();
+                    proc.WaitForExit(1000);
+                    if (output.Contains("native-host", StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+            }
+            else if (OperatingSystem.IsWindows())
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "wmic",
+                    Arguments = $"process where (ParentProcessId={parentPid}) get ProcessId,Name",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                using var proc = Process.Start(psi);
+                if (proc != null)
+                {
+                    var output = (await proc.StandardOutput.ReadToEndAsync()).Trim();
+                    proc.WaitForExit(2000);
+                    if (output.Contains("python", StringComparison.OrdinalIgnoreCase) ||
+                        output.Contains("native-host", StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Use Python script to safely edit Chrome's Preferences JSON file.
     /// Computes the extension ID via SHA256 of the path, then adds the entry.
-    /// Uses location=4 (EXTERNAL_PREF) with path pointing to the source directory.
-    /// Writes the Python script to a temp file to avoid shell quoting issues.
     /// </summary>
     private bool InjectExtensionViaPython(DetectedBrowser browser)
     {
@@ -185,10 +405,8 @@ public class BrowserExtensionService
                 return false;
             }
 
-            // Write the Python script to a temp file to avoid shell quoting issues
             File.WriteAllText(pyScript, @"import json, hashlib, os, sys, tempfile
 
-# Read arguments from the JSON file passed as argv[1]
 with open(sys.argv[1], 'r') as f:
     args = json.load(f)
 
@@ -196,7 +414,6 @@ prefs_path = args['prefs_path']
 ext_path = args['ext_path']
 install_time = int(args['install_time'])
 
-# Compute extension ID from path (SHA256 -> first 128 bits -> a-p alphabet)
 path_hash = hashlib.sha256(ext_path.encode('utf-8')).hexdigest()
 alphabet = 'abcdefghijklmnop'
 ext_id = ''
@@ -205,17 +422,14 @@ for i in range(16):
     ext_id += alphabet[(byte_val >> 4) & 0xf]
     ext_id += alphabet[byte_val & 0xf]
 
-# Read Preferences
 with open(prefs_path, 'r') as f:
     prefs = json.load(f)
 
-# Ensure extensions.settings exists
 if 'extensions' not in prefs:
     prefs['extensions'] = {}
 if 'settings' not in prefs['extensions']:
     prefs['extensions']['settings'] = {}
 
-# Add our extension entry (same format as the autoFill extension that works)
 prefs['extensions']['settings'][ext_id] = {
     'from_webstore': False,
     'state': 1,
@@ -229,14 +443,12 @@ prefs['extensions']['settings'][ext_id] = {
     }
 }
 
-# Write back
 with open(prefs_path, 'w') as f:
     json.dump(prefs, f, indent=2)
 
 print(f'Injected extension {ext_id} for path {ext_path}')
 ");
 
-            // Write arguments as a separate JSON file — install_time as a number, not string
             var argsJson = System.Text.Json.JsonSerializer.Serialize(new
             {
                 prefs_path = prefsPath,
@@ -278,14 +490,12 @@ print(f'Injected extension {ext_id} for path {ext_path}')
         }
         finally
         {
-            // Always clean up temp files, even on failure
             try { File.Delete(argsFile); } catch { }
             try { File.Delete(pyScript); } catch { }
         }
     }
-    /// <summary>Check if Chrome/Chromium-based process is currently running.
-    /// Uses partial name matching ("chrome") because Chrome's process name
-    /// is "chrome" not "google-chrome".</summary>
+
+    /// <summary>Check if Chrome/Chromium-based process is currently running.</summary>
     private static bool IsChromeRunning(DetectedBrowser browser)
     {
         if (!browser.IsChromeBased) return false;
@@ -337,28 +547,26 @@ print(f'Injected extension {ext_id} for path {ext_path}')
         }
     }
 
-    /// <summary>Gracefully kill all Chrome/chromium-based processes.</summary>
-    private static void KillChromeProcesses()
+    /// <summary>Gracefully kill browser processes.</summary>
+    private static void KillBrowserProcesses(string processName)
     {
         try
         {
-            // First try graceful SIGTERM
             var psi = new ProcessStartInfo
             {
                 FileName = "pkill",
-                Arguments = "chrome",
+                Arguments = processName,
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };
             using var proc = Process.Start(psi);
             proc?.WaitForExit(2000);
 
-            // Wait a moment then force kill remaining
             Thread.Sleep(500);
             var killPsi = new ProcessStartInfo
             {
                 FileName = "pkill",
-                Arguments = "-9 chrome",
+                Arguments = $"-9 {processName}",
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };
@@ -367,13 +575,11 @@ print(f'Injected extension {ext_id} for path {ext_path}')
         }
         catch
         {
-            // pkill might not be available
         }
     }
 
     /// <summary>
     /// Install native messaging host manifests via install-extensions.sh.
-    /// Must run once before the extension can communicate with the tracker.
     /// </summary>
     public async Task<bool> InstallNativeHostAsync(CancellationToken ct)
     {
@@ -382,7 +588,6 @@ print(f'Injected extension {ext_id} for path {ext_path}')
             var scriptPath = FindInstallScript();
             if (string.IsNullOrEmpty(scriptPath))
             {
-                // If script not found, manually create the native host manifest
                 return await InstallNativeHostManuallyAsync(ct);
             }
 
@@ -426,15 +631,13 @@ print(f'Injected extension {ext_id} for path {ext_path}')
     {
         var nativeHostManifest = Path.Combine(_chromeNativeHostDir, "com.alphai.tracker.json");
         var nativeHostInstalled = File.Exists(nativeHostManifest);
+
         var status = nativeHostInstalled
             ? BrowserInstallStatus.NativeHostReady
             : BrowserInstallStatus.ReadyToInstall;
 
-        // Check if the extension is already injected in Chrome's profile
-        if (nativeHostInstalled && IsExtensionInjectedInProfile())
-            status = BrowserInstallStatus.ExtensionActive;
-
-        if (await IsExtensionConnectedAsync(binaryName, ct))
+        // Check if extension is active by detecting native-host.py + Chrome running
+        if (await IsExtensionActiveAsync(ct))
             status = BrowserInstallStatus.ExtensionActive;
 
         results.Add(new DetectedBrowser
@@ -448,6 +651,178 @@ print(f'Injected extension {ext_id} for path {ext_path}')
             BrowserType = BrowserType.ChromeBased,
             NativeHostInstalled = nativeHostInstalled,
         });
+    }
+
+    private async Task AddFirefoxAsync(List<DetectedBrowser> results, CancellationToken ct)
+    {
+        var binaryPath = FindBinary("firefox") ?? FindBinary("firefox-esr");
+        if (binaryPath == null) return;
+
+        var nativeHostManifest = Path.Combine(_firefoxNativeHostDir, "com.alphai.tracker.json");
+        var nativeHostInstalled = File.Exists(nativeHostManifest);
+        var status = nativeHostInstalled
+            ? BrowserInstallStatus.NativeHostReady
+            : BrowserInstallStatus.ReadyToInstall;
+
+        if (await IsExtensionActiveAsync(ct))
+            status = BrowserInstallStatus.ExtensionActive;
+
+        results.Add(new DetectedBrowser
+        {
+            Name = "Firefox",
+            BinaryPath = binaryPath,
+            BinaryName = "firefox",
+            ExtensionDir = _firefoxExtDir,
+            Status = status,
+            IsChromeBased = false,
+            BrowserType = BrowserType.Firefox,
+            NativeHostInstalled = nativeHostInstalled,
+        });
+    }
+
+    /// <summary>
+    /// Check if the browser extension is actively connected.
+    ///
+    /// The native-host.py creates only EPHEMERAL socket connections (connect, send,
+    /// receive, close per message). So fuser cannot detect it — it only sees the
+    /// NativeMessageService listener (the tracker itself).
+    ///
+    /// Instead, we check:
+    ///   1. Is native-host.py running? (Chrome only spawns it when the
+    ///      extension calls connectNative())
+    ///   2. Is Chrome also running? (to avoid stale native-host orphans)
+    ///
+    /// This is reliable because Chrome 150+ launches native-host.py as a direct
+    /// child process as soon as the extension's background service worker calls
+    /// chrome.runtime.connectNative().
+    /// </summary>
+    private async Task<bool> IsExtensionActiveAsync(CancellationToken ct)
+    {
+        try
+        {
+            // 1. Is native-host.py running?
+            bool nativeHostRunning = false;
+            if (OperatingSystem.IsLinux())
+            {
+                var pgrepPsi = new ProcessStartInfo
+                {
+                    FileName = "pgrep",
+                    Arguments = "-f native-host.py",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                using var proc = Process.Start(pgrepPsi);
+                if (proc != null)
+                {
+                    var output = (await proc.StandardOutput.ReadToEndAsync(ct)).Trim();
+                    await proc.WaitForExitAsync(ct);
+                    nativeHostRunning = proc.ExitCode == 0 && !string.IsNullOrEmpty(output);
+                }
+            }
+            else if (OperatingSystem.IsMacOS())
+            {
+                var psPsi = new ProcessStartInfo
+                {
+                    FileName = "ps",
+                    Arguments = "aux",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                using var proc = Process.Start(psPsi);
+                if (proc != null)
+                {
+                    var output = (await proc.StandardOutput.ReadToEndAsync(ct)).Trim();
+                    await proc.WaitForExitAsync(ct);
+                    nativeHostRunning = output.Contains("native-host.py", StringComparison.OrdinalIgnoreCase);
+                }
+            }
+            else if (OperatingSystem.IsWindows())
+            {
+                var wmicPsi = new ProcessStartInfo
+                {
+                    FileName = "wmic",
+                    Arguments = "process where \"name like '%python%' or name like '%native-host%'\" get ProcessId",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                using var proc = Process.Start(wmicPsi);
+                if (proc != null)
+                {
+                    var output = (await proc.StandardOutput.ReadToEndAsync(ct)).Trim();
+                    await proc.WaitForExitAsync(ct);
+                    var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+                    nativeHostRunning = lines.Length > 1; // header + at least one PID
+                }
+            }
+
+            if (!nativeHostRunning) return false;
+
+            // 2. Is Chrome also running? (prevents stale native-host detection)
+            if (OperatingSystem.IsLinux())
+            {
+                var chromePsi = new ProcessStartInfo
+                {
+                    FileName = "pgrep",
+                    Arguments = "^chrome$",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                using var proc = Process.Start(chromePsi);
+                if (proc != null)
+                {
+                    var output = (await proc.StandardOutput.ReadToEndAsync(ct)).Trim();
+                    await proc.WaitForExitAsync(ct);
+                    return proc.ExitCode == 0 && !string.IsNullOrEmpty(output);
+                }
+            }
+            else if (OperatingSystem.IsMacOS())
+            {
+                var psPsi = new ProcessStartInfo
+                {
+                    FileName = "ps",
+                    Arguments = "aux",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                using var proc = Process.Start(psPsi);
+                if (proc != null)
+                {
+                    var output = (await proc.StandardOutput.ReadToEndAsync(ct)).Trim();
+                    await proc.WaitForExitAsync(ct);
+                    return output.Contains("Google Chrome", StringComparison.OrdinalIgnoreCase) ||
+                           output.Contains("/Applications/Google Chrome.app", StringComparison.OrdinalIgnoreCase);
+                }
+            }
+            else if (OperatingSystem.IsWindows())
+            {
+                var tasklistPsi = new ProcessStartInfo
+                {
+                    FileName = "tasklist",
+                    Arguments = "/NH /FI \"IMAGENAME eq chrome.exe\"",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                using var proc = Process.Start(tasklistPsi);
+                if (proc != null)
+                {
+                    var output = (await proc.StandardOutput.ReadToEndAsync(ct)).Trim();
+                    await proc.WaitForExitAsync(ct);
+                    return output.Contains("chrome.exe", StringComparison.OrdinalIgnoreCase);
+                }
+            }
+
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>Check if the extension is already injected in Chrome's Preferences file.</summary>
@@ -503,66 +878,6 @@ for ext_id, ext_data in settings.items():
         }
     }
 
-    private async Task AddFirefoxAsync(List<DetectedBrowser> results, CancellationToken ct)
-    {
-        var binaryPath = FindBinary("firefox") ?? FindBinary("firefox-esr");
-        if (binaryPath == null) return;
-
-        var nativeHostManifest = Path.Combine(_firefoxNativeHostDir, "com.alphai.tracker.json");
-        var nativeHostInstalled = File.Exists(nativeHostManifest);
-        var status = nativeHostInstalled
-            ? BrowserInstallStatus.NativeHostReady
-            : BrowserInstallStatus.ReadyToInstall;
-
-        if (await IsExtensionConnectedAsync("firefox", ct))
-            status = BrowserInstallStatus.ExtensionActive;
-
-        results.Add(new DetectedBrowser
-        {
-            Name = "Firefox",
-            BinaryPath = binaryPath,
-            BinaryName = "firefox",
-            ExtensionDir = _firefoxExtDir,
-            Status = status,
-            IsChromeBased = false,
-            BrowserType = BrowserType.Firefox,
-            NativeHostInstalled = nativeHostInstalled,
-        });
-    }
-
-    private async Task<bool> IsExtensionConnectedAsync(string binaryName, CancellationToken ct)
-    {
-        if (!File.Exists(_socketPath)) return false;
-
-        try
-        {
-            // Use lsof to check if any process has the socket open
-            // Filter by the browser's binary name to match
-            var psi = new ProcessStartInfo
-            {
-                FileName = "bash",
-                Arguments = $"-c \"fuser '{_socketPath}' 2>/dev/null | xargs -I{{}} ps -p {{}} -o comm= --no-headers 2>/dev/null | grep -qi '{binaryName}' && echo 'connected'\"",
-                RedirectStandardOutput = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-
-            using var proc = Process.Start(psi);
-            if (proc != null)
-            {
-                var output = await proc.StandardOutput.ReadToEndAsync(ct);
-                await proc.WaitForExitAsync(ct);
-                return output.Trim() == "connected";
-            }
-        }
-        catch
-        {
-            // fuser might not be available
-        }
-
-        return false;
-    }
-
     private async Task<bool> InstallNativeHostManuallyAsync(CancellationToken ct)
     {
         try
@@ -570,13 +885,19 @@ for ext_id, ext_data in settings.items():
             var nativeHostPy = FindNativeHostPy();
             if (string.IsNullOrEmpty(nativeHostPy)) return false;
 
+            var extensionPath = Path.GetFullPath(_chromeExtDir);
+            var extId = ComputeExtensionId(extensionPath);
+
             var manifest = new
             {
                 name = "com.alphai.tracker",
                 description = "Alpha AI Tracker — Native messaging bridge for browser tab/URL capture",
                 path = nativeHostPy,
                 type = "stdio",
-                allowed_origins = Array.Empty<string>(),
+                allowed_origins = new[]
+                {
+                    $"chrome-extension://{extId}/"
+                },
             };
 
             var json = System.Text.Json.JsonSerializer.Serialize(manifest, new System.Text.Json.JsonSerializerOptions
@@ -584,17 +905,14 @@ for ext_id, ext_data in settings.items():
                 WriteIndented = true
             });
 
-            // Write to Chrome location
             Directory.CreateDirectory(_chromeNativeHostDir);
             await File.WriteAllTextAsync(
                 Path.Combine(_chromeNativeHostDir, "com.alphai.tracker.json"), json, ct);
 
-            // Write to Firefox location
             Directory.CreateDirectory(_firefoxNativeHostDir);
             await File.WriteAllTextAsync(
                 Path.Combine(_firefoxNativeHostDir, "com.alphai.tracker.json"), json, ct);
 
-            // Make native-host.py executable
             if (File.Exists(nativeHostPy))
             {
                 var chmodPsi = new ProcessStartInfo
@@ -607,7 +925,8 @@ for ext_id, ext_data in settings.items():
                 Process.Start(chmodPsi);
             }
 
-            _logger.LogInformation("Native host manifests created manually");
+            _logger.LogInformation(
+                "Native host manifests created manually (extension ID: {ExtId})", extId);
             return true;
         }
         catch (Exception ex)
@@ -617,13 +936,62 @@ for ext_id, ext_data in settings.items():
         }
     }
 
+    /// <summary>
+    /// Compute Chrome extension ID from an absolute directory path.
+    /// Chrome uses SHA256 of the path, takes the first 128 bits,
+    /// and maps each 4-bit nibble to letters a-p.
+    /// </summary>
+    private static string ComputeExtensionId(string extensionPath)
+    {
+        try
+        {
+            var pyScript = Path.Combine(Path.GetTempPath(), "alpha_ai_compute_id.py");
+            try
+            {
+                File.WriteAllText(pyScript, @"import hashlib, sys
+
+ext_path = sys.argv[1]
+path_hash = hashlib.sha256(ext_path.encode('utf-8')).hexdigest()
+alphabet = 'abcdefghijklmnop'
+ext_id = ''
+for i in range(16):
+    byte_val = int(path_hash[i*2:i*2+2], 16)
+    ext_id += alphabet[(byte_val >> 4) & 0xf]
+    ext_id += alphabet[byte_val & 0xf]
+print(ext_id)
+");
+
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "python3",
+                    Arguments = $"\"{pyScript}\" \"{extensionPath}\"",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                using var proc = Process.Start(psi);
+                if (proc == null) return "unknown";
+                var output = proc.StandardOutput.ReadToEnd().Trim();
+                proc.WaitForExit(3000);
+                if (!string.IsNullOrEmpty(output))
+                    return output;
+            }
+            finally
+            {
+                try { File.Delete(pyScript); } catch { }
+            }
+        }
+        catch { }
+
+        return "unknown";
+    }
+
     /// <summary>Resolve the extensions/ directory from the repo root.</summary>
     private static string ResolveExtensionsRoot()
     {
-        // Strategy: walk up from BaseDirectory to find extensions/
         var dir = AppDomain.CurrentDomain.BaseDirectory;
 
-        // Try up to 6 levels up (bin/Debug/net10.0/ → client/ → repo root)
         for (int i = 0; i < 6; i++)
         {
             var candidate = Path.Combine(dir, "extensions");
@@ -634,7 +1002,6 @@ for ext_id, ext_data in settings.items():
             dir = parent;
         }
 
-        // Last resort: check alongside the executable
         var fallback = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "extensions");
         return Directory.Exists(fallback) ? fallback : AppDomain.CurrentDomain.BaseDirectory;
     }
@@ -671,7 +1038,6 @@ for ext_id, ext_data in settings.items():
             Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "extensions", "native-host.py"),
             Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "native-host.py"),
         };
-        // Normalize paths and check if they exist
         foreach (var c in candidates)
         {
             var normalized = Path.GetFullPath(c);
@@ -703,13 +1069,9 @@ public enum BrowserType { ChromeBased, Firefox }
 
 public enum BrowserInstallStatus
 {
-    /// <summary>Browser binary not found on this system</summary>
     NotInstalled,
-    /// <summary>Browser found, extension is ready to be loaded via --load-extension</summary>
     ReadyToInstall,
-    /// <summary>Native messaging host installed, extension needs to be loaded in browser</summary>
     NativeHostReady,
-    /// <summary>Extension is loaded in browser and actively communicating via socket</summary>
     ExtensionActive,
 }
 

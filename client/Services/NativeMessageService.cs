@@ -124,12 +124,25 @@ public class NativeMessageService : BackgroundService
             _logger.LogDebug("Browser event: {Action} tab={TabId} url={Url}",
                 msg.Action, msg.TabId, TruncateUrl(msg.Url, 80));
 
-            await ProcessMessageAsync(msg, ct);
-
-            // Send acknowledgment
-            var response = JsonSerializer.Serialize(new { status = "ok", tabId = msg.TabId });
-            var responseBytes = Encoding.UTF8.GetBytes(response);
-            await handler.SendAsync(responseBytes, SocketFlags.None, ct);
+            // 🟡 FIX: Always send a response, even if processing throws.
+            // If no response is sent, native-host.py blocks waiting for it
+            // and the entire messaging pipeline stalls after a few timeouts.
+            try
+            {
+                await ProcessMessageAsync(msg, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error processing browser message: {Action} tab={TabId}",
+                    msg.Action, msg.TabId);
+            }
+            finally
+            {
+                // Always send acknowledgment — native-host.py blocks on this response
+                var response = JsonSerializer.Serialize(new { status = "ok", tabId = msg.TabId });
+                var responseBytes = Encoding.UTF8.GetBytes(response);
+                await handler.SendAsync(responseBytes, SocketFlags.None, ct);
+            }
         }
         catch (JsonException ex)
         {

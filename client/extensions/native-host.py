@@ -43,7 +43,10 @@ def write_message(message):
 
 
 def forward_to_tracker(payload):
-    """Forward a message to the tracker client via Unix socket."""
+    """Forward a message to the tracker client via Unix socket.
+    Creates a fresh connection for each message (NativeMessageService closes
+    the accepted socket after handling one message).
+    """
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(SOCKET_TIMEOUT)
@@ -60,6 +63,9 @@ def forward_to_tracker(payload):
         return {"status": "error", "detail": "tracker not running"}
     except socket.timeout:
         return {"status": "error", "detail": "timeout"}
+    except (BrokenPipeError, ConnectionResetError):
+        # Tracker closed connection — can happen if it shut down
+        return {"status": "error", "detail": "connection reset"}
     except Exception:
         return {"status": "error", "detail": "forward failed"}
 
