@@ -50,6 +50,7 @@ internal static class DatabaseSchema
             install_date     TEXT,
             uninstall_string TEXT NOT NULL DEFAULT '',
             change_type      TEXT NOT NULL DEFAULT 'seen',
+            is_browser       INTEGER NOT NULL DEFAULT 0,
             detected_at      TEXT NOT NULL,
             is_synced        INTEGER NOT NULL DEFAULT 0,
             synced_at        TEXT,
@@ -223,6 +224,7 @@ internal static class DatabaseSchema
         ALTER TABLE app_sessions ADD COLUMN process_id INTEGER;
         ALTER TABLE app_sessions ADD COLUMN parent_process_id INTEGER;
         ALTER TABLE app_items ADD COLUMN process_id INTEGER;
+        ALTER TABLE installed_applications ADD COLUMN is_browser INTEGER NOT NULL DEFAULT 0;
     ";
 
     // PHASE 1: INSERT STATEMENTS
@@ -258,16 +260,17 @@ internal static class DatabaseSchema
     internal const string InsertInstalledApplicationSql = @"
         INSERT INTO installed_applications
             (id, app_name, binary_name, app_version, publisher, install_path, install_date,
-             uninstall_string, change_type, detected_at)
+             uninstall_string, change_type, is_browser, detected_at)
         VALUES
             ($id, $app_name, $binary_name, $app_version, $publisher, $install_path, $install_date,
-             $uninstall_string, $change_type, $detected_at)
+             $uninstall_string, $change_type, $is_browser, $detected_at)
         ON CONFLICT(app_name) DO UPDATE SET
             binary_name = COALESCE(NULLIF(excluded.binary_name, ''), installed_applications.binary_name),
             app_version = excluded.app_version,
             publisher = COALESCE(NULLIF(excluded.publisher, ''), installed_applications.publisher),
             install_path = COALESCE(NULLIF(excluded.install_path, ''), installed_applications.install_path),
             change_type = CASE WHEN installed_applications.change_type = 'installed' THEN 'installed' ELSE excluded.change_type END,
+            is_browser = MAX(installed_applications.is_browser, excluded.is_browser),
             detected_at = excluded.detected_at
     ";
 

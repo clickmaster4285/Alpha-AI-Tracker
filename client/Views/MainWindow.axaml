@@ -235,6 +235,100 @@
                             </StackPanel>
                         </Border>
 
+                        <!-- ── Browser Extension Setup ── -->
+                        <Border Classes="fade-in" IsVisible="{Binding IsBrowserSetup}">
+                            <StackPanel VerticalAlignment="Top" HorizontalAlignment="Center"
+                                        MaxWidth="380" Spacing="12" Margin="0,8,0,0">
+                                <Border Background="{StaticResource WarningBrush}"
+                                        CornerRadius="{StaticResource RadiusLg}"
+                                        Width="48" Height="48" HorizontalAlignment="Center"
+                                        BoxShadow="{StaticResource CardShadow}">
+                                    <TextBlock Text="🔗" FontSize="20"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Border>
+
+                                <TextBlock Text="Browser Journey Tracking" FontSize="20" FontWeight="Bold"
+                                           Foreground="{StaticResource FgBrush}"
+                                           HorizontalAlignment="Center"/>
+
+                                <TextBlock Text="Install the browser extension to track URLs, page titles, and navigation history. Click a browser below to auto-install."
+                                           FontSize="13" Foreground="{StaticResource MutedFgBrush}"
+                                           TextWrapping="Wrap" HorizontalAlignment="Center"
+                                           TextAlignment="Center"/>
+
+                                <!-- Browser list -->
+                                <ItemsControl ItemsSource="{Binding DetectedBrowsers}"
+                                              Margin="0,4,0,0">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border Background="{StaticResource CardBrush}"
+                                                    CornerRadius="{StaticResource RadiusMd}"
+                                                    Padding="12,10" Margin="0,0,0,6"
+                                                    BoxShadow="{StaticResource CardShadow}">
+                                                <Grid ColumnDefinitions="*,Auto">
+                                                    <StackPanel VerticalAlignment="Center">
+                                                        <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource FgBrush}"/>
+                                                        <TextBlock Text="{Binding StatusText}" FontSize="11"
+                                                                   Foreground="{StaticResource MutedFgBrush}"
+                                                                   Margin="0,2,0,0"/>
+                                                    </StackPanel>
+                                                    <Button Grid.Column="1"
+                                                            Content="{Binding ActionButtonText}"
+                                                            IsEnabled="{Binding CanInstall}"
+                                                            Classes="primary"
+                                                            FontSize="12" Padding="10,6"
+                                                            Command="{Binding $parent[ItemsControl].DataContext.AddExtensionToBrowserCommand}"
+                                                            CommandParameter="{Binding}"
+                                                            VerticalAlignment="Center"/>
+                                                </Grid>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+
+                                <!-- ═══ Instruction Card (persistent, prominent) ═══ -->
+                                <Border IsVisible="{Binding HasInstructions}"
+                                        Background="{StaticResource CardBrush}"
+                                        CornerRadius="{StaticResource RadiusLg}"
+                                        Padding="16" Margin="0,4,0,0"
+                                        BoxShadow="{StaticResource CardShadow}">
+                                    <StackPanel Spacing="10">
+                                        <TextBlock Text="{Binding ExtensionInstructionsTitle}"
+                                                   FontSize="15" FontWeight="SemiBold"
+                                                   Foreground="{StaticResource FgBrush}"
+                                                   TextWrapping="Wrap"/>
+                                        <Rectangle Height="1" Fill="{StaticResource BorderBrush}" Margin="0,0,0,2"/>
+                                        <TextBlock Text="{Binding ExtensionInstructions}"
+                                                   FontSize="12"
+                                                   Foreground="{StaticResource MutedFgBrush}"
+                                                   TextWrapping="Wrap"
+                                                   LineHeight="18"/>
+                                    </StackPanel>
+                                </Border>
+
+                                <!-- Status message (brief, for working state) -->
+                                <TextBlock Text="{Binding StepStatusText}" FontSize="12"
+                                           Foreground="{StaticResource SuccessBrush}"
+                                           TextWrapping="Wrap" HorizontalAlignment="Center"
+                                           TextAlignment="Center"
+                                           IsVisible="{Binding StepStatusText, Converter={StaticResource StringNotEmpty}}"/>
+
+                                <!-- Action buttons -->
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8" Margin="0,6,0,0">
+                                    <Button Classes="secondary"
+                                            Command="{Binding RefreshBrowsersCommand}"
+                                            Content="Refresh"
+                                            IsEnabled="{Binding IsStepWorking, Converter={StaticResource BoolInvert}}"
+                                            FontSize="12" Padding="14,8"/>
+                                    <Button Classes="success"
+                                            Command="{Binding DismissBrowserSetupCommand}"
+                                            Content="Done"
+                                            FontSize="12" Padding="14,8"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+
                         <!-- ── Profile (all permissions granted) ── -->
                         <Border Classes="fade-in" IsVisible="{Binding IsProfile}">
                             <StackPanel VerticalAlignment="Top" HorizontalAlignment="Center"

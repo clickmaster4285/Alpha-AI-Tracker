@@ -68,17 +68,19 @@ public static partial class ActivityContextParser
         // 🟡 Issue 2: Handle Wayland browsers with partial or empty window titles
         if (string.IsNullOrWhiteSpace(title))
         {
-            // On Wayland, Firefox/Chrome window titles may not be available via xprop.
-            // Fall back: use the process name and a unique PID-based identifier.
-            // Use context.RootIdentifier which was set to processName by Parse().
-            var uniquePid = Guid.NewGuid().ToString("N")[..8];
-            context.RootTitle = context.RootIdentifier;
-            context.RootIdentifier = tabId;
+            // On Wayland, browser window titles may not be available via xprop or GNOME Shell.
+            // Fall back: use the app display name (e.g., "Google Chrome", "Firefox") as the
+            // tab title so the browser session is still tracked with meaningful context.
+            // This is better than generating fake "default" or "wayland:<guid>" identifiers.
+            var appName = context.RootIdentifier; // set to processName by Parse()
+            context.RootTitle = appName;
+            context.RootIdentifier = $"{appName}:{tabId}";
+            // Add a navigation item with the app name as fallback — no URL available on Wayland
             context.Children.Add(new ContextChildItem
             {
                 ItemType = "browser_navigation",
-                Title = context.RootIdentifier,
-                Identifier = $"wayland:{uniquePid}:{tabId}",
+                Title = appName,
+                Identifier = $"wayland:{appName}:{tabId}",
             });
             return context;
         }

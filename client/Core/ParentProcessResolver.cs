@@ -76,35 +76,66 @@ public static partial class ParentProcessResolver
         return null;
     }
 
-    public static string? GetChromeProfile(string processName, int pid)
+    /// <summary>Get the command line for a process (public access for headless subprocess detection).</summary>
+    public static string? GetProcessCommandLine(int pid)
     {
-        if (!processName.Equals("chrome", StringComparison.OrdinalIgnoreCase))
-            return null;
+        try
+        {
+            if (OperatingSystem.IsWindows())
+                return GetWindowsCommandLine(pid);
+            else if (OperatingSystem.IsLinux())
+                return GetLinuxCommandLine(pid);
+            else if (OperatingSystem.IsMacOS())
+                return GetMacOSCommandLine(pid);
+        }
+        catch { }
+        return null;
+    }
 
+    /// <summary>
+    /// Extracts the browser profile name from a process command line.
+    /// Supports Chromium-based browsers (--profile-directory=), Firefox (-P or -profile),
+    /// and extraction from --user-data-dir paths.
+    /// </summary>
+    public static string? GetBrowserProfile(string processName, int pid)
+    {
         try
         {
             string? cmdline = null;
 
             if (OperatingSystem.IsWindows())
-            {
                 cmdline = GetWindowsCommandLine(pid);
-            }
             else if (OperatingSystem.IsLinux())
-            {
                 cmdline = GetLinuxCommandLine(pid);
-            }
             else if (OperatingSystem.IsMacOS())
-            {
                 cmdline = GetMacOSCommandLine(pid);
-            }
 
             if (cmdline == null) return null;
 
-            var match = ChromeProfileRegex().Match(cmdline);
+            // 1. Check for Chromium --profile-directory (Chrome, Chromium, Brave, Edge, Opera, Vivaldi)
+            var match = ChromiumProfileRegex().Match(cmdline);
             if (match.Success)
             {
                 var profile = match.Groups[1].Value;
                 return profile.Replace("\"", "");
+            }
+
+            // 2. Check for Firefox -P <profile> or -profile <profile_path>
+            var ffMatch = FirefoxProfileRegex().Match(cmdline);
+            if (ffMatch.Success)
+            {
+                var profile = ffMatch.Groups[1].Value;
+                return $"firefox:{profile.Replace("\"", "")}";
+            }
+
+            // 3. Check for --user-data-dir (fallback for other browsers)
+            var uddMatch = UserDataDirRegex().Match(cmdline);
+            if (uddMatch.Success)
+            {
+                var path = uddMatch.Groups[1].Value.Replace("\"", "");
+                var dirName = Path.GetFileName(path);
+                if (!string.IsNullOrWhiteSpace(dirName))
+                    return dirName;
             }
         }
         catch { }
@@ -272,7 +303,13 @@ public static partial class ParentProcessResolver
     private static partial Regex PpidRegex();
 
     [GeneratedRegex(@"--profile-directory=(?:""([^""]*)""|(\S+))", RegexOptions.IgnoreCase)]
-    private static partial Regex ChromeProfileRegex();
+    private static partial Regex ChromiumProfileRegex();
+
+    [GeneratedRegex(@"-P\s+(?:""([^""]*)""|(\S+))|--profile\s+(?:""([^""]*)""|(\S+))", RegexOptions.IgnoreCase)]
+    private static partial Regex FirefoxProfileRegex();
+
+    [GeneratedRegex(@"--user-data-dir=(?:""([^""]*)""|(\S+))", RegexOptions.IgnoreCase)]
+    private static partial Regex UserDataDirRegex();
 
     [StructLayout(LayoutKind.Sequential)]
     private struct PROCESSENTRY32

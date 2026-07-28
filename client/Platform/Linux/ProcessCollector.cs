@@ -73,7 +73,7 @@ public partial class ProcessCollector : IActivityCollector
                 // Fallback to X11 window title if available
                 resolvedTitle ??= x11Titles.GetValueOrDefault(pid);
 
-                var profile = ParentProcessResolver.GetChromeProfile(name, pid);
+                var profile = ParentProcessResolver.GetBrowserProfile(name, pid);
 
                 var title = profile != null && resolvedTitle != null
                     ? $"{resolvedTitle} [{profile}]"

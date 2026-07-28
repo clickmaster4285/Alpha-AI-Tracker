@@ -5,11 +5,9 @@ namespace client.Core;
 /// </summary>
 public static class AppProcessClassifier
 {
-    private static readonly HashSet<string> BrowserProcesses = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "chrome", "google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
-        "firefox", "brave", "brave-browser", "msedge", "opera", "vivaldi", "safari",
-    };
+    // ⚠️ BROWSER DETECTION IS NOW DYNAMIC — see InstalledAppDetector + is_browser column in DB.
+    // No hardcoded BrowserProcesses HashSet.
+    // Use the `isBrowser` flag passed from ResolveAppInfo() at runtime.
 
     private static readonly HashSet<string> FileManagerProcesses = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -54,10 +52,6 @@ public static class AppProcessClassifier
         "dotnet", "rustc", "gcc", "g++", "clang", "clang++",
     };
 
-    public static bool IsBrowserProcess(string processName) =>
-        BrowserProcesses.Contains(processName) ||
-        processName.StartsWith("chrome", StringComparison.OrdinalIgnoreCase);
-
     public static bool IsFileManagerProcess(string processName) =>
         FileManagerProcesses.Contains(processName);
 
@@ -79,15 +73,11 @@ public static class AppProcessClassifier
     public static bool IsBuildTool(string processName) =>
         BuildToolProcesses.Contains(processName);
 
-    public static bool IsChromeSubProcess(string processName, string? windowTitle) =>
-        processName.StartsWith("chrome", StringComparison.OrdinalIgnoreCase) &&
-        string.IsNullOrWhiteSpace(windowTitle);
-
     /// <summary>Root app_item type for a new session.</summary>
     public static string ResolveRootItemType(
-        string processName, string? appId, string? pkgId, string? windowTitle)
+        string processName, string? appId, string? pkgId, string? windowTitle, bool isBrowser = false)
     {
-        if (IsBrowserProcess(processName))
+        if (isBrowser)
             return "browser_tab";
 
         if (IsFileManagerProcess(processName))

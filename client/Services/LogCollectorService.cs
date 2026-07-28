@@ -217,11 +217,11 @@ public class LogCollectorService : BackgroundService
                         _previousSessionKeys[openKey] = rec.AppSessionId;
                 }
 
-                // Resolve display name, FK, and filter for each process
-                var resolvedLogs = new List<(ActivityLog log, string? displayName, string? appId, string? pkgId)>();
+                // Resolve display name, FK, isBrowser, and filter for each process
+                var resolvedLogs = new List<(ActivityLog log, string? displayName, string? appId, string? pkgId, bool isBrowser)>();
                 foreach (var log in allLogs)
                 {
-                    var (isKnown, displayName, appId, pkgId) = await ResolveAppInfo(
+                    var (isKnown, displayName, appId, pkgId, isBrowser) = await ResolveAppInfo(
                         log.ProcessName, log.WindowTitle, stoppingToken);
 
                     if (!isKnown) continue;
@@ -239,16 +239,16 @@ public class LogCollectorService : BackgroundService
                     // Reject only: truly unknown processes with neither a window title nor any known identity.
                     if (!isShell && !isPackage && !isKnownApp && !isBuildTool && !hasWindow) continue;
 
-                    resolvedLogs.Add((log, displayName, appId, pkgId));
+                    resolvedLogs.Add((log, displayName, appId, pkgId, isBrowser));
                 }
 
                 resolvedLogs.Sort((a, b) =>
-                    GetProcessPriority(AppProcessClassifier.ExtractBaseProcessName(a.log.ProcessName))
-                        .CompareTo(GetProcessPriority(AppProcessClassifier.ExtractBaseProcessName(b.log.ProcessName))));
+                    GetProcessPriority(AppProcessClassifier.ExtractBaseProcessName(a.log.ProcessName), a.isBrowser)
+                        .CompareTo(GetProcessPriority(AppProcessClassifier.ExtractBaseProcessName(b.log.ProcessName), b.isBrowser)));
 
                 // Build set of current running session keys (PID-based)
                 var currentKeys = new Dictionary<string, string>();
-                foreach (var (log, _, _, _) in resolvedLogs)
+                foreach (var (log, _, _, _, _) in resolvedLogs)
                 {
                     var key = BuildSessionKey(log.ProcessId);
                     currentKeys[key] = string.Empty;
@@ -276,7 +276,7 @@ public class LogCollectorService : BackgroundService
                 // 🟡 Issue 3: Build up dedup map: for build tools/runtimes with packageId,
                 // collect which packages are currently running so we can close old sessions
                 var runningPackageIds = new HashSet<string>();
-                foreach (var (log, _, _, pkgId) in resolvedLogs)
+                foreach (var (log, _, _, pkgId, _) in resolvedLogs)
                 {
                     if (!string.IsNullOrEmpty(pkgId))
                         runningPackageIds.Add(pkgId);
@@ -290,14 +290,14 @@ public class LogCollectorService : BackgroundService
                 // (prevents accumulating many 'open' sessions for the same tool like dotnet)
                 await CloseStalePackageSessionsAsync(runningPackageIds, closeSessions, stoppingToken);
 
-                foreach (var (log, displayName, appId, pkgId) in resolvedLogs)
+                foreach (var (log, displayName, appId, pkgId, isBrowser) in resolvedLogs)
                 {
                     var key = BuildSessionKey(log.ProcessId);
 
                     if (!string.IsNullOrEmpty(currentKeys.GetValueOrDefault(key)))
                     {
                         await UpdateActivityContextAsync(
-                            currentKeys[key], log, appId, pkgId, contextUpdates, stoppingToken);
+                            currentKeys[key], log, appId, pkgId, isBrowser, contextUpdates, stoppingToken);
                         continue;
                     }
 
@@ -305,14 +305,14 @@ public class LogCollectorService : BackgroundService
                     var parentLink = hierarchy.ResolveParent(log.ProcessId, baseProcessName);
                     var appDisplayName = displayName ?? log.WindowTitle ?? log.ProcessName;
                     var rootItemType = AppProcessClassifier.ResolveRootItemType(
-                        baseProcessName, appId, pkgId, log.WindowTitle);
+                        baseProcessName, appId, pkgId, log.WindowTitle, isBrowser);
 
-                    var chromeProfile = AppProcessClassifier.IsBrowserProcess(baseProcessName)
-                        ? ParentProcessResolver.GetChromeProfile(baseProcessName, log.ProcessId)
+                    var browserProfile = isBrowser
+                        ? ParentProcessResolver.GetBrowserProfile(baseProcessName, log.ProcessId)
                         : null;
 
                     var parsed = ActivityContextParser.Parse(
-                        baseProcessName, log.WindowTitle, rootItemType, chromeProfile);
+                        baseProcessName, log.WindowTitle, rootItemType, browserProfile);
 
                     var session = new AppSession
                     {
@@ -475,10 +475,10 @@ public class LogCollectorService : BackgroundService
     private string BuildSessionKey(int processId) =>
         $"{processId}|{_config.ClientId}|{SessionInfo.SessionId}";
 
-    private static int GetProcessPriority(string processName)
+    private static int GetProcessPriority(string processName, bool isBrowser)
     {
         if (AppProcessClassifier.IsIdeProcess(processName)) return 0;
-        if (AppProcessClassifier.IsBrowserProcess(processName)) return 1;
+        if (isBrowser) return 1;
         if (AppProcessClassifier.IsFileManagerProcess(processName)) return 2;
         if (AppProcessClassifier.IsTerminalEmulator(processName)) return 3;
         if (AppProcessClassifier.IsShellInterpreter(processName)) return 4;
@@ -490,19 +490,20 @@ public class LogCollectorService : BackgroundService
         ActivityLog log,
         string? appId,
         string? pkgId,
+        bool isBrowser,
         List<AppItem> contextUpdates,
         CancellationToken ct)
     {
         var baseProcessName = AppProcessClassifier.ExtractBaseProcessName(log.ProcessName);
         var rootType = AppProcessClassifier.ResolveRootItemType(
-            baseProcessName, appId, pkgId, log.WindowTitle);
+            baseProcessName, appId, pkgId, log.WindowTitle, isBrowser);
 
-        var chromeProfile = AppProcessClassifier.IsBrowserProcess(baseProcessName)
-            ? ParentProcessResolver.GetChromeProfile(baseProcessName, log.ProcessId)
+        var browserProfile = isBrowser
+            ? ParentProcessResolver.GetBrowserProfile(baseProcessName, log.ProcessId)
             : null;
 
         var parsed = ActivityContextParser.Parse(
-            log.ProcessName, log.WindowTitle, rootType, chromeProfile);
+            log.ProcessName, log.WindowTitle, rootType, browserProfile);
 
         var existingRoot = await _store.GetOpenAppItemAsync(
             appSessionId, rootType, parsed.RootIdentifier, ct);
@@ -563,42 +564,59 @@ public class LogCollectorService : BackgroundService
     /// If the process is not yet in the DB, attempts auto-detection and saves it.
     /// Automatically strips cmdline arguments from process names (e.g., "npm run dev" → "npm").
     /// </summary>
-    private async Task<(bool isKnown, string? displayName, string? appId, string? pkgId)> ResolveAppInfo(
+    private async Task<(bool isKnown, string? displayName, string? appId, string? pkgId, bool isBrowser)> ResolveAppInfo(
         string processName, string? windowTitle, CancellationToken ct)
     {
-        // 🟡 Issue 1: Strip cmdline arguments from process name (e.g., "npm run dev" → "npm")
+        // 🟡 Check for --type= in the ORIGINAL process name (before stripping) to detect
+        // headless browser subprocesses (renderer, GPU, utility, zygote, etc.).
+        // Chromium-based browsers use --type=renderer, --type=zygote, etc.
+        // Firefox uses --contentproc for its child processes.
+        var isHeadlessSubProcess = 
+            processName.Contains("--type=", StringComparison.OrdinalIgnoreCase) ||
+            processName.Contains("--contentproc", StringComparison.OrdinalIgnoreCase) ||
+            processName.Contains("-contentproc", StringComparison.OrdinalIgnoreCase);
+
+        // Strip cmdline arguments from process name (e.g., "npm run dev" → "npm")
         var strippedName = AppProcessClassifier.ExtractBaseProcessName(processName);
         if (strippedName != processName && !string.IsNullOrWhiteSpace(strippedName))
         {
-            // Re-resolve with the stripped name
-            return await ResolveAppInfoInner(strippedName, windowTitle, ct);
+            return await ResolveAppInfoInner(strippedName, windowTitle, isHeadlessSubProcess, ct);
         }
-        return await ResolveAppInfoInner(processName, windowTitle, ct);
+        return await ResolveAppInfoInner(processName, windowTitle, isHeadlessSubProcess, ct);
     }
 
-    private async Task<(bool isKnown, string? displayName, string? appId, string? pkgId)> ResolveAppInfoInner(
-        string processName, string? windowTitle, CancellationToken ct)
+    private async Task<(bool isKnown, string? displayName, string? appId, string? pkgId, bool isBrowser)> ResolveAppInfoInner(
+        string processName, string? windowTitle, bool isHeadlessSubProcess, CancellationToken ct)
     {
         if (AppProcessClassifier.IsShellProcess(processName))
         {
             var shellApp = await _store.GetInstalledAppByBinaryNameAsync(processName, ct);
             if (shellApp != null)
-                return (true, shellApp.AppName, shellApp.Id, null);
-            return (true, null, null, null);
+                return (true, shellApp.AppName, shellApp.Id, null, false);
+            return (true, null, null, null, false);
         }
 
         if (NonAppProcesses.Contains(processName))
-            return (false, null, null, null);
+            return (false, null, null, null, false);
 
-        if (AppProcessClassifier.IsChromeSubProcess(processName, windowTitle))
-            return (false, null, null, null);
+        // Headless browser subprocesses are filtered above (step 1) when we resolve
+        // the app from DB. For unknown processes without window titles, the main loop
+        // filter (!hasWindow && !isKnown) will reject them anyway.
 
         // 1. Check known app binary names (fast in-memory path)
         if (_knownAppBinaryNames.Contains(processName))
         {
             var app = await _store.GetInstalledAppByBinaryNameAsync(processName, ct);
             if (app != null)
-                return (true, app.AppName, app.Id, null);
+            {
+                // If this is a browser subprocess with --type= flag and no window title,
+                // it's a headless subprocess (renderer, GPU, utility, etc.) — skip tracking.
+                // Main browser process (no --type= flag) is tracked even without window title
+                // (needed for Wayland where window titles may not be available).
+                if (app.IsBrowser && string.IsNullOrWhiteSpace(windowTitle) && isHeadlessSubProcess)
+                    return (false, null, null, null, true);
+                return (true, app.AppName, app.Id, null, app.IsBrowser);
+            }
         }
 
         // 2. Check known package names (fast in-memory path)
@@ -606,7 +624,7 @@ public class LogCollectorService : BackgroundService
         {
             var pkg = await _store.GetInstalledPackageByNameAsync(processName, ct);
             if (pkg != null)
-                return (true, pkg.PackageName, null, pkg.Id);
+                return (true, pkg.PackageName, null, pkg.Id, false);
         }
 
         // 3. Try the in-memory detector as fallback
@@ -616,6 +634,16 @@ public class LogCollectorService : BackgroundService
             var displayName = _appDetector.ResolveDisplayName(processName);
             if (displayName == processName)
                 displayName = await ResolveDisplayNameFromPath(processName, execPath, ct);
+
+            // 🟡 FIX: Before creating a new entry, check if the DB already has a matching
+            // app by fuzzy binary/app name match. This prevents duplicates when the running
+            // process name differs from the .desktop binary name (e.g., "chrome" vs "google-chrome-stable").
+            var existingFuzzy = await _store.GetInstalledAppByBinaryNameFuzzyAsync(processName, ct);
+            if (existingFuzzy != null)
+            {
+                _knownAppBinaryNames.Add(processName);
+                return (true, existingFuzzy.AppName, existingFuzzy.Id, null, existingFuzzy.IsBrowser);
+            }
 
             if (displayName != null && displayName != processName)
             {
@@ -629,7 +657,7 @@ public class LogCollectorService : BackgroundService
                 };
                 var storedAppId = await _store.StoreInstalledAppAsync(app, ct);
                 _knownAppBinaryNames.Add(processName);
-                return (true, displayName, storedAppId, null);
+                return (true, displayName, storedAppId, null, false);
             }
             else
             {
@@ -643,19 +671,27 @@ public class LogCollectorService : BackgroundService
                 };
                 var storedAppId = await _store.StoreInstalledAppAsync(app, ct);
                 _knownAppBinaryNames.Add(processName);
-                return (true, processName, storedAppId, null);
+                return (true, processName, storedAppId, null, false);
             }
         }
 
         // 4. Auto-detect: unknown process — try to resolve from the filesystem
         if (!string.IsNullOrEmpty(execPath))
         {
+            // 🟡 FIX: Check fuzzy match BEFORE auto-creating new entry
+            var existingFuzzy = await _store.GetInstalledAppByBinaryNameFuzzyAsync(processName, ct);
+            if (existingFuzzy != null)
+            {
+                _knownAppBinaryNames.Add(processName);
+                return (true, existingFuzzy.AppName, existingFuzzy.Id, null, existingFuzzy.IsBrowser);
+            }
+
             var autoApp = await AutoDetectInstalledApp(processName, execPath, ct);
             if (autoApp != null)
             {
                 var storedAutoAppId = await _store.StoreInstalledAppAsync(autoApp, ct);
                 _knownAppBinaryNames.Add(processName);
-                return (true, autoApp.AppName, storedAutoAppId, null);
+                return (true, autoApp.AppName, storedAutoAppId, null, false);
             }
         }
 
@@ -674,9 +710,9 @@ public class LogCollectorService : BackgroundService
                 };
                 var storedPkgId = await _store.StoreInstalledPackageAsync(detected, ct);
                 _knownPackageNames.Add(processName);
-                return (true, detected.PackageName, null, storedPkgId);
+                return (true, detected.PackageName, null, storedPkgId, false);
             }
-            return (true, pkg.PackageName, null, pkg.Id);
+            return (true, pkg.PackageName, null, pkg.Id, false);
         }
 
         // 6. Build tools (make, go, npm, cargo, etc.) — auto-register as tools when seen running
@@ -694,13 +730,13 @@ public class LogCollectorService : BackgroundService
                 };
                 var storedBuildToolId = await _store.StoreInstalledPackageAsync(detected, ct);
                 _knownPackageNames.Add(processName);
-                return (true, detected.PackageName, null, storedBuildToolId);
+                return (true, detected.PackageName, null, storedBuildToolId, false);
             }
-            return (true, pkg.PackageName, null, pkg.Id);
+            return (true, pkg.PackageName, null, pkg.Id, false);
         }
 
         // 7. Not identifiable — skip
-        return (false, null, null, null);
+        return (false, null, null, null, false);
     }
 
     private static string? GetExecutablePath(string processName)

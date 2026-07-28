@@ -149,6 +149,7 @@ public class SqliteLogStore : ILogStore, IDisposable
         var pUninst = cmd.Parameters.Add("$uninstall_string", SqliteType.Text);
         var pChange = cmd.Parameters.Add("$change_type", SqliteType.Text);
         var pDetected = cmd.Parameters.Add("$detected_at", SqliteType.Text);
+        var pIsBrowser = cmd.Parameters.Add("$is_browser", SqliteType.Integer);
 
         await using var tx = await _connection.BeginTransactionAsync(ct);
         ((DbCommand)cmd).Transaction = tx;
@@ -163,6 +164,7 @@ public class SqliteLogStore : ILogStore, IDisposable
             pDate.Value = (object?)e.InstallDate?.ToString("O") ?? DBNull.Value;
             pUninst.Value = e.UninstallString;
             pChange.Value = e.ChangeType;
+            pIsBrowser.Value = e.IsBrowser ? 1 : 0;
             pDetected.Value = e.DetectedAt.ToString("O");
             await cmd.ExecuteNonQueryAsync(ct);
         }
@@ -268,6 +270,24 @@ public class SqliteLogStore : ILogStore, IDisposable
         return null;
     }
 
+    public async Task<InstalledApplication?> GetInstalledAppByBinaryNameFuzzyAsync(string processName, CancellationToken ct)
+    {
+        if (_connection == null || string.IsNullOrWhiteSpace(processName)) return null;
+        // Try matching: binary_name contains processName OR app_name contains processName OR vice versa
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = @"
+            SELECT * FROM installed_applications
+            WHERE binary_name LIKE '%' || $name || '%'
+               OR $name LIKE '%' || binary_name || '%'
+               OR app_name LIKE '%' || $name || '%'
+            LIMIT 1";
+        cmd.Parameters.AddWithValue("$name", processName);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (await reader.ReadAsync(ct))
+            return MapInstalledAppReader(reader);
+        return null;
+    }
+
     public async Task<InstalledPackage?> GetInstalledPackageByNameAsync(string packageName, CancellationToken ct)
     {
         if (_connection == null || string.IsNullOrWhiteSpace(packageName)) return null;
@@ -324,6 +344,7 @@ public class SqliteLogStore : ILogStore, IDisposable
         cmd.Parameters.AddWithValue("$install_date", (object?)entry.InstallDate?.ToString("O") ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$uninstall_string", entry.UninstallString);
         cmd.Parameters.AddWithValue("$change_type", entry.ChangeType);
+        cmd.Parameters.AddWithValue("$is_browser", entry.IsBrowser ? 1 : 0);
         cmd.Parameters.AddWithValue("$detected_at", entry.DetectedAt.ToString("O"));
         await cmd.ExecuteNonQueryAsync(ct);
         
@@ -997,6 +1018,7 @@ public class SqliteLogStore : ILogStore, IDisposable
             InstallDate = r.IsDBNull(r.GetOrdinal("install_date")) ? null : DateTime.Parse(r.GetString(r.GetOrdinal("install_date"))),
             UninstallString = r.GetString(r.GetOrdinal("uninstall_string")),
             ChangeType = r.GetString(r.GetOrdinal("change_type")),
+            IsBrowser = r.GetInt32(r.GetOrdinal("is_browser")) == 1,
             DetectedAt = DateTime.Parse(r.GetString(r.GetOrdinal("detected_at"))),
             IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
             SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),

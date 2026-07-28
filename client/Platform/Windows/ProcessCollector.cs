@@ -62,7 +62,7 @@ public class ProcessCollector : IActivityCollector
                 var resolvedTitle = ParentProcessResolver.ResolveWindowTitle(
                     pid, name, procTree, knownTitles, foregroundPid);
 
-                var profile = ParentProcessResolver.GetChromeProfile(name, pid);
+                var profile = ParentProcessResolver.GetBrowserProfile(name, pid);
 
                 var title = profile != null && resolvedTitle != null
                     ? $"{resolvedTitle} [{profile}]"

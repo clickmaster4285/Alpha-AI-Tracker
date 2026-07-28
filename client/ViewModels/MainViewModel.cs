@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using client.Configuration;
+using System.Collections.ObjectModel;
 using client.Core.Abstractions;
 using client.Core.Models;
 using client.Services;
@@ -89,7 +90,7 @@ public partial class MainViewModel : ViewModelBase
     public bool IsBackgroundStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.BackgroundRunning;
     public bool IsDependencyStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.Dependencies;
     public bool IsPermissionStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.OtherPermissions;
-    public bool IsProfile => IsLoggedIn && CurrentPermissionStep == PermissionStep.None;
+    public bool IsProfile => IsLoggedIn && CurrentPermissionStep == PermissionStep.None && !ShowBrowserSetup;
     public bool RequiresPermissionAction => IsLoggedIn && CurrentPermissionStep != PermissionStep.None;
 
     public string StepTitle => CurrentPermissionStep switch
@@ -139,13 +140,41 @@ public partial class MainViewModel : ViewModelBase
         set => SetProperty(ref _isStepWorking, value);
     }
 
+    private readonly BrowserExtensionService _browserExt;
+
+    // ─── Browser Extension State ───
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsProfile))]
+    [NotifyPropertyChangedFor(nameof(IsBrowserSetup))]
+    [NotifyPropertyChangedFor(nameof(RequiresBrowserSetup))]
+    private bool _showBrowserSetup;
+
+    // ─── Extension Instructions (persistent, shown in a dedicated card) ───
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasInstructions))]
+    private string _extensionInstructionsTitle = string.Empty;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasInstructions))]
+    private string _extensionInstructions = string.Empty;
+
+    public bool HasInstructions => !string.IsNullOrEmpty(ExtensionInstructions);
+
+    public ObservableCollection<DetectedBrowser> DetectedBrowsers { get; } = new();
+
+    public bool IsBrowserSetup => IsLoggedIn && ShowBrowserSetup;
+    public bool RequiresBrowserSetup => IsLoggedIn && ShowBrowserSetup && DetectedBrowsers.Any(b => b.CanInstall);
+
     public MainViewModel(
         AppConfig config,
         ILogStore store,
         HttpClient httpClient,
         IInstalledAppDetector appDetector,
         AutoStartService autoStart,
-        LogCollectorService logCollector)
+        LogCollectorService logCollector,
+        BrowserExtensionService browserExt)
     {
         _config = config;
         _store = store;
@@ -153,6 +182,7 @@ public partial class MainViewModel : ViewModelBase
         _appDetector = appDetector;
         _autoStart = autoStart;
         _logCollector = logCollector;
+        _browserExt = browserExt;
     }
 
     public async Task InitializeAsync(CancellationToken ct)
@@ -181,11 +211,11 @@ public partial class MainViewModel : ViewModelBase
             // Does NOT trust any previous stored status.
             CurrentPermissionStep = await GetNextPermissionStep();
 
-            // If all permissions are already granted (e.g. from a previous session
-            // where the user completed the flow), re-enforce auto-start
+            // If all permissions are already granted, check browser extension status
             if (IsProfile)
             {
                 _autoStart.EnableAutoStartForced();
+                await ScanBrowsersAsync(ct);
             }
         }
         else
@@ -838,6 +868,141 @@ public partial class MainViewModel : ViewModelBase
             2. Full Disk Access → Add Alpha AI Tracker → Enable
             3. Screen Recording → Add Alpha AI Tracker → Enable (optional)
             """;
+    }
+
+    // ─── Browser Extension Commands ───
+
+    private async Task ScanBrowsersAsync(CancellationToken ct)
+    {
+        try
+        {
+            await _browserExt.ScanAsync(ct);
+
+            // Batch-update ObservableCollection on UI thread
+            DetectedBrowsers.Clear();
+            foreach (var b in _browserExt.DetectedBrowsers)
+                DetectedBrowsers.Add(b);
+
+            ShowBrowserSetup = DetectedBrowsers.Count > 0;
+            StepStatusText = string.Empty;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Browser scan failed: {ex.Message}");
+        }
+    }
+
+    [RelayCommand]
+    private async Task AddExtensionToBrowserAsync(DetectedBrowser browser)
+    {
+        if (browser == null || !browser.CanInstall) return;
+
+        IsStepWorking = true;
+        ClearInstructions();
+
+        try
+        {
+            // Step 1: Install native host manifests if not done
+            if (!browser.NativeHostInstalled)
+            {
+                ExtensionInstructionsTitle = "Installing Native Messaging Host...";
+                ExtensionInstructions = "Setting up the communication bridge between the browser and tracker...";
+
+                var hostOk = await _browserExt.InstallNativeHostAsync(CancellationToken.None);
+                if (!hostOk)
+                {
+                    ExtensionInstructionsTitle = "⚠ Installation Failed";
+                    ExtensionInstructions = "Could not install the native messaging host automatically.\n\nTry running manually in terminal:\n  ./publish/install-extensions.sh";
+                    return;
+                }
+            }
+
+            // Step 2: Launch browser with extension or show instructions
+            if (browser.IsChromeBased)
+            {
+                var result = _browserExt.InstallExtension(browser);
+                if (result.Success)
+                {
+                    if (result.WasRestarted)
+                    {
+                        ExtensionInstructionsTitle = "🔄 Browser Restarted";
+                        ExtensionInstructions = $"Chrome was already open, so we closed it and reopened with the extension loaded.\n\nYour previous Chrome tabs and windows were closed. The extension is now active.\n\nClick Done to continue.";
+                    }
+                    else
+                    {
+                        ExtensionInstructionsTitle = "✅ Extension Loaded!";
+                        ExtensionInstructions = $"{browser.Name} has been launched with the extension loaded.\n\nThe extension will persist across browser restarts automatically.\n\nTo verify, open chrome://extensions and look for:\n  Alpha AI Tracker - Browser Journey";
+                    }
+                    browser.Status = BrowserInstallStatus.ExtensionActive;
+                }
+                else
+                {
+                    ExtensionInstructionsTitle = "📋 Manual Installation Required";
+                    var step2 = "Enable \"Developer mode\" (toggle in top-right)";
+                    var step3 = "Click \"Load unpacked\"";
+                    ExtensionInstructions = $"Could not launch {browser.Name} automatically.\n\nTo install manually:\n\n1. Open chrome://extensions in {browser.Name}\n2. {step2}\n3. {step3}\n4. Select the extension folder:\n   {browser.ExtensionDir}\n\nThe extension will remain loaded after restart.";
+                }
+            }
+            else
+            {
+                // Firefox: no --load-extension flag, show instructions
+                ExtensionInstructionsTitle = "📋 Firefox — Manual Installation";
+                var ffManifestPath = Path.Combine(browser.ExtensionDir, "manifest.json");
+                var ffStep2 = "Click \"Load Temporary Add-on\u2026\"";
+                ExtensionInstructions = $"Firefox does not support automatic extension loading.\n\nTo install:\n\n1. Open about:debugging#/runtime/this-firefox in Firefox\n2. {ffStep2}\n3. Navigate to and select:\n   {ffManifestPath}\n\nFor permanent install, submit the extension to Mozilla Add-ons.\n\n(Launching Firefox now for convenience...)";
+                _browserExt.InstallExtension(browser);
+            }
+
+            // Re-scan after a brief delay to update browser status in the list
+            await Task.Delay(2000);
+            await ScanBrowsersAsync(CancellationToken.None);
+
+            // If after re-scan all browsers are connected, update the instructions
+            if (_browserExt.IsAnyExtensionActive && browser.IsChromeBased)
+            {
+                ExtensionInstructionsTitle = "✅ All Connected!";
+                ExtensionInstructions = "Your browser is now sending tab URLs and navigation data to the tracker. ✓";
+            }
+        }
+        catch (Exception ex)
+        {
+            ExtensionInstructionsTitle = "⚠ Error";
+            ExtensionInstructions = $"An error occurred: {ex.Message}";
+        }
+        finally
+        {
+            IsStepWorking = false;
+        }
+    }
+
+    [RelayCommand]
+    private async Task RefreshBrowsersAsync()
+    {
+        ClearInstructions();
+        await ScanBrowsersAsync(CancellationToken.None);
+        if (!_browserExt.IsAnyExtensionActive)
+        {
+            ExtensionInstructionsTitle = "Select a browser below";
+            ExtensionInstructions = "Click \"Add Extension\" or \"Launch Browser\" next to your browser to install the tracking extension.";
+        }
+        else
+        {
+            ExtensionInstructionsTitle = "✅ All Connected!";
+            ExtensionInstructions = "All detected browsers are sending data to the tracker.";
+        }
+    }
+
+    [RelayCommand]
+    private void DismissBrowserSetup()
+    {
+        ShowBrowserSetup = false;
+        ClearInstructions();
+    }
+
+    private void ClearInstructions()
+    {
+        ExtensionInstructionsTitle = string.Empty;
+        ExtensionInstructions = string.Empty;
     }
 
     // ─── Platform Helpers ───

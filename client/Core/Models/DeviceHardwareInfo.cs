@@ -35,6 +35,8 @@ public class InstalledApplication
     public string UninstallString { get; set; } = string.Empty;
     /// <summary>"installed" | "uninstalled" | "seen"</summary>
     public string ChangeType { get; set; } = "seen";
+    /// <summary>True if this app is a web browser (detected from .desktop Categories/MimeType)</summary>
+    public bool IsBrowser { get; set; }
     public DateTime DetectedAt { get; set; } = DateTime.UtcNow;
     public bool IsSynced { get; set; }
     public string? SyncedAt { get; set; }

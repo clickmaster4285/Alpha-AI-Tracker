@@ -23,7 +23,21 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
     {
         EnsureInitialized();
         if (string.IsNullOrWhiteSpace(processName)) return null;
-        return _binaryToDisplayName.GetValueOrDefault(processName);
+        
+        // Exact match first
+        if (_binaryToDisplayName.TryGetValue(processName, out var displayName))
+            return displayName;
+
+        // 🟡 Fuzzy fallback: processName="chrome" but binary_name="google-chrome-stable"
+        // Check if any binary name contains the process name or vice versa
+        foreach (var kvp in _binaryToDisplayName)
+        {
+            if (kvp.Key.Contains(processName, StringComparison.OrdinalIgnoreCase) ||
+                processName.Contains(kvp.Key, StringComparison.OrdinalIgnoreCase))
+                return kvp.Value;
+        }
+
+        return null;
     }
 
     public IReadOnlyList<InstalledApplication> GetAllInstalledApplications()
@@ -185,12 +199,17 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
         {
             var lines = File.ReadAllLines(filePath);
             string? name = null, exec = null;
+            string? categories = null, mimeType = null;
             foreach (var line in lines)
             {
                 if (line.StartsWith("Name=", StringComparison.OrdinalIgnoreCase) && name == null)
                     name = line["Name=".Length..].Trim();
                 if (line.StartsWith("Exec=", StringComparison.OrdinalIgnoreCase))
                     exec = line["Exec=".Length..].Trim();
+                if (line.StartsWith("Categories=", StringComparison.OrdinalIgnoreCase))
+                    categories = line["Categories=".Length..].Trim();
+                if (line.StartsWith("MimeType=", StringComparison.OrdinalIgnoreCase))
+                    mimeType = line["MimeType=".Length..].Trim();
             }
             if (!string.IsNullOrWhiteSpace(name))
             {
@@ -201,6 +220,23 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                     _knownApps.Add(binaryName);
                     _binaryToDisplayName[binaryName] = name;
                 }
+
+                // Detect browser: Categories=WebBrowser or MimeType includes http/https URL schemes
+                var isBrowser = false;
+                if (!string.IsNullOrEmpty(categories))
+                {
+                    var cats = categories.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                    if (cats.Contains("WebBrowser", StringComparer.OrdinalIgnoreCase))
+                        isBrowser = true;
+                }
+                if (!isBrowser && !string.IsNullOrEmpty(mimeType))
+                {
+                    var mimes = mimeType.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                    if (mimes.Contains("x-scheme-handler/http", StringComparer.OrdinalIgnoreCase) ||
+                        mimes.Contains("x-scheme-handler/https", StringComparer.OrdinalIgnoreCase))
+                        isBrowser = true;
+                }
+
                 _installedApps.Add(new InstalledApplication
                 {
                     AppName = name,
@@ -209,6 +245,7 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                     Publisher = "",
                     AppVersion = "",
                     ChangeType = "seen",
+                    IsBrowser = isBrowser,
                     DetectedAt = DateTime.UtcNow,
                 });
             }
@@ -297,29 +334,44 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                         if (subKey == null) continue;
                         if (subKey.GetValue("DisplayName") is string displayName &&
                             !string.IsNullOrWhiteSpace(displayName))
-                        {
-                            // Extract binary name from install location or display icon
-                            var installPath = subKey.GetValue("InstallLocation") as string ?? "";
-                            var displayIcon = subKey.GetValue("DisplayIcon") as string ?? "";
-                            var binaryName = ExtractBinaryFromPath(installPath) ?? ExtractBinaryFromPath(displayIcon) ?? "";
+                        {                // Extract binary name from install location or display icon
+                var installPath = subKey.GetValue("InstallLocation") as string ?? "";
+                var displayIcon = subKey.GetValue("DisplayIcon") as string ?? "";
+                var binaryName = ExtractBinaryFromPath(installPath) ?? ExtractBinaryFromPath(displayIcon) ?? "";
 
-                            _knownApps.Add(displayName);
-                            if (!string.IsNullOrEmpty(binaryName))
-                            {
-                                _knownApps.Add(binaryName);
-                                _binaryToDisplayName[binaryName] = displayName;
-                            }
-                            _installedApps.Add(new InstalledApplication
-                            {
-                                AppName = displayName,
-                                BinaryName = binaryName,
-                                AppVersion = subKey.GetValue("DisplayVersion") as string ?? "",
-                                Publisher = subKey.GetValue("Publisher") as string ?? "",
-                                InstallPath = installPath,
-                                UninstallString = subKey.GetValue("UninstallString") as string ?? "",
-                                ChangeType = "installed",
-                                DetectedAt = DateTime.UtcNow,
-                            });
+                // Detect browser: check if app has URL Protocols registered (http, https)
+                var isBrowser = false;
+                try
+                {
+                    using var urlAssoc = subKey.OpenSubKey("URLAssociations");
+                    if (urlAssoc != null)
+                    {
+                        var http = urlAssoc.GetValue("http");
+                        var https = urlAssoc.GetValue("https");
+                        if (http != null || https != null)
+                            isBrowser = true;
+                    }
+                }
+                catch { }
+
+                _knownApps.Add(displayName);
+                if (!string.IsNullOrEmpty(binaryName))
+                {
+                    _knownApps.Add(binaryName);
+                    _binaryToDisplayName[binaryName] = displayName;
+                }
+                _installedApps.Add(new InstalledApplication
+                {
+                    AppName = displayName,
+                    BinaryName = binaryName,
+                    AppVersion = subKey.GetValue("DisplayVersion") as string ?? "",
+                    Publisher = subKey.GetValue("Publisher") as string ?? "",
+                    InstallPath = installPath,
+                    UninstallString = subKey.GetValue("UninstallString") as string ?? "",
+                    ChangeType = "installed",
+                    IsBrowser = isBrowser,
+                    DetectedAt = DateTime.UtcNow,
+                });
                         }
                     }
                 }
@@ -400,12 +452,15 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                         _knownApps.Add(name);
                         _knownApps.Add(binaryName);
                         _binaryToDisplayName[binaryName] = name;
+
+                        var isBrowserApp = IsMacOSBrowserApp(app);
                         _installedApps.Add(new InstalledApplication
                         {
                             AppName = name,
                             BinaryName = binaryName,
                             InstallPath = app,
                             ChangeType = "installed",
+                            IsBrowser = isBrowserApp,
                             DetectedAt = DateTime.UtcNow,
                         });
                     }
@@ -426,12 +481,15 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                         _knownApps.Add(name);
                         _knownApps.Add(binaryName);
                         _binaryToDisplayName[binaryName] = name;
+
+                        var isBrowserApp = IsMacOSBrowserApp(app);
                         _installedApps.Add(new InstalledApplication
                         {
                             AppName = name,
                             BinaryName = binaryName,
                             InstallPath = app,
                             ChangeType = "installed",
+                            IsBrowser = isBrowserApp,
                             DetectedAt = DateTime.UtcNow,
                         });
                     }
@@ -444,6 +502,33 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
         {
             Debug.WriteLine($"macOS app detection error: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Detect if a macOS .app bundle is a browser by reading its Info.plist
+    /// and checking CFBundleURLTypes for http/https URL scheme handling.
+    /// </summary>
+    private static bool IsMacOSBrowserApp(string appPath)
+    {
+        try
+        {
+            var plistPath = Path.Combine(appPath, "Contents", "Info.plist");
+            if (!File.Exists(plistPath)) return false;
+
+            var plist = File.ReadAllText(plistPath);
+            // Check for CFBundleURLSchemes containing http and https
+            if (plist.Contains("CFBundleURLSchemes", StringComparison.OrdinalIgnoreCase) &&
+                plist.Contains("http", StringComparison.OrdinalIgnoreCase))
+            {
+                // Simple heuristic: look for http and https URL schemes
+                var httpCount = 0;
+                if (plist.Contains("<string>http</string>", StringComparison.OrdinalIgnoreCase)) httpCount++;
+                if (plist.Contains("<string>https</string>", StringComparison.OrdinalIgnoreCase)) httpCount++;
+                return httpCount >= 2;
+            }
+        }
+        catch { }
+        return false;
     }
 
 }

@@ -40,6 +40,11 @@ public interface ILogStore
     /// <summary>Look up an installed app by its executable binary name (e.g., \"code\" → Visual Studio Code)</summary>
     Task<InstalledApplication?> GetInstalledAppByBinaryNameAsync(string binaryName, CancellationToken ct);
 
+    /// <summary>Fuzzy lookup by binary_name or app_name using LIKE (e.g., \"chrome\" matches \"google-chrome-stable\").
+    /// Returns null if no fuzzy match found. Used to prevent duplicate entries when runtime process name
+    /// differs from the .desktop binary name (e.g., process=\"chrome\", binary_name=\"google-chrome-stable\").</summary>
+    Task<InstalledApplication?> GetInstalledAppByBinaryNameFuzzyAsync(string processName, CancellationToken ct);
+
     /// <summary>Look up an installed package by its package name</summary>
     Task<InstalledPackage?> GetInstalledPackageByNameAsync(string packageName, CancellationToken ct);
 

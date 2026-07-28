@@ -121,6 +121,10 @@ builder.Services.AddHostedService<BackgroundGuardService>();
 builder.Services.AddSingleton<LogCollectorService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<LogCollectorService>());
 
+// Native Messaging (browser extension bridge — Unix socket for tab/URL capture)
+builder.Services.AddSingleton<BrowserExtensionService>();
+builder.Services.AddHostedService<NativeMessageService>();
+
 // Main ViewModel
 builder.Services.AddTransient<MainViewModel>();
 
