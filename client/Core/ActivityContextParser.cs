@@ -65,23 +65,16 @@ public static partial class ActivityContextParser
         var pageTitle = StripSuffix(title, BrowserSuffixes);
         var tabId = string.IsNullOrEmpty(chromeProfile) ? "default" : chromeProfile;
 
-        // 🟡 Issue 2: Handle Wayland browsers with partial or empty window titles
+        // No window title available (Wayland browsers don't expose titles via xprop).
+        // The browser extension handles navigation events via native messaging.
+        // DO NOT create fake browser_navigation items — they pollute the data.
+        // Just set the root tab context so the session is tracked.
         if (string.IsNullOrWhiteSpace(title))
         {
-            // On Wayland, browser window titles may not be available via xprop or GNOME Shell.
-            // Fall back: use the app display name (e.g., "Google Chrome", "Firefox") as the
-            // tab title so the browser session is still tracked with meaningful context.
-            // This is better than generating fake "default" or "wayland:<guid>" identifiers.
-            var appName = context.RootIdentifier; // set to processName by Parse()
+            var appName = context.RootIdentifier;
             context.RootTitle = appName;
-            context.RootIdentifier = $"{appName}:{tabId}";
-            // Add a navigation item with the app name as fallback — no URL available on Wayland
-            context.Children.Add(new ContextChildItem
-            {
-                ItemType = "browser_navigation",
-                Title = appName,
-                Identifier = $"wayland:{appName}:{tabId}",
-            });
+            context.RootIdentifier = $"browser:{appName}:{tabId}";
+            // No children — only the extension should create browser_navigation items
             return context;
         }
 

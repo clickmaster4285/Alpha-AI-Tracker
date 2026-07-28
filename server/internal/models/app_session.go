@@ -29,6 +29,8 @@ type AppItem struct {
 	ItemType     string     `json:"itemType" db:"item_type"`
 	Title        string     `json:"title" db:"title"`
 	Identifier   string     `json:"identifier" db:"identifier"`
+	Url          string     `json:"url" db:"url"`
+	Domain       string     `json:"domain" db:"domain"`
 	OpenedAt     time.Time  `json:"openedAt" db:"opened_at"`
 	ClosedAt     *time.Time `json:"closedAt,omitempty" db:"closed_at"`
 	SyncedAt     *time.Time `json:"syncedAt,omitempty" db:"synced_at"`

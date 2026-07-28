@@ -154,6 +154,7 @@ internal static class DatabaseSchema
         -- GENERIC APP ITEMS (replaces browser_contexts, file_explorer_contexts, urls, url_visits)
         -- Self-referencing via parent_item_id for nesting: app_session -> tab -> terminal/browser_navigation
         -- item_type: 'tab', 'browser_tab', 'browser_navigation', 'terminal', 'folder', 'file', etc.
+        -- url/domain stored separately from identifier for proper querying
 
         CREATE TABLE IF NOT EXISTS app_items (
             id                TEXT PRIMARY KEY,
@@ -162,6 +163,8 @@ internal static class DatabaseSchema
             item_type         TEXT NOT NULL DEFAULT '',
             title             TEXT NOT NULL DEFAULT '',
             identifier        TEXT NOT NULL DEFAULT '',
+            url               TEXT NOT NULL DEFAULT '',
+            domain            TEXT NOT NULL DEFAULT '',
             opened_at         TEXT NOT NULL,
             closed_at         TEXT,
             process_id        INTEGER,
@@ -225,6 +228,8 @@ internal static class DatabaseSchema
         ALTER TABLE app_sessions ADD COLUMN parent_process_id INTEGER;
         ALTER TABLE app_items ADD COLUMN process_id INTEGER;
         ALTER TABLE installed_applications ADD COLUMN is_browser INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE app_items ADD COLUMN url TEXT NOT NULL DEFAULT '';
+        ALTER TABLE app_items ADD COLUMN domain TEXT NOT NULL DEFAULT '';
     ";
 
     // PHASE 1: INSERT STATEMENTS
@@ -357,12 +362,16 @@ internal static class DatabaseSchema
 
     internal const string InsertAppItemSql = @"
         INSERT INTO app_items
-            (id, app_session_id, parent_item_id, item_type, title, identifier, opened_at, closed_at, process_id)
+            (id, app_session_id, parent_item_id, item_type, title, identifier, url, domain,
+             opened_at, closed_at, process_id)
         VALUES
-            ($id, $app_session_id, $parent_item_id, $item_type, $title, $identifier, $opened_at, $closed_at, $process_id)
+            ($id, $app_session_id, $parent_item_id, $item_type, $title, $identifier, $url, $domain,
+             $opened_at, $closed_at, $process_id)
         ON CONFLICT(id) DO UPDATE SET
             title = excluded.title,
             identifier = excluded.identifier,
+            url = COALESCE(NULLIF(excluded.url, ''), app_items.url),
+            domain = COALESCE(NULLIF(excluded.domain, ''), app_items.domain),
             parent_item_id = COALESCE(excluded.parent_item_id, app_items.parent_item_id),
             closed_at = COALESCE(excluded.closed_at, app_items.closed_at)
     ";

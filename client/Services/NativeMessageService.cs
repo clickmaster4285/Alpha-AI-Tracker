@@ -166,6 +166,9 @@ public class NativeMessageService : BackgroundService
 
         if (string.IsNullOrEmpty(msg.Url)) return;
 
+        // Extract URL and domain once for reuse
+        var (navUrl, navDomain) = ExtractUrlAndDomain(msg.Url);
+
         // Resolve browser app_id
         var browserAppId = await ResolveBrowserAppIdAsync(msg, ct);
 
@@ -182,6 +185,8 @@ public class NativeMessageService : BackgroundService
                 ItemType = "browser_navigation",
                 Title = msg.Title ?? msg.Url,
                 Identifier = msg.Url,
+                Url = navUrl,
+                Domain = navDomain,
                 OpenedAt = DateTime.UtcNow,
             };
             await _store.StoreAppItemsAsync(new[] { navItem }, ct);
@@ -206,6 +211,8 @@ public class NativeMessageService : BackgroundService
             ItemType = "browser_tab",
             Title = msg.Title ?? "New Tab",
             Identifier = msg.Url,
+            Url = navUrl,
+            Domain = navDomain,
             OpenedAt = DateTime.UtcNow,
         };
 
@@ -216,6 +223,8 @@ public class NativeMessageService : BackgroundService
             ItemType = "browser_navigation",
             Title = msg.Title ?? msg.Url,
             Identifier = msg.Url,
+            Url = navUrl,
+            Domain = navDomain,
             OpenedAt = DateTime.UtcNow,
         };
 
@@ -265,6 +274,38 @@ public class NativeMessageService : BackgroundService
     {
         if (string.IsNullOrEmpty(url)) return "";
         return url.Length <= maxLen ? url : url[..maxLen] + "...";
+    }
+
+    /// <summary>Extract URL and domain from a full URL string.</summary>
+    private static (string url, string domain) ExtractUrlAndDomain(string? rawUrl)
+    {
+        if (string.IsNullOrWhiteSpace(rawUrl))
+            return (string.Empty, string.Empty);
+
+        try
+        {
+            if (Uri.TryCreate(rawUrl, UriKind.Absolute, out var uri) &&
+                (uri.Scheme == "http" || uri.Scheme == "https"))
+            {
+                return (uri.ToString().TrimEnd('/'), uri.Host.ToLowerInvariant());
+            }
+        }
+        catch { }
+
+        // Fallback: try to prefix https:// and parse
+        try
+        {
+            var withScheme = rawUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+                ? rawUrl
+                : "https://" + rawUrl;
+            if (Uri.TryCreate(withScheme, UriKind.Absolute, out var uri))
+            {
+                return (uri.ToString().TrimEnd('/'), uri.Host.ToLowerInvariant());
+            }
+        }
+        catch { }
+
+        return (rawUrl, string.Empty);
     }
 
     private sealed class BrowserMessage

@@ -615,6 +615,8 @@ public class SqliteLogStore : ILogStore, IDisposable
         var pType = cmd.Parameters.Add("$item_type", SqliteType.Text);
         var pTitle = cmd.Parameters.Add("$title", SqliteType.Text);
         var pIdent = cmd.Parameters.Add("$identifier", SqliteType.Text);
+        var pUrl = cmd.Parameters.Add("$url", SqliteType.Text);
+        var pDomain = cmd.Parameters.Add("$domain", SqliteType.Text);
         var pOpened = cmd.Parameters.Add("$opened_at", SqliteType.Text);
         var pClosed = cmd.Parameters.Add("$closed_at", SqliteType.Text);
         var pProcId = cmd.Parameters.Add("$process_id", SqliteType.Integer);
@@ -629,6 +631,8 @@ public class SqliteLogStore : ILogStore, IDisposable
             pType.Value = e.ItemType;
             pTitle.Value = e.Title;
             pIdent.Value = e.Identifier;
+            pUrl.Value = e.Url;
+            pDomain.Value = e.Domain;
             pOpened.Value = e.OpenedAt.ToString("O");
             pClosed.Value = e.ClosedAt?.ToString("O") ?? (object)DBNull.Value;
             pProcId.Value = e.ProcessId.HasValue ? e.ProcessId.Value : DBNull.Value;
@@ -1121,6 +1125,8 @@ public class SqliteLogStore : ILogStore, IDisposable
             ItemType = r.GetString(r.GetOrdinal("item_type")),
             Title = r.GetString(r.GetOrdinal("title")),
             Identifier = r.GetString(r.GetOrdinal("identifier")),
+            Url = r.IsDBNull(r.GetOrdinal("url")) ? string.Empty : r.GetString(r.GetOrdinal("url")),
+            Domain = r.IsDBNull(r.GetOrdinal("domain")) ? string.Empty : r.GetString(r.GetOrdinal("domain")),
             OpenedAt = DateTime.Parse(r.GetString(r.GetOrdinal("opened_at"))),
             ClosedAt = r.IsDBNull(r.GetOrdinal("closed_at")) ? null : DateTime.Parse(r.GetString(r.GetOrdinal("closed_at"))),
             ProcessId = TryGetInt(r, "process_id"),

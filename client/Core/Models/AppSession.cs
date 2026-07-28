@@ -46,6 +46,10 @@ public class AppItem
     public string Title { get; set; } = string.Empty;
     /// <summary>Content identifier: URL, file path, folder path, shell command, etc.</summary>
     public string Identifier { get; set; } = string.Empty;
+    /// <summary>Full URL for browser_navigation items (from browser extension)</summary>
+    public string Url { get; set; } = string.Empty;
+    /// <summary>Extracted domain from URL for browser_navigation items</summary>
+    public string Domain { get; set; } = string.Empty;
     public DateTime OpenedAt { get; set; } = DateTime.UtcNow;
     public DateTime? ClosedAt { get; set; }
     public bool IsSynced { get; set; }

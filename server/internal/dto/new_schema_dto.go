@@ -290,6 +290,8 @@ type AppItemEntry struct {
 	ItemType     string  `json:"itemType"`
 	Title        string  `json:"title"`
 	Identifier   string  `json:"identifier"`
+	Url          string  `json:"url"`
+	Domain       string  `json:"domain"`
 	OpenedAt     string  `json:"openedAt"`
 	ClosedAt     *string `json:"closedAt,omitempty"`
 }
@@ -308,6 +310,8 @@ type AppItemResponse struct {
 	ItemType     string     `json:"itemType"`
 	Title        string     `json:"title"`
 	Identifier   string     `json:"identifier"`
+	Url          string     `json:"url"`
+	Domain       string     `json:"domain"`
 	OpenedAt     time.Time  `json:"openedAt"`
 	ClosedAt     *time.Time `json:"closedAt,omitempty"`
 	SyncedAt     *time.Time `json:"syncedAt,omitempty"`

@@ -342,25 +342,27 @@ func (r *NewSchemaRepo) BulkInsertAppItems(ctx context.Context, entries []models
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
-				argIdx+5, argIdx+6, argIdx+7, argIdx+8,
+				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9, argIdx+10,
 			))
 			args = append(args,
 				e.ID, e.EmployeeID, e.AppSessionID, e.ParentItemID, e.ItemType,
-				e.Title, e.Identifier, e.OpenedAt, e.ClosedAt,
+				e.Title, e.Identifier, e.Url, e.Domain, e.OpenedAt, e.ClosedAt,
 			)
-			argIdx += 9
+			argIdx += 11
 		}
 
 		query := fmt.Sprintf(`
 			INSERT INTO app_items
 				(id, employee_id, app_session_id, parent_item_id, item_type,
-				 title, identifier, opened_at, closed_at)
+				 title, identifier, url, domain, opened_at, closed_at)
 			VALUES %s
 			ON CONFLICT (id) DO UPDATE SET
 				title = EXCLUDED.title,
 				identifier = EXCLUDED.identifier,
+				url = COALESCE(NULLIF(EXCLUDED.url, ''), app_items.url),
+				domain = COALESCE(NULLIF(EXCLUDED.domain, ''), app_items.domain),
 				parent_item_id = COALESCE(EXCLUDED.parent_item_id, app_items.parent_item_id),
 				closed_at = COALESCE(EXCLUDED.closed_at, app_items.closed_at),
 				synced_at = NOW()
@@ -551,7 +553,7 @@ func (r *NewSchemaRepo) ListAppItems(ctx context.Context, params AppItemListPara
 
 	query := fmt.Sprintf(`
 		SELECT id, employee_id, app_session_id, parent_item_id, item_type,
-		       title, identifier, opened_at, closed_at, synced_at, created_at
+		       title, identifier, url, domain, opened_at, closed_at, synced_at, created_at
 		FROM app_items %s
 		ORDER BY opened_at DESC
 		LIMIT $%d OFFSET $%d
@@ -569,7 +571,8 @@ func (r *NewSchemaRepo) ListAppItems(ctx context.Context, params AppItemListPara
 		var item models.AppItem
 		if err := rows.Scan(
 			&item.ID, &item.EmployeeID, &item.AppSessionID, &item.ParentItemID, &item.ItemType,
-			&item.Title, &item.Identifier, &item.OpenedAt, &item.ClosedAt, &item.SyncedAt, &item.CreatedAt,
+			&item.Title, &item.Identifier, &item.Url, &item.Domain,
+			&item.OpenedAt, &item.ClosedAt, &item.SyncedAt, &item.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan app_item row: %w", err)
 		}
