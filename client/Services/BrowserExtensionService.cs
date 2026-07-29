@@ -5,7 +5,7 @@ namespace client.Services;
 
 /// <summary>
 /// Detects installed browsers, manages extension auto-installation,
-/// and tracks which browsers have the native messaging bridge connected.
+/// and checks extension connectivity via NativeMessageService heartbeat.
 ///
 /// Strategy (cross-browser, cross-platform):
 ///   Chrome-based (Chrome, Chromium, Edge, Brave, Opera, Vivaldi):
@@ -18,6 +18,7 @@ namespace client.Services;
 public class BrowserExtensionService
 {
     private readonly ILogger<BrowserExtensionService> _logger;
+    private readonly NativeMessageService _nativeMessageService;
     private readonly string _chromeExtDir;
     private readonly string _firefoxExtDir;
     private readonly string _socketPath;
@@ -29,12 +30,13 @@ public class BrowserExtensionService
     public IReadOnlyList<DetectedBrowser> DetectedBrowsers => _detected;
     private List<DetectedBrowser> _detected = new();
 
-    /// <summary>True if at least one browser has the extension active (connected via socket).</summary>
+    /// <summary>True if at least one browser has the extension active (confirmed via socket heartbeat).</summary>
     public bool IsAnyExtensionActive => _detected.Any(b => b.Status == BrowserInstallStatus.ExtensionActive);
 
-    public BrowserExtensionService(ILogger<BrowserExtensionService> logger)
+    public BrowserExtensionService(ILogger<BrowserExtensionService> logger, NativeMessageService nativeMessageService)
     {
         _logger = logger;
+        _nativeMessageService = nativeMessageService;
         var userHome = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
         // Resolve extension directories — walk up from build output to repo root
@@ -45,6 +47,11 @@ public class BrowserExtensionService
         _socketPath = Path.Combine(userHome, ".local", "share", "alpha-ai-tracker", "native-messaging.sock");
         _chromeNativeHostDir = Path.Combine(userHome, ".config", "google-chrome", "NativeMessagingHosts");
         _firefoxNativeHostDir = Path.Combine(userHome, ".mozilla", "native-messaging-hosts");
+
+        // Clean up any orphaned native-host.py from a previous crashed session.
+        // Stale processes would cause false positives in process-based detection;
+        // with heartbeat-based detection they are harmless but wasteful.
+        KillOrphanedNativeHostProcesses();
     }
 
     /// <summary>
@@ -688,148 +695,20 @@ print(f'Injected extension {ext_id} for path {ext_path}')
     }
 
     /// <summary>
-    /// Check if the browser extension is actively connected.
+    /// Check if the browser extension is actively connected by querying the
+    /// NativeMessageService heartbeat — the extension's background.js sends a
+    /// ping every ~27s via chrome.alarms. If we've received one within 60s the
+    /// full pipeline (extension → native-host.py → Unix socket) is confirmed alive.
     ///
-    /// The native-host.py creates only EPHEMERAL socket connections (connect, send,
-    /// receive, close per message). So fuser cannot detect it — it only sees the
-    /// NativeMessageService listener (the tracker itself).
-    ///
-    /// Instead, we check:
-    ///   1. Is native-host.py running? (Chrome only spawns it when the
-    ///      extension calls connectNative())
-    ///   2. Is Chrome also running? (to avoid stale native-host orphans)
-    ///
-    /// This is reliable because Chrome 150+ launches native-host.py as a direct
-    /// child process as soon as the extension's background service worker calls
-    /// chrome.runtime.connectNative().
+    /// This is reliable because native-host.py forwards ping messages to the
+    /// tracker socket, and NativeMessageService records a heartbeat timestamp.
+    /// Unlike the previous process-based heuristic (pgrep native-host.py + pgrep chrome),
+    /// this cannot false-positive on orphaned processes or unrelated browser instances.
     /// </summary>
-    private async Task<bool> IsExtensionActiveAsync(CancellationToken ct)
+    private Task<bool> IsExtensionActiveAsync(CancellationToken ct)
     {
-        try
-        {
-            // 1. Is native-host.py running?
-            bool nativeHostRunning = false;
-            if (OperatingSystem.IsLinux())
-            {
-                var pgrepPsi = new ProcessStartInfo
-                {
-                    FileName = "pgrep",
-                    Arguments = "-f native-host.py",
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                };
-                using var proc = Process.Start(pgrepPsi);
-                if (proc != null)
-                {
-                    var output = (await proc.StandardOutput.ReadToEndAsync(ct)).Trim();
-                    await proc.WaitForExitAsync(ct);
-                    nativeHostRunning = proc.ExitCode == 0 && !string.IsNullOrEmpty(output);
-                }
-            }
-            else if (OperatingSystem.IsMacOS())
-            {
-                var psPsi = new ProcessStartInfo
-                {
-                    FileName = "ps",
-                    Arguments = "aux",
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                };
-                using var proc = Process.Start(psPsi);
-                if (proc != null)
-                {
-                    var output = (await proc.StandardOutput.ReadToEndAsync(ct)).Trim();
-                    await proc.WaitForExitAsync(ct);
-                    nativeHostRunning = output.Contains("native-host.py", StringComparison.OrdinalIgnoreCase);
-                }
-            }
-            else if (OperatingSystem.IsWindows())
-            {
-                var wmicPsi = new ProcessStartInfo
-                {
-                    FileName = "wmic",
-                    Arguments = "process where \"name like '%python%' or name like '%native-host%'\" get ProcessId",
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                };
-                using var proc = Process.Start(wmicPsi);
-                if (proc != null)
-                {
-                    var output = (await proc.StandardOutput.ReadToEndAsync(ct)).Trim();
-                    await proc.WaitForExitAsync(ct);
-                    var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-                    nativeHostRunning = lines.Length > 1; // header + at least one PID
-                }
-            }
-
-            if (!nativeHostRunning) return false;
-
-            // 2. Is Chrome also running? (prevents stale native-host detection)
-            if (OperatingSystem.IsLinux())
-            {
-                var chromePsi = new ProcessStartInfo
-                {
-                    FileName = "pgrep",
-                    Arguments = "^chrome$",
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                };
-                using var proc = Process.Start(chromePsi);
-                if (proc != null)
-                {
-                    var output = (await proc.StandardOutput.ReadToEndAsync(ct)).Trim();
-                    await proc.WaitForExitAsync(ct);
-                    return proc.ExitCode == 0 && !string.IsNullOrEmpty(output);
-                }
-            }
-            else if (OperatingSystem.IsMacOS())
-            {
-                var psPsi = new ProcessStartInfo
-                {
-                    FileName = "ps",
-                    Arguments = "aux",
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                };
-                using var proc = Process.Start(psPsi);
-                if (proc != null)
-                {
-                    var output = (await proc.StandardOutput.ReadToEndAsync(ct)).Trim();
-                    await proc.WaitForExitAsync(ct);
-                    return output.Contains("Google Chrome", StringComparison.OrdinalIgnoreCase) ||
-                           output.Contains("/Applications/Google Chrome.app", StringComparison.OrdinalIgnoreCase);
-                }
-            }
-            else if (OperatingSystem.IsWindows())
-            {
-                var tasklistPsi = new ProcessStartInfo
-                {
-                    FileName = "tasklist",
-                    Arguments = "/NH /FI \"IMAGENAME eq chrome.exe\"",
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                };
-                using var proc = Process.Start(tasklistPsi);
-                if (proc != null)
-                {
-                    var output = (await proc.StandardOutput.ReadToEndAsync(ct)).Trim();
-                    await proc.WaitForExitAsync(ct);
-                    return output.Contains("chrome.exe", StringComparison.OrdinalIgnoreCase);
-                }
-            }
-
-            return false;
-        }
-        catch
-        {
-            return false;
-        }
+        var connected = _nativeMessageService.IsExtensionConnected();
+        return Task.FromResult(connected);
     }
 
     /// <summary>Check if the extension is already injected in Chrome's Preferences file.</summary>
@@ -1067,6 +946,58 @@ print(ext_id)
             if (File.Exists(normalized)) return normalized;
         }
         return null;
+    }
+
+    /// <summary>Kill orphaned native-host.py processes left over from a previous crashed session.
+    /// This prevents stale processes from consuming resources or confusing any fallback checks.</summary>
+    private static void KillOrphanedNativeHostProcesses()
+    {
+        try
+        {
+            if (OperatingSystem.IsLinux())
+            {
+                using var proc = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "pkill",
+                    Arguments = "-f native-host.py",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                });
+                proc?.WaitForExit(2000);
+            }
+            else if (OperatingSystem.IsMacOS())
+            {
+                using var proc = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "pkill",
+                    Arguments = "-f native-host.py",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                });
+                proc?.WaitForExit(2000);
+            }
+            else if (OperatingSystem.IsWindows())
+            {
+                using var proc = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "taskkill",
+                    Arguments = "/F /IM python.exe /FI \"WINDOWTITLE eq native-host*\"",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                });
+                proc?.WaitForExit(2000);
+            }
+        }
+        catch
+        {
+            // Best-effort cleanup — ignore failures
+        }
     }
 }
 

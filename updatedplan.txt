@@ -1,0 +1,31 @@
+Sounds good. Proceed with the implementation and complete **all phases** according to the finalized implementation plan.
+
+Before making changes:
+
+* Compare each phase against the existing codebase and reuse existing components wherever possible.
+* Avoid duplicating logic or introducing unnecessary abstractions.
+* Remove hardcoded values and replace them with metadata-driven or configuration-driven solutions.
+* Keep the implementation production-ready, scalable, maintainable, and cross-platform.
+* Preserve backward compatibility unless a breaking change is explicitly required.
+* Ensure every change follows the agreed execution order and architecture.
+
+During implementation:
+
+* Keep the codebase clean, modular, and well documented.
+* Follow existing project conventions and coding standards.
+* Add meaningful comments only where they improve maintainability.
+
+After completing each phase:
+
+* Verify it builds successfully.
+* Confirm there are no regressions.
+* Validate that all new functionality works as expected.
+* Refactor any duplicated or obsolete code introduced or uncovered during implementation.
+
+After the entire implementation is complete:
+
+* Update **`AGENTS.md`** to reflect the new architecture, system initialization flow, software discovery pipeline, journey filtering, synchronization flow, and any new components or design decisions.
+* Update **`client/ARCHITECTURE.md`** so it accurately documents the final client architecture, including the initialization sequence, software discovery/classification pipeline, tracking lifecycle, collectors, filtering engine, synchronization process, and data flow.
+* Ensure both documents are consistent with the final implementation and contain no outdated or obsolete information.
+
+Complete the implementation in one pass, covering all finalized phases, and perform a final end-to-end verification before considering the work complete.

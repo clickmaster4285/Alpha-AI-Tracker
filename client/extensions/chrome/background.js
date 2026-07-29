@@ -91,6 +91,15 @@ function connectNative() {
 
     console.log("[Alpha AI] Connected to native host:", HOST_NAME);
 
+    // Send initial heartbeat so the tracker knows we're alive immediately
+    // (not just on the first alarm cycle ~27s later). Small delay to let
+    // the native host process finish initializing.
+    setTimeout(() => {
+      try {
+        nativePort.postMessage({ action: "ping", timestamp: Date.now(), browser: "chrome" });
+      } catch (_) { /* port will reconnect via alarm */ }
+    }, 500);
+
     // Flush buffered events on fresh connection
     setTimeout(flushBuffer, 200);
   } catch (err) {

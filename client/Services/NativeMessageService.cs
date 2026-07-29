@@ -2,6 +2,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading;
 using client.Core.Abstractions;
 using client.Core.Models;
 using Microsoft.Extensions.Hosting;
@@ -29,6 +30,12 @@ public class NativeMessageService : BackgroundService
     private readonly Dictionary<string, string> _browserAppCache = new(StringComparer.OrdinalIgnoreCase);
     // Cache: browser process name + tabId → current AppSession.Id
     private readonly Dictionary<string, string> _tabSessionCache = new(StringComparer.OrdinalIgnoreCase);
+
+    // Heartbeat: last time a ping (or any message) was received from the extension.
+    // Used by BrowserExtensionService to confirm the extension is truly alive
+    // without relying on process-based heuristics. Stored as UTC ticks for
+    // lock-free cross-thread reads via Interlocked.
+    private long _lastHeartbeatAtTicks = DateTime.MinValue.Ticks;
 
     public NativeMessageService(ILogStore store, ILogger<NativeMessageService> logger)
     {
@@ -174,10 +181,27 @@ public class NativeMessageService : BackgroundService
         }
     }
 
+    /// <summary>Whether the browser extension has sent a heartbeat within the last <paramref name="maxAgeSeconds"/> seconds.
+    /// The extension's background.js sends a ping every ~27s via chrome.alarms.
+    /// 60s threshold covers ~2 missed cycles before declaring the extension disconnected.</summary>
+    public bool IsExtensionConnected(int maxAgeSeconds = 60)
+    {
+        var lastTicks = Interlocked.Read(ref _lastHeartbeatAtTicks);
+        if (lastTicks == DateTime.MinValue.Ticks) return false;
+        return (DateTime.UtcNow - new DateTime(lastTicks, DateTimeKind.Utc)).TotalSeconds < maxAgeSeconds;
+    }
+
+    /// <summary>Reset heartbeat (e.g., on startup to clear stale state from a previous session).</summary>
+    public void ResetHeartbeat() => Interlocked.Exchange(ref _lastHeartbeatAtTicks, DateTime.MinValue.Ticks);
+
     private async Task ProcessMessageAsync(BrowserMessage msg, CancellationToken ct)
     {
-        // Ping messages — just log at debug level
-        if (msg.Action == "ping") return;
+        // Ping messages — record heartbeat, nothing else to store
+        if (msg.Action == "ping")
+        {
+            Interlocked.Exchange(ref _lastHeartbeatAtTicks, DateTime.UtcNow.Ticks);
+            return;
+        }
 
         // Tab closed — mark the session as ended
         if (msg.Action == "closed")

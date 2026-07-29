@@ -124,8 +124,9 @@ builder.Services.AddSingleton<LogCollectorService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<LogCollectorService>());
 
 // Native Messaging (browser extension bridge — Unix socket for tab/URL capture)
+builder.Services.AddSingleton<NativeMessageService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<NativeMessageService>());
 builder.Services.AddSingleton<BrowserExtensionService>();
-builder.Services.AddHostedService<NativeMessageService>();
 
 // Desktop Event Bus (File Explorer tracking via AT-SPI + FileSystemWatcher)
 builder.Services.AddSingleton<EventCoordinator>();

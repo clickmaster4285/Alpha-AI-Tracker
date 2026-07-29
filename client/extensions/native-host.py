@@ -85,8 +85,9 @@ def main():
             if msg is None:
                 break
 
-            # Ping messages — just acknowledge
+            # Ping messages — forward to tracker AND acknowledge
             if msg.get("action") == "ping":
+                forward_to_tracker(msg)  # fire-and-forget so tracker records heartbeat
                 write_message({"status": "ok", "detail": "pong"})
                 continue
 

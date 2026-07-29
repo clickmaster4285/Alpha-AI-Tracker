@@ -957,9 +957,15 @@ public partial class MainViewModel : ViewModelBase
                 await _browserExt.InstallExtensionAsync(browser);
             }
 
-            // Re-scan after a brief delay to update browser status in the list
-            await Task.Delay(2000);
-            await ScanBrowsersAsync(CancellationToken.None);
+            // Re-scan after a brief delay to update browser status in the list.
+            // Wait for the extension's initial heartbeat (sent ~500ms after connect)
+            // before re-scanning, so the heartbeat-based detection confirms it alive.
+            for (int i = 0; i < 16; i++)
+            {
+                await Task.Delay(500);
+                await ScanBrowsersAsync(CancellationToken.None);
+                if (_browserExt.IsAnyExtensionActive) break;
+            }
 
             // If after re-scan all browsers are connected, update the instructions
             if (_browserExt.IsAnyExtensionActive && browser.IsChromeBased)
