@@ -69,6 +69,30 @@ public class LogCollectorService : BackgroundService
         "update-notifier",
         "packagekitd",
         "fwupd",
+        // GNOME daemons that leak through ProcessFilter (2026-07-29)
+        "gvfsd-network", "gvfsd-dnssd", "gvfsd-recent", "gvfsd-http",
+        "gvfs-udisks2-volume-monitor", "goa-identity-service",
+        "gsd-usb-protection", "gsd-smartcard", "gsd-sharing",
+        "gsd-screensaver-proxy", "gsd-rfkill", "gsd-printer",
+        "gsd-disk-utility-notify", "evolution-source-registry",
+        "gnome-shell-calendar-server", "at-spi2-registryd",
+        "gnome-shell-calendar-server", "gsd-media-keys",
+        "gsd-power", "gsd-print-notifications",
+        // Additional system processes found linked to wrong app entries
+        "gcr-ssh-agent", "gdm-wayland-session", "gdm",
+        "mutter-x11-frames", "user-session-helper",
+        "tracker-miner-fs-3", "dconf-service", "VBCSCompiler",
+    };
+
+    /// <summary>
+    /// Prefix patterns for system/background processes that should never be tracked.
+    /// Checked after exact NonAppProcesses match.
+    /// </summary>
+    private static readonly string[] NonAppProcessPrefixes =
+    {
+        "gvfsd-", "gvfs-", "gsd-", "goa-", "evolution-",
+        "ibus-", "at-spi2-", "gnome-shell-", "tracker-",
+        "gdm", "mutter-",
     };
 
     // Cached known binary names from installed_applications and installed_packages (refreshed from SQLite)
@@ -604,7 +628,8 @@ public class LogCollectorService : BackgroundService
             return (true, null, null, null, false);
         }
 
-        if (NonAppProcesses.Contains(processName))
+        if (NonAppProcesses.Contains(processName) ||
+            NonAppProcessPrefixes.Any(p => processName.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
             return (false, null, null, null, false);
 
         // Headless browser subprocesses are filtered above (step 1) when we resolve

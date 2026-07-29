@@ -200,6 +200,7 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
             var lines = File.ReadAllLines(filePath);
             string? name = null, exec = null;
             string? categories = null, mimeType = null;
+            bool noDisplay = false, isApplication = false, typeFound = false;
             foreach (var line in lines)
             {
                 if (line.StartsWith("Name=", StringComparison.OrdinalIgnoreCase) && name == null)
@@ -210,7 +211,17 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                     categories = line["Categories=".Length..].Trim();
                 if (line.StartsWith("MimeType=", StringComparison.OrdinalIgnoreCase))
                     mimeType = line["MimeType=".Length..].Trim();
+                if (line.StartsWith("NoDisplay=", StringComparison.OrdinalIgnoreCase))
+                    noDisplay = line["NoDisplay=".Length..].Trim().Equals("true", StringComparison.OrdinalIgnoreCase);
+                if (line.StartsWith("Type=", StringComparison.OrdinalIgnoreCase) && !typeFound)
+                {
+                    typeFound = true;
+                    isApplication = line["Type=".Length..].Trim().Equals("Application", StringComparison.OrdinalIgnoreCase);
+                }
             }
+            // Skip hidden/system .desktop files: NoDisplay=true or Type != Application
+            if (noDisplay || (typeFound && !isApplication))
+                return;
             if (!string.IsNullOrWhiteSpace(name))
             {
                 var binaryName = ExtractBinaryFromExec(exec);

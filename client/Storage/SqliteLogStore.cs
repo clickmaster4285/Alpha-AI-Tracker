@@ -277,9 +277,10 @@ public class SqliteLogStore : ILogStore, IDisposable
         var cmd = _connection.CreateCommand();
         cmd.CommandText = @"
             SELECT * FROM installed_applications
-            WHERE binary_name LIKE '%' || $name || '%'
-               OR $name LIKE '%' || binary_name || '%'
-               OR app_name LIKE '%' || $name || '%'
+            WHERE binary_name != ''
+              AND (binary_name LIKE '%' || $name || '%'
+                   OR $name LIKE '%' || binary_name || '%')
+              OR app_name LIKE '%' || $name || '%'
             LIMIT 1";
         cmd.Parameters.AddWithValue("$name", processName);
         await using var reader = await cmd.ExecuteReaderAsync(ct);
