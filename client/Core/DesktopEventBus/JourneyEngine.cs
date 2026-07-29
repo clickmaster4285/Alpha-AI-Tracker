@@ -10,6 +10,7 @@ public class JourneyEngine
     private readonly ILogStore _store;
     private readonly ILogger<JourneyEngine> _logger;
     private readonly Dictionary<string, string> _journeyAppSessionCache = new();
+    private readonly SemaphoreSlim _gate = new(1, 1);
 
     private static readonly HashSet<string> FileManagerProcesses = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -31,6 +32,7 @@ public class JourneyEngine
 
     public async Task ProcessEventAsync(DesktopEvent evt, CancellationToken ct)
     {
+        await _gate.WaitAsync(ct);
         try
         {
             if (!JourneyActions.Contains(evt.Action)) return;
@@ -84,6 +86,10 @@ public class JourneyEngine
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Error in JourneyEngine.ProcessEventAsync");
+        }
+        finally
+        {
+            _gate.Release();
         }
     }
 

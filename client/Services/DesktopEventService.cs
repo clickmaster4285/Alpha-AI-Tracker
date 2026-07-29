@@ -114,7 +114,12 @@ public class DesktopEventService : BackgroundService
         }
     }
 
-    private async void OnNormalizedEvent(object? sender, DesktopEvent evt)
+    private void OnNormalizedEvent(object? sender, DesktopEvent evt)
+    {
+        _ = OnNormalizedEventAsync(evt);
+    }
+
+    private async Task OnNormalizedEventAsync(DesktopEvent evt)
     {
         try
         {
