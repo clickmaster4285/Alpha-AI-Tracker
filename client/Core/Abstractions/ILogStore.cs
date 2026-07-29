@@ -93,8 +93,17 @@ public interface ILogStore
     /// <summary>Find an open context child item by type+identifier under a session.</summary>
     Task<AppItem?> GetOpenAppItemAsync(string appSessionId, string itemType, string identifier, CancellationToken ct);
 
+    /// <summary>Find an open journey event by journey_id + object_type + action + current_path.</summary>
+    Task<AppItem?> GetOpenJourneyEventAsync(string journeyId, string objectType, string action, string currentPath, CancellationToken ct);
+
+    /// <summary>Get the next sequence number for a journey (MAX(sequence) + 1).</summary>
+    Task<int> GetNextSequenceAsync(string journeyId, CancellationToken ct);
+
     /// <summary>Update title/identifier on an existing open app item (URL/path change).</summary>
     Task UpdateAppItemContextAsync(string itemId, string title, string identifier, CancellationToken ct);
+
+    /// <summary>Begin a transaction for atomic multi-write operations.</summary>
+    Task<IAsyncDisposable> BeginTransactionAsync(CancellationToken ct);
 
     /// <summary>Whether any storage device rows exist for the latest hardware record.</summary>
     Task<bool> HasStorageDevicesAsync(CancellationToken ct);

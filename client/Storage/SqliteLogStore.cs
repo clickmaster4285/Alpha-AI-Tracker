@@ -621,6 +621,15 @@ public class SqliteLogStore : ILogStore, IDisposable
         var pOpened = cmd.Parameters.Add("$opened_at", SqliteType.Text);
         var pClosed = cmd.Parameters.Add("$closed_at", SqliteType.Text);
         var pProcId = cmd.Parameters.Add("$process_id", SqliteType.Integer);
+        var pObjType = cmd.Parameters.Add("$object_type", SqliteType.Text);
+        var pAction = cmd.Parameters.Add("$action", SqliteType.Text);
+        var pJourneyId = cmd.Parameters.Add("$journey_id", SqliteType.Text);
+        var pSequence = cmd.Parameters.Add("$sequence", SqliteType.Integer);
+        var pPrevPath = cmd.Parameters.Add("$previous_path", SqliteType.Text);
+        var pCurPath = cmd.Parameters.Add("$current_path", SqliteType.Text);
+        var pWinId = cmd.Parameters.Add("$window_id", SqliteType.Integer);
+        var pTabId = cmd.Parameters.Add("$tab_id", SqliteType.Integer);
+        var pMetaJson = cmd.Parameters.Add("$metadata_json", SqliteType.Text);
 
         await using var tx = await _connection.BeginTransactionAsync(ct);
         ((DbCommand)cmd).Transaction = tx;
@@ -637,6 +646,15 @@ public class SqliteLogStore : ILogStore, IDisposable
             pOpened.Value = e.OpenedAt.ToString("O");
             pClosed.Value = e.ClosedAt?.ToString("O") ?? (object)DBNull.Value;
             pProcId.Value = e.ProcessId.HasValue ? e.ProcessId.Value : DBNull.Value;
+            pObjType.Value = e.ObjectType;
+            pAction.Value = e.Action;
+            pJourneyId.Value = e.JourneyId;
+            pSequence.Value = e.Sequence;
+            pPrevPath.Value = e.PreviousPath;
+            pCurPath.Value = e.CurrentPath;
+            pWinId.Value = e.WindowId.HasValue ? e.WindowId.Value : DBNull.Value;
+            pTabId.Value = e.TabId.HasValue ? e.TabId.Value : DBNull.Value;
+            pMetaJson.Value = e.MetadataJson;
             await cmd.ExecuteNonQueryAsync(ct);
         }
         await tx.CommitAsync(ct);
@@ -760,6 +778,33 @@ public class SqliteLogStore : ILogStore, IDisposable
         cmd.Parameters.AddWithValue("$identifier", identifier);
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         return await reader.ReadAsync(ct) ? MapAppItemReader(reader) : null;
+    }
+
+    public async Task<AppItem?> GetOpenJourneyEventAsync(string journeyId, string objectType, string action, string currentPath, CancellationToken ct)
+    {
+        if (_connection == null) return null;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = @"
+            SELECT * FROM app_items
+            WHERE journey_id = $journey_id AND object_type = $object_type
+              AND action = $action AND current_path = $current_path AND closed_at IS NULL
+            LIMIT 1";
+        cmd.Parameters.AddWithValue("$journey_id", journeyId);
+        cmd.Parameters.AddWithValue("$object_type", objectType);
+        cmd.Parameters.AddWithValue("$action", action);
+        cmd.Parameters.AddWithValue("$current_path", currentPath);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        return await reader.ReadAsync(ct) ? MapAppItemReader(reader) : null;
+    }
+
+    public async Task<int> GetNextSequenceAsync(string journeyId, CancellationToken ct)
+    {
+        if (_connection == null) return 1;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT COALESCE(MAX(sequence), 0) + 1 FROM app_items WHERE journey_id = $journey_id";
+        cmd.Parameters.AddWithValue("$journey_id", journeyId);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result is long l ? (int)l : 1;
     }
 
     public async Task UpdateAppItemContextAsync(string itemId, string title, string identifier, CancellationToken ct)
@@ -1134,7 +1179,23 @@ public class SqliteLogStore : ILogStore, IDisposable
             IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
             SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
             CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),
+            ObjectType = r.IsDBNull(r.GetOrdinal("object_type")) ? string.Empty : r.GetString(r.GetOrdinal("object_type")),
+            Action = r.IsDBNull(r.GetOrdinal("action")) ? string.Empty : r.GetString(r.GetOrdinal("action")),
+            JourneyId = r.IsDBNull(r.GetOrdinal("journey_id")) ? string.Empty : r.GetString(r.GetOrdinal("journey_id")),
+            Sequence = r.GetInt32(r.GetOrdinal("sequence")),
+            PreviousPath = r.IsDBNull(r.GetOrdinal("previous_path")) ? string.Empty : r.GetString(r.GetOrdinal("previous_path")),
+            CurrentPath = r.IsDBNull(r.GetOrdinal("current_path")) ? string.Empty : r.GetString(r.GetOrdinal("current_path")),
+            WindowId = TryGetInt(r, "window_id"),
+            TabId = TryGetInt(r, "tab_id"),
+            MetadataJson = r.IsDBNull(r.GetOrdinal("metadata_json")) ? "{}" : r.GetString(r.GetOrdinal("metadata_json")),
         };
+    }
+
+    public async Task<IAsyncDisposable> BeginTransactionAsync(CancellationToken ct)
+    {
+        if (_connection == null)
+            throw new InvalidOperationException("Database not initialized");
+        return await _connection.BeginTransactionAsync(ct);
     }
 
     private static int? TryGetInt(SqliteDataReader r, string column)

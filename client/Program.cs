@@ -6,7 +6,9 @@ using client;
 using client.Configuration;
 using client.Core;
 using client.Core.Abstractions;
+using client.Core.DesktopEventBus;
 using client.Services;
+using client.Services.Watchers;
 using client.Storage;
 using client.ViewModels;
 
@@ -124,6 +126,14 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<LogCollectorServic
 // Native Messaging (browser extension bridge — Unix socket for tab/URL capture)
 builder.Services.AddSingleton<BrowserExtensionService>();
 builder.Services.AddHostedService<NativeMessageService>();
+
+// Desktop Event Bus (File Explorer tracking via AT-SPI + FileSystemWatcher)
+builder.Services.AddSingleton<EventCoordinator>();
+builder.Services.AddSingleton<JourneyEngine>();
+builder.Services.AddSingleton<ATSPIEventWatcher>();
+builder.Services.AddSingleton<FileSystemEventWatcher>();
+builder.Services.AddSingleton<RecentFilesWatcher>();
+builder.Services.AddHostedService<DesktopEventService>();
 
 // Main ViewModel
 builder.Services.AddTransient<MainViewModel>();

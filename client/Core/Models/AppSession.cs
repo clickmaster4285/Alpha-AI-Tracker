@@ -58,4 +58,25 @@ public class AppItem
 
     /// <summary>OS process ID for process/runtime items nested under a terminal</summary>
     public int? ProcessId { get; set; }
+
+    // ── Journey Event Fields (coexist with item_type) ──
+
+    /// <summary>Generic object type: "Folder", "File", "Window", "Tab", "Page", etc.</summary>
+    public string ObjectType { get; set; } = string.Empty;
+    /// <summary>Action performed: "navigate", "open", "close", "create", "delete", "rename", etc.</summary>
+    public string Action { get; set; } = string.Empty;
+    /// <summary>Groups events into a journey (one per window/tab session)</summary>
+    public string JourneyId { get; set; } = string.Empty;
+    /// <summary>Deterministic ordering within a journey</summary>
+    public int Sequence { get; set; }
+    /// <summary>Previous location (for navigation reconstruction)</summary>
+    public string PreviousPath { get; set; } = string.Empty;
+    /// <summary>Current location</summary>
+    public string CurrentPath { get; set; } = string.Empty;
+    /// <summary>OS window identifier</summary>
+    public int? WindowId { get; set; }
+    /// <summary>Internal tab identifier within a window</summary>
+    public int? TabId { get; set; }
+    /// <summary>Flexible JSON blob for extensible metadata</summary>
+    public string MetadataJson { get; set; } = "{}";
 }

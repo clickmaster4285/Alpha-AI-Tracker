@@ -170,7 +170,16 @@ internal static class DatabaseSchema
             process_id        INTEGER,
             is_synced         INTEGER NOT NULL DEFAULT 0,
             synced_at         TEXT,
-            created_at        TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+            created_at        TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')),
+            object_type       TEXT NOT NULL DEFAULT '',
+            action            TEXT NOT NULL DEFAULT '',
+            journey_id        TEXT NOT NULL DEFAULT '',
+            sequence          INTEGER NOT NULL DEFAULT 0,
+            previous_path     TEXT NOT NULL DEFAULT '',
+            current_path      TEXT NOT NULL DEFAULT '',
+            window_id         INTEGER,
+            tab_id            INTEGER,
+            metadata_json     TEXT NOT NULL DEFAULT '{}'
         );
 
         CREATE INDEX IF NOT EXISTS idx_app_items_unsent
@@ -184,6 +193,12 @@ internal static class DatabaseSchema
 
         CREATE INDEX IF NOT EXISTS idx_app_items_context
             ON app_items(app_session_id, item_type, identifier);
+
+        CREATE INDEX IF NOT EXISTS idx_app_items_journey
+            ON app_items(journey_id, sequence);
+
+        CREATE INDEX IF NOT EXISTS idx_app_items_object_action
+            ON app_items(object_type, action);
 
         -- APP STATUS & PERMISSIONS
 
@@ -230,6 +245,15 @@ internal static class DatabaseSchema
         ALTER TABLE installed_applications ADD COLUMN is_browser INTEGER NOT NULL DEFAULT 0;
         ALTER TABLE app_items ADD COLUMN url TEXT NOT NULL DEFAULT '';
         ALTER TABLE app_items ADD COLUMN domain TEXT NOT NULL DEFAULT '';
+        ALTER TABLE app_items ADD COLUMN object_type TEXT NOT NULL DEFAULT '';
+        ALTER TABLE app_items ADD COLUMN action TEXT NOT NULL DEFAULT '';
+        ALTER TABLE app_items ADD COLUMN journey_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE app_items ADD COLUMN sequence INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE app_items ADD COLUMN previous_path TEXT NOT NULL DEFAULT '';
+        ALTER TABLE app_items ADD COLUMN current_path TEXT NOT NULL DEFAULT '';
+        ALTER TABLE app_items ADD COLUMN window_id INTEGER;
+        ALTER TABLE app_items ADD COLUMN tab_id INTEGER;
+        ALTER TABLE app_items ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';
     ";
 
     // PHASE 1: INSERT STATEMENTS
@@ -363,17 +387,27 @@ internal static class DatabaseSchema
     internal const string InsertAppItemSql = @"
         INSERT INTO app_items
             (id, app_session_id, parent_item_id, item_type, title, identifier, url, domain,
-             opened_at, closed_at, process_id)
+             opened_at, closed_at, process_id,
+             object_type, action, journey_id, sequence, previous_path, current_path,
+             window_id, tab_id, metadata_json)
         VALUES
             ($id, $app_session_id, $parent_item_id, $item_type, $title, $identifier, $url, $domain,
-             $opened_at, $closed_at, $process_id)
+             $opened_at, $closed_at, $process_id,
+             $object_type, $action, $journey_id, $sequence, $previous_path, $current_path,
+             $window_id, $tab_id, $metadata_json)
         ON CONFLICT(id) DO UPDATE SET
             title = excluded.title,
             identifier = excluded.identifier,
             url = COALESCE(NULLIF(excluded.url, ''), app_items.url),
             domain = COALESCE(NULLIF(excluded.domain, ''), app_items.domain),
             parent_item_id = COALESCE(excluded.parent_item_id, app_items.parent_item_id),
-            closed_at = COALESCE(excluded.closed_at, app_items.closed_at)
+            closed_at = COALESCE(excluded.closed_at, app_items.closed_at),
+            object_type = COALESCE(NULLIF(excluded.object_type, ''), app_items.object_type),
+            action = COALESCE(NULLIF(excluded.action, ''), app_items.action),
+            sequence = excluded.sequence,
+            previous_path = COALESCE(NULLIF(excluded.previous_path, ''), app_items.previous_path),
+            current_path = COALESCE(NULLIF(excluded.current_path, ''), app_items.current_path),
+            metadata_json = excluded.metadata_json
     ";
 
     internal const string MarkAppItemsSentSql = @"
