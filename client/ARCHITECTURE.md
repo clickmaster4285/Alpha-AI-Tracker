@@ -3,6 +3,7 @@
 > **Last audited:** 2026-07-29 (GNOME daemon contamination fix — blocklist, prefix matching, fuzzy SQL)  
 > **Changelog:** 
 > - 2026-07-29: **Fixed GNOME daemon contamination via Xwayland empty `binary_name`** — Xwayland `.desktop` file has no `Exec=` line, so `InstalledAppDetector` stored it with `binary_name=""`. The fuzzy-match SQL (`$name LIKE '%' || binary_name || '%'`) became `$name LIKE '%%'` — matching **every** process. Fixed by: (1) `AND binary_name != ''` in fuzzy SQL; (2) `NonAppProcesses` expanded with 16 GNOME daemons + added `NonAppProcessPrefixes` array (`gvfsd-`, `gsd-`, `goa-`, `evolution-`, `ibus-`, `at-spi2-`, `gnome-shell-`, `tracker-`, `gdm`, `mutter-`); (3) `KernelNamePrefixes` in `ProcessFilter.cs` for first-stage filter; (4) `NoDisplay=true` + `Type!=Application` gate in `AddAppFromDesktopFile`. DB cleaned: orphaned sessions closed, Xwayland entry patched with `binary_name='Xwayland'`.
+> - 2026-07-29: **Added File Explorer journey tracking** — Full event-driven desktop event bus for file manager operations (Nautilus, Dolphin, Thunar, Nemo, etc.). Three watchers: `ATSPIEventWatcher` (Tmds.DBus.Protocol → AT-SPI focus/window events + `/proc/cwd`), `FileSystemEventWatcher` (FileSystemWatcher on 7 user directories), `RecentFilesWatcher` (XBEL monitor at `~/.local/share/recently-used.xbel`). `EventCoordinator` deduplicates (3s), correlates (500ms), normalizes raw→business events. `JourneyEngine` resolves `AppSession`, creates `AppItem` rows with 9 journey fields (`object_type`, `action`, `journey_id`, `sequence`, `previous_path`, `current_path`, `window_id`, `tab_id`, `metadata_json`). `IObservableEventSource` interface for all watchers. Coexistence: `item_type` preserved; browser pipeline untouched. NuGet: `Tmds.DBus.Protocol` v0.94.2.
 > - 2026-07-28: **Added browser extension journey tracking** — Chrome MV3 extension + NativeMessageService + native-host.py pipeline captures real-time browser navigation (URLs, tabs, titles). Stored as `browser_tab`/`browser_navigation` in `app_items` with `url`/`domain` fields.
 > - 2026-07-28: **Added `NativeMessageService`** — BackgroundService listening on Unix socket for browser events. `_tabSessionCache` maps browser:tabId→AppSession. Handles tab create/update/activate/close events.
 > - 2026-07-28: **Added `BrowserExtensionService`** — Browser detection + two-strategy extension install (--load-extension → profile injection). Async-safe. Extension detection via process monitoring.
@@ -24,7 +25,7 @@
 > - 2026-07-27: **Broadened `AutoDetectInstalledApp`** — now accepts `/home/*` and `/media/*` paths as valid install locations (covers project-local compiled binaries like `./bin/alpha-ai-server`).
 > - 2026-07-27: **Fixed file manager path resolution** — `ParseFileManagerContext` now resolves folder display names to absolute paths by searching `~/`, `~/Documents`, `~/Desktop`, `/media/<user>/`, etc.
 > - 2026-07-27: **Fixed `SessionHierarchyResolver`** — `ResolveParent` now walks through build tools and runtime packages as intermediate PPID steps; `ShouldLinkTo` now accepts build tools as children of IDEs and terminals.
-> **Service completion (honest):** ~74%
+> **Service completion (honest):** ~80%
 
 ---
 
@@ -61,6 +62,7 @@
 | **SQLite Bundle** | SQLitePCLRaw.bundle_e_sqlite3 | 2.1.12 |
 | **DI/Hosting** | Microsoft.Extensions.Hosting | 10.0.10 |
 | **HTTP Client** | System.Net.Http (built-in) | — |
+| **D-Bus** | Tmds.DBus.Protocol | 0.94.2 |
 
 ### Notable Omissions
 
@@ -94,9 +96,17 @@ client/
 │   │   ├── IInstalledAppDetector.cs    # GUI/desktop app detection + permission status
 │   │   ├── IPackageDetector.cs         # CLI tool/runtime/library detection from package managers
 │   │   └── IShellCommandCollector.cs   # Shell command collection + accessibility status
+│   ├── DesktopEventBus/
+│   │   ├── IObservableEventSource.cs   # Common interface for all watchers (atspi, filesystem, recentfiles)
+│   │   ├── RawDesktopEvent.cs          # Raw OS-level event from watchers
+│   │   ├── DesktopEvent.cs             # Normalized business-level event (after coordinator processing)
+│   │   ├── DesktopEventValidator.cs    # Static validation: file manager detection, path validity, process filtering
+│   │   ├── EventCoordinator.cs         # Subscribes watchers → dedup (3s) + correlate (500ms) + normalize raw→business events
+│   │   ├── JourneyEngine.cs            # Receives DesktopEvent → resolve AppSession → create AppItem rows with journey fields
+│   │   └── JourneyRecord.cs            # In-memory journey state (per window/tab session)
 │   ├── Models/
 │   │   ├── ActivityLog.cs              # Intermediate collection DTO (used by IActivityCollector, not persisted)
-│   │   ├── AppSession.cs               # App session + BrowserContext + FileExplorerContext + UrlRecord + UrlVisit
+│   │   ├── AppSession.cs               # App session + BrowserContext + FileExplorerContext + UrlRecord + UrlVisit + 9 journey fields
 │   │   ├── DeviceHardwareInfo.cs       # Phase 1: DeviceHardwareInfo + InstalledApplication + InstalledPackage + NetworkInfo + SessionEvent
 │   │   ├── EmployeeInfo.cs             # Employee login info (persisted in SQLite)
 │   │   ├── SessionInfo.cs              # Static session ID (generated once per app launch)
@@ -126,7 +136,12 @@ client/
 │   ├── NativeMessageService.cs          # BackgroundService: Unix socket listener for browser navigation events (Native Messaging bridge)
 │   ├── BrowserExtensionService.cs       # Browser detection + extension install (two-strategy: --load-extension / profile injection)
 │   ├── BackgroundGuardService.cs        # Watchdog: re-installs auto-start/systemd if removed (60s check)
-│   └── AutoStartService.cs              # Platform-specific auto-start: Run key, .desktop, launchd plist
+│   ├── AutoStartService.cs              # Platform-specific auto-start: Run key, .desktop, launchd plist
+│   ├── DesktopEventService.cs           # BackgroundService: orchestrator — starts watchers, wires EventCoordinator → JourneyEngine
+│   └── Watchers/
+│       ├── ATSPIEventWatcher.cs         # Linux AT-SPI via Tmds.DBus.Protocol — focus/window events + /proc/cwd for file manager paths
+│       ├── FileSystemEventWatcher.cs    # FileSystemWatcher on 7 user directories — create/delete/rename/modify enrichment
+│       └── RecentFilesWatcher.cs        # XBEL monitor at ~/.local/share/recently-used.xbel — recent-file-opens evidence
 │
 ├── Storage/
 │   ├── DatabaseSchema.cs                # Raw SQL for all table creation (9 new tables + shell_commands + employee_info + app_status + permission_status)
@@ -192,10 +207,10 @@ client/
 Microsoft.Extensions.Hosting (`Host.CreateApplicationBuilder`). All services registered in `Program.cs`:
 
 | Lifetime | Services |
-|---|---|
-| **Singleton** | `AppConfig`, `ILogStore`, `HttpClient`, `IInstalledAppDetector`, `IActivityCollector`, `IShellCommandCollector`, `AutoStartService`, `LogCollectorService` |
+|---|---|---|
+| **Singleton** | `AppConfig`, `ILogStore`, `HttpClient`, `IInstalledAppDetector`, `IActivityCollector`, `AutoStartService`, `LogCollectorService`, `EventCoordinator`, `JourneyEngine`, `ATSPIEventWatcher`, `FileSystemEventWatcher`, `RecentFilesWatcher` |
 | **Transient** | `MainViewModel` |
-| **Hosted** | `BackgroundGuardService`, `LogCollectorService` |
+| **Hosted** | `BackgroundGuardService`, `LogCollectorService`, `NativeMessageService`, `DesktopEventService` |
 
 ViewModels are resolved from DI when the window is created (`App.axaml.cs` uses `ServiceProvider.GetRequiredService<MainViewModel>()`).
 
@@ -494,5 +509,5 @@ CREATE TABLE IF NOT EXISTS employee_info (
 9. ~~**Add process ancestry tracking** — persist parent PID chain from `ParentProcessResolver` into `AppItem`~~ ✅ DONE
 10. **Improve Chrome subprocess filtering** — use `/proc/<pid>/cmdline` check for `--type=` flag to reliably filter non-browser chrome processes
 11. **Browser extension for full URL capture** — window-title parsing is best-effort; MV3 extension + native messaging for production-grade URLs. Currently only page title and a heuristic `title:X` identifier are stored, not actual URLs.
-12. **AT-SPI for Wayland window enumeration** — currently only the foreground window is captured via AT-SPI. All-windows enumeration via AT-SPI Registry would fix background Chrome tabs, Nautilus paths, etc.
-13. **File manager via `xdg-open` hook or inotify** — watch `~/.local/share/recently-used.xbel` for recently opened files/folders as a supplement to window title parsing.
+12. ~~**AT-SPI for Wayland window enumeration** — currently only the foreground window is captured via AT-SPI. All-windows enumeration via AT-SPI Registry would fix background Chrome tabs, Nautilus paths, etc.~~ ✅ DONE (File Explorer journey tracking: 3 watchers + EventCoordinator + JourneyEngine)
+13. ~~**File manager via `xdg-open` hook or inotify** — watch `~/.local/share/recently-used.xbel` for recently opened files/folders as a supplement to window title parsing.~~ ✅ DONE (RecentFilesWatcher + FileSystemEventWatcher + ATSPIEventWatcher)
