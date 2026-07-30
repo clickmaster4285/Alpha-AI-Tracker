@@ -1,5 +1,0 @@
-/media/devteam/NewVolume/Alpha-AI-Tracker/client/bin/Debug/net10.0/dotnetrunlog.txt
-this is my all logs saved of dotnet run 
-
-
-currnelty i built the plan on claude https://claude.ai/chat/75f8c34c-298a-4d8a-bcce-9cc5bce247ba

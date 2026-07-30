@@ -1,0 +1,511 @@
+# Alpha AI Tracker — Client Fix Analysis & Plan
+## Generated: 2026-07-30
+
+═══════════════════════════════════════════════════════════
+ TABLE OF CONTENTS
+═══════════════════════════════════════════════════════════
+ 1. Fix 1 — SQLite Transaction/Connection Mismatch
+ 2. Fix 2 — Electron/Chromium Subprocess Filtering  
+ 3. Fix 3 — Waydroid FileSystemWatcher Log Flood
+ 4. Implementation Priority & Plan
+
+═══════════════════════════════════════════════════════════
+ FIX 1 — SQLite Connection Concurrency (REAL BUG)
+═══════════════════════════════════════════════════════════
+
+### Claim Made
+"Is there ANY synchronization primitive guarding access to _connection
+ across concurrent callers? Can StoreInstalledAppAsync run at the same
+ wall-clock moment as another method calling _connection.BeginTransactionAsync?
+ If yes to #2 and no to #1, that's the bug."
+
+### Reality (After Full Concurrency Audit)
+✅ CORRECT — THIS IS A GENUINE CONCURRENCY BUG.
+
+### 1. NO SYNCHRONIZATION EXISTS
+
+SqliteLogStore has ZERO synchronization on `_connection`:
+- No `lock` statement
+- No `SemaphoreSlim`
+- No `ReaderWriterLock`
+- No `Monitor.Enter/Exit`
+- Nothing. `_connection` is a raw, unprotected `SqliteConnection?` field.
+
+### 2. ILogStore IS A SINGLETON — Shared by ALL Callers
+
+Program.cs line 71:
+```csharp
+builder.Services.AddSingleton<ILogStore>(sp => { ... return new SqliteLogStore(...); });
+```
+
+Every service gets the SAME `SqliteLogStore` instance with the SAME
+single `_connection`. This connection is SHARED across all concurrent
+callers with no mutual exclusion.
+
+### 3. CONCURRENT CALLER ANALYSIS
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Caller                │ Type              │ ILogStore Methods Called       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ LogCollectorService  │ Hosted Background │ StoreAppSessionsAsync       ⚡ │
+│                      │ Service (30s loop)│ StoreAppItemsAsync          ⚡ │
+│                      │                   │ StoreInstalledAppAsync        │
+│                      │                   │ StoreInstalledPackageAsync    │
+│                      │                   │ GetOpenSessionRecordsAsync    │
+│                      │                   │ SetStatusAsync                │
+│                      │                   │ MarkXxxSentAsync          ⚡  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ NativeMessageService │ Hosted Background │ StoreAppSessionsAsync       ⚡ │
+│                      │ Service (socket   │ StoreAppItemsAsync          ⚡ │
+│                      │ listener, fire-   │ CloseAppItemsBySessionIdsAsync│
+│                      │ and-forget per    │ GetInstalledAppByBinaryName   │
+│                      │ connection)       │ FuzzyAsync                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ DesktopEventService→ │ Hosted Background │ StoreAppSessionsAsync       ⚡ │
+│ JourneyEngine        │ Service (event-   │ StoreAppItemsAsync          ⚡ │
+│                      │ driven, any time) │ CloseAppItemsBySessionIdsAsync│
+│                      │                   │ GetOpenJourneyEventAsync      │
+│                      │                   │ GetOpenAppItemAsync           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ MainViewModel         │ UI Thread        │ SetStatusAsync                │
+│                       │ (user-driven)    │ SaveEmployeeInfoAsync         │
+│                       │                   │ ClearEmployeeInfoAsync        │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+   ⚡ = uses _connection.BeginTransactionAsync (holds open transaction)
+
+### 4. CONCRETE RACE CONDITION SCENARIO
+
+Scenario A — Non-transacted write during transacted write:
+
+  T=0s:  NativeMessageService receives browser tab event
+         → StoreAppSessionsAsync(session, ct)
+         → _connection.BeginTransactionAsync()         ← Transaction opened
+         → executing INSERT...
+
+  T=0.1s: LogCollectorService collection cycle (30s timer fires)
+          → ResolveAppInfo calls StoreInstalledAppAsync(...)
+          → _connection.CreateCommand().ExecuteNonQueryAsync()  ← SAME connection
+          → SQLITE_BUSY or undefined behavior on shared connection
+
+Scenario B — Two transactions simultaneously:
+
+  T=0s:  LogCollectorService's SyncUnsentData()
+         → MarkDeviceHardwareInfoSentAsync(...)
+         → _connection.BeginTransactionAsync()          ← Transaction T1
+
+  T=0.05s: JourneyEngine receives file system event
+           → StoreAppItemsAsync(...)
+           → _connection.BeginTransactionAsync()        ← Transaction T2 on SAME conn
+           → SQLite error: only one transaction allowed per connection
+
+SQLite in `Cache=Shared` mode (which this uses) does NOT provide
+built-in concurrency safety for multiple writers on the same connection.
+`Microsoft.Data.Sqlite` throws `SqliteException (SQLITE_BUSY)` or
+worse, silently corrupts data, when two writers contend on one connection.
+
+### PROPOSED FIX — SemaphoreSlim(1,1) on _connection
+
+Add a `SemaphoreSlim` gate that wraps ALL methods accessing `_connection`:
+
+```csharp
+private readonly SemaphoreSlim _connectionGate = new(1, 1);
+
+// Every public method gates its body:
+public async Task StoreInstalledAppAsync(InstalledApplication entry, CancellationToken ct)
+{
+    await _connectionGate.WaitAsync(ct);
+    try
+    {
+        // ... existing code using _connection ...
+    }
+    finally
+    {
+        _connectionGate.Release();
+    }
+}
+```
+
+This ensures that:
+- Only ONE logical operation touches the connection at a time
+- Transacted writes are isolated from non-transacted writes
+- All 4 concurrent callers serialize through the same gate
+- No interface/abstraction leak — the gate is entirely inside SqliteLogStore
+
+Alternative approach: Give every StoreInstalledAppAsync a transaction too
+so all write paths are symmetric. But that leaves the core problem of
+TWO callers both opening transactions simultaneously on the same
+connection. SemaphoreSlim is the right answer.
+
+═══════════════════════════════════════════════════════════
+ FIX 2 — Electron/Chromium Subprocess Filtering
+═══════════════════════════════════════════════════════════
+
+### Claim Made
+"The existing Chrome subprocess filtering gap needs to be generalized.
+ Any process with --type= flags should never be tracked. Cross-platform
+ check. Clean up existing garbage rows."
+
+### Reality (After Reading Full Source)
+✅ MOSTLY ALREADY IMPLEMENTED — but with gaps.
+
+### What Already Exists
+
+1. LogCollectorService.cs (line 594-599):
+   Checks ORIGINAL process name for `--type=` AND `--contentproc` flags
+   BEFORE stripping cmdline arguments:
+   ```csharp
+   var isHeadlessSubProcess = 
+       processName.Contains("--type=", StringComparison.OrdinalIgnoreCase) ||
+       processName.Contains("--contentproc", StringComparison.OrdinalIgnoreCase) ||
+       processName.Contains("-contentproc", StringComparison.OrdinalIgnoreCase);
+   ```
+
+2. ResolveAppInfoInner (line 615-622):
+   Returns (false, null, null, null, false) at the very top if
+   `isHeadlessSubProcess && string.IsNullOrWhiteSpace(windowTitle)`:
+   ```csharp
+   if (isHeadlessSubProcess && string.IsNullOrWhiteSpace(windowTitle))
+       return (false, null, null, null, false);
+   ```
+
+3. Linux ProcessCollector (line 57-62, 596-621):
+   Has `IsChromeSubprocess(pid, name)` method that reads
+   `/proc/{pid}/cmdline` for `--type=` flags — the most reliable
+   approach on Linux because /proc/cmdline contains the full command:
+   ```csharp
+   private static bool IsChromeSubprocess(int pid, string processName)
+   {
+       var cmdline = File.ReadAllText($"/proc/{pid}/cmdline")
+                         .Replace('\0', ' ');
+       if (cmdline.Contains("--type=", StringComparison.OrdinalIgnoreCase))
+           return true;
+       ...
+   }
+   ```
+   This filter runs in ProcessCollector BEFORE the session resolution loop.
+
+### Remaining Gaps
+
+🔴 GAP A — IsChromeSubprocess is Linux-only:
+   The /proc/{pid}/cmdline check only runs on Linux. Windows and macOS
+   collectors do NOT check for `--type=` at the process collection level.
+   They rely solely on the LogCollectorService's `isHeadlessSubProcess`
+   check, which only works if the full command line appears in the
+   process name (which it often doesn't — GetProcessesByName returns
+   just "chrome" without args).
+
+🔴 GAP B — Name is misleading:
+   `IsChromeSubprocess` actually checks for `--type=` which is a generic
+   Chromium/Electron convention used by Chrome, Edge, Brave, Opera,
+   VSCode, Slack, Discord, Electron apps, etc. The name should be
+   `IsHeadlessSubprocess` or `IsChromiumSubprocess`.
+
+🟡 GAP C — No cleanup for existing garbage rows:
+   No startup migration to clean existing `app_sessions` rows where
+   `process_name LIKE '%--type=%'` or `LENGTH(process_name) > 200`.
+
+### Proposed Fix for Fix 2
+
+1. Rename `IsChromeSubprocess` → `IsHeadlessSubprocess` in Linux/ProcessCollector.cs
+2. Add the same cmdline check to Windows/ProcessCollector.cs (use WMI Win32_Process.CommandLine)
+3. Add the same cmdline check to macOS/ProcessCollector.cs (use `ps -o command= -p <pid>`)
+4. Add a startup cleanup: delete or mark-as-synced existing app_sessions rows
+   where process_name is garbage (contains `--type=`, or length > 200)
+5. Add a static readonly set `ChromiumSubprocessFlags` to make the check
+   extensible: --type=renderer, --type=gpu-process, --type=utility,
+   --type=zygote, --type=broker, --contentproc, -contentproc
+
+═══════════════════════════════════════════════════════════
+ FIX 3 — Waydroid FileSystemWatcher Log Flood
+═══════════════════════════════════════════════════════════
+
+### Claim Made
+"Add known VM/sandbox/container data directories to an exclusion list.
+ Do NOT recursively enumerate into a directory tree if the top-level
+ directory itself throws UnauthorizedAccessException. Keep ONE summary
+ warning per excluded root instead of one line per subfolder."
+
+### Reality (After Reading Full Source)
+✅ THIS IS A REAL BUG — and a significant one.
+
+### The Problem
+
+FileSystemEventWatcher.cs watches 7 directories:
+```csharp
+private static readonly string[] WatchDirectories =
+{
+    Environment.GetFolderPath(SpecialFolder.Desktop),
+    Environment.GetFolderPath(SpecialFolder.MyDocuments),
+    Environment.GetFolderPath(SpecialFolder.MyMusic),
+    Environment.GetFolderPath(SpecialFolder.MyPictures),
+    Environment.GetFolderPath(SpecialFolder.MyVideos),
+    Path.Combine(UserProfile, "Downloads"),
+    Environment.GetFolderPath(SpecialFolder.UserProfile),  // ← WATCHES ~/ RECURSIVELY
+};
+```
+
+The 7th entry watches `~/` WITH `IncludeSubdirectories = true`. This means:
+- Every creation/deletion in `~/.local/share/waydroid/data/` fires events
+- Every flatpak sandbox `~/.var/app/` change fires events
+- Every `~/snap/` change fires events
+- Every `~/.cache/` file change fires events
+
+On a system with Waydroid, Flatpak, or Snap installed, this generates
+THOUSANDS of events per minute — causing:
+- CPU spike from event handler invocations
+- SQLite pressure from JourneyEngine processing
+- Log noise from debounced events
+
+### Current Error Handling
+- `watcher.Error +=` only logs the error — doesn't stop the flood
+- `catch (Exception ex)` at watcher STARTUP doesn't help — the watcher
+  starts fine, it's the event flood that's the problem
+- No exclusion list exists
+
+### Proposed Fix for Fix 3
+
+1. Add a static exclusion list of path prefixes:
+   ```csharp
+   private static readonly string[] ExcludedPathPrefixes =
+   {
+       ".local/share/waydroid/",
+       ".var/app/",
+       "snap/",
+       ".cache/",
+       ".local/share/Trash/",
+       ".local/share/containers/",
+       ".local/share/Steam/",
+       "AppData/Local/Temp/",     // Windows
+       "Library/Caches/",         // macOS
+   };
+   ```
+
+2. Add checked-in-path filter in `HandleFileEvent`:
+   ```csharp
+   private static bool IsExcludedPath(string fullPath)
+   {
+       if (string.IsNullOrEmpty(fullPath)) return true;
+       foreach (var prefix in ExcludedPathPrefixes)
+       {
+           if (fullPath.Contains(prefix, StringComparison.OrdinalIgnoreCase))
+               return true;
+       }
+       return false;
+   }
+   ```
+   Return early from `HandleFileEvent` if `IsExcludedPath(e.FullPath)`.
+
+3. Add a static flag `_loggedExclusions` to log each excluded root
+   ONLY ONCE per startup, not once per event.
+
+4. ⚠️ Consider removing `UserProfile` from WatchDirectories entirely,
+   or at minimum adding `.`-prefixed hidden directories to the exclusion
+   list (dotfiles are almost never user file operations).
+
+═══════════════════════════════════════════════════════════
+ FIX 4 — Remove Hardcoded Browser Deduction (Scalability)
+═══════════════════════════════════════════════════════════
+
+### Claim Made
+"Remove hardcoded browser deduction from ActivityContextParser.cs.
+ Use an alternative, best, and scalable approach."
+
+### Reality (After Reading Full Source)
+✅ CORRECT — This is a real scalability/maintenance issue.
+
+### The Problem
+
+ActivityContextParser.cs has a hardcoded `BrowserSuffixes` array:
+```csharp
+private static readonly string[] BrowserSuffixes =
+{
+    " - Google Chrome", " — Google Chrome", " - Chromium", " - Mozilla Firefox",
+    " — Mozilla Firefox", " - Firefox", " - Microsoft\u200b Edge", " - Microsoft Edge",
+    " - Brave", " - Opera", " - Vivaldi", " - Safari",
+};
+```
+
+Issues:
+1. **Every new browser requires a recompile + redeploy**
+   - Arc Browser, Yandex, Floorp, Wavebox, Sidekick, Colibri, etc. all missing
+2. **Locale brittleness** — The `" - "` vs `" — "` (em-dash) distinction is
+   fragile. Different locales format titles differently.
+3. **Hidden Unicode bug** — `"Microsoft\u200b Edge"` contains a zero-width
+   space (U+200B) between "Microsoft" and "Edge". This is a copy-paste
+   artifact that silently fails to match real window titles.
+4. **Duplicated data** — The browser's `app_name` already exists in the
+   `installed_applications` table (populated dynamically by `InstalledApp-
+   Detector`). The hardcoded list duplicates what the DB already knows.
+
+### The Good News — Dynamic Infrastructure Already Exists
+
+The dynamic browser detection pipeline is already in place:
+```
+.desktop file → Categories=WebBrowser or MimeType=http/https
+                      ↓
+          InstalledAppDetector.AddAppFromDesktopFile()
+                      ↓
+       installed_applications.is_browser = true
+       installed_applications.app_name = "Google Chrome"
+                      ↓
+          ResolveAppInfo() → isBrowser: true
+                      ↓
+       ResolveRootItemType() → "browser_tab"
+                      ↓
+       ActivityContextParser.Parse(rootItemType="browser_tab")
+                      ↓
+       ParseBrowserContext() → strips BrowserSuffixes ✗
+```
+
+The only missing piece: `ParseBrowserContext` doesn't receive the
+browser's `app_name` from the DB. It relies on the hardcoded list.
+
+### Proposed Fix — Dynamic Suffix from DB App Name
+
+1. **Add `appDisplayName` parameter to `Parse()`:**
+   ```csharp
+   public static ParsedActivityContext Parse(
+       string processName,
+       string? windowTitle,
+       string rootItemType,
+       string? chromeProfile = null,
+       string? appDisplayName = null)  // ← NEW
+   ```
+
+2. **Pass it to `ParseBrowserContext`:**
+   ```csharp
+   if (rootItemType == "browser_tab")
+       return ParseBrowserContext(context, title, chromeProfile, appDisplayName);
+   ```
+
+3. **In `ParseBrowserContext`, build the suffix dynamically:**
+   ```csharp
+   private static ParsedActivityContext ParseBrowserContext(
+       ParsedActivityContext context, string title,
+       string? chromeProfile, string? appDisplayName)
+   {
+       string? pageTitle = null;
+       
+       // Priority 1: Dynamic suffix from app's actual display name
+       if (!string.IsNullOrEmpty(appDisplayName))
+       {
+           pageTitle = StripSuffix(title, new[]
+           {
+               $" - {appDisplayName}",
+               $" — {appDisplayName}",
+           });
+       }
+       
+       // Priority 2: Generic fallback regex for unknown browsers
+       if (pageTitle == null || pageTitle == title)
+       {
+           // Strip common patterns: " - Word", " — Word" at end of title
+           pageTitle = StripGenericBrowserSuffix(title);
+       }
+       
+       // If nothing worked, use title as-is
+       if (string.IsNullOrEmpty(pageTitle)) pageTitle = title;
+       // ... rest of method ...
+   }
+   ```
+
+4. **Add a small generic fallback regex:**
+   ```csharp
+   private static string StripGenericBrowserSuffix(string title)
+   {
+       // Matches " - AnyWord", " — AnyWord", " - Any Browser Name" at the end
+       var match = BrowserSuffixRegex().Match(title);
+       if (match.Success && match.Groups[1].Value.Length < title.Length)
+           return match.Groups[1].Value.Trim();
+       return title;
+   }
+   
+   [GeneratedRegex(@"^(.+?)\s+[-—]\s+[A-Z][a-zA-Z\s]+$")]
+   private static partial Regex BrowserSuffixRegex();
+   ```
+
+5. **Remove the entire `BrowserSuffixes` array** (12 entries → 0).
+
+6. **Update both call sites in LogCollectorService.cs** (lines 338 and 529)
+   to pass `displayName` which is already in scope:
+   ```csharp
+   // Line 338 — displayName is in the tuple from resolvedLogs
+   var parsed = ActivityContextParser.Parse(
+       baseProcessName, log.WindowTitle, rootItemType, browserProfile, displayName);
+   
+   // Line 529 — displayName is a parameter of UpdateActivityContextAsync
+   var parsed = ActivityContextParser.Parse(
+       log.ProcessName, log.WindowTitle, rootType, browserProfile, displayName);
+   ```
+
+### Why This Is Better
+
+| Aspect | Before (Hardcoded) | After (Dynamic) |
+|--------|-------------------|-----------------|
+| New browser | Code change + deploy | `InstalledAppDetector` picks it up automatically |
+| Locale support | Only en-US formats | Works for all locales (display name is OS-native) |
+| Unicode glitches | Zero-width space bug | No hardcoded strings |
+| Maintenance | Must update 12+ entries at every browser release | Zero maintenance |
+| Unknown browser | Silently fails to strip suffix | Generic regex fallback works reasonably |
+
+
+═══════════════════════════════════════════════════════════
+ IMPLEMENTATION PLAN (Ordered By Priority)
+═══════════════════════════════════════════════════════════
+
+### Phase 1 — Critical Bugs (Fix 3 first — it's causing active log flood)
+
+[ ] Fix 3: FileSystemEventWatcher exclusion list
+    Files: client/Services/Watchers/FileSystemEventWatcher.cs
+    - Add ExcludedPathPrefixes static array
+    - Add IsExcludedPath() check in HandleFileEvent + HandleRenamedEvent
+    - Add one-time-per-startup exclusion logging
+    - Consider removing UserProfile from WatchDirectories
+
+### Phase 2 — Important Improvements
+
+[ ] Fix 1: SemaphoreSlim concurrency gate on SqliteLogStore._connection
+    File: client/Storage/SqliteLogStore.cs
+    - Add private readonly SemaphoreSlim _connectionGate = new(1, 1)
+    - Wrap every public method's body with await _connectionGate.WaitAsync(ct)
+      / try / finally { _connectionGate.Release() }
+    - This fixes the genuine concurrency bug (4 concurrent callers,
+      no synchronization, single shared connection)
+
+[ ] Fix 4: Remove hardcoded browser deduction from ActivityContextParser
+    Files: 
+    - client/Core/ActivityContextParser.cs
+    - client/Services/LogCollectorService.cs
+    - Remove BrowserSuffixes array (12 hardcoded entries)
+    - Add appDisplayName parameter to Parse()
+    - Build suffix dynamically from appDisplayName at runtime
+    - Add generic regex fallback for unknown browsers
+    - Pass displayName from both call sites
+
+[ ] Fix 1b: Per-process resilience in LogCollectorService
+    File: client/Services/LogCollectorService.cs
+    - Add inner try-catch around each process in the main foreach loop
+    - Log warning and continue on per-process failure
+
+[ ] Fix 2GapA: Cross-platform --type= cmdline check
+    Files: 
+    - client/Platform/Windows/ProcessCollector.cs
+    - client/Platform/MacOS/ProcessCollector.cs
+    - client/Platform/Linux/ProcessCollector.cs (rename only)
+    - Add WMI/ps -o command= /proc/pid/cmdline command extraction
+    - Check for --type= flag on all platforms at collection time
+
+### Phase 3 — Cleanup & Polish
+
+[ ] Fix 2GapB: Rename IsChromeSubprocess → IsHeadlessSubprocess
+    File: client/Platform/Linux/ProcessCollector.cs
+
+[ ] Fix 2GapC: Startup cleanup of garbage session rows
+    File: client/Storage/DatabaseSchema.cs or LogCollectorService.cs
+    - Add SQL cleanup: DELETE app_sessions WHERE process_name LIKE '%--type=%'
+    - Add SQL cleanup: DELETE app_sessions WHERE LENGTH(process_name) > 200
+
+[ ] Fix 2GapC: Add ChromiumSubprocessFlags static set
+    File: client/Services/LogCollectorService.cs or new helper
+    - Centralize the flag list: renderer, gpu-process, utility, zygote, broker

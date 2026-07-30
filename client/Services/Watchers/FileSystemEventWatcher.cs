@@ -14,6 +14,15 @@ public class FileSystemEventWatcher : IObservableEventSource
 
     public event EventHandler<RawDesktopEvent>? EventRaised;
 
+    /// <summary>
+    /// Directories to watch for file system events.
+    /// NOTE: SpecialFolder.UserProfile (~/) is intentionally excluded. On a typical Linux
+    /// desktop it contains waydroid, flatpak, snap, Steam, .cache, .local/share/containers,
+    /// and thousands of other sandbox/VM directories that generate massive event floods.
+    /// Even with an exclusion list, the FileSystemWatcher still incurs kernel overhead
+    /// enumerating every change in deep recursive directories. The 6 specific user folders
+    /// below cover the vast majority of meaningful user file operations.
+    /// </summary>
     private static readonly string[] WatchDirectories =
     {
         Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
@@ -22,8 +31,31 @@ public class FileSystemEventWatcher : IObservableEventSource
         Environment.GetFolderPath(Environment.SpecialFolder.MyPictures),
         Environment.GetFolderPath(Environment.SpecialFolder.MyVideos),
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"),
-        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
     };
+
+    /// <summary>
+    /// Path fragments that, if present in an event's full path, cause the event
+    /// to be silently dropped. These are VM/sandbox/container/cache directories
+    /// that generate high-volume, semantically meaningless file events.
+    /// </summary>
+    private static readonly string[] ExcludedPathPrefixes =
+    {
+        ".local/share/waydroid/",
+        ".var/app/",
+        "snap/",
+        ".cache/",
+        ".local/share/Trash/",
+        ".local/share/containers/",
+        ".local/share/Steam/",
+        "AppData/Local/Temp/",
+        "Library/Caches/",
+        "node_modules/",
+        ".npm/",
+        ".cargo/registry/",
+    };
+
+    // Tracks which excluded prefixes have been logged this session (one line per prefix total)
+    private static readonly HashSet<string> _loggedExclusions = new(StringComparer.OrdinalIgnoreCase);
 
     private static readonly TimeSpan DebounceDelay = TimeSpan.FromMilliseconds(500);
 
@@ -97,6 +129,7 @@ public class FileSystemEventWatcher : IObservableEventSource
     private void HandleFileEvent(FileSystemEventArgs e, string eventType)
     {
         if (!_isActive) return;
+        if (IsExcludedPath(e.FullPath)) return;
 
         var now = DateTime.UtcNow;
         if (now - _lastEventTime < DebounceDelay &&
@@ -122,6 +155,12 @@ public class FileSystemEventWatcher : IObservableEventSource
     private void HandleRenamedEvent(RenamedEventArgs e)
     {
         if (!_isActive) return;
+        if (IsExcludedPath(e.FullPath))
+        {
+            if (IsExcludedPath(e.OldFullPath)) return;
+            // The old path was meaningful but the new path is excluded — still fire
+            // the event for the original path's perspective
+        }
 
         var raw = new RawDesktopEvent
         {
@@ -133,5 +172,31 @@ public class FileSystemEventWatcher : IObservableEventSource
         };
 
         EventRaised?.Invoke(this, raw);
+    }
+
+    /// <summary>
+    /// Returns true if the given path falls under an excluded prefix
+    /// (VM/sandbox/cache directory). Logs each excluded root ONCE per
+    /// session, not per event.
+    /// </summary>
+    private static bool IsExcludedPath(string? fullPath)
+    {
+        if (string.IsNullOrEmpty(fullPath)) return true;
+
+        foreach (var prefix in ExcludedPathPrefixes)
+        {
+            if (fullPath.Contains(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                // Log each excluded root ONCE per startup
+                if (_loggedExclusions.Add(prefix))
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[FileSystemWatcher] Excluding path prefix: {prefix} (hit: {fullPath})");
+                }
+                return true;
+            }
+        }
+
+        return false;
     }
 }

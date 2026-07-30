@@ -196,6 +196,11 @@ public class LogCollectorService : BackgroundService
         // close orphaned sessions with the correct approximate ended_at time.
         await ReconcileStaleSessionsOnBootAsync(stoppingToken);
 
+        // ─── Clean up garbage app_session rows from old Chromium subprocess bug ───
+        // Removes rows where process_name contains --type= or is abnormally long.
+        // These were created before the headless-subprocess filter was in place.
+        await CleanupGarbageSessionRowsAsync(stoppingToken);
+
         var interval = TimeSpan.FromSeconds(Math.Max(5, _config.CollectIntervalSec));
 
         // Collect hardware and network info immediately on startup
@@ -245,25 +250,30 @@ public class LogCollectorService : BackgroundService
                 var resolvedLogs = new List<(ActivityLog log, string? displayName, string? appId, string? pkgId, bool isBrowser)>();
                 foreach (var log in allLogs)
                 {
-                    var (isKnown, displayName, appId, pkgId, isBrowser) = await ResolveAppInfo(
-                        log.ProcessName, log.WindowTitle, stoppingToken);
+                    try
+                    {
+                        var (isKnown, displayName, appId, pkgId, isBrowser) = await ResolveAppInfo(
+                            log.ProcessName, log.WindowTitle, stoppingToken);
 
-                    if (!isKnown) continue;
+                        if (!isKnown) continue;
 
-                    var isShell = AppProcessClassifier.IsShellProcess(log.ProcessName) ||
-                                  AppProcessClassifier.IsShellProcessExtended(log.ProcessName);
-                    var isPackage = pkgId != null;
-                    var hasWindow = !string.IsNullOrWhiteSpace(log.WindowTitle);
-                    var isKnownApp = appId != null;  // in installed_applications
-                    var isBuildTool = AppProcessClassifier.IsBuildTool(log.ProcessName) ||
-                                      AppProcessClassifier.IsBuildToolExtended(log.ProcessName);
+                        var isShell = AppProcessClassifier.IsShellProcess(log.ProcessName) ||
+                                      AppProcessClassifier.IsShellProcessExtended(log.ProcessName);
+                        var isPackage = pkgId != null;
+                        var hasWindow = !string.IsNullOrWhiteSpace(log.WindowTitle);
+                        var isKnownApp = appId != null;
+                        var isBuildTool = AppProcessClassifier.IsBuildTool(log.ProcessName) ||
+                                          AppProcessClassifier.IsBuildToolExtended(log.ProcessName);
 
-                    // Allow: shells, known packages, known apps (even without window — Wayland-native apps
-                    // won't appear in X11 window list), build tools running in terminals.
-                    // Reject only: truly unknown processes with neither a window title nor any known identity.
-                    if (!isShell && !isPackage && !isKnownApp && !isBuildTool && !hasWindow) continue;
+                        if (!isShell && !isPackage && !isKnownApp && !isBuildTool && !hasWindow) continue;
 
-                    resolvedLogs.Add((log, displayName, appId, pkgId, isBrowser));
+                        resolvedLogs.Add((log, displayName, appId, pkgId, isBrowser));
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Skipping process '{Process}' due to resolution error", log.ProcessName);
+                        continue;
+                    }
                 }
 
                 resolvedLogs.Sort((a, b) =>
@@ -321,7 +331,7 @@ public class LogCollectorService : BackgroundService
                     if (!string.IsNullOrEmpty(currentKeys.GetValueOrDefault(key)))
                     {
                         await UpdateActivityContextAsync(
-                            currentKeys[key], log, appId, pkgId, isBrowser, contextUpdates, stoppingToken);
+                            currentKeys[key], log, appId, pkgId, isBrowser, contextUpdates, stoppingToken, displayName);
                         continue;
                     }
 
@@ -336,7 +346,7 @@ public class LogCollectorService : BackgroundService
                         : null;
 
                     var parsed = ActivityContextParser.Parse(
-                        baseProcessName, log.WindowTitle, rootItemType, browserProfile);
+                        baseProcessName, log.WindowTitle, rootItemType, browserProfile, displayName);
 
                     var session = new AppSession
                     {
@@ -516,7 +526,8 @@ public class LogCollectorService : BackgroundService
         string? pkgId,
         bool isBrowser,
         List<AppItem> contextUpdates,
-        CancellationToken ct)
+        CancellationToken ct,
+        string? displayName = null)
     {
         var baseProcessName = AppProcessClassifier.ExtractBaseProcessName(log.ProcessName);
         var rootType = AppProcessClassifier.ResolveRootItemType(
@@ -527,7 +538,7 @@ public class LogCollectorService : BackgroundService
             : null;
 
         var parsed = ActivityContextParser.Parse(
-            log.ProcessName, log.WindowTitle, rootType, browserProfile);
+            log.ProcessName, log.WindowTitle, rootType, browserProfile, displayName ?? log.ProcessName);
 
         var existingRoot = await _store.GetOpenAppItemAsync(
             appSessionId, rootType, parsed.RootIdentifier, ct);
@@ -1607,6 +1618,52 @@ public class LogCollectorService : BackgroundService
         }
 
         return "unknown";
+    }
+
+    /// <summary>
+    /// Phase 3: Close garbage app_session rows created before the headless-subprocess
+    /// filter was in place. These are rows where process_name contains --type= flags
+    /// (Chromium/Electron helpers) or is abnormally long (corrupted cmdline data).
+    /// Called once at startup. Closes them with ended_at = now rather than deleting,
+    /// so any already-synced data remains consistent on the server.
+    /// </summary>
+    private async Task CleanupGarbageSessionRowsAsync(CancellationToken ct)
+    {
+        try
+        {
+            var openRecords = await _store.GetAllOpenSessionRecordsAsync(ct);
+            var garbageSessions = new List<string>();
+            var closeList = new List<AppSession>();
+
+            foreach (var rec in openRecords)
+            {
+                if (rec.ProcessName.Contains("--type=", StringComparison.OrdinalIgnoreCase) ||
+                    rec.ProcessName.Contains("--contentproc", StringComparison.OrdinalIgnoreCase) ||
+                    rec.ProcessName.Length > 200)
+                {
+                    garbageSessions.Add(rec.AppSessionId);
+                    closeList.Add(new AppSession
+                    {
+                        Id = rec.AppSessionId,
+                        ProcessName = string.Empty,
+                        EndedAt = DateTime.UtcNow,
+                    });
+                }
+            }
+
+            if (garbageSessions.Count > 0)
+            {
+                await _store.StoreAppSessionsAsync(closeList, ct);
+                await _store.CloseAppItemsBySessionIdsAsync(garbageSessions, DateTime.UtcNow, ct);
+                _logger.LogWarning(
+                    "⚠️ Closed {Count} garbage sessions with --type= flags or long process names",
+                    garbageSessions.Count);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to clean up garbage session rows");
+        }
     }
 
     /// <summary>

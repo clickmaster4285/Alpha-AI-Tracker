@@ -197,4 +197,40 @@ public static class AppProcessClassifier
         IsRuntimePackage(processName) ||
         IsBuildTool(processName);
 
+    // ── Chromium/Electron Headless Subprocess Detection (Fix 2, 2026-07-30) ──
+
+    /// <summary>
+    /// Flags that identify Chromium/Electron helper subprocesses.
+    /// Any process whose cmdline contains one of these flags is a headless
+    /// helper (renderer, GPU, utility, etc.) and should NOT be tracked as
+    /// its own app_session — all activity belongs to the parent browser/Electron app.
+    /// Shared across all three platform ProcessCollectors.
+    /// </summary>
+    private static readonly string[] ChromiumSubprocessFlags =
+    {
+        "--type=renderer",
+        "--type=gpu-process",
+        "--type=utility",
+        "--type=zygote",
+        "--type=broker",
+        "--type=crashpad-handler",
+        "--contentproc",
+        "-contentproc",
+    };
+
+    /// <summary>
+    /// Check if a command line indicates a headless Chromium/Electron subprocess.
+    /// Reads the full cmdline and checks for --type= flags (Chrome, Edge, Brave,
+    /// Vivaldi, Opera, VSCode, Slack, Discord, etc.) or --contentproc (Firefox).
+    /// </summary>
+    public static bool IsHeadlessSubprocess(string? cmdline)
+    {
+        if (string.IsNullOrEmpty(cmdline)) return false;
+        foreach (var flag in ChromiumSubprocessFlags)
+        {
+            if (cmdline.Contains(flag, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
 }

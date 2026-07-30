@@ -21,12 +21,10 @@ public sealed class ContextChildItem
 /// </summary>
 public static partial class ActivityContextParser
 {
-    private static readonly string[] BrowserSuffixes =
-    {
-        " - Google Chrome", " — Google Chrome", " - Chromium", " - Mozilla Firefox",
-        " — Mozilla Firefox", " - Firefox", " - Microsoft​ Edge", " - Microsoft Edge",
-        " - Brave", " - Opera", " - Vivaldi", " - Safari",
-    };
+    // BROWSER SUFFIXES REMOVED (2026-07-30): hardcoded list was brittle
+    // (locale-dependent, zero-width-space bug, requires recompile per browser).
+    // Replaced with dynamic suffix stripping using the app's actual display
+    // name from installed_applications (passed via appDisplayName parameter).
 
     private static readonly string[] FileManagerSuffixes =
     {
@@ -34,11 +32,25 @@ public static partial class ActivityContextParser
         " — Nemo", " - Nemo", " — File Explorer", " - File Explorer",
     };
 
+    /// <summary>
+    /// Parse a window title + process metadata into a structured activity context.
+    /// </summary>
+    /// <param name="processName">The base process/binary name (e.g. "chrome", "code")</param>
+    /// <param name="windowTitle">The window title from the OS (may be null/empty on Wayland)</param>
+    /// <param name="rootItemType">The resolved item type ("browser_tab", "folder", "tab", etc.)</param>
+    /// <param name="chromeProfile">Browser profile identifier from ParentProcessResolver</param>
+    /// <param name="appDisplayName">
+    ///   The app's real display name from installed_applications (e.g. "Google Chrome",
+    ///   "Mozilla Firefox"). Used to dynamically strip browser suffixes from window titles.
+    ///   When null, the raw title is kept as-is — no generic regex fallback (see safety
+    ///   constraint in Fix 4 design).
+    /// </param>
     public static ParsedActivityContext Parse(
         string processName,
         string? windowTitle,
         string rootItemType,
-        string? chromeProfile = null)
+        string? chromeProfile = null,
+        string? appDisplayName = null)
     {
         var title = windowTitle?.Trim() ?? string.Empty;
         var context = new ParsedActivityContext
@@ -48,7 +60,7 @@ public static partial class ActivityContextParser
         };
 
         if (rootItemType == "browser_tab")
-            return ParseBrowserContext(context, title, chromeProfile);
+            return ParseBrowserContext(context, title, chromeProfile, appDisplayName);
 
         if (rootItemType == "folder")
             return ParseFileManagerContext(context, title);
@@ -60,9 +72,16 @@ public static partial class ActivityContextParser
     }
 
     private static ParsedActivityContext ParseBrowserContext(
-        ParsedActivityContext context, string title, string? chromeProfile)
+        ParsedActivityContext context, string title, string? chromeProfile, string? appDisplayName)
     {
-        var pageTitle = StripSuffix(title, BrowserSuffixes);
+        // Dynamically strip suffix from the app's real display name (e.g., " - Google Chrome",
+        // " — Mozilla Firefox"). This is future-proof: new browsers detected by InstalledAppDetector
+        // automatically get their suffix stripped without any code changes.
+        // If appDisplayName is null (shouldn't happen for confirmed browsers, but be safe),
+        // pass the title through UNMODIFIED — no generic regex fallback.
+        var pageTitle = string.IsNullOrEmpty(appDisplayName)
+            ? title
+            : StripSuffix(title, new[] { $" - {appDisplayName}", $" — {appDisplayName}" });
         var tabId = string.IsNullOrEmpty(chromeProfile) ? "default" : chromeProfile;
 
         // No window title available (Wayland browsers don't expose titles via xprop).
