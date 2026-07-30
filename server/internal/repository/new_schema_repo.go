@@ -95,21 +95,24 @@ func (r *NewSchemaRepo) BulkInsertInstalledApps(ctx context.Context, entries []m
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
-				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9, argIdx+10,
+				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
+				argIdx+10, argIdx+11, argIdx+12, argIdx+13, argIdx+14,
 			))
 			args = append(args,
 				e.ID, e.EmployeeID, e.AppName, e.AppVersion, e.Publisher,
-				e.InstallPath, e.InstallDate, e.UninstallString, e.ChangeType, e.DetectedAt, time.Now(),
+				e.InstallPath, e.InstallDate, e.UninstallString, e.ChangeType, e.DetectedAt,
+				time.Now(), e.BinaryName, e.IsBrowser, e.DesktopID, e.Categories,
 			)
-			argIdx += 11
+			argIdx += 15
 		}
 
 		query := fmt.Sprintf(`
 			INSERT INTO installed_applications
 				(id, employee_id, app_name, app_version, publisher, install_path,
-				 install_date, uninstall_string, change_type, detected_at, synced_at)
+				 install_date, uninstall_string, change_type, detected_at, synced_at,
+				 binary_name, is_browser, desktop_id, categories)
 			VALUES %s
 			ON CONFLICT (id) DO NOTHING
 		`, strings.Join(valueStrings, ", "))

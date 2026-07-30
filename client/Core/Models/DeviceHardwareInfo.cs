@@ -37,6 +37,19 @@ public class InstalledApplication
     public string ChangeType { get; set; } = "seen";
     /// <summary>True if this app is a web browser (detected from .desktop Categories/MimeType)</summary>
     public bool IsBrowser { get; set; }
+    /// <summary>
+    /// Stable desktop entry identity on Linux: the .desktop filename without extension
+    /// (e.g. "firefox_firefox", "code"). Used by SoftwareIdentityResolver to dedup across
+    /// package managers and detect the same app discovered via multiple sources.
+    /// Empty on Windows/macOS.
+    /// </summary>
+    public string DesktopId { get; set; } = string.Empty;
+    /// <summary>
+    /// Desktop entry Categories on Linux (e.g. "WebBrowser;Network;GTK;") or macOS bundle
+    /// identifier (e.g. "org.mozilla.firefox"). Used for metadata-driven classification
+    /// instead of hardcoded name lists. Empty on Windows.
+    /// </summary>
+    public string Categories { get; set; } = string.Empty;
     public DateTime DetectedAt { get; set; } = DateTime.UtcNow;
     public bool IsSynced { get; set; }
     public string? SyncedAt { get; set; }

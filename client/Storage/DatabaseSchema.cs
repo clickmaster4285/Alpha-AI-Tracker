@@ -51,6 +51,8 @@ internal static class DatabaseSchema
             uninstall_string TEXT NOT NULL DEFAULT '',
             change_type      TEXT NOT NULL DEFAULT 'seen',
             is_browser       INTEGER NOT NULL DEFAULT 0,
+            desktop_id       TEXT NOT NULL DEFAULT '',
+            categories       TEXT NOT NULL DEFAULT '',
             detected_at      TEXT NOT NULL,
             is_synced        INTEGER NOT NULL DEFAULT 0,
             synced_at        TEXT,
@@ -65,6 +67,9 @@ internal static class DatabaseSchema
 
         CREATE INDEX IF NOT EXISTS idx_installed_apps_binary
             ON installed_applications(binary_name);
+
+        CREATE INDEX IF NOT EXISTS idx_installed_apps_desktop_id
+            ON installed_applications(desktop_id);
 
         CREATE TABLE IF NOT EXISTS installed_packages (
             id               TEXT PRIMARY KEY,
@@ -243,6 +248,8 @@ internal static class DatabaseSchema
         ALTER TABLE app_sessions ADD COLUMN parent_process_id INTEGER;
         ALTER TABLE app_items ADD COLUMN process_id INTEGER;
         ALTER TABLE installed_applications ADD COLUMN is_browser INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE installed_applications ADD COLUMN desktop_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE installed_applications ADD COLUMN categories TEXT NOT NULL DEFAULT '';
         ALTER TABLE app_items ADD COLUMN url TEXT NOT NULL DEFAULT '';
         ALTER TABLE app_items ADD COLUMN domain TEXT NOT NULL DEFAULT '';
         ALTER TABLE app_items ADD COLUMN object_type TEXT NOT NULL DEFAULT '';
@@ -289,10 +296,10 @@ internal static class DatabaseSchema
     internal const string InsertInstalledApplicationSql = @"
         INSERT INTO installed_applications
             (id, app_name, binary_name, app_version, publisher, install_path, install_date,
-             uninstall_string, change_type, is_browser, detected_at)
+             uninstall_string, change_type, is_browser, desktop_id, categories, detected_at)
         VALUES
             ($id, $app_name, $binary_name, $app_version, $publisher, $install_path, $install_date,
-             $uninstall_string, $change_type, $is_browser, $detected_at)
+             $uninstall_string, $change_type, $is_browser, $desktop_id, $categories, $detected_at)
         ON CONFLICT(app_name) DO UPDATE SET
             binary_name = COALESCE(NULLIF(excluded.binary_name, ''), installed_applications.binary_name),
             app_version = excluded.app_version,
@@ -300,6 +307,8 @@ internal static class DatabaseSchema
             install_path = COALESCE(NULLIF(excluded.install_path, ''), installed_applications.install_path),
             change_type = CASE WHEN installed_applications.change_type = 'installed' THEN 'installed' ELSE excluded.change_type END,
             is_browser = MAX(installed_applications.is_browser, excluded.is_browser),
+            desktop_id = COALESCE(NULLIF(excluded.desktop_id, ''), installed_applications.desktop_id),
+            categories = COALESCE(NULLIF(excluded.categories, ''), installed_applications.categories),
             detected_at = excluded.detected_at
     ";
 

@@ -306,15 +306,25 @@ public partial class PackageDetector : Abstractions.IPackageDetector
             var output = proc.StandardOutput.ReadToEnd();
             proc.WaitForExit(3000);
 
+            // Snap .desktop files live here (e.g. firefox_firefox.desktop).
+            // Any snap that has a desktop entry is a GUI application discovered by
+            // InstalledAppDetector via $XDG_DATA_DIRS — skip it here to avoid the
+            // Firefox-as-package misclassification (one software = one identity).
+            var snapDesktopDir = "/var/lib/snapd/desktop/applications";
+
             foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
             {
                 var parts = line.Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
                 if (parts.Length < 1 || parts[0].Equals("Name", StringComparison.OrdinalIgnoreCase))
                     continue;
 
+                var snapName = parts[0];
+                if (HasSnapDesktopEntry(snapName, snapDesktopDir))
+                    continue; // GUI app — handled by InstalledAppDetector
+
                 AddPackage(new InstalledPackage
                 {
-                    PackageName = parts[0],
+                    PackageName = snapName,
                     Version = parts.Length >= 2 ? parts[1] : "",
                     Category = "tool",
                     SourceManager = "snap",
@@ -323,6 +333,18 @@ public partial class PackageDetector : Abstractions.IPackageDetector
             }
         }
         catch { }
+    }
+
+    /// <summary>True if a .desktop file exists for the given snap name in the snap desktop dir.</summary>
+    private static bool HasSnapDesktopEntry(string snapName, string snapDesktopDir)
+    {
+        try
+        {
+            if (!Directory.Exists(snapDesktopDir)) return false;
+            // snap desktop files are named {snap}_{snap}.desktop (e.g. firefox_firefox.desktop)
+            return Directory.GetFiles(snapDesktopDir, $"{snapName}_*.desktop").Length > 0;
+        }
+        catch { return false; }
     }
 
     // ── flatpak packages ──
@@ -345,15 +367,25 @@ public partial class PackageDetector : Abstractions.IPackageDetector
             var output = proc.StandardOutput.ReadToEnd();
             proc.WaitForExit(3000);
 
+            // Flatpak app .desktop files are exported to the flatpak share dir and surfaced
+            // via $XDG_DATA_DIRS (e.g. /var/lib/flatpak/exports/share/applications).
+            // Any flatpak app with an exported desktop entry is a GUI application discovered
+            // by InstalledAppDetector — skip it here (one software = one identity).
+            var flatpakDesktopDirs = GetFlatpakDesktopDirs();
+
             foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
             {
                 var parts = line.Split('\t', StringSplitOptions.RemoveEmptyEntries);
                 if (parts.Length < 1 || parts[0].Equals("Application", StringComparison.OrdinalIgnoreCase))
                     continue;
 
+                var appId = parts[0];
+                if (HasFlatpakDesktopEntry(appId, flatpakDesktopDirs))
+                    continue; // GUI app — handled by InstalledAppDetector
+
                 AddPackage(new InstalledPackage
                 {
-                    PackageName = parts[0],
+                    PackageName = appId,
                     Version = parts.Length >= 2 ? parts[1] : "",
                     Category = "tool",
                     SourceManager = "flatpak",
@@ -362,6 +394,33 @@ public partial class PackageDetector : Abstractions.IPackageDetector
             }
         }
         catch { }
+    }
+
+    /// <summary>Flatpak export dirs that may contain app .desktop files.</summary>
+    private static List<string> GetFlatpakDesktopDirs()
+    {
+        var dirs = new List<string>();
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        dirs.Add(Path.Combine(home, ".local", "share", "flatpak", "exports", "share", "applications"));
+        dirs.Add("/var/lib/flatpak/exports/share/applications");
+        return dirs;
+    }
+
+    /// <summary>True if a .desktop file exists for the given flatpak app id in any flatpak export dir.</summary>
+    private static bool HasFlatpakDesktopEntry(string appId, List<string> dirs)
+    {
+        try
+        {
+            foreach (var dir in dirs)
+            {
+                if (!Directory.Exists(dir)) continue;
+                // flatpak desktop files are named {appId}.desktop
+                if (File.Exists(Path.Combine(dir, $"{appId}.desktop")))
+                    return true;
+            }
+            return false;
+        }
+        catch { return false; }
     }
 
     // ── Homebrew (macOS) ──

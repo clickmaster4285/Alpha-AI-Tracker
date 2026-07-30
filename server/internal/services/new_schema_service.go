@@ -102,6 +102,10 @@ func (s *NewSchemaService) SyncInstalledApps(ctx context.Context, req *dto.SyncI
 			ChangeType:      e.ChangeType,
 			DetectedAt:      dets,
 			SyncedAt:        &now,
+			BinaryName:      e.BinaryName,
+			IsBrowser:       e.IsBrowser,
+			DesktopID:       e.DesktopID,
+			Categories:      e.Categories,
 		})
 	}
 

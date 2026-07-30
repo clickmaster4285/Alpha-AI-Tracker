@@ -1393,16 +1393,23 @@ public class LogCollectorService : BackgroundService
         {
             // Force recheck to pick up newly installed apps
             _appDetector.ForceRecheck();
+            _packageDetector.ForceRecheck();
 
-            var apps = _appDetector.GetAllInstalledApplications();
-            if (apps.Count == 0)
-            {
-                _logger.LogDebug("No installed applications detected");
-                return;
-            }
+            var rawApps = _appDetector.GetAllInstalledApplications();
+            var rawPackages = _packageDetector.GetAllInstalledPackages();
 
-            await _store.StoreInstalledApplicationsAsync(apps, ct);
-            _logger.LogDebug("Scanned {Count} installed applications", apps.Count);
+            // Joint classification: dedup app+pkg sources and route each software to exactly
+            // one table. Fixes Firefox-snap appearing in installed_packages — the snap .desktop
+            // (now discovered via $XDG_DATA_DIRS) wins as a browser application.
+            var (apps, packages) = SoftwareClassifier.Classify(rawApps, rawPackages);
+
+            if (apps.Count > 0)
+                await _store.StoreInstalledApplicationsAsync(apps, ct);
+            if (packages.Count > 0)
+                await _store.StoreInstalledPackagesAsync(packages, ct);
+
+            _logger.LogDebug("Software inventory: {Apps} applications, {Packages} packages (pre-classify: {RawApps}/{RawPkgs})",
+                apps.Count, packages.Count, rawApps.Count, rawPackages.Count);
         }
         catch (Exception ex)
         {
@@ -1414,27 +1421,10 @@ public class LogCollectorService : BackgroundService
     // Installed Package Scanner
     // ────────────────────────────────────────────
 
-    private async Task CollectInstalledPackagesAsync(CancellationToken ct)
-    {
-        try
-        {
-            _packageDetector.ForceRecheck();
-
-            var packages = _packageDetector.GetAllInstalledPackages();
-            if (packages.Count == 0)
-            {
-                _logger.LogDebug("No installed packages detected");
-                return;
-            }
-
-            await _store.StoreInstalledPackagesAsync(packages, ct);
-            _logger.LogDebug("Scanned {Count} installed packages", packages.Count);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to scan installed packages");
-        }
-    }
+    // CollectInstalledApplicationsAsync now performs the joint app+package classification.
+    // CollectInstalledPackagesAsync is retained for the periodic loop but delegates to the
+    // joint collector so the classifier always sees both sources together.
+    private Task CollectInstalledPackagesAsync(CancellationToken ct) => CollectInstalledApplicationsAsync(ct);
 
     // ────────────────────────────────────────────
     // Session Event Recording

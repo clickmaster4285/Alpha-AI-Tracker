@@ -252,6 +252,8 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                 {
                     AppName = name,
                     BinaryName = binaryName ?? "",
+                    DesktopId = Path.GetFileNameWithoutExtension(filePath),
+                    Categories = categories ?? "",
                     InstallPath = exec ?? filePath,
                     Publisher = "",
                     AppVersion = "",
@@ -375,6 +377,8 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                 {
                     AppName = displayName,
                     BinaryName = binaryName,
+                    DesktopId = subKeyName, // registry uninstall key name as stable Windows identity
+                    Categories = isBrowser ? "WebBrowser" : "",
                     AppVersion = subKey.GetValue("DisplayVersion") as string ?? "",
                     Publisher = subKey.GetValue("Publisher") as string ?? "",
                     InstallPath = installPath,
@@ -419,23 +423,36 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
     {
         try
         {
-            // 1. Enumerate .desktop files in standard locations
-            var desktopPaths = new[]
-            {
-                "/usr/share/applications/",
-                "/usr/local/share/applications/",
-                Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                    ".local", "share", "applications")
-            };
+            // Discover .desktop files from all application directories.
+            // Sources (in priority order, deduplicated by resolved real path):
+            //   1. $XDG_DATA_HOME/applications           (user override)
+            //   2. ~/.local/share/applications           (user default)
+            //   3. each $XDG_DATA_DIRS entry + /applications
+            //      (covers /usr/share, /usr/local/share, snap: /var/lib/snapd/desktop,
+            //       flatpak exports: /var/lib/flatpak/exports/share, ~/.local/share/flatpak/exports/share)
+            //   4. /usr/share/applications, /usr/local/share/applications  (baseline always included)
+            //
+            // This fixes the Firefox-snap misclassification: the snap .desktop lives at
+            // /var/lib/snapd/desktop/applications/firefox_firefox.desktop which was previously
+            // outside the scan path, so Firefox never entered installed_applications and fell
+            // through to PackageDetector.ScanSnap as a generic tool package.
+            var desktopPaths = GetLinuxDesktopApplicationDirs();
 
+            var seenDirs = new HashSet<string>(StringComparer.Ordinal);
             foreach (var desktopPath in desktopPaths)
             {
-                if (!Directory.Exists(desktopPath)) continue;
-                foreach (var file in Directory.GetFiles(desktopPath, "*.desktop"))
+                if (string.IsNullOrEmpty(desktopPath)) continue;
+                try
                 {
-                    AddAppFromDesktopFile(file);
+                    var resolved = Path.GetFullPath(desktopPath.TrimEnd('/'));
+                    if (!seenDirs.Add(resolved)) continue; // skip duplicate directory
+                    if (!Directory.Exists(resolved)) continue;
+                    foreach (var file in Directory.GetFiles(resolved, "*.desktop"))
+                    {
+                        AddAppFromDesktopFile(file);
+                    }
                 }
+                catch { /* ignore unreadable dirs */ }
             }
 
             // NOTE: dpkg, snap, flatpak package detection moved to PackageDetector
@@ -444,6 +461,39 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
         {
             Debug.WriteLine($"Linux app detection error: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Build the list of application directories to scan for .desktop files on Linux.
+    /// Derived from XDG_DATA_HOME / XDG_DATA_DIRS plus the standard baseline paths.
+    /// </summary>
+    private static List<string> GetLinuxDesktopApplicationDirs()
+    {
+        var dirs = new List<string>();
+
+        // User application dir: XDG_DATA_HOME or default ~/.local/share
+        var xdgDataHome = Environment.GetEnvironmentVariable("XDG_DATA_HOME");
+        if (!string.IsNullOrWhiteSpace(xdgDataHome))
+            dirs.Add(Path.Combine(xdgDataHome, "applications"));
+        dirs.Add(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".local", "share", "applications"));
+
+        // XDG_DATA_DIRS entries (colon-separated) + /applications
+        var xdgDataDirs = Environment.GetEnvironmentVariable("XDG_DATA_DIRS");
+        if (!string.IsNullOrWhiteSpace(xdgDataDirs))
+        {
+            foreach (var entry in xdgDataDirs.Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                dirs.Add(Path.Combine(entry, "applications"));
+            }
+        }
+
+        // Baseline standard directories — always included even if XDG_DATA_DIRS is unset/minimal
+        dirs.Add("/usr/share/applications");
+        dirs.Add("/usr/local/share/applications");
+
+        return dirs;
     }
 
     private void DetectInstalledMacOS()
@@ -460,15 +510,17 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                     if (!string.IsNullOrWhiteSpace(name))
                     {
                         var binaryName = name.ToLowerInvariant();
+                        var (isBrowserApp, bundleId) = InspectMacOSBundle(app);
                         _knownApps.Add(name);
                         _knownApps.Add(binaryName);
                         _binaryToDisplayName[binaryName] = name;
 
-                        var isBrowserApp = IsMacOSBrowserApp(app);
                         _installedApps.Add(new InstalledApplication
                         {
                             AppName = name,
                             BinaryName = binaryName,
+                            DesktopId = bundleId,         // CFBundleIdentifier as stable identity
+                            Categories = bundleId,         // store bundle id for classification
                             InstallPath = app,
                             ChangeType = "installed",
                             IsBrowser = isBrowserApp,
@@ -489,15 +541,17 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
                     if (!string.IsNullOrWhiteSpace(name))
                     {
                         var binaryName = name.ToLowerInvariant();
+                        var (isBrowserApp, bundleId) = InspectMacOSBundle(app);
                         _knownApps.Add(name);
                         _knownApps.Add(binaryName);
                         _binaryToDisplayName[binaryName] = name;
 
-                        var isBrowserApp = IsMacOSBrowserApp(app);
                         _installedApps.Add(new InstalledApplication
                         {
                             AppName = name,
                             BinaryName = binaryName,
+                            DesktopId = bundleId,
+                            Categories = bundleId,
                             InstallPath = app,
                             ChangeType = "installed",
                             IsBrowser = isBrowserApp,
@@ -516,30 +570,52 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
     }
 
     /// <summary>
-    /// Detect if a macOS .app bundle is a browser by reading its Info.plist
-    /// and checking CFBundleURLTypes for http/https URL scheme handling.
+    /// Inspect a macOS .app bundle's Info.plist to determine (a) whether it is a browser
+    /// (CFBundleURLSchemes contains http and https) and (b) its stable bundle identifier
+    /// (CFBundleIdentifier). Returns ("", "") if the plist is missing/unreadable.
     /// </summary>
-    private static bool IsMacOSBrowserApp(string appPath)
+    private static (bool isBrowser, string bundleId) InspectMacOSBundle(string appPath)
     {
         try
         {
             var plistPath = Path.Combine(appPath, "Contents", "Info.plist");
-            if (!File.Exists(plistPath)) return false;
+            if (!File.Exists(plistPath)) return (false, "");
 
             var plist = File.ReadAllText(plistPath);
-            // Check for CFBundleURLSchemes containing http and https
-            if (plist.Contains("CFBundleURLSchemes", StringComparison.OrdinalIgnoreCase) &&
-                plist.Contains("http", StringComparison.OrdinalIgnoreCase))
+
+            // Extract CFBundleIdentifier (stable identity)
+            string bundleId = ExtractPlistString(plist, "CFBundleIdentifier");
+
+            // Detect browser: CFBundleURLSchemes containing both http and https
+            var isBrowser = false;
+            if (plist.Contains("CFBundleURLSchemes", StringComparison.OrdinalIgnoreCase))
             {
-                // Simple heuristic: look for http and https URL schemes
                 var httpCount = 0;
                 if (plist.Contains("<string>http</string>", StringComparison.OrdinalIgnoreCase)) httpCount++;
                 if (plist.Contains("<string>https</string>", StringComparison.OrdinalIgnoreCase)) httpCount++;
-                return httpCount >= 2;
+                isBrowser = httpCount >= 2;
             }
+            return (isBrowser, bundleId);
         }
         catch { }
-        return false;
+        return (false, "");
+    }
+
+    /// <summary>Naive extraction of a &lt;key&gt;Name&lt;/key&gt;&lt;string&gt;value&lt;/string&gt; pair from a plist.</summary>
+    private static string ExtractPlistString(string plist, string key)
+    {
+        try
+        {
+            var keyIdx = plist.IndexOf($"<key>{key}</key>", StringComparison.OrdinalIgnoreCase);
+            if (keyIdx < 0) return "";
+            var stringStart = plist.IndexOf("<string>", keyIdx, StringComparison.OrdinalIgnoreCase);
+            if (stringStart < 0) return "";
+            stringStart += "<string>".Length;
+            var stringEnd = plist.IndexOf("</string>", stringStart, StringComparison.OrdinalIgnoreCase);
+            if (stringEnd < 0) return "";
+            return plist.Substring(stringStart, stringEnd - stringStart).Trim();
+        }
+        catch { return ""; }
     }
 
 }

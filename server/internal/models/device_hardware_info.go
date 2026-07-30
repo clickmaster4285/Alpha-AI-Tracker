@@ -34,6 +34,10 @@ type InstalledApplication struct {
 	DetectedAt      time.Time  `json:"detectedAt" db:"detected_at"`
 	SyncedAt        *time.Time `json:"syncedAt,omitempty" db:"synced_at"`
 	CreatedAt       time.Time  `json:"createdAt" db:"created_at"`
+	BinaryName      string     `json:"binaryName,omitempty" db:"binary_name"`
+	IsBrowser       bool       `json:"isBrowser" db:"is_browser"`
+	DesktopID       string     `json:"desktopId,omitempty" db:"desktop_id"`
+	Categories      string     `json:"categories,omitempty" db:"categories"`
 }
 
 type NetworkInfo struct {

@@ -150,6 +150,8 @@ public class SqliteLogStore : ILogStore, IDisposable
         var pChange = cmd.Parameters.Add("$change_type", SqliteType.Text);
         var pDetected = cmd.Parameters.Add("$detected_at", SqliteType.Text);
         var pIsBrowser = cmd.Parameters.Add("$is_browser", SqliteType.Integer);
+        var pDesktopId = cmd.Parameters.Add("$desktop_id", SqliteType.Text);
+        var pCategories = cmd.Parameters.Add("$categories", SqliteType.Text);
 
         await using var tx = await _connection.BeginTransactionAsync(ct);
         ((DbCommand)cmd).Transaction = tx;
@@ -165,6 +167,8 @@ public class SqliteLogStore : ILogStore, IDisposable
             pUninst.Value = e.UninstallString;
             pChange.Value = e.ChangeType;
             pIsBrowser.Value = e.IsBrowser ? 1 : 0;
+            pDesktopId.Value = e.DesktopId;
+            pCategories.Value = e.Categories;
             pDetected.Value = e.DetectedAt.ToString("O");
             await cmd.ExecuteNonQueryAsync(ct);
         }
@@ -346,6 +350,8 @@ public class SqliteLogStore : ILogStore, IDisposable
         cmd.Parameters.AddWithValue("$uninstall_string", entry.UninstallString);
         cmd.Parameters.AddWithValue("$change_type", entry.ChangeType);
         cmd.Parameters.AddWithValue("$is_browser", entry.IsBrowser ? 1 : 0);
+        cmd.Parameters.AddWithValue("$desktop_id", entry.DesktopId);
+        cmd.Parameters.AddWithValue("$categories", entry.Categories);
         cmd.Parameters.AddWithValue("$detected_at", entry.DetectedAt.ToString("O"));
         await cmd.ExecuteNonQueryAsync(ct);
         
@@ -1069,6 +1075,8 @@ public class SqliteLogStore : ILogStore, IDisposable
             UninstallString = r.GetString(r.GetOrdinal("uninstall_string")),
             ChangeType = r.GetString(r.GetOrdinal("change_type")),
             IsBrowser = r.GetInt32(r.GetOrdinal("is_browser")) == 1,
+            DesktopId = r.IsDBNull(r.GetOrdinal("desktop_id")) ? string.Empty : r.GetString(r.GetOrdinal("desktop_id")),
+            Categories = r.IsDBNull(r.GetOrdinal("categories")) ? string.Empty : r.GetString(r.GetOrdinal("categories")),
             DetectedAt = DateTime.Parse(r.GetString(r.GetOrdinal("detected_at"))),
             IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
             SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),

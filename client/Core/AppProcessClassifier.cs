@@ -9,13 +9,13 @@ public static class AppProcessClassifier
     // No hardcoded BrowserProcesses HashSet.
     // Use the `isBrowser` flag passed from ResolveAppInfo() at runtime.
 
-    private static readonly HashSet<string> FileManagerProcesses = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly HashSet<string> FileManagerFallbacks = new(StringComparer.OrdinalIgnoreCase)
     {
         "nautilus", "dolphin", "thunar", "nemo", "pcmanfm", "caja", "nautilus-desktop",
         "explorer", "finder", "files",
     };
 
-    private static readonly HashSet<string> IdeProcesses = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly HashSet<string> IdeFallbacks = new(StringComparer.OrdinalIgnoreCase)
     {
         "code", "cursor", "codium", "idea", "pycharm", "webstorm", "goland", "rider",
         "devenv", "sublime_text", "atom", "zed",
@@ -52,11 +52,44 @@ public static class AppProcessClassifier
         "dotnet", "rustc", "gcc", "g++", "clang", "clang++",
     };
 
+    // ── Dynamic category detection (preferred) ──────────────────────────────────
+
+    /// <summary>
+    /// Resolve the primary app category using the new metadata-first approach:
+    ///   1. If <paramref name="isBrowser"/> is true → browser
+    ///   2. If <paramref name="categories"/> can be resolved → use that category
+    ///   3. Fallback to process-name sets
+    /// Returns null when the category cannot be determined.
+    /// </summary>
+    public static string? ResolveCategory(string processName, bool isBrowser, string? categories)
+    {
+        if (isBrowser) return SoftwareCategoryResolver.Browser;
+        if (!string.IsNullOrWhiteSpace(categories))
+        {
+            var cat = SoftwareCategoryResolver.ResolveFromCategories(categories, isBrowser: false);
+            if (cat != SoftwareCategoryResolver.Unknown) return cat;
+        }
+        // Fallback to process-name heuristics.
+        return ResolveCategoryFallback(processName);
+    }
+
+    /// <summary>Process-name fallback when OS metadata is not available.</summary>
+    private static string? ResolveCategoryFallback(string processName)
+    {
+        if (IsFileManagerProcess(processName)) return SoftwareCategoryResolver.FileManager;
+        if (IsIdeProcess(processName)) return SoftwareCategoryResolver.Ide;
+        if (IsShellProcess(processName)) return SoftwareCategoryResolver.Application;
+        if (IsRuntimePackage(processName)) return SoftwareCategoryResolver.Runtime;
+        return null;
+    }
+
+    // ── Legacy bool checks (backward compat) ────────────────────────────────────
+
     public static bool IsFileManagerProcess(string processName) =>
-        FileManagerProcesses.Contains(processName);
+        FileManagerFallbacks.Contains(processName);
 
     public static bool IsIdeProcess(string processName) =>
-        IdeProcesses.Contains(processName);
+        IdeFallbacks.Contains(processName);
 
     public static bool IsShellInterpreter(string processName) =>
         ShellInterpreters.Contains(processName);
@@ -73,30 +106,6 @@ public static class AppProcessClassifier
     public static bool IsBuildTool(string processName) =>
         BuildToolProcesses.Contains(processName);
 
-    /// <summary>Root app_item type for a new session.</summary>
-    public static string ResolveRootItemType(
-        string processName, string? appId, string? pkgId, string? windowTitle, bool isBrowser = false)
-    {
-        if (isBrowser)
-            return "browser_tab";
-
-        if (IsFileManagerProcess(processName))
-            return "folder";
-
-        if (IsShellProcess(processName))
-            return "terminal";
-
-        if (appId != null)
-            return "tab";
-
-        if (pkgId != null || IsRuntimePackage(processName) || IsBuildTool(processName))
-            return "process";
-
-        if (!string.IsNullOrWhiteSpace(windowTitle))
-            return "tab";
-
-        return "process";
-    }
 
     /// <summary>Extract the base binary name from a process name that may include arguments.</summary>
     public static string ExtractBaseProcessName(string rawName)
@@ -127,6 +136,59 @@ public static class AppProcessClassifier
         var baseName = ExtractBaseProcessName(rawName);
         return IsShellProcess(baseName);
     }
+
+    // ── Root item type resolution ───────────────────────────────────────────────
+
+    /// <summary>
+    /// Resolve item_type using metadata when available, falling back to the old bool + name-check model.
+    /// </summary>
+    public static string ResolveRootItemType(
+        string processName, string? appId, string? pkgId, string? windowTitle,
+        bool isBrowser, string? categories, string? desktopId)
+    {
+        // Priority 1: explicit browser flag (from .desktop / manifest / registry).
+        if (isBrowser) return "browser_tab";
+
+        // Priority 2: metadata lookups.
+        if (!string.IsNullOrWhiteSpace(categories) || !string.IsNullOrWhiteSpace(desktopId))
+        {
+            var cat = ResolveCategory(processName, isBrowser: false, categories);
+            switch (cat)
+            {
+                case SoftwareCategoryResolver.FileManager: return "folder";
+                case SoftwareCategoryResolver.Ide:
+                case SoftwareCategoryResolver.Application:
+                    return "tab";
+                case SoftwareCategoryResolver.Browser:
+                    return "browser_tab";
+                case SoftwareCategoryResolver.Runtime:
+                    return pkgId != null ? "process" : "tab";
+            }
+        }
+
+        // Priority 3: legacy process-name fallbacks.
+        if (IsFileManagerProcess(processName))
+            return "folder";
+
+        if (IsShellProcess(processName))
+            return "terminal";
+
+        if (appId != null)
+            return "tab";
+
+        if (pkgId != null || IsRuntimePackage(processName) || IsBuildTool(processName))
+            return "process";
+
+        if (!string.IsNullOrWhiteSpace(windowTitle))
+            return "tab";
+
+        return "process";
+    }
+
+    /// <summary>Backward-compatible overload (no metadata).</summary>
+    public static string ResolveRootItemType(
+        string processName, string? appId, string? pkgId, string? windowTitle, bool isBrowser = false) =>
+        ResolveRootItemType(processName, appId, pkgId, windowTitle, isBrowser, categories: null, desktopId: null);
 
     /// <summary>Whether a child process should nest under a parent session item instead of being standalone.</summary>
     public static bool ShouldNestUnderParent(string processName, string? pkgId) =>

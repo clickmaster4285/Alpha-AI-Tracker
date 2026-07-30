@@ -73,6 +73,10 @@ type InstalledApplicationEntry struct {
 	UninstallString string  `json:"uninstallString"`
 	ChangeType      string  `json:"changeType"`
 	DetectedAt      string  `json:"detectedAt"`
+	BinaryName      string  `json:"binaryName"`
+	IsBrowser       bool    `json:"isBrowser"`
+	DesktopID       string  `json:"desktopId"`
+	Categories      string  `json:"categories"`
 }
 
 type SyncInstalledAppsRequest struct {
