@@ -58,6 +58,10 @@ public interface ILogStore
     /// Returns the actual stored ID (may differ from entry.Id if app_name already existed via ON CONFLICT).</summary>
     Task<string> StoreInstalledAppAsync(InstalledApplication entry, CancellationToken ct);
 
+    /// <summary>Delete a non-GUI installed_applications entry that was incorrectly auto-registered.
+    /// Used by Phase 0a cleanup to remove shell/system entries (sh, snap) from the DB.</summary>
+    Task DeleteInstalledAppAsync(string id, CancellationToken ct);
+
     /// <summary>Store a single auto-detected installed package (called when a running process is not yet in the DB).
     /// Returns the actual stored ID.</summary>
     Task<string> StoreInstalledPackageAsync(InstalledPackage entry, CancellationToken ct);

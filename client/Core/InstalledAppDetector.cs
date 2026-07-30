@@ -105,6 +105,99 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
         return false;
     }
 
+    public bool IsGuiApplication(string processName, string? executablePath)
+    {
+        EnsureInitialized();
+        if (string.IsNullOrWhiteSpace(processName)) return false;
+
+        // Fast path 1: exact match in known apps (from .desktop / registry / .app scan)
+        if (_knownApps.Contains(processName)) return true;
+
+        // Fast path 2: fuzzy match against known binary names from GUI .desktop entries
+        if (ResolveDisplayName(processName) != null) return true;
+
+        // Slow path: scan .desktop / .app bundle / Start Menu for this specific binary
+        if (!string.IsNullOrEmpty(executablePath))
+            return CheckGuiPath(executablePath, processName);
+
+        return false;
+    }
+
+    /// <summary>
+    /// Check whether a given executable path and process name correspond
+    /// to a GUI application (has a .desktop file, .app bundle, or Start Menu entry).
+    /// Unlike CheckPath which returns true for ANY binary in standard paths,
+    /// this only returns true for applications with actual GUI desktop metadata.
+    /// </summary>
+    private bool CheckGuiPath(string path, string processName)
+    {
+        if (OperatingSystem.IsLinux())
+        {
+            // Check if there is a .desktop file whose Exec= references this binary
+            var desktopDirs = GetLinuxDesktopApplicationDirs();
+            foreach (var dir in desktopDirs)
+            {
+                if (!Directory.Exists(dir)) continue;
+                try
+                {
+                    foreach (var file in Directory.GetFiles(dir, "*.desktop"))
+                    {
+                        try
+                        {
+                            var lines = File.ReadAllLines(file);
+                            foreach (var line in lines)
+                            {
+                                if (line.StartsWith("Exec=", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    var exec = line["Exec=".Length..].Trim();
+                                    var binary = ExtractBinaryFromExec(exec);
+                                    if (string.Equals(binary, processName, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        // Verify it's a real app (Type=Application, NoDisplay!=true)
+                                        var noDisplay = lines.Any(l => l.StartsWith("NoDisplay=true", StringComparison.OrdinalIgnoreCase));
+                                        var isApp = lines.Any(l => l.Trim().Equals("Type=Application", StringComparison.OrdinalIgnoreCase));
+                                        if (!noDisplay && isApp)
+                                            return true;
+                                    }
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                }
+                catch { }
+            }
+            return false;
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            // GUI apps are in Program Files, WindowsApps, or have Start Menu entries
+            var progFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            var progFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+
+            if (!string.IsNullOrEmpty(progFiles) && path.StartsWith(progFiles, StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (!string.IsNullOrEmpty(progFilesX86) && path.StartsWith(progFilesX86, StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (!string.IsNullOrEmpty(localAppData) && path.StartsWith(localAppData, StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (path.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase))
+                return true;
+            return false;
+        }
+
+        if (OperatingSystem.IsMacOS())
+        {
+            // GUI apps are .app bundles
+            return path.Contains(".app/", StringComparison.OrdinalIgnoreCase) ||
+                   path.StartsWith("/Applications/", StringComparison.Ordinal);
+        }
+
+        return false;
+    }
+
     private void EnsureInitialized()
     {
         if (_initialized) return;

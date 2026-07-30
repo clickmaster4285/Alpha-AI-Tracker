@@ -48,4 +48,12 @@ public interface IInstalledAppDetector
     /// Returns null if the binary name is not known.
     /// </summary>
     string? ResolveDisplayName(string processName);
+
+    /// <summary>
+    /// Returns true only if the process corresponds to a GUI application
+    /// (has a .desktop file on Linux, .app bundle on macOS, Start Menu /
+    /// Program Files entry on Windows). Returns false for CLI-only tools,
+    /// shell interpreters, build tools, runtimes, and daemons.
+    /// </summary>
+    bool IsGuiApplication(string processName, string? executablePath);
 }

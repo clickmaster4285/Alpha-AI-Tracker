@@ -82,6 +82,17 @@ public class LogCollectorService : BackgroundService
         "gcr-ssh-agent", "gdm-wayland-session", "gdm",
         "mutter-x11-frames", "user-session-helper",
         "tracker-miner-fs-3", "dconf-service", "VBCSCompiler",
+        // 🟡 Phase 0a: Shell interpreters that leak through GUI gate (2026-07-30)
+        "sh", "bash", "zsh", "dash", "fish",
+        // 🟡 Phase 0a: System tools that have no GUI .desktop but were auto-registered
+        "ssh-agent", "unattended-upgrade-shutdown",
+        "snap",
+        // 🟡 Phase 0a: VS Code subprocess that isn't a user-facing app
+        "opencode",
+        // 🟡 Phase 0a: Orphan process that was slipping through without installed_app_id
+        "file-manager",
+        // 🟡 Phase 0a: GNOME virtual filesystem daemons
+        "gvfsd-trash",
     };
 
     /// <summary>
@@ -93,11 +104,12 @@ public class LogCollectorService : BackgroundService
         "gvfsd-", "gvfs-", "gsd-", "goa-", "evolution-",
         "ibus-", "at-spi2-", "gnome-shell-", "tracker-",
         "gdm", "mutter-",
+        // 🟡 Phase 0a: VS Code / .NET subprocesses (extension host, language server, etc.)
+        "microsoft.",
     };
 
-    // Cached known binary names from installed_applications and installed_packages (refreshed from SQLite)
+    // Cached known binary names from installed_applications (refreshed from SQLite)
     private HashSet<string> _knownAppBinaryNames = new(StringComparer.OrdinalIgnoreCase);
-    private HashSet<string> _knownPackageNames = new(StringComparer.OrdinalIgnoreCase);
     private DateTime _lastKnownNamesRefresh = DateTime.MinValue;
 
     public LogCollectorService(
@@ -201,6 +213,12 @@ public class LogCollectorService : BackgroundService
         // These were created before the headless-subprocess filter was in place.
         await CleanupGarbageSessionRowsAsync(stoppingToken);
 
+        // ─── Phase 0a: Clean up non-GUI processes that were auto-registered before the GUI gate ───
+        // Removes installed_applications entries for shell interpreters (sh), system tools (snap),
+        // and closes their orphaned open sessions. These were auto-registered by the old code path
+        // that put anything in /usr/bin/ into the DB without checking for a .desktop file.
+        await CleanupNonGuiAppEntriesAsync(stoppingToken);
+
         var interval = TimeSpan.FromSeconds(Math.Max(5, _config.CollectIntervalSec));
 
         // Collect hardware and network info immediately on startup
@@ -257,16 +275,6 @@ public class LogCollectorService : BackgroundService
 
                         if (!isKnown) continue;
 
-                        var isShell = AppProcessClassifier.IsShellProcess(log.ProcessName) ||
-                                      AppProcessClassifier.IsShellProcessExtended(log.ProcessName);
-                        var isPackage = pkgId != null;
-                        var hasWindow = !string.IsNullOrWhiteSpace(log.WindowTitle);
-                        var isKnownApp = appId != null;
-                        var isBuildTool = AppProcessClassifier.IsBuildTool(log.ProcessName) ||
-                                          AppProcessClassifier.IsBuildToolExtended(log.ProcessName);
-
-                        if (!isShell && !isPackage && !isKnownApp && !isBuildTool && !hasWindow) continue;
-
                         resolvedLogs.Add((log, displayName, appId, pkgId, isBrowser));
                     }
                     catch (Exception ex)
@@ -307,22 +315,9 @@ public class LogCollectorService : BackgroundService
                     }
                 }
 
-                // 🟡 Issue 3: Build up dedup map: for build tools/runtimes with packageId,
-                // collect which packages are currently running so we can close old sessions
-                var runningPackageIds = new HashSet<string>();
-                foreach (var (log, _, _, pkgId, _) in resolvedLogs)
-                {
-                    if (!string.IsNullOrEmpty(pkgId))
-                        runningPackageIds.Add(pkgId);
-                }
-
                 var newSessions = new List<AppSession>();
                 var newItems = new List<AppItem>();
                 var contextUpdates = new List<AppItem>();
-
-                // 🟡 Issue 3: Close old open sessions for packages no longer running
-                // (prevents accumulating many 'open' sessions for the same tool like dotnet)
-                await CloseStalePackageSessionsAsync(runningPackageIds, closeSessions, stoppingToken);
 
                 foreach (var (log, displayName, appId, pkgId, isBrowser) in resolvedLogs)
                 {
@@ -497,7 +492,6 @@ public class LogCollectorService : BackgroundService
         try
         {
             _knownAppBinaryNames = await _store.GetAllInstalledAppBinaryNamesAsync(ct);
-            _knownPackageNames = await _store.GetAllInstalledPackageNamesAsync(ct);
             _lastKnownNamesRefresh = DateTime.UtcNow;
         }
         catch
@@ -631,71 +625,73 @@ public class LogCollectorService : BackgroundService
         if (isHeadlessSubProcess && string.IsNullOrWhiteSpace(windowTitle))
             return (false, null, null, null, false);
 
-        if (AppProcessClassifier.IsShellProcess(processName))
-        {
-            var shellApp = await _store.GetInstalledAppByBinaryNameAsync(processName, ct);
-            if (shellApp != null)
-                return (true, shellApp.AppName, shellApp.Id, null, false);
-            return (true, null, null, null, false);
-        }
-
         if (NonAppProcesses.Contains(processName) ||
             NonAppProcessPrefixes.Any(p => processName.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
             return (false, null, null, null, false);
 
-        // Headless browser subprocesses are filtered above (step 1) when we resolve
-        // the app from DB. For unknown processes without window titles, the main loop
-        // filter (!hasWindow && !isKnown) will reject them anyway.
-
-        // 1. Check known app binary names (fast in-memory path)
+        // 1. Check known app binary names from installed_applications (fast in-memory path)
+        // 🟡 Phase 0a: Even if the process is in the DB, verify it's actually a GUI app.
+        // Pre-existing rows for non-GUI tools (sh, snap) were auto-registered before the
+        // GUI gate existed and would bypass the gate if we only check _knownAppBinaryNames.
         if (_knownAppBinaryNames.Contains(processName))
         {
             var app = await _store.GetInstalledAppByBinaryNameAsync(processName, ct);
             if (app != null)
             {
-                // If this is a browser subprocess with --type= flag and no window title,
-                // it's a headless subprocess (renderer, GPU, utility, etc.) — skip tracking.
-                // Main browser process (no --type= flag) is tracked even without window title
-                // (needed for Wayland where window titles may not be available).
+                // Skip non-GUI apps that happen to be in the DB from before the GUI gate.
+                // A GUI app has non-empty Categories OR is flagged as a browser.
+                if (!app.IsBrowser && string.IsNullOrWhiteSpace(app.Categories))
+                    return (false, null, null, null, false);
+
                 if (app.IsBrowser && string.IsNullOrWhiteSpace(windowTitle) && isHeadlessSubProcess)
                     return (false, null, null, null, true);
                 return (true, app.AppName, app.Id, null, app.IsBrowser);
             }
         }
 
-        // 2. Check known package names (fast in-memory path)
-        if (_knownPackageNames.Contains(processName))
+        // 2. Fuzzy match: process may exist in DB under a similar binary name
+        // 🟡 Phase 0a: Only consider fuzzy matches that could plausibly be the same app.
+        // Reject matches where the process name is very short (≤3 chars) because short
+        // SQL LIKE patterns like '%sh%' or '%go%' are too broad and match unrelated processes.
+        var existingFuzzy = processName.Length > 3
+            ? await _store.GetInstalledAppByBinaryNameFuzzyAsync(processName, ct)
+            : null;
+        if (existingFuzzy != null)
         {
-            var pkg = await _store.GetInstalledPackageByNameAsync(processName, ct);
-            if (pkg != null)
-                return (true, pkg.PackageName, null, pkg.Id, false);
+            // Also verify the fuzzy match is actually a GUI app
+            if (!existingFuzzy.IsBrowser && string.IsNullOrWhiteSpace(existingFuzzy.Categories))
+                return (false, null, null, null, false);
+
+            _knownAppBinaryNames.Add(processName);
+            return (true, existingFuzzy.AppName, existingFuzzy.Id, null, existingFuzzy.IsBrowser);
         }
 
-        // 3. Try the in-memory detector as fallback
+        // 3. Auto-detect: is this a GUI application? (has .desktop / .app bundle / Start Menu)
+        // Only GUI applications get registered into installed_applications and tracked.
+        // CLI-only tools, shells, build tools, runtimes, and daemons are all skipped.
         var execPath = GetExecutablePath(processName);
-        if (_appDetector.IsInstalledApplication(processName, execPath))
+        if (_appDetector.IsGuiApplication(processName, execPath))
         {
-            var displayName = _appDetector.ResolveDisplayName(processName);
-            if (displayName == processName)
-                displayName = await ResolveDisplayNameFromPath(processName, execPath, ct);
-
-            // 🟡 FIX: Before creating a new entry, check if the DB already has a matching
-            // app by fuzzy binary/app name match. This prevents duplicates when the running
-            // process name differs from the .desktop binary name (e.g., "chrome" vs "google-chrome-stable").
-            var existingFuzzy = await _store.GetInstalledAppByBinaryNameFuzzyAsync(processName, ct);
-            if (existingFuzzy != null)
+            if (!string.IsNullOrEmpty(execPath))
             {
-                _knownAppBinaryNames.Add(processName);
-                return (true, existingFuzzy.AppName, existingFuzzy.Id, null, existingFuzzy.IsBrowser);
+                var autoApp = await AutoDetectInstalledGuiApp(processName, execPath, ct);
+                if (autoApp != null)
+                {
+                    var storedAutoAppId = await _store.StoreInstalledAppAsync(autoApp, ct);
+                    _knownAppBinaryNames.Add(processName);
+                    return (true, autoApp.AppName, storedAutoAppId, null, autoApp.IsBrowser);
+                }
             }
 
-            if (displayName != null && displayName != processName)
+            // Process name matches a known GUI app but exec path unavailable — still register
+            var displayName = _appDetector.ResolveDisplayName(processName);
+            if (displayName != null)
             {
                 var app = new InstalledApplication
                 {
                     AppName = displayName,
                     BinaryName = processName,
-                    InstallPath = execPath ?? "",
+                    InstallPath = "",
                     ChangeType = "seen",
                     DetectedAt = DateTime.UtcNow,
                 };
@@ -703,83 +699,9 @@ public class LogCollectorService : BackgroundService
                 _knownAppBinaryNames.Add(processName);
                 return (true, displayName, storedAppId, null, false);
             }
-            else
-            {
-                var app = new InstalledApplication
-                {
-                    AppName = processName,
-                    BinaryName = processName,
-                    InstallPath = execPath ?? "",
-                    ChangeType = "seen",
-                    DetectedAt = DateTime.UtcNow,
-                };
-                var storedAppId = await _store.StoreInstalledAppAsync(app, ct);
-                _knownAppBinaryNames.Add(processName);
-                return (true, processName, storedAppId, null, false);
-            }
         }
 
-        // 4. Auto-detect: unknown process — try to resolve from the filesystem
-        if (!string.IsNullOrEmpty(execPath))
-        {
-            // 🟡 FIX: Check fuzzy match BEFORE auto-creating new entry
-            var existingFuzzy = await _store.GetInstalledAppByBinaryNameFuzzyAsync(processName, ct);
-            if (existingFuzzy != null)
-            {
-                _knownAppBinaryNames.Add(processName);
-                return (true, existingFuzzy.AppName, existingFuzzy.Id, null, existingFuzzy.IsBrowser);
-            }
-
-            var autoApp = await AutoDetectInstalledApp(processName, execPath, ct);
-            if (autoApp != null)
-            {
-                var storedAutoAppId = await _store.StoreInstalledAppAsync(autoApp, ct);
-                _knownAppBinaryNames.Add(processName);
-                return (true, autoApp.AppName, storedAutoAppId, null, false);
-            }
-        }
-
-        // 5. Runtime packages (node, python, etc.) — auto-register when seen running
-        if (AppProcessClassifier.IsRuntimePackage(processName))
-        {
-            var pkg = await _store.GetInstalledPackageByNameAsync(processName, ct);
-            if (pkg == null)
-            {
-                var detected = new InstalledPackage
-                {
-                    PackageName = processName,
-                    Category = "runtime",
-                    SourceManager = "process",
-                    DetectedAt = DateTime.UtcNow,
-                };
-                var storedPkgId = await _store.StoreInstalledPackageAsync(detected, ct);
-                _knownPackageNames.Add(processName);
-                return (true, detected.PackageName, null, storedPkgId, false);
-            }
-            return (true, pkg.PackageName, null, pkg.Id, false);
-        }
-
-        // 6. Build tools (make, go, npm, cargo, etc.) — auto-register as tools when seen running
-        if (AppProcessClassifier.IsBuildTool(processName))
-        {
-            var pkg = await _store.GetInstalledPackageByNameAsync(processName, ct);
-            if (pkg == null)
-            {
-                var detected = new InstalledPackage
-                {
-                    PackageName = processName,
-                    Category = "tool",
-                    SourceManager = "process",
-                    DetectedAt = DateTime.UtcNow,
-                };
-                var storedBuildToolId = await _store.StoreInstalledPackageAsync(detected, ct);
-                _knownPackageNames.Add(processName);
-                return (true, detected.PackageName, null, storedBuildToolId, false);
-            }
-            return (true, pkg.PackageName, null, pkg.Id, false);
-        }
-
-        // 7. Not identifiable — skip
+        // 4. Not identifiable or not a GUI app — skip
         return (false, null, null, null, false);
     }
 
@@ -852,7 +774,15 @@ public class LogCollectorService : BackgroundService
         return null;
     }
 
-    private async Task<InstalledApplication?> AutoDetectInstalledApp(string processName, string execPath, CancellationToken ct)
+    /// <summary>
+    /// Auto-detect a GUI application by scanning OS application metadata.
+    /// On Linux: scans .desktop files for a matching Exec= binary.
+    /// On Windows: checks Program Files / WindowsApps paths.
+    /// On macOS: checks for .app bundle paths.
+    /// Only returns a record if the process corresponds to a real GUI application.
+    /// CLI-only tools, shells, build tools, and runtimes will return null.
+    /// </summary>
+    private async Task<InstalledApplication?> AutoDetectInstalledGuiApp(string processName, string execPath, CancellationToken ct)
     {
         try
         {
@@ -1667,27 +1597,64 @@ public class LogCollectorService : BackgroundService
     }
 
     /// <summary>
-    /// 🟡 Issue 3: Close stale sessions for packages that are no longer running.
-    /// When a build tool (e.g., dotnet) runs with a new PID and the same packageId
-    /// as an already-tracked session, the old PID naturally falls out of currentKeys
-    /// on the next cycle and gets closed by the existing PID-based close logic.
-    /// This method handles an edge case: if a package changes PIDs mid-cycle,
-    /// we proactively close the old PID's session.
+    /// Phase 0a: Close sessions and remove installed_applications entries for non-GUI
+    /// processes that were auto-registered before the GUI-only tracking gate existed.
+    /// These include shell interpreters (sh), system tools (snap), and other CLI-only
+    /// processes that were incorrectly registered into installed_applications by the old
+    /// AutoDetectInstalledApp code (which put anything in /usr/bin/ into the DB).
     /// </summary>
-    private async Task CloseStalePackageSessionsAsync(
-        HashSet<string> runningPackageIds,
-        List<AppSession> closeSessions,
-        CancellationToken ct)
+    private async Task CleanupNonGuiAppEntriesAsync(CancellationToken ct)
     {
         try
         {
-            // Find any sessions in _previousSessionKeys whose package is no longer running
-            // by checking _previousSessionKeys entries against current packageIds.
-            // Since we don't store packageId in _previousSessionKeys, this is a no-op here.
-            // PID-based natural closing handles the normal case.
+            // Non-GUI binary names that should never have been in installed_applications
+            var nonGuiBinaryNames = new[] { "sh", "snap" };
+
+            foreach (var binaryName in nonGuiBinaryNames)
+            {
+                // Find the installed_applications entry for this non-GUI binary
+                var app = await _store.GetInstalledAppByBinaryNameAsync(binaryName, ct);
+                if (app == null || app.IsBrowser || !string.IsNullOrWhiteSpace(app.Categories))
+                    continue;
+
+                _logger.LogWarning(
+                    "⚠️ Phase 0a: Removing non-GUI entry '{AppName}' (binary={Binary}) from installed_applications and closing its open sessions",
+                    app.AppName, binaryName);
+
+                // Close all open sessions linked to this app
+                var openRecords = await _store.GetAllOpenSessionRecordsAsync(ct);
+                var closeSessions = new List<AppSession>();
+                var sessionIds = new List<string>();
+
+                foreach (var rec in openRecords)
+                {
+                    if (string.Equals(rec.ProcessName, binaryName, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(rec.ProcessName, app.AppName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        sessionIds.Add(rec.AppSessionId);
+                        closeSessions.Add(new AppSession
+                        {
+                            Id = rec.AppSessionId,
+                            ProcessName = string.Empty,
+                            EndedAt = DateTime.UtcNow,
+                        });
+                    }
+                }
+
+                if (closeSessions.Count > 0)
+                {
+                    await _store.StoreAppSessionsAsync(closeSessions, ct);
+                    await _store.CloseAppItemsBySessionIdsAsync(sessionIds, DateTime.UtcNow, ct);
+                }
+
+                // Delete the installed_applications entry
+                await _store.DeleteInstalledAppAsync(app.Id, ct);
+            }
         }
-        catch { }
-        await Task.CompletedTask;
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to clean up non-GUI app entries");
+        }
     }
 
     // ────────────────────────────────────────────

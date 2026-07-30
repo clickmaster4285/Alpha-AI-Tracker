@@ -26,8 +26,8 @@ public class NativeMessageService : BackgroundService
     private readonly ILogger<NativeMessageService> _logger;
     private readonly string _socketPath;
 
-    // Cache: browser process name → installed_app entry (looked up on first event)
-    private readonly Dictionary<string, string> _browserAppCache = new(StringComparer.OrdinalIgnoreCase);
+    // Cache: browser process name → (installed_app_id, installed_app_displayName)
+    private readonly Dictionary<string, (string id, string displayName)> _browserAppCache = new(StringComparer.OrdinalIgnoreCase);
     // Cache: browser process name + tabId → current AppSession.Id
     private readonly Dictionary<string, string> _tabSessionCache = new(StringComparer.OrdinalIgnoreCase);
 
@@ -226,8 +226,8 @@ public class NativeMessageService : BackgroundService
         // Extract URL and domain once for reuse
         var (navUrl, navDomain) = ExtractUrlAndDomain(msg.Url);
 
-        // Resolve browser app_id
-        var browserAppId = await ResolveBrowserAppIdAsync(msg, ct);
+        // Resolve browser app_id and display name
+        var (browserAppId, browserDisplayName) = await ResolveBrowserAppAsync(msg, ct);
 
         // Build a cache key: browser + tabId (survives browser/extension restarts)
         var tabCacheKey = BuildTabCacheKey(msg);
@@ -254,7 +254,7 @@ public class NativeMessageService : BackgroundService
         var session = new AppSession
         {
             ProcessName = msg.Browser ?? "browser",
-            AppDisplayName = browserAppId ?? msg.Browser ?? "Browser",
+            AppDisplayName = browserDisplayName ?? msg.Browser ?? "Browser",
             StartedAt = DateTime.UtcNow,
             MachineId = Environment.MachineName,
             SessionId = SessionInfo.SessionId,
@@ -300,21 +300,26 @@ public class NativeMessageService : BackgroundService
         }
     }
 
-    private async Task<string?> ResolveBrowserAppIdAsync(BrowserMessage msg, CancellationToken ct)
+    /// <summary>
+    /// Resolve the installed_applications row for a browser process name.
+    /// Returns (installedAppId, displayName) or (null, null) if not found.
+    /// Caches both values so repeat lookups don't hit the DB.
+    /// </summary>
+    private async Task<(string? id, string? displayName)> ResolveBrowserAppAsync(BrowserMessage msg, CancellationToken ct)
     {
         var browserName = msg.Browser ?? "chrome";
-        if (_browserAppCache.TryGetValue(browserName, out var cachedId))
-            return cachedId;
+        if (_browserAppCache.TryGetValue(browserName, out var cached))
+            return (cached.id, cached.displayName);
 
         // Try to find the browser in installed_applications by fuzzy binary name match
         var app = await _store.GetInstalledAppByBinaryNameFuzzyAsync(browserName, ct);
         if (app != null)
         {
-            _browserAppCache[browserName] = app.Id;
-            return app.Id;
+            _browserAppCache[browserName] = (app.Id, app.AppName);
+            return (app.Id, app.AppName);
         }
 
-        return null;
+        return (null, null);
     }
 
     private static string BuildTabCacheKey(BrowserMessage msg) =>

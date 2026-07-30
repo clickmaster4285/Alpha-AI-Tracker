@@ -506,6 +506,23 @@ public class SqliteLogStore : ILogStore, IDisposable
         }
     }
 
+    public async Task DeleteInstalledAppAsync(string id, CancellationToken ct)
+    {
+        if (_connection == null) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "DELETE FROM installed_applications WHERE id = $id";
+            cmd.Parameters.AddWithValue("$id", id);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
     public async Task<string> StoreInstalledPackageAsync(InstalledPackage entry, CancellationToken ct)
     {
         if (_connection == null) return entry.Id;

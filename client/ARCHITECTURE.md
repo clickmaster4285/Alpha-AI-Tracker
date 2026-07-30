@@ -1,7 +1,15 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-07-29 (GNOME daemon contamination fix — blocklist, prefix matching, fuzzy SQL)  
+> **Last audited:** 2026-07-30 (GUI-only tracking gate + concurrency + subprocess filtering)  
 > **Changelog:** 
+> - 2026-07-30: **Software classification pipeline** — Added `SoftwareCategoryResolver.cs` (metadata-driven category resolution: `.desktop Categories` → Browser/IDE/FileManager/Application, macOS bundle ID fallback), `SoftwareClassifier.cs` (joint dedup pipeline: GUI apps win over matching package entries), `SoftwareIdentityResolver.cs` (SHA-256 stable identity for cross-source dedup across InstalledAppDetector vs PackageDetector). Refactored `AppProcessClassifier.cs`: renamed `FileManagerProcesses`/`IdeProcesses` → `FileManagerFallbacks`/`IdeFallbacks`, added `ResolveCategory()` and new `ResolveRootItemType()` overload with `categories`/`desktopId` params. Upgraded `InstalledAppDetector.cs`: Linux `.desktop` scanning now follows `$XDG_DATA_DIRS` (covers snap `/var/lib/snapd/desktop/applications/` and flatpak exports), macOS `IsMacOSBrowserApp()` → `InspectMacOSBundle()` returning `CFBundleIdentifier` + browser flag, added `ExtractPlistString()` helper, browser detection via `Categories=WebBrowser` (Linux) / `URLAssociations` http/https (Windows) / `CFBundleURLSchemes` http+https (macOS). Added server migration 012 (`desktop_id`, `categories`, `is_browser` columns).
+> - 2026-07-30: **File logger** — Added `FileLoggerProvider.cs` for `dotnetrunlog.txt` output, registered in `Program.cs`.
+> - 2026-07-30: **GUI-apps-only tracking gate** — New rule: only processes resolving to `installed_applications` or detected as GUI apps (has .desktop file / .app bundle / Start Menu) are tracked. Removed shell-always-tracked, build-tool auto-registration, runtime auto-registration, package fallback tracking from `ResolveAppInfoInner`. Added `IsGuiApplication()` to `IInstalledAppDetector`/`InstalledAppDetector` with `CheckGuiPath()`. Simplified main loop filter, removed `_knownPackageNames`, `CloseStalePackageSessionsAsync`. Renamed `AutoDetectInstalledApp` → `AutoDetectInstalledGuiApp`.
+> - 2026-07-30: **Fixed NativeMessageService app_display_name GUID bug** — `_browserAppCache` now stores `(id, displayName)` tuple instead of raw GUID. `ResolveBrowserAppIdAsync` → `ResolveBrowserAppAsync` returning both ID and name. Caller uses display name for `AppDisplayName`.
+> - 2026-07-30: **Cross-platform headless subprocess filter** — Added `GetProcessCommandLine()` (PowerShell on Windows, `ps -o command=` on macOS). Centralized `ChromiumSubprocessFlags` + `IsHeadlessSubprocess()` in `AppProcessClassifier`. Linux `IsChromeSubprocess()` → `ReadProcessCmdline()`. Startup cleanup closes old `--type=` rows.
+> - 2026-07-30: **Dynamic browser suffix stripping** — Removed 12-entry hardcoded `BrowserSuffixes` array from `ActivityContextParser`. Strips suffix dynamically from `installed_applications.app_name`. No generic regex fallback.
+> - 2026-07-30: **SemaphoreSlim concurrency gate** — `SemaphoreSlim(1,1)` guarding all `SqliteLogStore` public methods. Private ungated helpers avoid reentrancy deadlock. `PRAGMA busy_timeout = 5000;`. `GatedTransaction` wrapper + gate-leak fix.
+> - 2026-07-30: **FileSystemEventWatcher exclusion list** — Excluded Waydroid, Flatpak, Snap, cache, trash, containers, Steam dirs. Removed `UserProfile` from `WatchDirectories`. Per-process resilience via inner try/catch.
 > - 2026-07-29: **Fixed GNOME daemon contamination via Xwayland empty `binary_name`** — Xwayland `.desktop` file has no `Exec=` line, so `InstalledAppDetector` stored it with `binary_name=""`. The fuzzy-match SQL (`$name LIKE '%' || binary_name || '%'`) became `$name LIKE '%%'` — matching **every** process. Fixed by: (1) `AND binary_name != ''` in fuzzy SQL; (2) `NonAppProcesses` expanded with 16 GNOME daemons + added `NonAppProcessPrefixes` array (`gvfsd-`, `gsd-`, `goa-`, `evolution-`, `ibus-`, `at-spi2-`, `gnome-shell-`, `tracker-`, `gdm`, `mutter-`); (3) `KernelNamePrefixes` in `ProcessFilter.cs` for first-stage filter; (4) `NoDisplay=true` + `Type!=Application` gate in `AddAppFromDesktopFile`. DB cleaned: orphaned sessions closed, Xwayland entry patched with `binary_name='Xwayland'`.
 > - 2026-07-29: **Added File Explorer journey tracking** — Full event-driven desktop event bus for file manager operations (Nautilus, Dolphin, Thunar, Nemo, etc.). Three watchers: `ATSPIEventWatcher` (Tmds.DBus.Protocol → AT-SPI focus/window events + `/proc/cwd`), `FileSystemEventWatcher` (FileSystemWatcher on 7 user directories), `RecentFilesWatcher` (XBEL monitor at `~/.local/share/recently-used.xbel`). `EventCoordinator` deduplicates (3s), correlates (500ms), normalizes raw→business events. `JourneyEngine` resolves `AppSession`, creates `AppItem` rows with 9 journey fields (`object_type`, `action`, `journey_id`, `sequence`, `previous_path`, `current_path`, `window_id`, `tab_id`, `metadata_json`). `IObservableEventSource` interface for all watchers. Coexistence: `item_type` preserved; browser pipeline untouched. NuGet: `Tmds.DBus.Protocol` v0.94.2.
 > - 2026-07-28: **Added browser extension journey tracking** — Chrome MV3 extension + NativeMessageService + native-host.py pipeline captures real-time browser navigation (URLs, tabs, titles). Stored as `browser_tab`/`browser_navigation` in `app_items` with `url`/`domain` fields.
@@ -25,7 +33,7 @@
 > - 2026-07-27: **Broadened `AutoDetectInstalledApp`** — now accepts `/home/*` and `/media/*` paths as valid install locations (covers project-local compiled binaries like `./bin/alpha-ai-server`).
 > - 2026-07-27: **Fixed file manager path resolution** — `ParseFileManagerContext` now resolves folder display names to absolute paths by searching `~/`, `~/Documents`, `~/Desktop`, `/media/<user>/`, etc.
 > - 2026-07-27: **Fixed `SessionHierarchyResolver`** — `ResolveParent` now walks through build tools and runtime packages as intermediate PPID steps; `ShouldLinkTo` now accepts build tools as children of IDEs and terminals.
-> **Service completion (honest):** ~80%
+> **Service completion (honest):** ~85%
 
 ---
 
@@ -382,14 +390,10 @@ CREATE TABLE IF NOT EXISTS employee_info (
 
 - **ProcessFilter.cs** — filters out kernel/system processes
 - **LogCollectorService** — resolves each process against SQLite `installed_applications` (via `binary_name`) and `installed_packages` (via `package_name`):
-  - **Shell processes** (`bash`, `zsh`, `cmd`, etc.): always tracked (no window title needed)
-  - **GUI apps with window title** (found in `installed_applications` AND have a window): tracked with full context
-  - **GUI apps WITHOUT window title** (found in `installed_applications` but NOT in X11 window list): still tracked — Wayland-native apps like VSCode and Chrome don't appear in X11 client list
-  - **CLI packages** (found in `installed_packages`): tracked regardless of window title
-  - **Build tools** (`make`, `go`, `npm`, `npx`, `cargo`, `pip`, `tsc`, etc.): auto-registered as `installed_packages` (category=`tool`) and tracked even without a window
-  - **Runtime packages** (`node`, `dotnet`, `python`, etc.): auto-registered as `installed_packages` (category=`runtime`) and tracked
-  - **Unknown processes with exec path**: auto-detected via filesystem heuristics (`.desktop` files, standard install paths including `/home/` and `/media/`); saved and tracked
-  - **Unresolvable processes**: silently skipped (no known identity, no window, not a shell/build tool)
+- **Known GUI apps** (found in `installed_applications` via binary_name match): tracked with full context — both with and without window titles (Wayland-native apps like VSCode don't appear in X11 client list)
+- **Unknown processes detected as GUI**: scanned for .desktop files (Linux), .app bundles (macOS), or Start Menu/Program Files entries (Windows) via `IsGuiApplication()`; if GUI, auto-registered into `installed_applications` and tracked
+- **CLI-only tools, shells, build tools, runtimes, and daemons**: **SKIPPED entirely** — no `installed_packages` entry created, no `app_session` created, no `app_items` created
+- **Unresolvable processes**: silently skipped
 - `AppDisplayName` is set from the installed app's `app_name` (e.g., `"Visual Studio Code"`), not from the OS process name (`"code"`) or window title
 - `InstalledAppId` / `InstalledPackageId` FK columns link each session to its app/package record
 - **Wayland note**: Linux window title enumeration uses X11 `xprop _NET_CLIENT_LIST`. On Wayland, only XWayland windows appear (not native Wayland windows). Foreground detection via AT-SPI/gdbus still works for the active window.
@@ -507,7 +511,6 @@ CREATE TABLE IF NOT EXISTS employee_info (
 7. **Add offline retry with backoff** — exponential backoff on sync failures to reduce server load
 8. **Consider auto-update** — integrate Velopack or Squirrel.Windows for silent updates
 9. ~~**Add process ancestry tracking** — persist parent PID chain from `ParentProcessResolver` into `AppItem`~~ ✅ DONE
-10. **Improve Chrome subprocess filtering** — use `/proc/<pid>/cmdline` check for `--type=` flag to reliably filter non-browser chrome processes
-11. **Browser extension for full URL capture** — window-title parsing is best-effort; MV3 extension + native messaging for production-grade URLs. Currently only page title and a heuristic `title:X` identifier are stored, not actual URLs.
+10. **Browser extension for full URL capture** — window-title parsing is best-effort; MV3 extension + native messaging for production-grade URLs. Currently only page title and a heuristic `title:X` identifier are stored, not actual URLs.
 12. ~~**AT-SPI for Wayland window enumeration** — currently only the foreground window is captured via AT-SPI. All-windows enumeration via AT-SPI Registry would fix background Chrome tabs, Nautilus paths, etc.~~ ✅ DONE (File Explorer journey tracking: 3 watchers + EventCoordinator + JourneyEngine)
 13. ~~**File manager via `xdg-open` hook or inotify** — watch `~/.local/share/recently-used.xbel` for recently opened files/folders as a supplement to window title parsing.~~ ✅ DONE (RecentFilesWatcher + FileSystemEventWatcher + ATSPIEventWatcher)

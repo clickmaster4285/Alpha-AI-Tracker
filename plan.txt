@@ -1,511 +1,298 @@
-# Alpha AI Tracker — Client Fix Analysis & Plan
-## Generated: 2026-07-30
-
 ═══════════════════════════════════════════════════════════
- TABLE OF CONTENTS
-═══════════════════════════════════════════════════════════
- 1. Fix 1 — SQLite Transaction/Connection Mismatch
- 2. Fix 2 — Electron/Chromium Subprocess Filtering  
- 3. Fix 3 — Waydroid FileSystemWatcher Log Flood
- 4. Implementation Priority & Plan
-
-═══════════════════════════════════════════════════════════
- FIX 1 — SQLite Connection Concurrency (REAL BUG)
+  ALPHA AI TRACKER — FOREGROUND/BACKGROUND INSTRUMENTATION PLAN
+  Audited: 2026-07-30 (live DB + code analysis)
 ═══════════════════════════════════════════════════════════
 
-### Claim Made
-"Is there ANY synchronization primitive guarding access to _connection
- across concurrent callers? Can StoreInstalledAppAsync run at the same
- wall-clock moment as another method calling _connection.BeginTransactionAsync?
- If yes to #2 and no to #1, that's the bug."
-
-### Reality (After Full Concurrency Audit)
-✅ CORRECT — THIS IS A GENUINE CONCURRENCY BUG.
-
-### 1. NO SYNCHRONIZATION EXISTS
-
-SqliteLogStore has ZERO synchronization on `_connection`:
-- No `lock` statement
-- No `SemaphoreSlim`
-- No `ReaderWriterLock`
-- No `Monitor.Enter/Exit`
-- Nothing. `_connection` is a raw, unprotected `SqliteConnection?` field.
-
-### 2. ILogStore IS A SINGLETON — Shared by ALL Callers
-
-Program.cs line 71:
-```csharp
-builder.Services.AddSingleton<ILogStore>(sp => { ... return new SqliteLogStore(...); });
-```
-
-Every service gets the SAME `SqliteLogStore` instance with the SAME
-single `_connection`. This connection is SHARED across all concurrent
-callers with no mutual exclusion.
-
-### 3. CONCURRENT CALLER ANALYSIS
-
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ Caller                │ Type              │ ILogStore Methods Called       │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ LogCollectorService  │ Hosted Background │ StoreAppSessionsAsync       ⚡ │
-│                      │ Service (30s loop)│ StoreAppItemsAsync          ⚡ │
-│                      │                   │ StoreInstalledAppAsync        │
-│                      │                   │ StoreInstalledPackageAsync    │
-│                      │                   │ GetOpenSessionRecordsAsync    │
-│                      │                   │ SetStatusAsync                │
-│                      │                   │ MarkXxxSentAsync          ⚡  │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ NativeMessageService │ Hosted Background │ StoreAppSessionsAsync       ⚡ │
-│                      │ Service (socket   │ StoreAppItemsAsync          ⚡ │
-│                      │ listener, fire-   │ CloseAppItemsBySessionIdsAsync│
-│                      │ and-forget per    │ GetInstalledAppByBinaryName   │
-│                      │ connection)       │ FuzzyAsync                    │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ DesktopEventService→ │ Hosted Background │ StoreAppSessionsAsync       ⚡ │
-│ JourneyEngine        │ Service (event-   │ StoreAppItemsAsync          ⚡ │
-│                      │ driven, any time) │ CloseAppItemsBySessionIdsAsync│
-│                      │                   │ GetOpenJourneyEventAsync      │
-│                      │                   │ GetOpenAppItemAsync           │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ MainViewModel         │ UI Thread        │ SetStatusAsync                │
-│                       │ (user-driven)    │ SaveEmployeeInfoAsync         │
-│                       │                   │ ClearEmployeeInfoAsync        │
-└─────────────────────────────────────────────────────────────────────────────┘
-
-   ⚡ = uses _connection.BeginTransactionAsync (holds open transaction)
-
-### 4. CONCRETE RACE CONDITION SCENARIO
-
-Scenario A — Non-transacted write during transacted write:
-
-  T=0s:  NativeMessageService receives browser tab event
-         → StoreAppSessionsAsync(session, ct)
-         → _connection.BeginTransactionAsync()         ← Transaction opened
-         → executing INSERT...
-
-  T=0.1s: LogCollectorService collection cycle (30s timer fires)
-          → ResolveAppInfo calls StoreInstalledAppAsync(...)
-          → _connection.CreateCommand().ExecuteNonQueryAsync()  ← SAME connection
-          → SQLITE_BUSY or undefined behavior on shared connection
-
-Scenario B — Two transactions simultaneously:
-
-  T=0s:  LogCollectorService's SyncUnsentData()
-         → MarkDeviceHardwareInfoSentAsync(...)
-         → _connection.BeginTransactionAsync()          ← Transaction T1
-
-  T=0.05s: JourneyEngine receives file system event
-           → StoreAppItemsAsync(...)
-           → _connection.BeginTransactionAsync()        ← Transaction T2 on SAME conn
-           → SQLite error: only one transaction allowed per connection
-
-SQLite in `Cache=Shared` mode (which this uses) does NOT provide
-built-in concurrency safety for multiple writers on the same connection.
-`Microsoft.Data.Sqlite` throws `SqliteException (SQLITE_BUSY)` or
-worse, silently corrupts data, when two writers contend on one connection.
-
-### PROPOSED FIX — SemaphoreSlim(1,1) on _connection
-
-Add a `SemaphoreSlim` gate that wraps ALL methods accessing `_connection`:
-
-```csharp
-private readonly SemaphoreSlim _connectionGate = new(1, 1);
-
-// Every public method gates its body:
-public async Task StoreInstalledAppAsync(InstalledApplication entry, CancellationToken ct)
-{
-    await _connectionGate.WaitAsync(ct);
-    try
-    {
-        // ... existing code using _connection ...
-    }
-    finally
-    {
-        _connectionGate.Release();
-    }
-}
-```
-
-This ensures that:
-- Only ONE logical operation touches the connection at a time
-- Transacted writes are isolated from non-transacted writes
-- All 4 concurrent callers serialize through the same gate
-- No interface/abstraction leak — the gate is entirely inside SqliteLogStore
-
-Alternative approach: Give every StoreInstalledAppAsync a transaction too
-so all write paths are symmetric. But that leaves the core problem of
-TWO callers both opening transactions simultaneously on the same
-connection. SemaphoreSlim is the right answer.
-
-═══════════════════════════════════════════════════════════
- FIX 2 — Electron/Chromium Subprocess Filtering
-═══════════════════════════════════════════════════════════
-
-### Claim Made
-"The existing Chrome subprocess filtering gap needs to be generalized.
- Any process with --type= flags should never be tracked. Cross-platform
- check. Clean up existing garbage rows."
-
-### Reality (After Reading Full Source)
-✅ MOSTLY ALREADY IMPLEMENTED — but with gaps.
-
-### What Already Exists
-
-1. LogCollectorService.cs (line 594-599):
-   Checks ORIGINAL process name for `--type=` AND `--contentproc` flags
-   BEFORE stripping cmdline arguments:
-   ```csharp
-   var isHeadlessSubProcess = 
-       processName.Contains("--type=", StringComparison.OrdinalIgnoreCase) ||
-       processName.Contains("--contentproc", StringComparison.OrdinalIgnoreCase) ||
-       processName.Contains("-contentproc", StringComparison.OrdinalIgnoreCase);
-   ```
-
-2. ResolveAppInfoInner (line 615-622):
-   Returns (false, null, null, null, false) at the very top if
-   `isHeadlessSubProcess && string.IsNullOrWhiteSpace(windowTitle)`:
-   ```csharp
-   if (isHeadlessSubProcess && string.IsNullOrWhiteSpace(windowTitle))
-       return (false, null, null, null, false);
-   ```
-
-3. Linux ProcessCollector (line 57-62, 596-621):
-   Has `IsChromeSubprocess(pid, name)` method that reads
-   `/proc/{pid}/cmdline` for `--type=` flags — the most reliable
-   approach on Linux because /proc/cmdline contains the full command:
-   ```csharp
-   private static bool IsChromeSubprocess(int pid, string processName)
-   {
-       var cmdline = File.ReadAllText($"/proc/{pid}/cmdline")
-                         .Replace('\0', ' ');
-       if (cmdline.Contains("--type=", StringComparison.OrdinalIgnoreCase))
-           return true;
-       ...
-   }
-   ```
-   This filter runs in ProcessCollector BEFORE the session resolution loop.
-
-### Remaining Gaps
-
-🔴 GAP A — IsChromeSubprocess is Linux-only:
-   The /proc/{pid}/cmdline check only runs on Linux. Windows and macOS
-   collectors do NOT check for `--type=` at the process collection level.
-   They rely solely on the LogCollectorService's `isHeadlessSubProcess`
-   check, which only works if the full command line appears in the
-   process name (which it often doesn't — GetProcessesByName returns
-   just "chrome" without args).
-
-🔴 GAP B — Name is misleading:
-   `IsChromeSubprocess` actually checks for `--type=` which is a generic
-   Chromium/Electron convention used by Chrome, Edge, Brave, Opera,
-   VSCode, Slack, Discord, Electron apps, etc. The name should be
-   `IsHeadlessSubprocess` or `IsChromiumSubprocess`.
-
-🟡 GAP C — No cleanup for existing garbage rows:
-   No startup migration to clean existing `app_sessions` rows where
-   `process_name LIKE '%--type=%'` or `LENGTH(process_name) > 200`.
-
-### Proposed Fix for Fix 2
-
-1. Rename `IsChromeSubprocess` → `IsHeadlessSubprocess` in Linux/ProcessCollector.cs
-2. Add the same cmdline check to Windows/ProcessCollector.cs (use WMI Win32_Process.CommandLine)
-3. Add the same cmdline check to macOS/ProcessCollector.cs (use `ps -o command= -p <pid>`)
-4. Add a startup cleanup: delete or mark-as-synced existing app_sessions rows
-   where process_name is garbage (contains `--type=`, or length > 200)
-5. Add a static readonly set `ChromiumSubprocessFlags` to make the check
-   extensible: --type=renderer, --type=gpu-process, --type=utility,
-   --type=zygote, --type=broker, --contentproc, -contentproc
-
-═══════════════════════════════════════════════════════════
- FIX 3 — Waydroid FileSystemWatcher Log Flood
-═══════════════════════════════════════════════════════════
-
-### Claim Made
-"Add known VM/sandbox/container data directories to an exclusion list.
- Do NOT recursively enumerate into a directory tree if the top-level
- directory itself throws UnauthorizedAccessException. Keep ONE summary
- warning per excluded root instead of one line per subfolder."
-
-### Reality (After Reading Full Source)
-✅ THIS IS A REAL BUG — and a significant one.
-
-### The Problem
-
-FileSystemEventWatcher.cs watches 7 directories:
-```csharp
-private static readonly string[] WatchDirectories =
-{
-    Environment.GetFolderPath(SpecialFolder.Desktop),
-    Environment.GetFolderPath(SpecialFolder.MyDocuments),
-    Environment.GetFolderPath(SpecialFolder.MyMusic),
-    Environment.GetFolderPath(SpecialFolder.MyPictures),
-    Environment.GetFolderPath(SpecialFolder.MyVideos),
-    Path.Combine(UserProfile, "Downloads"),
-    Environment.GetFolderPath(SpecialFolder.UserProfile),  // ← WATCHES ~/ RECURSIVELY
-};
-```
-
-The 7th entry watches `~/` WITH `IncludeSubdirectories = true`. This means:
-- Every creation/deletion in `~/.local/share/waydroid/data/` fires events
-- Every flatpak sandbox `~/.var/app/` change fires events
-- Every `~/snap/` change fires events
-- Every `~/.cache/` file change fires events
-
-On a system with Waydroid, Flatpak, or Snap installed, this generates
-THOUSANDS of events per minute — causing:
-- CPU spike from event handler invocations
-- SQLite pressure from JourneyEngine processing
-- Log noise from debounced events
-
-### Current Error Handling
-- `watcher.Error +=` only logs the error — doesn't stop the flood
-- `catch (Exception ex)` at watcher STARTUP doesn't help — the watcher
-  starts fine, it's the event flood that's the problem
-- No exclusion list exists
-
-### Proposed Fix for Fix 3
-
-1. Add a static exclusion list of path prefixes:
-   ```csharp
-   private static readonly string[] ExcludedPathPrefixes =
-   {
-       ".local/share/waydroid/",
-       ".var/app/",
-       "snap/",
-       ".cache/",
-       ".local/share/Trash/",
-       ".local/share/containers/",
-       ".local/share/Steam/",
-       "AppData/Local/Temp/",     // Windows
-       "Library/Caches/",         // macOS
-   };
-   ```
-
-2. Add checked-in-path filter in `HandleFileEvent`:
-   ```csharp
-   private static bool IsExcludedPath(string fullPath)
-   {
-       if (string.IsNullOrEmpty(fullPath)) return true;
-       foreach (var prefix in ExcludedPathPrefixes)
-       {
-           if (fullPath.Contains(prefix, StringComparison.OrdinalIgnoreCase))
-               return true;
-       }
-       return false;
-   }
-   ```
-   Return early from `HandleFileEvent` if `IsExcludedPath(e.FullPath)`.
-
-3. Add a static flag `_loggedExclusions` to log each excluded root
-   ONLY ONCE per startup, not once per event.
-
-4. ⚠️ Consider removing `UserProfile` from WatchDirectories entirely,
-   or at minimum adding `.`-prefixed hidden directories to the exclusion
-   list (dotfiles are almost never user file operations).
-
-═══════════════════════════════════════════════════════════
- FIX 4 — Remove Hardcoded Browser Deduction (Scalability)
-═══════════════════════════════════════════════════════════
-
-### Claim Made
-"Remove hardcoded browser deduction from ActivityContextParser.cs.
- Use an alternative, best, and scalable approach."
-
-### Reality (After Reading Full Source)
-✅ CORRECT — This is a real scalability/maintenance issue.
-
-### The Problem
-
-ActivityContextParser.cs has a hardcoded `BrowserSuffixes` array:
-```csharp
-private static readonly string[] BrowserSuffixes =
-{
-    " - Google Chrome", " — Google Chrome", " - Chromium", " - Mozilla Firefox",
-    " — Mozilla Firefox", " - Firefox", " - Microsoft\u200b Edge", " - Microsoft Edge",
-    " - Brave", " - Opera", " - Vivaldi", " - Safari",
-};
-```
-
-Issues:
-1. **Every new browser requires a recompile + redeploy**
-   - Arc Browser, Yandex, Floorp, Wavebox, Sidekick, Colibri, etc. all missing
-2. **Locale brittleness** — The `" - "` vs `" — "` (em-dash) distinction is
-   fragile. Different locales format titles differently.
-3. **Hidden Unicode bug** — `"Microsoft\u200b Edge"` contains a zero-width
-   space (U+200B) between "Microsoft" and "Edge". This is a copy-paste
-   artifact that silently fails to match real window titles.
-4. **Duplicated data** — The browser's `app_name` already exists in the
-   `installed_applications` table (populated dynamically by `InstalledApp-
-   Detector`). The hardcoded list duplicates what the DB already knows.
-
-### The Good News — Dynamic Infrastructure Already Exists
-
-The dynamic browser detection pipeline is already in place:
-```
-.desktop file → Categories=WebBrowser or MimeType=http/https
-                      ↓
-          InstalledAppDetector.AddAppFromDesktopFile()
-                      ↓
-       installed_applications.is_browser = true
-       installed_applications.app_name = "Google Chrome"
-                      ↓
-          ResolveAppInfo() → isBrowser: true
-                      ↓
-       ResolveRootItemType() → "browser_tab"
-                      ↓
-       ActivityContextParser.Parse(rootItemType="browser_tab")
-                      ↓
-       ParseBrowserContext() → strips BrowserSuffixes ✗
-```
-
-The only missing piece: `ParseBrowserContext` doesn't receive the
-browser's `app_name` from the DB. It relies on the hardcoded list.
-
-### Proposed Fix — Dynamic Suffix from DB App Name
-
-1. **Add `appDisplayName` parameter to `Parse()`:**
-   ```csharp
-   public static ParsedActivityContext Parse(
-       string processName,
-       string? windowTitle,
-       string rootItemType,
-       string? chromeProfile = null,
-       string? appDisplayName = null)  // ← NEW
-   ```
-
-2. **Pass it to `ParseBrowserContext`:**
-   ```csharp
-   if (rootItemType == "browser_tab")
-       return ParseBrowserContext(context, title, chromeProfile, appDisplayName);
-   ```
-
-3. **In `ParseBrowserContext`, build the suffix dynamically:**
-   ```csharp
-   private static ParsedActivityContext ParseBrowserContext(
-       ParsedActivityContext context, string title,
-       string? chromeProfile, string? appDisplayName)
-   {
-       string? pageTitle = null;
-       
-       // Priority 1: Dynamic suffix from app's actual display name
-       if (!string.IsNullOrEmpty(appDisplayName))
-       {
-           pageTitle = StripSuffix(title, new[]
-           {
-               $" - {appDisplayName}",
-               $" — {appDisplayName}",
-           });
-       }
-       
-       // Priority 2: Generic fallback regex for unknown browsers
-       if (pageTitle == null || pageTitle == title)
-       {
-           // Strip common patterns: " - Word", " — Word" at end of title
-           pageTitle = StripGenericBrowserSuffix(title);
-       }
-       
-       // If nothing worked, use title as-is
-       if (string.IsNullOrEmpty(pageTitle)) pageTitle = title;
-       // ... rest of method ...
-   }
-   ```
-
-4. **Add a small generic fallback regex:**
-   ```csharp
-   private static string StripGenericBrowserSuffix(string title)
-   {
-       // Matches " - AnyWord", " — AnyWord", " - Any Browser Name" at the end
-       var match = BrowserSuffixRegex().Match(title);
-       if (match.Success && match.Groups[1].Value.Length < title.Length)
-           return match.Groups[1].Value.Trim();
-       return title;
-   }
-   
-   [GeneratedRegex(@"^(.+?)\s+[-—]\s+[A-Z][a-zA-Z\s]+$")]
-   private static partial Regex BrowserSuffixRegex();
-   ```
-
-5. **Remove the entire `BrowserSuffixes` array** (12 entries → 0).
-
-6. **Update both call sites in LogCollectorService.cs** (lines 338 and 529)
-   to pass `displayName` which is already in scope:
-   ```csharp
-   // Line 338 — displayName is in the tuple from resolvedLogs
-   var parsed = ActivityContextParser.Parse(
-       baseProcessName, log.WindowTitle, rootItemType, browserProfile, displayName);
-   
-   // Line 529 — displayName is a parameter of UpdateActivityContextAsync
-   var parsed = ActivityContextParser.Parse(
-       log.ProcessName, log.WindowTitle, rootType, browserProfile, displayName);
-   ```
-
-### Why This Is Better
-
-| Aspect | Before (Hardcoded) | After (Dynamic) |
-|--------|-------------------|-----------------|
-| New browser | Code change + deploy | `InstalledAppDetector` picks it up automatically |
-| Locale support | Only en-US formats | Works for all locales (display name is OS-native) |
-| Unicode glitches | Zero-width space bug | No hardcoded strings |
-| Maintenance | Must update 12+ entries at every browser release | Zero maintenance |
-| Unknown browser | Silently fails to strip suffix | Generic regex fallback works reasonably |
-
-
-═══════════════════════════════════════════════════════════
- IMPLEMENTATION PLAN (Ordered By Priority)
-═══════════════════════════════════════════════════════════
-
-### Phase 1 — Critical Bugs (Fix 3 first — it's causing active log flood)
-
-[ ] Fix 3: FileSystemEventWatcher exclusion list
-    Files: client/Services/Watchers/FileSystemEventWatcher.cs
-    - Add ExcludedPathPrefixes static array
-    - Add IsExcludedPath() check in HandleFileEvent + HandleRenamedEvent
-    - Add one-time-per-startup exclusion logging
-    - Consider removing UserProfile from WatchDirectories
-
-### Phase 2 — Important Improvements
-
-[ ] Fix 1: SemaphoreSlim concurrency gate on SqliteLogStore._connection
-    File: client/Storage/SqliteLogStore.cs
-    - Add private readonly SemaphoreSlim _connectionGate = new(1, 1)
-    - Wrap every public method's body with await _connectionGate.WaitAsync(ct)
-      / try / finally { _connectionGate.Release() }
-    - This fixes the genuine concurrency bug (4 concurrent callers,
-      no synchronization, single shared connection)
-
-[ ] Fix 4: Remove hardcoded browser deduction from ActivityContextParser
-    Files: 
-    - client/Core/ActivityContextParser.cs
-    - client/Services/LogCollectorService.cs
-    - Remove BrowserSuffixes array (12 hardcoded entries)
-    - Add appDisplayName parameter to Parse()
-    - Build suffix dynamically from appDisplayName at runtime
-    - Add generic regex fallback for unknown browsers
-    - Pass displayName from both call sites
-
-[ ] Fix 1b: Per-process resilience in LogCollectorService
-    File: client/Services/LogCollectorService.cs
-    - Add inner try-catch around each process in the main foreach loop
-    - Log warning and continue on per-process failure
-
-[ ] Fix 2GapA: Cross-platform --type= cmdline check
-    Files: 
-    - client/Platform/Windows/ProcessCollector.cs
-    - client/Platform/MacOS/ProcessCollector.cs
-    - client/Platform/Linux/ProcessCollector.cs (rename only)
-    - Add WMI/ps -o command= /proc/pid/cmdline command extraction
-    - Check for --type= flag on all platforms at collection time
-
-### Phase 3 — Cleanup & Polish
-
-[ ] Fix 2GapB: Rename IsChromeSubprocess → IsHeadlessSubprocess
-    File: client/Platform/Linux/ProcessCollector.cs
-
-[ ] Fix 2GapC: Startup cleanup of garbage session rows
-    File: client/Storage/DatabaseSchema.cs or LogCollectorService.cs
-    - Add SQL cleanup: DELETE app_sessions WHERE process_name LIKE '%--type=%'
-    - Add SQL cleanup: DELETE app_sessions WHERE LENGTH(process_name) > 200
-
-[ ] Fix 2GapC: Add ChromiumSubprocessFlags static set
-    File: client/Services/LogCollectorService.cs or new helper
-    - Centralize the flag list: renderer, gpu-process, utility, zygote, broker
+┌─────────────────────────────────────────────────────────────┐
+│  PHASE 0 — FIX THE FOUNDATION                              │
+│  (Estimated: 5-8 hours)                                     │
+└─────────────────────────────────────────────────────────────┘
+
+─── 0a. Fix the GUI-only gate ─────────────────────────────────
+
+CURRENT STATE (from live DB audit of 48 open sessions):
+  47 of 48 open sessions have installed_app_id (only 1 orphan).
+  But NON-GUI processes are passing through the gate:
+
+  Leaking process         Resolves via              Root cause
+  ─────────────────────────────────────────────────────────────────
+  sh (binary_name='sh')   IN installed_applications  Old auto-register created row before GUI gate
+  bash                    Fuzzy match to sh          SQL: 'bash' LIKE '%sh%' → TRUE
+  ssh-agent (sh display)  Fuzzy match to sh entry    Same fuzzy issue  
+  unattended-upgrade-shutdown  Fuzzy match to sh     Same fuzzy issue
+  snap                    IN installed_applications   Old auto-register ("Handler for snap:// URIs")
+
+  WHY THE GATE FAILS:
+  ResolveAppInfoInner has 4 steps:
+    Step 1: Check _knownAppBinaryNames (loaded from DB) → hit if sh/snap are in installed_applications
+    Step 2: Fuzzy match via GetInstalledAppByBinaryNameFuzzyAsync → bash→sh via LIKE '%sh%'
+    Step 3: IsGuiApplication() check → NEVER REACHED for these because step 1/2 catches them first
+    Step 4: Skip
+
+  The GUI gate (step 3) is ORDERED LAST — pre-existing DB rows bypass it entirely.
+
+  WHAT TO FIX:
+  [ ] Add IsGuiApplication gate to step 1: even if process is in installed_applications,
+      only track it if it's actually a GUI app (has Categories field non-empty, is_browser=true,
+      or passes a lightweight GUI check). Skip non-GUI rows even if they exist in the DB.
+  [ ] Add to NonAppProcesses: "sh", "bash", "zsh", "dash", "fish", "ssh-agent",
+      "unattended-upgrade-shutdown", "snap", "file-manager", "gvfsd-trash"
+  [ ] Add prefix filters for VS Code subprocesses: "Microsoft." (catches .NET language servers,
+      VS Code extension hosts, SQL tools, etc.)
+  [ ] Fix fuzzy match: GetInstalledAppByBinaryNameFuzzyAsync should exclude binary_names that
+      match system processes, or require minimum match length > 2 characters.
+  [ ] Clean up existing garbage rows: DELETE installed_applications entries for sh, snap
+      (no real .desktop file), and close their open app_sessions.
+
+─── 0b. Fix VS Code session explosion (one app = one session) ─
+
+  CURRENT STATE:
+  VS Code produces 22+ app_sessions rows across 7 process names:
+    code                                    — 11 sessions
+    opencode                                — 1 session
+    Microsoft.CodeAnalysis.LanguageServer   — 2 sessions
+    Microsoft.VisualStudio.Code.Server      — 2 sessions
+    Microsoft.VisualStudio.Code.ServiceController — 2 sessions
+    Microsoft.VisualStudio.Code.ServiceHost — 4 sessions
+
+  Root cause: These subprocesses fuzzy-match to "code" binary_name in
+  installed_applications via GetInstalledAppByBinaryNameFuzzyAsync
+  ('Microsoft.CodeAnalysis.LanguageServer' LIKE '%code%' → TRUE).
+
+  Even though they correctly resolve to app=Visual Studio Code, each
+  PID creates its own session because SessionHierarchyResolver doesn't
+  detect same-app → attach-to-existing logic. The resolver only creates
+  links for IDE→shell→buildTool relationships, not same-app subprocesses.
+
+  ⚠️ CORRECTION (user review 2026-07-30): app_items ALREADY has an
+  action column (added with the file-manager journey engine). No schema
+  change needed. Phase 2 is simpler than originally written.
+
+  CORRECT APPROACH:
+  [ ] When a new session is created, write an app_items row with:
+        object_type = 'AppSession'
+        action = 'open'
+        title = appDisplayName
+        occurred_at = started_at
+  [ ] When a session is closed, write:
+        object_type = 'AppSession'
+        action = 'close'
+        occurred_at = ended_at
+  [ ] This gives callers ONE table (app_items) to query for open/close/nav/
+      foreground/background across all app types. No schema changes needed.
+
+─── 0c. Fix parent_process_id population ──────────────────────
+
+  CURRENT STATE:
+  parent_process_id is NULL on 100% of all app_sessions rows (0 of 48 open, 0 of 130 total).
+
+  Root cause: SessionHierarchyResolver.ResolveParent() only returns a link when
+  ShouldLinkTo() explicitly allows it. The ShouldLinkTo matrix is:
+
+    Parent IDE → accepts: shell, terminal, runtime, buildTool
+    Parent Terminal → accepts: shell, runtime, buildTool
+    Parent terminal-item → accepts: shell, runtime, buildTool
+    Parent tab-item → accepts: shell
+    All others → NEVER links
+
+  This means:
+  - VS Code → bash → npm: links WORK (IDE→shell→buildTool chain)
+  - VS Code → extension host: NO LINK (not in matrix)
+  - gnome-terminal → bash → npm: links WORK (terminal→shell→buildTool)
+  - chrome → chrome-extension-host: NO LINK
+
+  The common case (bash inside gnome-terminal) should work, but doesn't because:
+    gnome-terminal is registered as installed_app with item_type="tab" (not "terminal")
+    so ShouldLinkTo checks parent.ItemType == "tab" → only accepts IsShellInterpreter → bash ✓
+    BUT: the PPID of bash might skip gnome-terminal and go directly to systemd/init.
+
+  WHAT TO FIX:
+  [ ] Add debug logging to ResolveParent showing PPID chain walks
+  [ ] Handle the common case: if parent has item_type="tab" and child is shell_process → link
+  [ ] Add same-installed-app-id linking: if parent and child share installed_app_id → link
+  [ ] Ensure gnome-terminal actually gets item_type="terminal" via its .desktop Categories
+  [ ] After creating a new session, verify parent_process_id is set and log warning if not
+
+─── 0d. Verification gate ─────────────────────────────────────
+
+  [ ] Before starting Phase 1:
+      1. Open one VS Code window → exactly 1 app_sessions row (id="Visual Studio Code")
+      2. Open one Chrome window → exactly 1 app_sessions row (id="Google Chrome")
+      3. bash/zsh spawned INSIDE VS Code terminal → linked via parent_process_id
+      4. Run: npm start in terminal → 0 new app_sessions (CLI tools no longer tracked)
+      5. Run: gnome-text-editor → 1 new app_sessions row (id="gnome-text-editor")
+      6. parent_process_id populated on child sessions
+
+┌─────────────────────────────────────────────────────────────┐
+│  PHASE 1 — FOREGROUND/BACKGROUND INSTRUMENTATION            │
+│  (Estimated: 6-10 hours)                                     │
+└─────────────────────────────────────────────────────────────┘
+
+─── 1a. Generalize ATSPIEventWatcher for all apps ─────────────
+
+  ⚠️ CORRECTION (user review 2026-07-30): AT-SPI's focus: signal fires
+  on EVERY widget-level focus change (text field, dropdown, menu), not just
+  top-level window switches. Generalizing without a filter would flood the
+  interval table with noise — an app_focus_intervals row every time someone
+  clicks into a different text box.
+
+  WHAT TO BUILD:
+  [ ] Gate on AT-SPI window-level activation signals (window:activate/
+      window:deactivate) rather than the generic per-widget focus: signal.
+      These are already distinguished in the AT-SPI event stream.
+  [ ] Add short debounce (reuse existing 3s dedup from EventCoordinator) so
+      rapid alt-tab flicker doesn't generate sub-1s noise intervals.
+  [ ] Extend ATSPIEventWatcher to emit IObservableEventSource events for ALL
+      app window activation changes, not just file managers.
+  [ ] Track _lastFocusedPid and emit "background" event for previously-focused
+      window before emitting "foreground" for new one.
+  [ ] Emit RawDesktopEvent with:
+      object_type = "Window"
+      action = "foreground" | "background"
+      Source PID, window title, timestamp
+  [ ] Keep existing file-manager path detection (cwd resolution) as-is — just
+      make it conditional on IsFileManagerProcess.
+
+─── 1b. New table: app_focus_intervals ────────────────────────
+
+  [ ] Add CREATE TABLE to DatabaseSchema.cs:
+
+      CREATE TABLE IF NOT EXISTS app_focus_intervals (
+          id              TEXT PRIMARY KEY,
+          app_session_id  TEXT NOT NULL REFERENCES app_sessions(id),
+          state           TEXT NOT NULL CHECK(state IN ('foreground','background')),
+          occurred_at     TEXT NOT NULL,
+          duration_seconds INTEGER,        -- filled when next interval starts
+          created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z','now'))
+      );
+
+  [ ] Add methods to ILogStore / SqliteLogStore:
+      - StoreFocusIntervalAsync(AppFocusInterval interval, CancellationToken ct)
+      - GetUnclosedFocusIntervalsAsync(CancellationToken ct) → open-ended intervals
+      - CloseFocusIntervalAsync(string id, int durationSeconds, CancellationToken ct)
+
+─── 1c. Boot reconciliation for app_focus_intervals ───────────
+
+  [ ] In ReconcileStaleSessionsOnBootAsync, ALSO close any dangling open
+      focus intervals using lastHeartbeat as the approximate end time.
+      Same pattern: query open intervals, close with heartbeat timestamp.
+
+─── 1d. Reuse JourneyEngine ───────────────────────────────────
+
+  [ ] In JourneyEngine.ProcessEventAsync(), add a branch for:
+      if (e.ObjectType == "Window" && e.Action is "foreground" or "background"):
+          1. Resolve or find the existing AppSession for this PID
+          2. Store app_focus_interval row
+          3. Write app_items row with action=foreground/background
+  [ ] This means a single app_items query can already answer the full timeline:
+      open/close/nav/foreground/background across all app types.
+
+┌─────────────────────────────────────────────────────────────┐
+│  PHASE 2 — OPEN/CLOSE COMPLETENESS                          │
+│  (Estimated: 2-4 hours)                                      │
+└─────────────────────────────────────────────────────────────┘
+
+─── 2a. app_items open/close events ───────────────────────────
+
+  [ ] When a new session is created (in LogCollectorService main loop),
+      also write an app_items row with:
+        item_type = "app_session"
+        action = "open"  
+        title = appDisplayName
+        occurred_at = started_at
+  [ ] When a session is closed, write:
+        item_type = "app_session"
+        action = "close"
+        occurred_at = ended_at
+
+  Wait, there's no "action" column on app_items. The existing schema uses
+  item_type (browser_tab, browser_navigation, folder, tab, process, terminal)
+  and the journey fields (object_type, action, etc.).
+
+  [ ] Actually: reuse the journey event model. Write DesktopEvent → JourneyEngine
+      processes it. Add to IObservableEventSource pattern:
+        EventCoordinator already exists → wire session lifecycle events through it.
+      Simpler: just add process start/end to the general-purpose watcher path.
+
+─── 2b. (Simpler alternative to 2a) ───────────────────────────
+
+  app_sessions.started_at/ended_at already serves as open/close signal.
+  Document that callers should use app_sessions for lifecycle and app_items
+  for navigation/context. Don't duplicate data without a clear consumer need.
+
+  RECOMMENDATION: Skip Phase 2a unless there's a specific query that needs
+  action='open' without joining app_sessions.
+
+┌─────────────────────────────────────────────────────────────┐
+│  PHASE 3 — NAVIGATION (SCOPED)                              │
+│  (Estimated: 3-5 hours)                                      │
+└─────────────────────────────────────────────────────────────┘
+
+─── 3a. Window title change tracking ──────────────────────────
+
+  For generic GUI apps (non-browser, non-file-manager), true semantic
+  navigation isn't feasible without per-app instrumentation. Scope to:
+
+  [ ] In the 30s poll cycle, for each process that already has an open session:
+      diff the current window title against the last known title. If changed:
+        - Write an app_items row with:
+            item_type = "title_change"
+            title = new window title
+            identifier = app_session_id + timestamp
+        - This captures document-level granularity (e.g., switching files in VS Code)
+
+  [ ] Store last known title per session in _sessionTitleCache (Dictionary<string, string>)
+
+─── 3b. Scope documentation ───────────────────────────────────
+
+  [ ] In ARCHITECTURE.md and AGENTS.md, explicitly document:
+      - Browser tabs → structured navigation (URLs from NativeMessageService)
+      - File manager paths → structured navigation (paths from ATSPIEventWatcher)
+      - All other GUI apps → title-change only (no structured in-app navigation)
+      - Deep semantic navigation (Photoshop layers, Word sections, etc.) is OUT OF SCOPE
+
+┌─────────────────────────────────────────────────────────────┐
+│  DATA MODEL SUMMARY                                          │
+└─────────────────────────────────────────────────────────────┘
+
+  Existing tables (unchanged):
+    app_sessions       — lifecycle (started_at/ended_at), identity (installed_app_id)
+    app_items          — journeys, browser tabs/navs, file paths, title changes
+    installed_apps     — GUI applications (desktop files, .app bundles, registry)
+    installed_packages — CLI tools/runtimes/libraries (inventory only, not tracked)
+
+  New table (Phase 1):
+    app_focus_intervals — foreground/background log (append-only, crash-safe)
+
+  New watch (Phase 1): ATSPIEventWatcher generalized for all apps
+  New items (Phase 3): title_change in app_items
+
+┌─────────────────────────────────────────────────────────────┐
+│  IMPLEMENTATION ORDER                                        │
+└─────────────────────────────────────────────────────────────┘
+
+  MUST be done sequentially (each depends on previous):
+    Phase 0a → Phase 0b → Phase 0c → Phase 0d (verification)
+    Phase 1a → Phase 1b → Phase 1c → Phase 1d
+    Phase 2 (optional, depends on Phase 0+1)
+    Phase 3 (can partly parallel with Phase 1a)
+
+  Risk: Phase 0d verification must PASS before starting Phase 1.
+  If it doesn't, something is fundamentally broken and Phase 1 will
+  produce garbage data.
+
+  Risk: ATSPIEventWatcher already has the Tmds.DBus.Protocol dependency
+  and the AT-SPI DBus connection. Generalizing it should be additive — 
+  remove the IsFileManagerProcess filter, keep all existing code paths.
+
+╔══════════════════════════════════════════════════════════════════╗
+║  SUMMARY OF DB AUDIT FINDINGS                                  ║
+╠══════════════════════════════════════════════════════════════════╣
+║  48 open sessions total                                        ║
+║  47 with installed_app_id (1 orphan: "file-manager")           ║
+║   0 open sessions with installed_package_id                    ║
+║   0 sessions EVER with parent_process_id set                   ║
+║  22 VS Code sessions across 7 process names                    ║
+║  bash/sh resolve to sh's DB entry via fuzzy SQL LIKE           ║
+║  snap resolves to "Handler for snap:// URIs" (old auto-detect) ║
+╚══════════════════════════════════════════════════════════════════╝
