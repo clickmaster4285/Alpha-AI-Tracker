@@ -62,6 +62,9 @@ var logLevel = config.LogLevel?.ToLowerInvariant() switch
 };
 builder.Logging.SetMinimumLevel(logLevel);
 
+var logFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "dotnetrunlog.txt");
+builder.Logging.AddFile(logFilePath);
+
 builder.Services.AddSingleton(config);
 
 // SQLite Log Store
