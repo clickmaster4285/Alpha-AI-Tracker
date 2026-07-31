@@ -93,6 +93,8 @@ public class LogCollectorService : BackgroundService
         "file-manager",
         // 🟡 Phase 0a: GNOME virtual filesystem daemons
         "gvfsd-trash",
+        // 🟡 Phase 0b: GNOME search provider daemon (not the Settings GUI)
+        "gnome-control-center-search-provider",
     };
 
     /// <summary>
@@ -253,19 +255,23 @@ public class LogCollectorService : BackgroundService
 
                 var processTree = ParentProcessResolver.BuildProcessTree();
                 var openRecords = await _store.GetOpenSessionRecordsAsync(stoppingToken);
-                var hierarchy = new SessionHierarchyResolver(processTree, openRecords);
+                var hierarchy = new SessionHierarchyResolver(processTree, openRecords, _logger);
 
                 // Hydrate in-memory maps from DB open sessions (survives client restart)
+                // N4: recompute the scope live for still-running processes — same-boot
+                // restart reuses the session; cross-boot (process gone) falls through to
+                // the PID key and the stale session closes on the next cycle as before.
                 foreach (var rec in openRecords)
                 {
-                    var openKey = BuildSessionKey(rec.ProcessId);
+                    var scope = CgroupResolver.GetAppScope(rec.ProcessId);
+                    var openKey = BuildSessionKey(rec.ProcessId, scope, rec.InstalledAppId);
                     _sessionRootItems[openKey] = rec.RootItemId;
                     if (!_previousSessionKeys.ContainsKey(openKey))
                         _previousSessionKeys[openKey] = rec.AppSessionId;
                 }
 
                 // Resolve display name, FK, isBrowser, and filter for each process
-                var resolvedLogs = new List<(ActivityLog log, string? displayName, string? appId, string? pkgId, bool isBrowser)>();
+                var resolvedLogs = new List<(ActivityLog log, string? displayName, string? appId, string? pkgId, bool isBrowser, string? scope)>();
                 foreach (var log in allLogs)
                 {
                     try
@@ -275,7 +281,12 @@ public class LogCollectorService : BackgroundService
 
                         if (!isKnown) continue;
 
-                        resolvedLogs.Add((log, displayName, appId, pkgId, isBrowser));
+                        // N3: resolve the systemd cgroup scope ONCE per log, then thread it
+                        // through the tuple so every BuildSessionKey call site derives the
+                        // same key. Do NOT re-read /proc/<pid>/cgroup at multiple places.
+                        var scope = CgroupResolver.GetAppScope(log.ProcessId);
+
+                        resolvedLogs.Add((log, displayName, appId, pkgId, isBrowser, scope));
                     }
                     catch (Exception ex)
                     {
@@ -288,11 +299,11 @@ public class LogCollectorService : BackgroundService
                     GetProcessPriority(AppProcessClassifier.ExtractBaseProcessName(a.log.ProcessName), a.isBrowser)
                         .CompareTo(GetProcessPriority(AppProcessClassifier.ExtractBaseProcessName(b.log.ProcessName), b.isBrowser)));
 
-                // Build set of current running session keys (PID-based)
+                // Build set of current running session keys (scope-aware)
                 var currentKeys = new Dictionary<string, string>();
-                foreach (var (log, _, _, _, _) in resolvedLogs)
+                foreach (var (log, _, appId, _, _, scope) in resolvedLogs)
                 {
-                    var key = BuildSessionKey(log.ProcessId);
+                    var key = BuildSessionKey(log.ProcessId, scope, appId);
                     currentKeys[key] = string.Empty;
                 }
 
@@ -319,14 +330,14 @@ public class LogCollectorService : BackgroundService
                 var newItems = new List<AppItem>();
                 var contextUpdates = new List<AppItem>();
 
-                foreach (var (log, displayName, appId, pkgId, isBrowser) in resolvedLogs)
+                foreach (var (log, displayName, appId, pkgId, isBrowser, scope) in resolvedLogs)
                 {
-                    var key = BuildSessionKey(log.ProcessId);
+                    var key = BuildSessionKey(log.ProcessId, scope, appId);
 
                     if (!string.IsNullOrEmpty(currentKeys.GetValueOrDefault(key)))
                     {
                         await UpdateActivityContextAsync(
-                            currentKeys[key], log, appId, pkgId, isBrowser, contextUpdates, stoppingToken, displayName);
+                            currentKeys[key], log, appId, pkgId, isBrowser, contextUpdates, stoppingToken, displayName, scope);
                         continue;
                     }
 
@@ -358,6 +369,9 @@ public class LogCollectorService : BackgroundService
                         InstalledPackageId = pkgId,
                         ProcessId = log.ProcessId,
                         ParentProcessId = parentLink?.ParentProcessId,
+                        GroupedBy = string.IsNullOrEmpty(scope) ? "pid" : "cgroup",
+                        CgroupScope = scope,
+                        ContextLabel = SessionLabelResolver.Resolve(baseProcessName, log.ProcessId),
                     };
                     newSessions.Add(session);
                     currentKeys[key] = session.Id;
@@ -400,7 +414,7 @@ public class LogCollectorService : BackgroundService
                 }
 
                 if (closeSessions.Count > 0)
-                    await _store.StoreAppSessionsAsync(closeSessions, stoppingToken);
+                    await _store.CloseSessionsAndAppItemsAsync(closeSessions, DateTime.UtcNow, stoppingToken);
 
                 if (newSessions.Count > 0)
                     await _store.StoreAppSessionsAsync(newSessions, stoppingToken);
@@ -500,8 +514,17 @@ public class LogCollectorService : BackgroundService
         }
     }
 
-    private string BuildSessionKey(int processId) =>
-        $"{processId}|{_config.ClientId}|{SessionInfo.SessionId}";
+    /// <summary>
+    /// Stable session identity key.
+    /// Scoped processes (under a systemd app-*.scope): "scope|{scope}|{installedAppId}|{machine}|{session}"
+    /// Unscoped processes: "{processId}|{machine}|{session}" (today's behavior, unchanged).
+    /// The scope+appId form collapses all subprocesses of one logical window into one session;
+    /// two separate windows of the same app get different scopes → different keys.
+    /// </summary>
+    private string BuildSessionKey(int processId, string? scope = null, string? installedAppId = null) =>
+        !string.IsNullOrEmpty(scope) && !string.IsNullOrEmpty(installedAppId)
+            ? $"scope|{scope}|{installedAppId}|{_config.ClientId}|{SessionInfo.SessionId}"
+            : $"{processId}|{_config.ClientId}|{SessionInfo.SessionId}";
 
     private static int GetProcessPriority(string processName, bool isBrowser)
     {
@@ -521,7 +544,8 @@ public class LogCollectorService : BackgroundService
         bool isBrowser,
         List<AppItem> contextUpdates,
         CancellationToken ct,
-        string? displayName = null)
+        string? displayName = null,
+        string? scope = null)
     {
         var baseProcessName = AppProcessClassifier.ExtractBaseProcessName(log.ProcessName);
         var rootType = AppProcessClassifier.ResolveRootItemType(
@@ -541,7 +565,7 @@ public class LogCollectorService : BackgroundService
         {
             await _store.UpdateAppItemContextAsync(
                 existingRoot.Id, parsed.RootTitle, parsed.RootIdentifier, ct);
-            _sessionRootItems[BuildSessionKey(log.ProcessId)] = existingRoot.Id;
+            _sessionRootItems[BuildSessionKey(log.ProcessId, scope, appId)] = existingRoot.Id;
         }
 
         foreach (var child in parsed.Children)
@@ -566,7 +590,7 @@ public class LogCollectorService : BackgroundService
             }
             else
             {
-                var rootItemId = _sessionRootItems.GetValueOrDefault(BuildSessionKey(log.ProcessId));
+                var rootItemId = _sessionRootItems.GetValueOrDefault(BuildSessionKey(log.ProcessId, scope, appId));
                 if (string.IsNullOrEmpty(rootItemId))
                 {
                     var open = await _store.GetOpenAppItemAsync(appSessionId, rootType, parsed.RootIdentifier, ct);
@@ -1450,24 +1474,16 @@ public class LogCollectorService : BackgroundService
             }
 
             var uptime = GetSystemUptime();
-            var sessionIds = new List<string>();
-            var closeList = openRecords.Select(r =>
+            var closeList = openRecords.Select(r => new AppSession
             {
-                sessionIds.Add(r.AppSessionId);
-                return new AppSession
-                {
-                    Id = r.AppSessionId,
-                    // Setting ProcessName to empty signals to StoreAppSessionsAsync
-                    // that this is a close-only update, not a new session insert.
-                    ProcessName = string.Empty,
-                    EndedAt = lastHeartbeat,
-                };
+                Id = r.AppSessionId,
+                // ProcessName is unused by CloseSessionsAndAppItemsAsync — only EndedAt matters
+                ProcessName = string.Empty,
+                EndedAt = lastHeartbeat,
             }).ToList();
 
-            await _store.StoreAppSessionsAsync(closeList, ct);
-
-            // Also close all app_items belonging to these sessions
-            await _store.CloseAppItemsBySessionIdsAsync(sessionIds, lastHeartbeat, ct);
+            // Atomic: close the sessions AND their app_items in one transaction
+            await _store.CloseSessionsAndAppItemsAsync(closeList, lastHeartbeat, ct);
 
             _logger.LogWarning(
                 "⚠️ Crash recovery: reconciled {Count} stale sessions + their app_items — " +
@@ -1583,8 +1599,7 @@ public class LogCollectorService : BackgroundService
 
             if (garbageSessions.Count > 0)
             {
-                await _store.StoreAppSessionsAsync(closeList, ct);
-                await _store.CloseAppItemsBySessionIdsAsync(garbageSessions, DateTime.UtcNow, ct);
+                await _store.CloseSessionsAndAppItemsAsync(closeList, DateTime.UtcNow, ct);
                 _logger.LogWarning(
                     "⚠️ Closed {Count} garbage sessions with --type= flags or long process names",
                     garbageSessions.Count);
@@ -1624,14 +1639,12 @@ public class LogCollectorService : BackgroundService
                 // Close all open sessions linked to this app
                 var openRecords = await _store.GetAllOpenSessionRecordsAsync(ct);
                 var closeSessions = new List<AppSession>();
-                var sessionIds = new List<string>();
 
                 foreach (var rec in openRecords)
                 {
                     if (string.Equals(rec.ProcessName, binaryName, StringComparison.OrdinalIgnoreCase) ||
                         string.Equals(rec.ProcessName, app.AppName, StringComparison.OrdinalIgnoreCase))
                     {
-                        sessionIds.Add(rec.AppSessionId);
                         closeSessions.Add(new AppSession
                         {
                             Id = rec.AppSessionId,
@@ -1643,8 +1656,7 @@ public class LogCollectorService : BackgroundService
 
                 if (closeSessions.Count > 0)
                 {
-                    await _store.StoreAppSessionsAsync(closeSessions, ct);
-                    await _store.CloseAppItemsBySessionIdsAsync(sessionIds, DateTime.UtcNow, ct);
+                    await _store.CloseSessionsAndAppItemsAsync(closeSessions, DateTime.UtcNow, ct);
                 }
 
                 // Delete the installed_applications entry

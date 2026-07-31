@@ -261,6 +261,9 @@ internal static class DatabaseSchema
         ALTER TABLE app_items ADD COLUMN window_id INTEGER;
         ALTER TABLE app_items ADD COLUMN tab_id INTEGER;
         ALTER TABLE app_items ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';
+        ALTER TABLE app_sessions ADD COLUMN grouped_by TEXT;
+        ALTER TABLE app_sessions ADD COLUMN cgroup_scope TEXT;
+        ALTER TABLE app_sessions ADD COLUMN context_label TEXT;
     ";
 
     // PHASE 1: INSERT STATEMENTS
@@ -369,11 +372,13 @@ internal static class DatabaseSchema
         INSERT INTO app_sessions
             (id, process_name, app_display_name, started_at, ended_at,
              machine_id, employee_id, employee_name, session_id, platform,
-             installed_app_id, installed_package_id, process_id, parent_process_id)
+             installed_app_id, installed_package_id, process_id, parent_process_id,
+             grouped_by, cgroup_scope, context_label)
         VALUES
             ($id, $process_name, $app_display_name, $started_at, $ended_at,
              $machine_id, $employee_id, $employee_name, $session_id, $platform,
-             $installed_app_id, $installed_package_id, $process_id, $parent_process_id)
+             $installed_app_id, $installed_package_id, $process_id, $parent_process_id,
+             $grouped_by, $cgroup_scope, $context_label)
         ON CONFLICT(id) DO UPDATE SET
             ended_at = COALESCE(excluded.ended_at, app_sessions.ended_at),
             parent_process_id = COALESCE(excluded.parent_process_id, app_sessions.parent_process_id)

@@ -94,6 +94,12 @@ public interface ILogStore
     /// <summary>Batch-close all app_items for a set of session IDs (for crash recovery).</summary>
     Task CloseAppItemsBySessionIdsAsync(IReadOnlyList<string> sessionIds, DateTime closedAt, CancellationToken ct);
 
+    /// <summary>
+    /// Atomically close a set of sessions AND their still-open app_items in ONE transaction.
+    /// Acquires the connection gate once, so it is safe to call without nesting gated public methods.
+    /// </summary>
+    Task CloseSessionsAndAppItemsAsync(IReadOnlyList<AppSession> closeSessions, DateTime closedAt, CancellationToken ct);
+
     /// <summary>Find an open context child item by type+identifier under a session.</summary>
     Task<AppItem?> GetOpenAppItemAsync(string appSessionId, string itemType, string identifier, CancellationToken ct);
 

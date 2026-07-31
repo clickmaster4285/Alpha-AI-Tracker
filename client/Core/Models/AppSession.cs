@@ -27,6 +27,25 @@ public class AppSession
 
     /// <summary>Parent OS process ID when nested under another session</summary>
     public int? ParentProcessId { get; set; }
+
+    /// <summary>
+    /// How this session's identity was grouped: 'cgroup' (systemd scope — the preferred
+    /// path), 'pid' (fallback when the process has no app-*.scope), or null for pre-fix rows.
+    /// </summary>
+    public string? GroupedBy { get; set; }
+
+    /// <summary>
+    /// Raw systemd transient scope (e.g. "app-gnome-code-3a2f91.scope") that this session
+    /// was grouped under. Needed at boot hydration to rebuild the scope-aware session key
+    /// for still-running processes without duplicating sessions.
+    /// </summary>
+    public string? CgroupScope { get; set; }
+
+    /// <summary>
+    /// Human label to disambiguate multiple windows/instances of the same app:
+    /// VS Code workspace/project folder name, Chrome --profile-directory, etc.
+    /// </summary>
+    public string? ContextLabel { get; set; }
 }
 
 /// <summary>

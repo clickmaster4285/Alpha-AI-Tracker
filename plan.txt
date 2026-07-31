@@ -1,298 +1,195 @@
-═══════════════════════════════════════════════════════════
-  ALPHA AI TRACKER — FOREGROUND/BACKGROUND INSTRUMENTATION PLAN
-  Audited: 2026-07-30 (live DB + code analysis)
-═══════════════════════════════════════════════════════════
+alpha_tracker.db — Session Dedup & Cascade-Close Fix Plan (FINAL, verified 2026-07-31)
+=====================================================================================
+Status: APPROVED for implementation. All claims below verified against live
+queries of alpha_tracker.db AND actual source (SqliteLogStore.cs,
+LogCollectorService.cs, SessionHierarchyResolver.cs, DatabaseSchema.cs,
+AppSession.cs, ILogStore.cs). The 4 corrections from the previous review are
+folded in, plus 4 fine-grained implementation notes that must not be missed.
 
-┌─────────────────────────────────────────────────────────────┐
-│  PHASE 0 — FIX THE FOUNDATION                              │
-│  (Estimated: 5-8 hours)                                     │
-└─────────────────────────────────────────────────────────────┘
+DB state right now (verified):
+  - 24 total app_sessions, 14 open, 0/24 have parent_process_id
+  - 11 orphaned app_items (closed_at=NULL) on already-closed sessions
+  - 11 open sessions process_name='code', SAME installed_app_id,
+    started_at: 08:41:28 (1 row) + 08:42:06 (10 rows, identical ns)
+  - cgroup probe live: PIDs 5245/5246/5248 all inside app-gnome-code-5236.scope
+  - app_items already has object_type/action/journey_id/sequence/... (no schema gap)
+  - gnome-control-center-search-provider HAS an open session → must be blocked
 
-─── 0a. Fix the GUI-only gate ─────────────────────────────────
+WHY THE TIME-WINDOW HEURISTIC IS REJECTED
+  - The 11 rows share an IDENTICAL nanosecond timestamp — that's "same poll
+    cycle", not "started close together". A window solves a non-problem.
+  - False merges: two genuine windows opened < 5s apart would collapse.
+  - PPID/wall-clock are wrong keys because subprocesses get reparented and
+    launchers exit before collection.
+  Replacement: cgroup scope grouping (validated on the live system above).
 
-CURRENT STATE (from live DB audit of 48 open sessions):
-  47 of 48 open sessions have installed_app_id (only 1 orphan).
-  But NON-GUI processes are passing through the gate:
+═══════════════════════════════════════════════════════════════════════════
+CORRECTION 1 — Transaction sketch must not deadlock (BLOCKER, fixed)
+═══════════════════════════════════════════════════════════════════════════
+Actual store API (verified):
+  StoreAppSessionsAsync(IReadOnlyList<AppSession>, CancellationToken)
+  CloseAppItemsBySessionIdsAsync(IReadOnlyList<string>, DateTime, CancellationToken)
+  BeginTransactionAsync(ct) → GatedTransaction (IAsyncDisposable) HOLDING the gate
+Every public method acquires _connectionGate (SemaphoreSlim(1,1), NOT reentrant).
+Calling two gated public methods inside one transaction = deadlock (second call
+blocks on a gate the first is holding) — the class of bug this codebase already
+avoids with private ungated helpers (SetStatusCoreAsync, GetEmployeeInfoCoreAsync).
 
-  Leaking process         Resolves via              Root cause
-  ─────────────────────────────────────────────────────────────────
-  sh (binary_name='sh')   IN installed_applications  Old auto-register created row before GUI gate
-  bash                    Fuzzy match to sh          SQL: 'bash' LIKE '%sh%' → TRUE
-  ssh-agent (sh display)  Fuzzy match to sh entry    Same fuzzy issue  
-  unattended-upgrade-shutdown  Fuzzy match to sh     Same fuzzy issue
-  snap                    IN installed_applications   Old auto-register ("Handler for snap:// URIs")
+FIX — one new composite store method, acquires the gate ONCE:
+  // ILogStore
+  Task CloseSessionsAndAppItemsAsync(IReadOnlyList<AppSession> closeSessions,
+                                     DateTime closedAt, CancellationToken ct);
+  // SqliteLogStore: gate once → one tx → 1) UPDATE app_sessions SET ended_at
+  // 2) UPDATE app_items SET closed_at, is_synced=0 WHERE app_session_id IN (...)
+  //    AND closed_at IS NULL → commit → release gate in finally.
+True atomicity: a crash between the two writes is structurally impossible.
 
-  WHY THE GATE FAILS:
-  ResolveAppInfoInner has 4 steps:
-    Step 1: Check _knownAppBinaryNames (loaded from DB) → hit if sh/snap are in installed_applications
-    Step 2: Fuzzy match via GetInstalledAppByBinaryNameFuzzyAsync → bash→sh via LIKE '%sh%'
-    Step 3: IsGuiApplication() check → NEVER REACHED for these because step 1/2 catches them first
-    Step 4: Skip
+Wire it into ALL FOUR close paths:
+  1. Main-loop normal close (line ~402) — TODAY IT DOES NOT CLOSE ITEMS AT ALL
+     (verified) → this is exactly why the 11 orphans exist. PRIMARY FIX.
+  2. ReconcileStaleSessionsOnBootAsync (~1467) — swap two calls for one.
+  3. Garbage cleanup (~1586) — swap.
+  4. Non-GUI cleanup (~1646) — swap.
 
-  The GUI gate (step 3) is ORDERED LAST — pre-existing DB rows bypass it entirely.
+═══════════════════════════════════════════════════════════════════════════
+CORRECTION 2 — No cycle-based key; keep PID fallback (BLOCKER, fixed)
+═══════════════════════════════════════════════════════════════════════════
+`{installedAppId}::cycle::{cycleId}` changes every poll → every unscoped process
+recreated+closed each cycle → churn + sync spam. Rejected.
 
-  WHAT TO FIX:
-  [ ] Add IsGuiApplication gate to step 1: even if process is in installed_applications,
-      only track it if it's actually a GUI app (has Categories field non-empty, is_browser=true,
-      or passes a lightweight GUI check). Skip non-GUI rows even if they exist in the DB.
-  [ ] Add to NonAppProcesses: "sh", "bash", "zsh", "dash", "fish", "ssh-agent",
-      "unattended-upgrade-shutdown", "snap", "file-manager", "gvfsd-trash"
-  [ ] Add prefix filters for VS Code subprocesses: "Microsoft." (catches .NET language servers,
-      VS Code extension hosts, SQL tools, etc.)
-  [ ] Fix fuzzy match: GetInstalledAppByBinaryNameFuzzyAsync should exclude binary_names that
-      match system processes, or require minimum match length > 2 characters.
-  [ ] Clean up existing garbage rows: DELETE installed_applications entries for sh, snap
-      (no real .desktop file), and close their open app_sessions.
+Two-tier key, BOTH stable across cycles:
+  scoped:    "scope|{scope}|{installedAppId}|{machineId}|{clientSessionId}"
+  unscoped:  "pid|{processId}|{machineId}|{clientSessionId}"   ← TODAY'S KEY, unchanged
+installedAppId in the key: an app launched FROM a terminal inherits the
+terminal's scope; scope+appId keeps them separate. Same scope + same appId
+(11 VS Code PIDs) → ONE session. Different scopes + same appId (2 windows) → 2.
 
-─── 0b. Fix VS Code session explosion (one app = one session) ─
+═══════════════════════════════════════════════════════════════════════════
+IMPLEMENTATION NOTES (NEW — do not miss these)
+═══════════════════════════════════════════════════════════════════════════
+N1. NO per-cycle dictionary. The real dedup mechanism is the persistent
+    _previousSessionKeys + currentKeys maps. Make BuildSessionKey scope-aware
+    and those maps dedup across cycles automatically. A throwaway
+    "sessionsThisCycle" dict is redundant — and if you add it INSTEAD of
+    changing BuildSessionKey, dedup only works within one cycle and every
+    process gets a fresh session next cycle. There are exactly 6 call sites:
+        LogCollectorService.cs lines 261, 295, 324, 503 (definition), 544, 569
+    plus 5 _sessionRootItems uses (262, 310, 399, 544, 569). ALL must derive
+    the SAME key, or context updates (UpdateActivityContextAsync) and closes
+    will hit the wrong sessions.
 
-  CURRENT STATE:
-  VS Code produces 22+ app_sessions rows across 7 process names:
-    code                                    — 11 sessions
-    opencode                                — 1 session
-    Microsoft.CodeAnalysis.LanguageServer   — 2 sessions
-    Microsoft.VisualStudio.Code.Server      — 2 sessions
-    Microsoft.VisualStudio.Code.ServiceController — 2 sessions
-    Microsoft.VisualStudio.Code.ServiceHost — 4 sessions
+N2. Keep the machine|clientSessionId suffix in the key (see Correction 2).
+    Without it, keys collide across boots/machines.
 
-  Root cause: These subprocesses fuzzy-match to "code" binary_name in
-  installed_applications via GetInstalledAppByBinaryNameFuzzyAsync
-  ('Microsoft.CodeAnalysis.LanguageServer' LIKE '%code%' → TRUE).
+N3. Scope must ride through the resolvedLogs tuple alongside
+    displayName/appId/pkgId/isBrowser, and UpdateActivityContextAsync (which
+    already receives appId) must also receive scope. Do NOT re-read
+    /proc/<pid>/cgroup at 6 different places — resolve once per log, reuse.
 
-  Even though they correctly resolve to app=Visual Studio Code, each
-  PID creates its own session because SessionHierarchyResolver doesn't
-  detect same-app → attach-to-existing logic. The resolver only creates
-  links for IDE→shell→buildTool relationships, not same-app subprocesses.
+N4. Boot hydration (line 261): GetOpenSessionRecordsAsync must add
+    installed_app_id to the SELECT (new OpenSessionRecord field) and
+    BuildSessionKey must live-resolve scope for still-running PIDs.
+    Same-boot restart → process alive → scope matches → session reused.
+    Cross-boot → process dead → PID fallback → stale session closed next
+    cycle (existing behavior, correct). Verify this path during testing.
 
-  ⚠️ CORRECTION (user review 2026-07-30): app_items ALREADY has an
-  action column (added with the file-manager journey engine). No schema
-  change needed. Phase 2 is simpler than originally written.
+═══════════════════════════════════════════════════════════════════════════
+CORRECTION 3 — Boot hydration + schema wiring (required)
+═══════════════════════════════════════════════════════════════════════════
+Schema additions (verified MigrateSql is exactly the ALTER mechanism,
+SqliteLogStore.cs:246-264 — fits with zero new plumbing; RunMigrationsAsync
+already tolerates duplicate-column errors):
+    ALTER TABLE app_sessions ADD COLUMN grouped_by TEXT;      -- 'cgroup'|'pid'|NULL
+    ALTER TABLE app_sessions ADD COLUMN cgroup_scope TEXT;    -- raw scope, for hydration
+    ALTER TABLE app_sessions ADD COLUMN context_label TEXT;   -- VS Code folder / Chrome profile
+Also: AppSession model (+GroupedBy/+CgroupScope/+ContextLabel — verified absent),
+InsertAppSessionSql (verified in DatabaseSchema.cs), MapAppSessionReader
+(verified in SqliteLogStore.cs ~1568). Server sync = separate later commit.
 
-  CORRECT APPROACH:
-  [ ] When a new session is created, write an app_items row with:
-        object_type = 'AppSession'
-        action = 'open'
-        title = appDisplayName
-        occurred_at = started_at
-  [ ] When a session is closed, write:
-        object_type = 'AppSession'
-        action = 'close'
-        occurred_at = ended_at
-  [ ] This gives callers ONE table (app_items) to query for open/close/nav/
-      foreground/background across all app types. No schema changes needed.
+═══════════════════════════════════════════════════════════════════════════
+CORRECTION 4 — parent_process_id: recalibrated target
+═══════════════════════════════════════════════════════════════════════════
+ResolveParent() IS wired (line ~334) and DOES set ParentProcessId — verified
+not dead code. It's NULL on 100% because ShouldLinkTo() only links
+IDE→(shell|terminal|runtime|build) and terminal→(shell|runtime|build), and the
+GUI gate removed bare shells — almost no legitimate children remain. Same-app
+subprocesses (code→code) were never meant to be linked by this matrix; the
+cgroup fix handles that instead.
 
-─── 0c. Fix parent_process_id population ──────────────────────
+Scope remaining work to:
+  - Debug logging in ResolveParent to trace PPID walks.
+  - Terminal classification: Categories OR KnownTerminalBinaries allowlist
+    {gnome-terminal-server, konsole, xterm, alacritty, kitty, foot, tilix}
+    (flatpak/snap gnome-terminal ships without Categories — valid concern).
+  - Acceptance target: parent_process_id populated ONLY for real
+    terminal → build-tool-run-inside-it chains. Near-empty column is the
+    EXPECTED state under the GUI-only gate. Do NOT chase 100%.
 
-  CURRENT STATE:
-  parent_process_id is NULL on 100% of all app_sessions rows (0 of 48 open, 0 of 130 total).
+═══════════════════════════════════════════════════════════════════════════
+PHASE ORDER
+═══════════════════════════════════════════════════════════════════════════
+Phase 0a — DONE (previous work). ADD: "gnome-control-center-search-provider"
+          → NonAppProcesses (verified open session exists).
 
-  Root cause: SessionHierarchyResolver.ResolveParent() only returns a link when
-  ShouldLinkTo() explicitly allows it. The ShouldLinkTo matrix is:
+Phase 0b — cgroup dedup: CgroupResolver (client/Core/CgroupResolver.cs, Linux
+          only, null elsewhere), scope-aware BuildSessionKey (N1/N2/N3/N4),
+          schema columns + model + SQL + reader, SessionLabelResolver
+          (client/Core/SessionLabelResolver.cs; VS Code project folder from
+          argv, Chrome --profile-directory=; do NOT use wmctrl as primary —
+          silent no-op on Wayland).
+          GATE: 1 VS Code window → exactly 1 app_sessions row; 2 windows → 2
+          rows with different context_label.
 
-    Parent IDE → accepts: shell, terminal, runtime, buildTool
-    Parent Terminal → accepts: shell, runtime, buildTool
-    Parent terminal-item → accepts: shell, runtime, buildTool
-    Parent tab-item → accepts: shell
-    All others → NEVER links
+Phase 0c — terminal classification + PPID walk logging + ShouldLinkTo fixes
+          (narrow scope per Correction 4). Not a blocker for 0d.
 
-  This means:
-  - VS Code → bash → npm: links WORK (IDE→shell→buildTool chain)
-  - VS Code → extension host: NO LINK (not in matrix)
-  - gnome-terminal → bash → npm: links WORK (terminal→shell→buildTool)
-  - chrome → chrome-extension-host: NO LINK
+Phase 0d — CloseSessionsAndAppItemsAsync (Correction 1) wired into all 4
+          close paths. Closes the 11 confirmed orphans.
 
-  The common case (bash inside gnome-terminal) should work, but doesn't because:
-    gnome-terminal is registered as installed_app with item_type="tab" (not "terminal")
-    so ShouldLinkTo checks parent.ItemType == "tab" → only accepts IsShellInterpreter → bash ✓
-    BUT: the PPID of bash might skip gnome-terminal and go directly to systemd/init.
+Phase 0e — deferred. nautilus duplicates are literal double-inserts
+          (identifier='nautilus' placeholder, window_id/tab_id NULL,
+          current_path='' — verified identical). Unique constraint on
+          (app_session_id, item_type, identifier, opened_at) is UNSAFE until
+          identifier/window_id carry real distinguishing values. Data-
+          completeness work first, then the constraint. Multi-window
+          non-single-instance apps get separate scopes/sessions under 0b —
+          no special casing. Chrome profiles get separate scopes too; only
+          context_label labeling is missing (SessionLabelResolver covers it).
 
-  WHAT TO FIX:
-  [ ] Add debug logging to ResolveParent showing PPID chain walks
-  [ ] Handle the common case: if parent has item_type="tab" and child is shell_process → link
-  [ ] Add same-installed-app-id linking: if parent and child share installed_app_id → link
-  [ ] Ensure gnome-terminal actually gets item_type="terminal" via its .desktop Categories
-  [ ] After creating a new session, verify parent_process_id is set and log warning if not
+═══════════════════════════════════════════════════════════════════════════
+FILES TOUCHED
+═══════════════════════════════════════════════════════════════════════════
+  client/Core/CgroupResolver.cs                NEW
+  client/Core/SessionLabelResolver.cs          NEW
+  client/Core/Models/AppSession.cs             +GroupedBy, +CgroupScope, +ContextLabel
+  client/Core/Abstractions/ILogStore.cs        +CloseSessionsAndAppItemsAsync
+  client/Storage/SqliteLogStore.cs             +composite method, +reader, +insert columns
+  client/Storage/DatabaseSchema.cs             MigrateSql ALTERs, InsertAppSessionSql
+  client/Services/LogCollectorService.cs       6 key sites, hydration, NonAppProcesses,
+                                               resolvedLogs scope field, 4 close paths
+  server/ (separate, later commit)             migration + DTOs for new columns
 
-─── 0d. Verification gate ─────────────────────────────────────
+═══════════════════════════════════════════════════════════════════════════
+VERIFICATION (post-implementation)
+═══════════════════════════════════════════════════════════════════════════
+-- 0 orphans on fresh data:
+SELECT COUNT(*) FROM app_items ai
+JOIN app_sessions s ON ai.app_session_id = s.id
+WHERE s.ended_at IS NOT NULL AND ai.closed_at IS NULL;            -- expect 0
 
-  [ ] Before starting Phase 1:
-      1. Open one VS Code window → exactly 1 app_sessions row (id="Visual Studio Code")
-      2. Open one Chrome window → exactly 1 app_sessions row (id="Google Chrome")
-      3. bash/zsh spawned INSIDE VS Code terminal → linked via parent_process_id
-      4. Run: npm start in terminal → 0 new app_sessions (CLI tools no longer tracked)
-      5. Run: gnome-text-editor → 1 new app_sessions row (id="gnome-text-editor")
-      6. parent_process_id populated on child sessions
+-- ≤1 session per (installed_app_id, grouped_by) after deploy:
+SELECT installed_app_id, grouped_by, COUNT(*)
+FROM app_sessions WHERE started_at > '<deploy_timestamp>'
+GROUP BY installed_app_id, grouped_by;
 
-┌─────────────────────────────────────────────────────────────┐
-│  PHASE 1 — FOREGROUND/BACKGROUND INSTRUMENTATION            │
-│  (Estimated: 6-10 hours)                                     │
-└─────────────────────────────────────────────────────────────┘
+-- 2 VS Code windows → 2 rows, distinct context_label:
+SELECT id, process_id, started_at, context_label
+FROM app_sessions WHERE process_name = 'code' AND ended_at IS NULL;
 
-─── 1a. Generalize ATSPIEventWatcher for all apps ─────────────
-
-  ⚠️ CORRECTION (user review 2026-07-30): AT-SPI's focus: signal fires
-  on EVERY widget-level focus change (text field, dropdown, menu), not just
-  top-level window switches. Generalizing without a filter would flood the
-  interval table with noise — an app_focus_intervals row every time someone
-  clicks into a different text box.
-
-  WHAT TO BUILD:
-  [ ] Gate on AT-SPI window-level activation signals (window:activate/
-      window:deactivate) rather than the generic per-widget focus: signal.
-      These are already distinguished in the AT-SPI event stream.
-  [ ] Add short debounce (reuse existing 3s dedup from EventCoordinator) so
-      rapid alt-tab flicker doesn't generate sub-1s noise intervals.
-  [ ] Extend ATSPIEventWatcher to emit IObservableEventSource events for ALL
-      app window activation changes, not just file managers.
-  [ ] Track _lastFocusedPid and emit "background" event for previously-focused
-      window before emitting "foreground" for new one.
-  [ ] Emit RawDesktopEvent with:
-      object_type = "Window"
-      action = "foreground" | "background"
-      Source PID, window title, timestamp
-  [ ] Keep existing file-manager path detection (cwd resolution) as-is — just
-      make it conditional on IsFileManagerProcess.
-
-─── 1b. New table: app_focus_intervals ────────────────────────
-
-  [ ] Add CREATE TABLE to DatabaseSchema.cs:
-
-      CREATE TABLE IF NOT EXISTS app_focus_intervals (
-          id              TEXT PRIMARY KEY,
-          app_session_id  TEXT NOT NULL REFERENCES app_sessions(id),
-          state           TEXT NOT NULL CHECK(state IN ('foreground','background')),
-          occurred_at     TEXT NOT NULL,
-          duration_seconds INTEGER,        -- filled when next interval starts
-          created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z','now'))
-      );
-
-  [ ] Add methods to ILogStore / SqliteLogStore:
-      - StoreFocusIntervalAsync(AppFocusInterval interval, CancellationToken ct)
-      - GetUnclosedFocusIntervalsAsync(CancellationToken ct) → open-ended intervals
-      - CloseFocusIntervalAsync(string id, int durationSeconds, CancellationToken ct)
-
-─── 1c. Boot reconciliation for app_focus_intervals ───────────
-
-  [ ] In ReconcileStaleSessionsOnBootAsync, ALSO close any dangling open
-      focus intervals using lastHeartbeat as the approximate end time.
-      Same pattern: query open intervals, close with heartbeat timestamp.
-
-─── 1d. Reuse JourneyEngine ───────────────────────────────────
-
-  [ ] In JourneyEngine.ProcessEventAsync(), add a branch for:
-      if (e.ObjectType == "Window" && e.Action is "foreground" or "background"):
-          1. Resolve or find the existing AppSession for this PID
-          2. Store app_focus_interval row
-          3. Write app_items row with action=foreground/background
-  [ ] This means a single app_items query can already answer the full timeline:
-      open/close/nav/foreground/background across all app types.
-
-┌─────────────────────────────────────────────────────────────┐
-│  PHASE 2 — OPEN/CLOSE COMPLETENESS                          │
-│  (Estimated: 2-4 hours)                                      │
-└─────────────────────────────────────────────────────────────┘
-
-─── 2a. app_items open/close events ───────────────────────────
-
-  [ ] When a new session is created (in LogCollectorService main loop),
-      also write an app_items row with:
-        item_type = "app_session"
-        action = "open"  
-        title = appDisplayName
-        occurred_at = started_at
-  [ ] When a session is closed, write:
-        item_type = "app_session"
-        action = "close"
-        occurred_at = ended_at
-
-  Wait, there's no "action" column on app_items. The existing schema uses
-  item_type (browser_tab, browser_navigation, folder, tab, process, terminal)
-  and the journey fields (object_type, action, etc.).
-
-  [ ] Actually: reuse the journey event model. Write DesktopEvent → JourneyEngine
-      processes it. Add to IObservableEventSource pattern:
-        EventCoordinator already exists → wire session lifecycle events through it.
-      Simpler: just add process start/end to the general-purpose watcher path.
-
-─── 2b. (Simpler alternative to 2a) ───────────────────────────
-
-  app_sessions.started_at/ended_at already serves as open/close signal.
-  Document that callers should use app_sessions for lifecycle and app_items
-  for navigation/context. Don't duplicate data without a clear consumer need.
-
-  RECOMMENDATION: Skip Phase 2a unless there's a specific query that needs
-  action='open' without joining app_sessions.
-
-┌─────────────────────────────────────────────────────────────┐
-│  PHASE 3 — NAVIGATION (SCOPED)                              │
-│  (Estimated: 3-5 hours)                                      │
-└─────────────────────────────────────────────────────────────┘
-
-─── 3a. Window title change tracking ──────────────────────────
-
-  For generic GUI apps (non-browser, non-file-manager), true semantic
-  navigation isn't feasible without per-app instrumentation. Scope to:
-
-  [ ] In the 30s poll cycle, for each process that already has an open session:
-      diff the current window title against the last known title. If changed:
-        - Write an app_items row with:
-            item_type = "title_change"
-            title = new window title
-            identifier = app_session_id + timestamp
-        - This captures document-level granularity (e.g., switching files in VS Code)
-
-  [ ] Store last known title per session in _sessionTitleCache (Dictionary<string, string>)
-
-─── 3b. Scope documentation ───────────────────────────────────
-
-  [ ] In ARCHITECTURE.md and AGENTS.md, explicitly document:
-      - Browser tabs → structured navigation (URLs from NativeMessageService)
-      - File manager paths → structured navigation (paths from ATSPIEventWatcher)
-      - All other GUI apps → title-change only (no structured in-app navigation)
-      - Deep semantic navigation (Photoshop layers, Word sections, etc.) is OUT OF SCOPE
-
-┌─────────────────────────────────────────────────────────────┐
-│  DATA MODEL SUMMARY                                          │
-└─────────────────────────────────────────────────────────────┘
-
-  Existing tables (unchanged):
-    app_sessions       — lifecycle (started_at/ended_at), identity (installed_app_id)
-    app_items          — journeys, browser tabs/navs, file paths, title changes
-    installed_apps     — GUI applications (desktop files, .app bundles, registry)
-    installed_packages — CLI tools/runtimes/libraries (inventory only, not tracked)
-
-  New table (Phase 1):
-    app_focus_intervals — foreground/background log (append-only, crash-safe)
-
-  New watch (Phase 1): ATSPIEventWatcher generalized for all apps
-  New items (Phase 3): title_change in app_items
-
-┌─────────────────────────────────────────────────────────────┐
-│  IMPLEMENTATION ORDER                                        │
-└─────────────────────────────────────────────────────────────┘
-
-  MUST be done sequentially (each depends on previous):
-    Phase 0a → Phase 0b → Phase 0c → Phase 0d (verification)
-    Phase 1a → Phase 1b → Phase 1c → Phase 1d
-    Phase 2 (optional, depends on Phase 0+1)
-    Phase 3 (can partly parallel with Phase 1a)
-
-  Risk: Phase 0d verification must PASS before starting Phase 1.
-  If it doesn't, something is fundamentally broken and Phase 1 will
-  produce garbage data.
-
-  Risk: ATSPIEventWatcher already has the Tmds.DBus.Protocol dependency
-  and the AT-SPI DBus connection. Generalizing it should be additive — 
-  remove the IsFileManagerProcess filter, keep all existing code paths.
-
-╔══════════════════════════════════════════════════════════════════╗
-║  SUMMARY OF DB AUDIT FINDINGS                                  ║
-╠══════════════════════════════════════════════════════════════════╣
-║  48 open sessions total                                        ║
-║  47 with installed_app_id (1 orphan: "file-manager")           ║
-║   0 open sessions with installed_package_id                    ║
-║   0 sessions EVER with parent_process_id set                   ║
-║  22 VS Code sessions across 7 process names                    ║
-║  bash/sh resolve to sh's DB entry via fuzzy SQL LIKE           ║
-║  snap resolves to "Handler for snap:// URIs" (old auto-detect) ║
-╚══════════════════════════════════════════════════════════════════╝
+═══════════════════════════════════════════════════════════════════════════
+OPEN QUESTIONS (need user call before implementation)
+═══════════════════════════════════════════════════════════════════════════
+1. Historical data: 11 open 'code' sessions + 11 orphaned app_items are
+   pre-fix. Leave as-is (ages out naturally) or one-time cleanup at deploy?
+2. Server-side sync of grouped_by/context_label/cgroup_scope: client-only
+   first (recommended, unblocks 0b/0d) or bundled with server migration?

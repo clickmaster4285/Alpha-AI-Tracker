@@ -28,8 +28,8 @@ public static class AppProcessClassifier
 
     private static readonly HashSet<string> TerminalEmulators = new(StringComparer.OrdinalIgnoreCase)
     {
-        "gnome-terminal", "gnome-terminal.real", "konsole", "alacritty", "kitty",
-        "iterm2", "terminal", "xterm", "rxvt", "urxvt", "st", "tmux", "screen",
+        "gnome-terminal", "gnome-terminal.real", "gnome-terminal-server", "konsole", "alacritty", "kitty",
+        "iterm2", "terminal", "xterm", "rxvt", "urxvt", "st", "tmux", "screen", "foot",
         "xfce4-terminal", "lxterminal", "tilix", "hyper", "wezterm",
     };
 

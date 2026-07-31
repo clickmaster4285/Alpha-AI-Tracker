@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Logging;
+
 namespace client.Core;
 
 public sealed class OpenSessionRecord
@@ -7,6 +9,8 @@ public sealed class OpenSessionRecord
     public string RootItemId { get; init; } = string.Empty;
     public string ProcessName { get; init; } = string.Empty;
     public string ItemType { get; init; } = string.Empty;
+    /// <summary>FK → installed_applications.id, needed to rebuild scope-aware session keys on boot hydration.</summary>
+    public string? InstalledAppId { get; init; }
 }
 
 public sealed class ParentLink
@@ -24,13 +28,16 @@ public sealed class SessionHierarchyResolver
 {
     private readonly Dictionary<int, int> _processTree;
     private readonly Dictionary<int, OpenSessionRecord> _openByPid;
+    private readonly ILogger? _logger;
 
     public SessionHierarchyResolver(
         Dictionary<int, int> processTree,
-        IEnumerable<OpenSessionRecord> existingOpen)
+        IEnumerable<OpenSessionRecord> existingOpen,
+        ILogger? logger = null)
     {
         _processTree = processTree;
         _openByPid = existingOpen.ToDictionary(r => r.ProcessId);
+        _logger = logger;
     }
 
     public void Register(OpenSessionRecord record) => _openByPid[record.ProcessId] = record;
@@ -45,13 +52,17 @@ public sealed class SessionHierarchyResolver
     /// </summary>
     public ParentLink? ResolveParent(int pid, string processName)
     {
+        _logger?.LogDebug("ResolveParent: walking PPID chain for pid={Pid} name={Name}", pid, processName);
         var visited = new HashSet<int>();
         var current = pid;
 
         while (current > 0 && visited.Add(current))
         {
             if (!_processTree.TryGetValue(current, out var ppid) || ppid <= 0)
+            {
+                _logger?.LogDebug("ResolveParent: pid={Pid} has no tracked parent, stopping", current);
                 break;
+            }
 
             if (visited.Contains(ppid))
                 break;
@@ -60,6 +71,8 @@ public sealed class SessionHierarchyResolver
             {
                 if (ShouldLinkTo(parentRecord, processName))
                 {
+                    _logger?.LogDebug("ResolveParent: pid={Pid} linked to parent pid={Ppid} session={Session}",
+                        pid, ppid, parentRecord.AppSessionId);
                     return new ParentLink
                     {
                         ParentSessionId = parentRecord.AppSessionId,
@@ -67,6 +80,8 @@ public sealed class SessionHierarchyResolver
                         ParentProcessId = ppid,
                     };
                 }
+                _logger?.LogDebug("ResolveParent: pid={Pid} found open session at pid={Ppid} but ShouldLinkTo rejected (parent={ParentName} child={ChildName})",
+                    pid, ppid, parentRecord.ProcessName, processName);
             }
 
             // Walk through intermediate processes to find IDE / terminal emulator

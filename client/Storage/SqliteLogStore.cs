@@ -780,6 +780,9 @@ public class SqliteLogStore : ILogStore, IDisposable
                 var pPkgId = cmd.Parameters.Add("$installed_package_id", SqliteType.Text);
                 var pPid = cmd.Parameters.Add("$process_id", SqliteType.Integer);
                 var pPPid = cmd.Parameters.Add("$parent_process_id", SqliteType.Integer);
+                var pGroupedBy = cmd.Parameters.Add("$grouped_by", SqliteType.Text);
+                var pCgroupScope = cmd.Parameters.Add("$cgroup_scope", SqliteType.Text);
+                var pContextLabel = cmd.Parameters.Add("$context_label", SqliteType.Text);
 
                 foreach (var e in newSessions)
                 {
@@ -797,6 +800,9 @@ public class SqliteLogStore : ILogStore, IDisposable
                     pPkgId.Value = (object?)e.InstalledPackageId ?? DBNull.Value;
                     pPid.Value = e.ProcessId.HasValue ? e.ProcessId.Value : DBNull.Value;
                     pPPid.Value = e.ParentProcessId.HasValue ? e.ParentProcessId.Value : DBNull.Value;
+                    pGroupedBy.Value = (object?)e.GroupedBy ?? DBNull.Value;
+                    pCgroupScope.Value = (object?)e.CgroupScope ?? DBNull.Value;
+                    pContextLabel.Value = (object?)e.ContextLabel ?? DBNull.Value;
                     await cmd.ExecuteNonQueryAsync(ct);
                 }
             }
@@ -980,7 +986,7 @@ public class SqliteLogStore : ILogStore, IDisposable
         {
             var cmd = _connection.CreateCommand();
             cmd.CommandText = @"
-                SELECT s.id, s.process_name, COALESCE(s.process_id, 0), i.id AS item_id, i.item_type
+                SELECT s.id, s.process_name, COALESCE(s.process_id, 0), i.id AS item_id, i.item_type, s.installed_app_id
                 FROM app_sessions s
                 INNER JOIN app_items i ON i.app_session_id = s.id AND i.parent_item_id IS NULL
                 WHERE s.ended_at IS NULL AND s.process_id IS NOT NULL
@@ -996,6 +1002,7 @@ public class SqliteLogStore : ILogStore, IDisposable
                     ProcessId = reader.GetInt32(2),
                     RootItemId = reader.GetString(3),
                     ItemType = reader.GetString(4),
+                    InstalledAppId = reader.IsDBNull(5) ? null : reader.GetString(5),
                 });
             }
             return results;
@@ -1014,7 +1021,7 @@ public class SqliteLogStore : ILogStore, IDisposable
         {
             var cmd = _connection.CreateCommand();
             cmd.CommandText = @"
-                SELECT s.id, s.process_name, COALESCE(s.process_id, 0), '' AS item_id, '' AS item_type
+                SELECT s.id, s.process_name, COALESCE(s.process_id, 0), '' AS item_id, '' AS item_type, s.installed_app_id
                 FROM app_sessions s
                 WHERE s.ended_at IS NULL
                 ORDER BY s.started_at ASC";
@@ -1029,6 +1036,7 @@ public class SqliteLogStore : ILogStore, IDisposable
                     ProcessId = reader.GetInt32(2),
                     RootItemId = reader.GetString(3),
                     ItemType = reader.GetString(4),
+                    InstalledAppId = reader.IsDBNull(5) ? null : reader.GetString(5),
                 });
             }
             return results;
@@ -1059,6 +1067,55 @@ public class SqliteLogStore : ILogStore, IDisposable
                 pClosed.Value = closedAt.ToString("O");
                 await cmd.ExecuteNonQueryAsync(ct);
             }
+            await tx.CommitAsync(ct);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Atomically close a set of sessions AND their still-open app_items in ONE
+    /// transaction, under ONE gate acquisition. A crash between the two writes is
+    /// structurally impossible — you never get closed sessions with orphaned open items.
+    /// </summary>
+    public async Task CloseSessionsAndAppItemsAsync(IReadOnlyList<AppSession> closeSessions, DateTime closedAt, CancellationToken ct)
+    {
+        if (_connection == null || closeSessions.Count == 0) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            await using var tx = await _connection.BeginTransactionAsync(ct);
+
+            // 1) Close the sessions themselves (ended_at)
+            var updateCmd = _connection.CreateCommand();
+            updateCmd.CommandText = DatabaseSchema.UpdateAppSessionEndedSql;
+            ((DbCommand)updateCmd).Transaction = tx;
+            var pId = updateCmd.Parameters.Add("$id", SqliteType.Text);
+            var pEnd = updateCmd.Parameters.Add("$ended_at", SqliteType.Text);
+            foreach (var e in closeSessions)
+            {
+                pId.Value = e.Id;
+                pEnd.Value = (e.EndedAt ?? closedAt).ToString("O");
+                await updateCmd.ExecuteNonQueryAsync(ct);
+            }
+
+            // 2) Cascade-close every still-open app_item of those sessions
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+                UPDATE app_items SET closed_at = $closed_at, is_synced = 0
+                WHERE app_session_id = $session_id AND closed_at IS NULL";
+            ((DbCommand)cmd).Transaction = tx;
+            var pSessionId = cmd.Parameters.Add("$session_id", SqliteType.Text);
+            var pClosed = cmd.Parameters.Add("$closed_at", SqliteType.Text);
+            foreach (var e in closeSessions)
+            {
+                pSessionId.Value = e.Id;
+                pClosed.Value = closedAt.ToString("O");
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+
             await tx.CommitAsync(ct);
         }
         finally
@@ -1583,6 +1640,9 @@ public class SqliteLogStore : ILogStore, IDisposable
             InstalledPackageId = r.IsDBNull(r.GetOrdinal("installed_package_id")) ? null : r.GetString(r.GetOrdinal("installed_package_id")),
             ProcessId = TryGetInt(r, "process_id"),
             ParentProcessId = TryGetInt(r, "parent_process_id"),
+            GroupedBy = TryGetString(r, "grouped_by"),
+            CgroupScope = TryGetString(r, "cgroup_scope"),
+            ContextLabel = TryGetString(r, "context_label"),
             IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
             SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
             CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),
@@ -1690,6 +1750,19 @@ public class SqliteLogStore : ILogStore, IDisposable
         {
             var ordinal = r.GetOrdinal(column);
             return r.IsDBNull(ordinal) ? null : r.GetInt32(ordinal);
+        }
+        catch (IndexOutOfRangeException)
+        {
+            return null;
+        }
+    }
+
+    private static string? TryGetString(SqliteDataReader r, string column)
+    {
+        try
+        {
+            var ordinal = r.GetOrdinal(column);
+            return r.IsDBNull(ordinal) ? null : r.GetString(ordinal);
         }
         catch (IndexOutOfRangeException)
         {
