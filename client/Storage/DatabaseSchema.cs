@@ -264,6 +264,19 @@ internal static class DatabaseSchema
         ALTER TABLE app_sessions ADD COLUMN grouped_by TEXT;
         ALTER TABLE app_sessions ADD COLUMN cgroup_scope TEXT;
         ALTER TABLE app_sessions ADD COLUMN context_label TEXT;
+        DELETE FROM installed_packages
+            WHERE id NOT IN (
+                SELECT id FROM (
+                    SELECT id, ROW_NUMBER() OVER (
+                        PARTITION BY package_name, source_manager
+                        ORDER BY detected_at DESC, id DESC
+                    ) AS rn
+                    FROM installed_packages
+                )
+                WHERE rn = 1
+            );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_installed_packages_fingerprint
+            ON installed_packages(package_name, source_manager);
     ";
 
     // PHASE 1: INSERT STATEMENTS
@@ -312,7 +325,8 @@ internal static class DatabaseSchema
             is_browser = MAX(installed_applications.is_browser, excluded.is_browser),
             desktop_id = COALESCE(NULLIF(excluded.desktop_id, ''), installed_applications.desktop_id),
             categories = COALESCE(NULLIF(excluded.categories, ''), installed_applications.categories),
-            detected_at = excluded.detected_at
+            detected_at = excluded.detected_at,
+            is_synced = 0
     ";
 
     internal const string MarkInstalledAppsSentSql = @"
@@ -328,10 +342,11 @@ internal static class DatabaseSchema
         VALUES
             ($id, $package_name, $version, $category, $source_manager, $install_path,
              $publisher, $description, $detected_at)
-        ON CONFLICT(id) DO UPDATE SET
+        ON CONFLICT(package_name, source_manager) DO UPDATE SET
             version = excluded.version,
-            category = excluded.category,
-            detected_at = excluded.detected_at
+            category = CASE WHEN excluded.category = 'tool' THEN installed_packages.category ELSE excluded.category END,
+            detected_at = excluded.detected_at,
+            is_synced = 0
     ";
 
     internal const string MarkInstalledPackagesSentSql = @"

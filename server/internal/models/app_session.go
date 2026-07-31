@@ -3,19 +3,24 @@ package models
 import "time"
 
 type AppSession struct {
-	ID             string     `json:"id" db:"id"`
-	EmployeeID     string     `json:"employeeId" db:"employee_id"`
-	ProcessName    string     `json:"processName" db:"process_name"`
-	AppDisplayName string     `json:"appDisplayName" db:"app_display_name"`
-	StartedAt      time.Time  `json:"startedAt" db:"started_at"`
-	EndedAt        *time.Time `json:"endedAt,omitempty" db:"ended_at"`
-	MachineID      string     `json:"machineId" db:"machine_id"`
-	SessionID      string     `json:"sessionId" db:"session_id"`
-	Platform       string     `json:"platform" db:"platform"`
-	ProcessID      *int       `json:"processId,omitempty" db:"process_id"`
-	ParentProcessID *int      `json:"parentProcessId,omitempty" db:"parent_process_id"`
-	SyncedAt       *time.Time `json:"syncedAt,omitempty" db:"synced_at"`
-	CreatedAt      time.Time  `json:"createdAt" db:"created_at"`
+	ID               string     `json:"id" db:"id"`
+	EmployeeID       string     `json:"employeeId" db:"employee_id"`
+	ProcessName      string     `json:"processName" db:"process_name"`
+	AppDisplayName   string     `json:"appDisplayName" db:"app_display_name"`
+	StartedAt        time.Time  `json:"startedAt" db:"started_at"`
+	EndedAt          *time.Time `json:"endedAt,omitempty" db:"ended_at"`
+	MachineID        string     `json:"machineId" db:"machine_id"`
+	SessionID        string     `json:"sessionId" db:"session_id"`
+	Platform         string     `json:"platform" db:"platform"`
+	ProcessID        *int       `json:"processId,omitempty" db:"process_id"`
+	ParentProcessID  *int       `json:"parentProcessId,omitempty" db:"parent_process_id"`
+	InstalledAppID   *string    `json:"installedAppId,omitempty" db:"installed_app_id"`
+	InstalledPackageID *string  `json:"installedPackageId,omitempty" db:"installed_package_id"`
+	GroupedBy        *string    `json:"groupedBy,omitempty" db:"grouped_by"`
+	CgroupScope      *string    `json:"cgroupScope,omitempty" db:"cgroup_scope"`
+	ContextLabel     *string    `json:"contextLabel,omitempty" db:"context_label"`
+	SyncedAt         *time.Time `json:"syncedAt,omitempty" db:"synced_at"`
+	CreatedAt        time.Time  `json:"createdAt" db:"created_at"`
 }
 
 // AppItem is a generic child of AppSession, replacing BrowserContext, FileExplorerContext, UrlRecord, UrlVisit.
@@ -33,6 +38,16 @@ type AppItem struct {
 	Domain       string     `json:"domain" db:"domain"`
 	OpenedAt     time.Time  `json:"openedAt" db:"opened_at"`
 	ClosedAt     *time.Time `json:"closedAt,omitempty" db:"closed_at"`
+	ProcessID    *int       `json:"processId,omitempty" db:"process_id"`
+	ObjectType   string     `json:"objectType" db:"object_type"`
+	Action       string     `json:"action" db:"action"`
+	JourneyID    string     `json:"journeyId" db:"journey_id"`
+	Sequence     int        `json:"sequence" db:"sequence"`
+	PreviousPath string     `json:"previousPath" db:"previous_path"`
+	CurrentPath  string     `json:"currentPath" db:"current_path"`
+	WindowID     *int       `json:"windowId,omitempty" db:"window_id"`
+	TabID        *int       `json:"tabId,omitempty" db:"tab_id"`
+	MetadataJSON string     `json:"metadataJson" db:"metadata_json"`
 	SyncedAt     *time.Time `json:"syncedAt,omitempty" db:"synced_at"`
 	CreatedAt    time.Time  `json:"createdAt" db:"created_at"`
 }

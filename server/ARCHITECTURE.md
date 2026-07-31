@@ -1,7 +1,7 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-07-27 (session process IDs, app_items upsert)  
-> **Changelog:** 2026-07-27: Migration 010 adds `process_id`/`parent_process_id` to `app_sessions`. App-items sync uses upsert on conflict. App-session sync upserts `ended_at` and `parent_process_id`.  
+> **Last audited:** 2026-07-31 (catalog dedup + junction tables + session/item identity fields)  
+> **Changelog:** 2026-07-31: Migrations 013–016 + catalog/link sync rewrite. 013 adds `installed_app_id`/`installed_package_id`/`grouped_by`/`cgroup_scope`/`context_label` to `app_sessions`. 014 adds `process_id` + 9 journey fields to `app_items`. 015/016 build company-global app/package catalogs (`app_fingerprint = desktop_id|binary_name`, `package_fingerprint = package_name|source_manager`) with per-employee junction tables `employee_installed_applications`/`employee_installed_packages` (version/path/install_date + first/last_seen_at + is_active) — two employees with the same app now share ONE catalog row. `SyncInstalledApps`/`SyncInstalledPackages` rewritten to upsert-catalog-then-link inside one tx. New `internal/jobs/staleness_sweep.go` hourly deactivates links idle > `LINK_STALE_DAYS` (default 7, configurable). `NewSchemaRepo` gains `Begin()` + 4 upsert methods. App-session/item bulk inserts + list queries extended with the new fields.
 > **Service completion (honest):** ~50%
 
 ---

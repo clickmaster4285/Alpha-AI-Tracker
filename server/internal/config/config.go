@@ -18,6 +18,10 @@ type Config struct {
 	Admin    AdminConfig
 	CORS     CORSConfig
 	LogLevel string
+
+	// LinkStaleDays is the staleness threshold (in days) after which an
+	// employee↔app/package junction link is marked is_active = false.
+	LinkStaleDays int
 }
 
 type ServerConfig struct {
@@ -110,6 +114,8 @@ func Load() (*Config, error) {
 			AllowedOrigins: getEnvSlice("CORS_ALLOWED_ORIGINS", []string{"http://localhost:3000"}),
 		},
 		LogLevel: getEnv("LOG_LEVEL", "info"),
+
+		LinkStaleDays: getEnvInt("LINK_STALE_DAYS", 7),
 	}
 
 	if cfg.Database.Password == "" {

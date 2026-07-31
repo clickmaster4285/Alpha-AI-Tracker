@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/alpha-ai-tracker/server/internal/dto"
@@ -68,6 +69,9 @@ func (s *NewSchemaService) SyncDeviceHardware(ctx context.Context, req *dto.Sync
 
 // ── installed_applications ──
 
+// SyncInstalledApps ingests installed applications as a company-global catalog
+// (deduplicated by app_fingerprint = desktop_id|binary_name) plus per-employee link rows
+// holding install-specific metadata (version, path, install date).
 func (s *NewSchemaService) SyncInstalledApps(ctx context.Context, req *dto.SyncInstalledAppsRequest) (*dto.SyncBatchResponse, error) {
 	emp, err := s.employeeRepo.GetByEmployeeID(ctx, req.EmployeeID)
 	if err != nil {
@@ -81,7 +85,7 @@ func (s *NewSchemaService) SyncInstalledApps(ctx context.Context, req *dto.SyncI
 	}
 
 	now := time.Now()
-	entries := make([]models.InstalledApplication, 0, len(req.Entries))
+	inserted := 0
 	for _, e := range req.Entries {
 		dets, _ := time.Parse(time.RFC3339, e.DetectedAt)
 		var installDate *time.Time
@@ -90,7 +94,8 @@ func (s *NewSchemaService) SyncInstalledApps(ctx context.Context, req *dto.SyncI
 				installDate = &t
 			}
 		}
-		entries = append(entries, models.InstalledApplication{
+
+		cat := models.InstalledApplication{
 			ID:              e.ID,
 			EmployeeID:      req.EmployeeID,
 			AppName:         e.AppName,
@@ -106,18 +111,58 @@ func (s *NewSchemaService) SyncInstalledApps(ctx context.Context, req *dto.SyncI
 			IsBrowser:       e.IsBrowser,
 			DesktopID:       e.DesktopID,
 			Categories:      e.Categories,
-		})
-	}
+			AppFingerprint:  appFingerprint(e.DesktopID, e.BinaryName),
+		}
 
-	inserted, err := s.repo.BulkInsertInstalledApps(ctx, entries)
-	if err != nil {
-		return nil, fmt.Errorf("bulk insert installed_apps: %w", err)
+		tx, err := s.repo.Begin(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("begin tx: %w", err)
+		}
+
+		catalogID, err := s.repo.UpsertApplicationCatalog(ctx, tx, cat)
+		if err != nil {
+			tx.Rollback(ctx)
+			return nil, err
+		}
+
+		err = s.repo.UpsertEmployeeAppLink(ctx, tx, models.EmployeeInstalledApplication{
+			EmployeeID:             req.EmployeeID,
+			InstalledApplicationID: catalogID,
+			AppVersion:             e.AppVersion,
+			Publisher:              e.Publisher,
+			InstallPath:            e.InstallPath,
+			InstallDate:            installDate,
+		})
+		if err != nil {
+			tx.Rollback(ctx)
+			return nil, err
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit tx: %w", err)
+		}
+		inserted++
 	}
 	return &dto.SyncBatchResponse{Synced: inserted, Message: fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries))}, nil
 }
 
+// appFingerprint builds the catalog natural key for applications.
+func appFingerprint(desktopID, binaryName string) string {
+	desktopID = strings.TrimSpace(desktopID)
+	binaryName = strings.TrimSpace(binaryName)
+	return desktopID + "|" + binaryName
+}
+
+// packageFingerprint builds the catalog natural key for packages.
+func packageFingerprint(packageName, sourceManager string) string {
+	return strings.TrimSpace(packageName) + "|" + strings.TrimSpace(sourceManager)
+}
+
 // ── installed_packages ──
 
+// SyncInstalledPackages ingests installed packages as a company-global catalog
+// (deduplicated by package_fingerprint = package_name|source_manager) plus per-employee
+// link rows holding install-specific metadata (version, path, publisher).
 func (s *NewSchemaService) SyncInstalledPackages(ctx context.Context, req *dto.SyncInstalledPackagesRequest) (*dto.SyncBatchResponse, error) {
 	emp, err := s.employeeRepo.GetByEmployeeID(ctx, req.EmployeeID)
 	if err != nil {
@@ -131,27 +176,52 @@ func (s *NewSchemaService) SyncInstalledPackages(ctx context.Context, req *dto.S
 	}
 
 	now := time.Now()
-	entries := make([]models.InstalledPackage, 0, len(req.Entries))
+	inserted := 0
 	for _, e := range req.Entries {
 		dets, _ := time.Parse(time.RFC3339, e.DetectedAt)
-		entries = append(entries, models.InstalledPackage{
-			ID:            e.ID,
-			EmployeeID:    req.EmployeeID,
-			PackageName:   e.PackageName,
-			Version:       e.Version,
-			Category:      e.Category,
-			SourceManager: e.SourceManager,
-			InstallPath:   e.InstallPath,
-			Publisher:     e.Publisher,
-			Description:   e.Description,
-			DetectedAt:    dets,
-			SyncedAt:      &now,
-		})
-	}
 
-	inserted, err := s.repo.BulkInsertInstalledPackages(ctx, entries)
-	if err != nil {
-		return nil, fmt.Errorf("bulk insert installed_packages: %w", err)
+		cat := models.InstalledPackage{
+			ID:                e.ID,
+			EmployeeID:        req.EmployeeID,
+			PackageName:       e.PackageName,
+			Version:           e.Version,
+			Category:          e.Category,
+			SourceManager:     e.SourceManager,
+			InstallPath:       e.InstallPath,
+			Publisher:         e.Publisher,
+			Description:       e.Description,
+			DetectedAt:        dets,
+			SyncedAt:          &now,
+			PackageFingerprint: packageFingerprint(e.PackageName, e.SourceManager),
+		}
+
+		tx, err := s.repo.Begin(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("begin tx: %w", err)
+		}
+
+		catalogID, err := s.repo.UpsertPackageCatalog(ctx, tx, cat)
+		if err != nil {
+			tx.Rollback(ctx)
+			return nil, err
+		}
+
+		err = s.repo.UpsertEmployeePackageLink(ctx, tx, models.EmployeeInstalledPackage{
+			EmployeeID:         req.EmployeeID,
+			InstalledPackageID: catalogID,
+			Version:            e.Version,
+			Publisher:          e.Publisher,
+			InstallPath:        e.InstallPath,
+		})
+		if err != nil {
+			tx.Rollback(ctx)
+			return nil, err
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit tx: %w", err)
+		}
+		inserted++
 	}
 	return &dto.SyncBatchResponse{Synced: inserted, Message: fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries))}, nil
 }
@@ -253,18 +323,23 @@ func (s *NewSchemaService) SyncAppSessions(ctx context.Context, req *dto.SyncApp
 			}
 		}
 		entries = append(entries, models.AppSession{
-			ID:              e.ID,
-			EmployeeID:      req.EmployeeID,
-			ProcessName:     e.ProcessName,
-			AppDisplayName:  e.AppDisplayName,
-			StartedAt:       started,
-			EndedAt:         ended,
-			MachineID:       e.MachineID,
-			SessionID:       e.SessionID,
-			Platform:        e.Platform,
-			ProcessID:       e.ProcessID,
-			ParentProcessID: e.ParentProcessID,
-			SyncedAt:        &now,
+			ID:                 e.ID,
+			EmployeeID:         req.EmployeeID,
+			ProcessName:        e.ProcessName,
+			AppDisplayName:     e.AppDisplayName,
+			StartedAt:          started,
+			EndedAt:            ended,
+			MachineID:          e.MachineID,
+			SessionID:          e.SessionID,
+			Platform:           e.Platform,
+			ProcessID:          e.ProcessID,
+			ParentProcessID:    e.ParentProcessID,
+			InstalledAppID:     e.InstalledAppID,
+			InstalledPackageID: e.InstalledPackageID,
+			GroupedBy:          e.GroupedBy,
+			CgroupScope:        e.CgroupScope,
+			ContextLabel:       e.ContextLabel,
+			SyncedAt:           &now,
 		})
 	}
 
@@ -311,6 +386,16 @@ func (s *NewSchemaService) SyncAppItems(ctx context.Context, req *dto.SyncAppIte
 			Domain:       e.Domain,
 			OpenedAt:     opened,
 			ClosedAt:     closed,
+			ProcessID:    e.ProcessID,
+			ObjectType:   e.ObjectType,
+			Action:       e.Action,
+			JourneyID:    e.JourneyID,
+			Sequence:     e.Sequence,
+			PreviousPath: e.PreviousPath,
+			CurrentPath:  e.CurrentPath,
+			WindowID:     e.WindowID,
+			TabID:        e.TabID,
+			MetadataJSON: e.MetadataJSON,
 			SyncedAt:     &now,
 		})
 	}
@@ -333,18 +418,23 @@ func (s *NewSchemaService) ListAppSessions(ctx context.Context, params repositor
 	sessions := make([]dto.AppSessionResponse, len(result.Sessions))
 	for i, s := range result.Sessions {
 		sessions[i] = dto.AppSessionResponse{
-			ID:              s.ID,
-			EmployeeID:      s.EmployeeID,
-			ProcessName:     s.ProcessName,
-			AppDisplayName:  s.AppDisplayName,
-			StartedAt:       s.StartedAt,
-			EndedAt:         s.EndedAt,
-			MachineID:       s.MachineID,
-			SessionID:       s.SessionID,
-			Platform:        s.Platform,
-			ProcessID:       s.ProcessID,
-			ParentProcessID: s.ParentProcessID,
-			SyncedAt:        s.SyncedAt,
+			ID:                 s.ID,
+			EmployeeID:         s.EmployeeID,
+			ProcessName:        s.ProcessName,
+			AppDisplayName:     s.AppDisplayName,
+			StartedAt:          s.StartedAt,
+			EndedAt:            s.EndedAt,
+			MachineID:          s.MachineID,
+			SessionID:          s.SessionID,
+			Platform:           s.Platform,
+			ProcessID:          s.ProcessID,
+			ParentProcessID:    s.ParentProcessID,
+			InstalledAppID:     s.InstalledAppID,
+			InstalledPackageID: s.InstalledPackageID,
+			GroupedBy:          s.GroupedBy,
+			CgroupScope:        s.CgroupScope,
+			ContextLabel:       s.ContextLabel,
+			SyncedAt:           s.SyncedAt,
 		}
 	}
 
@@ -394,6 +484,16 @@ func (s *NewSchemaService) ListAppItems(ctx context.Context, params repository.A
 			Domain:       item.Domain,
 			OpenedAt:     item.OpenedAt,
 			ClosedAt:     closedAt,
+			ProcessID:    item.ProcessID,
+			ObjectType:   item.ObjectType,
+			Action:       item.Action,
+			JourneyID:    item.JourneyID,
+			Sequence:     item.Sequence,
+			PreviousPath: item.PreviousPath,
+			CurrentPath:  item.CurrentPath,
+			WindowID:     item.WindowID,
+			TabID:        item.TabID,
+			MetadataJSON: item.MetadataJSON,
 			SyncedAt:     syncedAt,
 		}
 	}

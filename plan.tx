@@ -1,0 +1,72 @@
+# Alpha AI Tracker — Server Washout, Sync Prep, and Employee↔App/Package Linking
+
+Date: 2026-07-31 · Verified against live client SQLite schema + server code + live DB state.
+
+## Goal
+1. Wash out all tracking/log data from PostgreSQL (keep users/employees/departments/migrations).
+2. Prepare server to sync ALL client data per employee (fix payload gaps, cross-service).
+3. New: employee↔app/package catalog dedup (junction tables + staleness sweep), landed during washout while tables are empty.
+
+## Findings (verified)
+- DB `alpha_ai_tracker` (PostgreSQL, running): 5 employees (EMP-10002…EMP-10010), 1 admin user, 8 departments, 12 migrations. Tracking data: app_sessions 9,976 / app_items 10,223 / installed_applications 5,548 / installed_packages 6,530 / device_hardware_info 716 / network_info 46 / session_events 46 + empty legacy tables (browser_contexts, file_explorer_contexts, shell_commands, urls, url_visits).
+- Server builds clean; 7 sync endpoints wired; running on 192.168.88.51:8080; Redis up.
+- Client bugs/gaps:
+  - installed-apps sync mapper omits binaryName/isBrowser/desktopId/categories (server migration-012 columns never populated).
+  - Client app_sessions has cgroup fields (groupedBy/cgroupScope/contextLabel) not sent; server has no columns.
+  - Server app_items lacks journey fields + process_id; client mapper doesn't send them.
+  - Client installed_packages `ON CONFLICT(id)` (fresh GUID) never conflicts → duplicate package rows every ~30 min scan (root cause of 6,530 rows).
+  - Client installed_applications conflict-update never resets `is_synced` → apps sent exactly once; no inventory refresh.
+
+## Part A — Washout PostgreSQL (tracking data only)
+1. Backup: `pg_dump -Fc alpha_ai_tracker > server/bin/backup/alpha_ai_tracker_<ts>.dump` + verify via `pg_restore --list`.
+2. FK graph audit before truncate (read output, ensure nothing unexpected cascades).
+3. `TRUNCATE` 12 tracking tables with CASCADE: app_items, app_sessions, browser_contexts, file_explorer_contexts, device_hardware_info, installed_applications, installed_packages, network_info, session_events, shell_commands, urls, url_visits.
+4. Keep users, employees, departments, schema_migrations.
+5. Bidirectional count check: 12 tables = 0 AND preserved tables unchanged (employees = 5, departments = 8, users = 1, migrations = 12).
+
+## Part B — Server changes
+### Migrations (all plain `CREATE INDEX IF NOT EXISTS` — runner wraps each file in a transaction, no CONCURRENTLY)
+- `013_session_identity.sql` — app_sessions += installed_app_id, installed_package_id, grouped_by, cgroup_scope, context_label; index `(employee_id, started_at)`. No FK on installed_app_id/package_id (avoid breaking ingestion).
+- `014_app_items_journey.sql` — app_items += process_id, object_type, action, journey_id, sequence, previous_path, current_path, window_id, tab_id, metadata_json; index `(journey_id, sequence)`.
+- `015_employee_app_links.sql` — installed_applications += app_fingerprint (desktop_id|binary_name), unique index, backfill; NEW `employee_installed_applications` junction:
+  - `employee_id VARCHAR(20) NOT NULL REFERENCES employees(employee_id)`
+  - `installed_application_id TEXT NOT NULL REFERENCES installed_applications(id)`
+  - app_version, publisher, install_path, install_date, first_seen_at, last_seen_at, is_active, `UNIQUE(employee_id, installed_application_id)` + indexes.
+- `016_employee_package_links.sql` — same shape for packages: package_fingerprint (package_name|source_manager), unique index; NEW `employee_installed_packages` junction (version, publisher, install_path, first/last_seen_at, is_active).
+
+### Code
+- `internal/config/config.go` + `.env`/`.env.example`: `LINK_STALE_DAYS=7`.
+- `internal/models/app_session.go`: AppSession += InstalledAppID, InstalledPackageID, GroupedBy, CgroupScope, ContextLabel; AppItem += ProcessID + 9 journey fields.
+- `internal/models/employee_app_link.go` (NEW): EmployeeInstalledApplication, EmployeeInstalledPackage.
+- `internal/dto/new_schema_dto.go`: extend AppSessionEntry/Response + AppItemEntry/Response.
+- `internal/services/new_schema_service.go`: map 013/014 fields; rewrite SyncInstalledApps/SyncInstalledPackages → upsert-catalog-then-link (per-entry, in tx):
+  - catalog upsert `ON CONFLICT (app_fingerprint) DO UPDATE SET app_name/categories/... RETURNING id`
+  - link upsert `ON CONFLICT (employee_id, installed_application_id) DO UPDATE SET version/..., last_seen_at=now(), is_active=true`
+  - compute fingerprint server-side: `COALESCE(NULLIF(desktop_id,''),'')||'|'||binary_name` and `package_name||'|'||source_manager`.
+- `internal/repository/new_schema_repo.go`: +UpsertApplicationCatalog, +UpsertEmployeeAppLink, +UpsertPackageCatalog, +UpsertEmployeePackageLink; update BulkInsertAppSessions/BulkInsertAppItems SQL + List SELECT/scan.
+- `internal/jobs/staleness_sweep.go` (NEW): hourly goroutine, `is_active=false WHERE is_active AND last_seen_at < now() - N days` on both junctions.
+- `cmd/server/main.go`: start sweep after migrations.
+
+## Part C — Client changes
+- `Storage/DatabaseSchema.cs`:
+  - Apps: keep `ON CONFLICT(app_name)`; add `is_synced = 0, detected_at = now()` to DO UPDATE SET (re-send on re-detect → last_seen_at freshness). No schema change.
+  - Packages: dedup block (window fn keep newest per `(package_name, source_manager)`) + `CREATE UNIQUE INDEX IF NOT EXISTS idx_installed_packages_fingerprint` BEFORE it (existing client DBs already contain dupes) + change insert to `ON CONFLICT(package_name, source_manager) DO UPDATE SET ..., is_synced = 0, detected_at = now()`.
+- `Services/LogCollectorService.cs`:
+  - installed-apps mapper += binaryName, isBrowser, desktopId, categories.
+  - app-sessions mapper += groupedBy, cgroupScope, contextLabel (installedAppId/installedPackageId already sent).
+  - app-items mapper += processId, objectType, action, journeyId, sequence, previousPath, currentPath, windowId, tabId, metadataJson.
+
+## Part D — Verify / deploy sequence
+1. `go build ./...` + `dotnet build` clean BEFORE restart.
+2. Restart alpha-ai-server (brief downtime — client buffers locally, no data loss).
+3. Confirm migrations 013, 014, 015, 016 recorded in schema_migrations.
+4. Smoke tests:
+   - Happy path: one small batch per sync endpoint, expect `{synced: N}`.
+   - Two-employee-same-app: same fingerprint from 2 employees → 1 catalog row + 2 link rows (the key new-logic test).
+   - Malformed/partial payload → graceful 4xx/default, not 500.
+5. Update AGENTS.md changelog + server/ARCHITECTURE.md + client/ARCHITECTURE.md.
+
+## File manifest
+NEW: server/migrations/013,014,015,016; server/internal/models/employee_app_link.go; server/internal/jobs/staleness_sweep.go
+MOD: server/internal/config/config.go, .env, .env.example, models/app_session.go, dto/new_schema_dto.go, services/new_schema_service.go, repository/new_schema_repo.go, cmd/server/main.go
+MOD: client/Storage/DatabaseSchema.cs, client/Services/LogCollectorService.cs

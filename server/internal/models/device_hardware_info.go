@@ -38,6 +38,7 @@ type InstalledApplication struct {
 	IsBrowser       bool       `json:"isBrowser" db:"is_browser"`
 	DesktopID       string     `json:"desktopId,omitempty" db:"desktop_id"`
 	Categories      string     `json:"categories,omitempty" db:"categories"`
+	AppFingerprint  string     `json:"-" db:"app_fingerprint"`
 }
 
 type NetworkInfo struct {
@@ -65,6 +66,7 @@ type InstalledPackage struct {
 	DetectedAt    time.Time  `json:"detectedAt" db:"detected_at"`
 	SyncedAt      *time.Time `json:"syncedAt,omitempty" db:"synced_at"`
 	CreatedAt     time.Time  `json:"createdAt" db:"created_at"`
+	PackageFingerprint string `json:"-" db:"package_fingerprint"`
 }
 
 type SessionEvent struct {

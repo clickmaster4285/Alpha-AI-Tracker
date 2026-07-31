@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/alpha-ai-tracker/server/internal/models"
 )
@@ -16,6 +17,11 @@ type NewSchemaRepo struct {
 
 func NewNewSchemaRepo(pool *pgxpool.Pool) *NewSchemaRepo {
 	return &NewSchemaRepo{pool: pool}
+}
+
+// Begin starts a transaction for multi-statement ingestion (catalog upsert + link upsert).
+func (r *NewSchemaRepo) Begin(ctx context.Context) (pgx.Tx, error) {
+	return r.pool.Begin(ctx)
 }
 
 // ────────────────────────────────
@@ -287,30 +293,41 @@ func (r *NewSchemaRepo) BulkInsertAppSessions(ctx context.Context, entries []mod
 		}
 		batch := entries[i:end]
 		valueStrings := make([]string, 0, len(batch))
-		args := make([]interface{}, 0, len(batch)*11)
+		args := make([]interface{}, 0, len(batch)*17)
 		argIdx := 1
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
-				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9, argIdx+10, argIdx+11,
+				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
+				argIdx+10, argIdx+11, argIdx+12, argIdx+13, argIdx+14,
+				argIdx+15, argIdx+16,
 			))
 			args = append(args,
 				e.ID, e.EmployeeID, e.ProcessName, e.AppDisplayName, e.StartedAt,
-				e.EndedAt, e.MachineID, e.SessionID, e.Platform, e.ProcessID, e.ParentProcessID, time.Now(),
+				e.EndedAt, e.MachineID, e.SessionID, e.Platform, e.ProcessID, e.ParentProcessID,
+				e.InstalledAppID, e.InstalledPackageID, e.GroupedBy, e.CgroupScope, e.ContextLabel,
+				time.Now(),
 			)
-			argIdx += 12
+			argIdx += 17
 		}
 
 		query := fmt.Sprintf(`
 			INSERT INTO app_sessions
 				(id, employee_id, process_name, app_display_name, started_at,
-				 ended_at, machine_id, session_id, platform, process_id, parent_process_id, synced_at)
+				 ended_at, machine_id, session_id, platform, process_id, parent_process_id,
+				 installed_app_id, installed_package_id, grouped_by, cgroup_scope, context_label,
+				 synced_at)
 			VALUES %s
 			ON CONFLICT (id) DO UPDATE SET
 				ended_at = COALESCE(EXCLUDED.ended_at, app_sessions.ended_at),
 				parent_process_id = COALESCE(EXCLUDED.parent_process_id, app_sessions.parent_process_id),
+				installed_app_id = COALESCE(EXCLUDED.installed_app_id, app_sessions.installed_app_id),
+				installed_package_id = COALESCE(EXCLUDED.installed_package_id, app_sessions.installed_package_id),
+				grouped_by = COALESCE(EXCLUDED.grouped_by, app_sessions.grouped_by),
+				cgroup_scope = COALESCE(EXCLUDED.cgroup_scope, app_sessions.cgroup_scope),
+				context_label = COALESCE(EXCLUDED.context_label, app_sessions.context_label),
 				synced_at = EXCLUDED.synced_at
 		`, strings.Join(valueStrings, ", "))
 
@@ -340,26 +357,33 @@ func (r *NewSchemaRepo) BulkInsertAppItems(ctx context.Context, entries []models
 		}
 		batch := entries[i:end]
 		valueStrings := make([]string, 0, len(batch))
-		args := make([]interface{}, 0, len(batch)*9)
+		args := make([]interface{}, 0, len(batch)*21)
 		argIdx := 1
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
-				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9, argIdx+10,
+				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
+				argIdx+10, argIdx+11, argIdx+12, argIdx+13, argIdx+14,
+				argIdx+15, argIdx+16, argIdx+17, argIdx+18, argIdx+19,
+				argIdx+20,
 			))
 			args = append(args,
 				e.ID, e.EmployeeID, e.AppSessionID, e.ParentItemID, e.ItemType,
 				e.Title, e.Identifier, e.Url, e.Domain, e.OpenedAt, e.ClosedAt,
+				e.ProcessID, e.ObjectType, e.Action, e.JourneyID, e.Sequence,
+				e.PreviousPath, e.CurrentPath, e.WindowID, e.TabID, e.MetadataJSON,
 			)
-			argIdx += 11
+			argIdx += 21
 		}
 
 		query := fmt.Sprintf(`
 			INSERT INTO app_items
 				(id, employee_id, app_session_id, parent_item_id, item_type,
-				 title, identifier, url, domain, opened_at, closed_at)
+				 title, identifier, url, domain, opened_at, closed_at,
+				 process_id, object_type, action, journey_id, sequence,
+				 previous_path, current_path, window_id, tab_id, metadata_json)
 			VALUES %s
 			ON CONFLICT (id) DO UPDATE SET
 				title = EXCLUDED.title,
@@ -368,6 +392,16 @@ func (r *NewSchemaRepo) BulkInsertAppItems(ctx context.Context, entries []models
 				domain = COALESCE(NULLIF(EXCLUDED.domain, ''), app_items.domain),
 				parent_item_id = COALESCE(EXCLUDED.parent_item_id, app_items.parent_item_id),
 				closed_at = COALESCE(EXCLUDED.closed_at, app_items.closed_at),
+				process_id = COALESCE(EXCLUDED.process_id, app_items.process_id),
+				object_type = COALESCE(NULLIF(EXCLUDED.object_type, ''), app_items.object_type),
+				action = COALESCE(NULLIF(EXCLUDED.action, ''), app_items.action),
+				journey_id = COALESCE(NULLIF(EXCLUDED.journey_id, ''), app_items.journey_id),
+				sequence = COALESCE(EXCLUDED.sequence, app_items.sequence),
+				previous_path = COALESCE(NULLIF(EXCLUDED.previous_path, ''), app_items.previous_path),
+				current_path = COALESCE(NULLIF(EXCLUDED.current_path, ''), app_items.current_path),
+				window_id = COALESCE(EXCLUDED.window_id, app_items.window_id),
+				tab_id = COALESCE(EXCLUDED.tab_id, app_items.tab_id),
+				metadata_json = EXCLUDED.metadata_json,
 				synced_at = NOW()
 		`, strings.Join(valueStrings, ", "))
 
@@ -448,7 +482,9 @@ func (r *NewSchemaRepo) ListAppSessions(ctx context.Context, params AppSessionLi
 
 	query := fmt.Sprintf(`
 		SELECT id, employee_id, process_name, app_display_name, started_at, ended_at,
-		       machine_id, session_id, platform, process_id, parent_process_id, synced_at, created_at
+		       machine_id, session_id, platform, process_id, parent_process_id,
+		       installed_app_id, installed_package_id, grouped_by, cgroup_scope, context_label,
+		       synced_at, created_at
 		FROM app_sessions %s
 		ORDER BY started_at DESC
 		LIMIT $%d OFFSET $%d
@@ -466,7 +502,9 @@ func (r *NewSchemaRepo) ListAppSessions(ctx context.Context, params AppSessionLi
 		var s models.AppSession
 		if err := rows.Scan(
 			&s.ID, &s.EmployeeID, &s.ProcessName, &s.AppDisplayName, &s.StartedAt, &s.EndedAt,
-			&s.MachineID, &s.SessionID, &s.Platform, &s.ProcessID, &s.ParentProcessID, &s.SyncedAt, &s.CreatedAt,
+			&s.MachineID, &s.SessionID, &s.Platform, &s.ProcessID, &s.ParentProcessID,
+			&s.InstalledAppID, &s.InstalledPackageID, &s.GroupedBy, &s.CgroupScope, &s.ContextLabel,
+			&s.SyncedAt, &s.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan app_session row: %w", err)
 		}
@@ -556,7 +594,10 @@ func (r *NewSchemaRepo) ListAppItems(ctx context.Context, params AppItemListPara
 
 	query := fmt.Sprintf(`
 		SELECT id, employee_id, app_session_id, parent_item_id, item_type,
-		       title, identifier, url, domain, opened_at, closed_at, synced_at, created_at
+		       title, identifier, url, domain, opened_at, closed_at,
+		       process_id, object_type, action, journey_id, sequence,
+		       previous_path, current_path, window_id, tab_id, metadata_json,
+		       synced_at, created_at
 		FROM app_items %s
 		ORDER BY opened_at DESC
 		LIMIT $%d OFFSET $%d
@@ -575,7 +616,10 @@ func (r *NewSchemaRepo) ListAppItems(ctx context.Context, params AppItemListPara
 		if err := rows.Scan(
 			&item.ID, &item.EmployeeID, &item.AppSessionID, &item.ParentItemID, &item.ItemType,
 			&item.Title, &item.Identifier, &item.Url, &item.Domain,
-			&item.OpenedAt, &item.ClosedAt, &item.SyncedAt, &item.CreatedAt,
+			&item.OpenedAt, &item.ClosedAt,
+			&item.ProcessID, &item.ObjectType, &item.Action, &item.JourneyID, &item.Sequence,
+			&item.PreviousPath, &item.CurrentPath, &item.WindowID, &item.TabID, &item.MetadataJSON,
+			&item.SyncedAt, &item.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan app_item row: %w", err)
 		}
@@ -589,4 +633,110 @@ func (r *NewSchemaRepo) ListAppItems(ctx context.Context, params AppItemListPara
 		PerPage:    params.PerPage,
 		TotalPages: totalPages,
 	}, nil
+}
+
+// ────────────────────────────────
+// CATALOG + EMPLOYEE LINK UPSERTS
+// (employee↔app / employee↔package catalog dedup)
+// ────────────────────────────────
+
+// UpsertApplicationCatalog inserts or updates the deduplicated app catalog row keyed by
+// app_fingerprint and returns its id.
+func (r *NewSchemaRepo) UpsertApplicationCatalog(ctx context.Context, tx pgx.Tx, e models.InstalledApplication) (string, error) {
+	var id string
+	err := tx.QueryRow(ctx, `
+		INSERT INTO installed_applications
+			(id, employee_id, app_name, app_version, publisher, install_path,
+			 install_date, uninstall_string, change_type, detected_at, synced_at,
+			 binary_name, is_browser, desktop_id, categories, app_fingerprint)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+		ON CONFLICT (app_fingerprint) DO UPDATE SET
+			app_name = EXCLUDED.app_name,
+			binary_name = COALESCE(NULLIF(EXCLUDED.binary_name, ''), installed_applications.binary_name),
+			is_browser = installed_applications.is_browser OR EXCLUDED.is_browser,
+			desktop_id = COALESCE(NULLIF(EXCLUDED.desktop_id, ''), installed_applications.desktop_id),
+			categories = COALESCE(NULLIF(EXCLUDED.categories, ''), installed_applications.categories),
+			detected_at = EXCLUDED.detected_at,
+			synced_at = EXCLUDED.synced_at
+		RETURNING id
+	`,
+		e.ID, e.EmployeeID, e.AppName, e.AppVersion, e.Publisher, e.InstallPath,
+		e.InstallDate, e.UninstallString, e.ChangeType, e.DetectedAt, e.SyncedAt,
+		e.BinaryName, e.IsBrowser, e.DesktopID, e.Categories, e.AppFingerprint,
+	).Scan(&id)
+	if err != nil {
+		return "", fmt.Errorf("upsert application catalog: %w", err)
+	}
+	return id, nil
+}
+
+// UpsertPackageCatalog inserts or updates the deduplicated package catalog row keyed by
+// package_fingerprint and returns its id.
+func (r *NewSchemaRepo) UpsertPackageCatalog(ctx context.Context, tx pgx.Tx, e models.InstalledPackage) (string, error) {
+	var id string
+	err := tx.QueryRow(ctx, `
+		INSERT INTO installed_packages
+			(id, employee_id, package_name, version, category, source_manager,
+			 install_path, publisher, description, detected_at, synced_at, package_fingerprint)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		ON CONFLICT (package_fingerprint) DO UPDATE SET
+			package_name = EXCLUDED.package_name,
+			category = COALESCE(NULLIF(EXCLUDED.category, ''), installed_packages.category),
+			description = COALESCE(NULLIF(EXCLUDED.description, ''), installed_packages.description),
+			detected_at = EXCLUDED.detected_at,
+			synced_at = EXCLUDED.synced_at
+		RETURNING id
+	`,
+		e.ID, e.EmployeeID, e.PackageName, e.Version, e.Category, e.SourceManager,
+		e.InstallPath, e.Publisher, e.Description, e.DetectedAt, e.SyncedAt, e.PackageFingerprint,
+	).Scan(&id)
+	if err != nil {
+		return "", fmt.Errorf("upsert package catalog: %w", err)
+	}
+	return id, nil
+}
+
+// UpsertEmployeeAppLink links an employee to a catalog app, refreshing per-install metadata.
+func (r *NewSchemaRepo) UpsertEmployeeAppLink(ctx context.Context, tx pgx.Tx, link models.EmployeeInstalledApplication) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO employee_installed_applications
+			(employee_id, installed_application_id, app_version, publisher, install_path, install_date,
+			 first_seen_at, last_seen_at, is_active)
+		VALUES ($1, $2, $3, $4, $5, $6, now(), now(), true)
+		ON CONFLICT (employee_id, installed_application_id) DO UPDATE SET
+			app_version = EXCLUDED.app_version,
+			publisher = COALESCE(NULLIF(EXCLUDED.publisher, ''), employee_installed_applications.publisher),
+			install_path = COALESCE(NULLIF(EXCLUDED.install_path, ''), employee_installed_applications.install_path),
+			install_date = COALESCE(EXCLUDED.install_date, employee_installed_applications.install_date),
+			last_seen_at = now(),
+			is_active = true
+	`,
+		link.EmployeeID, link.InstalledApplicationID, link.AppVersion, link.Publisher, link.InstallPath, link.InstallDate,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert employee app link: %w", err)
+	}
+	return nil
+}
+
+// UpsertEmployeePackageLink links an employee to a catalog package, refreshing per-install metadata.
+func (r *NewSchemaRepo) UpsertEmployeePackageLink(ctx context.Context, tx pgx.Tx, link models.EmployeeInstalledPackage) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO employee_installed_packages
+			(employee_id, installed_package_id, version, publisher, install_path,
+			 first_seen_at, last_seen_at, is_active)
+		VALUES ($1, $2, $3, $4, $5, now(), now(), true)
+		ON CONFLICT (employee_id, installed_package_id) DO UPDATE SET
+			version = EXCLUDED.version,
+			publisher = COALESCE(NULLIF(EXCLUDED.publisher, ''), employee_installed_packages.publisher),
+			install_path = COALESCE(NULLIF(EXCLUDED.install_path, ''), employee_installed_packages.install_path),
+			last_seen_at = now(),
+			is_active = true
+	`,
+		link.EmployeeID, link.InstalledPackageID, link.Version, link.Publisher, link.InstallPath,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert employee package link: %w", err)
+	}
+	return nil
 }

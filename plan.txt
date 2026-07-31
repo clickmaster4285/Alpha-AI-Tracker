@@ -1,195 +1,52 @@
-alpha_tracker.db — Session Dedup & Cascade-Close Fix Plan (FINAL, verified 2026-07-31)
-=====================================================================================
-Status: APPROVED for implementation. All claims below verified against live
-queries of alpha_tracker.db AND actual source (SqliteLogStore.cs,
-LogCollectorService.cs, SessionHierarchyResolver.cs, DatabaseSchema.cs,
-AppSession.cs, ILogStore.cs). The 4 corrections from the previous review are
-folded in, plus 4 fine-grained implementation notes that must not be missed.
+# Alpha AI Tracker — Server DB Washout + Full-Data Sync Preparation
 
-DB state right now (verified):
-  - 24 total app_sessions, 14 open, 0/24 have parent_process_id
-  - 11 orphaned app_items (closed_at=NULL) on already-closed sessions
-  - 11 open sessions process_name='code', SAME installed_app_id,
-    started_at: 08:41:28 (1 row) + 08:42:06 (10 rows, identical ns)
-  - cgroup probe live: PIDs 5245/5246/5248 all inside app-gnome-code-5236.scope
-  - app_items already has object_type/action/journey_id/sequence/... (no schema gap)
-  - gnome-control-center-search-provider HAS an open session → must be blocked
+## Findings
 
-WHY THE TIME-WINDOW HEURISTIC IS REJECTED
-  - The 11 rows share an IDENTICAL nanosecond timestamp — that's "same poll
-    cycle", not "started close together". A window solves a non-problem.
-  - False merges: two genuine windows opened < 5s apart would collapse.
-  - PPID/wall-clock are wrong keys because subprocesses get reparented and
-    launchers exit before collection.
-  Replacement: cgroup scope grouping (validated on the live system above).
+**DB state (`alpha_ai_tracker`, PostgreSQL running):**
+- 5 employees (EMP-10002 … EMP-10010), 1 admin user, 8 departments, 12 migrations applied
+- Tracking data to wipe: `app_sessions` 9,976 / `app_items` 10,223 / `installed_applications` 5,548 / `installed_packages` 6,530 / `device_hardware_info` 716 / `network_info` 46 / `session_events` 46 + 6 empty legacy tables (`browser_contexts`, `file_explorer_contexts`, `shell_commands`, `urls`, `url_visits`)
+- Server builds clean; all 7 sync endpoints wired; running on `192.168.88.51:8080`; Redis up
 
-═══════════════════════════════════════════════════════════════════════════
-CORRECTION 1 — Transaction sketch must not deadlock (BLOCKER, fixed)
-═══════════════════════════════════════════════════════════════════════════
-Actual store API (verified):
-  StoreAppSessionsAsync(IReadOnlyList<AppSession>, CancellationToken)
-  CloseAppItemsBySessionIdsAsync(IReadOnlyList<string>, DateTime, CancellationToken)
-  BeginTransactionAsync(ct) → GatedTransaction (IAsyncDisposable) HOLDING the gate
-Every public method acquires _connectionGate (SemaphoreSlim(1,1), NOT reentrant).
-Calling two gated public methods inside one transaction = deadlock (second call
-blocks on a gate the first is holding) — the class of bug this codebase already
-avoids with private ungated helpers (SetStatusCoreAsync, GetEmployeeInfoCoreAsync).
+**Payload gaps found (client sends fields the server doesn't store, and vice versa):**
+1. Client's `installed-apps/sync` omits `binaryName` / `isBrowser` / `desktopId` / `categories` — server migration-012 columns never populated (`client/Services/LogCollectorService.cs:1714`)
+2. Client sends `installedAppId` / `installedPackageId` per app-session, but server `app_sessions` has no such columns (migration 013 needed)
+3. Client cgroup fields (`groupedBy` / `cgroupScope` / `contextLabel`) exist on the model but aren't sent; server DTO has no fields
+4. Server `app_items` lacks the 10 journey fields + `process_id` the client collects; client mapper doesn't send them either
 
-FIX — one new composite store method, acquires the gate ONCE:
-  // ILogStore
-  Task CloseSessionsAndAppItemsAsync(IReadOnlyList<AppSession> closeSessions,
-                                     DateTime closedAt, CancellationToken ct);
-  // SqliteLogStore: gate once → one tx → 1) UPDATE app_sessions SET ended_at
-  // 2) UPDATE app_items SET closed_at, is_synced=0 WHERE app_session_id IN (...)
-  //    AND closed_at IS NULL → commit → release gate in finally.
-True atomicity: a crash between the two writes is structurally impossible.
+---
 
-Wire it into ALL FOUR close paths:
-  1. Main-loop normal close (line ~402) — TODAY IT DOES NOT CLOSE ITEMS AT ALL
-     (verified) → this is exactly why the 11 orphans exist. PRIMARY FIX.
-  2. ReconcileStaleSessionsOnBootAsync (~1467) — swap two calls for one.
-  3. Garbage cleanup (~1586) — swap.
-  4. Non-GUI cleanup (~1646) — swap.
+## Part A — Washout PostgreSQL (tracking data only)
 
-═══════════════════════════════════════════════════════════════════════════
-CORRECTION 2 — No cycle-based key; keep PID fallback (BLOCKER, fixed)
-═══════════════════════════════════════════════════════════════════════════
-`{installedAppId}::cycle::{cycleId}` changes every poll → every unscoped process
-recreated+closed each cycle → churn + sync spam. Rejected.
+1. **Backup** DB first: `pg_dump` → `server/bin/backup/alpha_ai_tracker_<timestamp>.sql` (safety before destructive op)
+2. **TRUNCATE** the 12 tracking tables in one transaction:
+   - `app_items, app_sessions, browser_contexts, file_explorer_contexts, device_hardware_info, installed_applications, installed_packages, network_info, session_events, shell_commands, urls, url_visits` (with `CASCADE`)
+3. **Keep** `users`, `employees`, `departments`, `schema_migrations` untouched
+4. **Verify** row counts = 0 and the 5 employees remain
 
-Two-tier key, BOTH stable across cycles:
-  scoped:    "scope|{scope}|{installedAppId}|{machineId}|{clientSessionId}"
-  unscoped:  "pid|{processId}|{machineId}|{clientSessionId}"   ← TODAY'S KEY, unchanged
-installedAppId in the key: an app launched FROM a terminal inherits the
-terminal's scope; scope+appId keeps them separate. Same scope + same appId
-(11 VS Code PIDs) → ONE session. Different scopes + same appId (2 windows) → 2.
+## Part B — Server schema + DTO/model/repo wiring
 
-═══════════════════════════════════════════════════════════════════════════
-IMPLEMENTATION NOTES (NEW — do not miss these)
-═══════════════════════════════════════════════════════════════════════════
-N1. NO per-cycle dictionary. The real dedup mechanism is the persistent
-    _previousSessionKeys + currentKeys maps. Make BuildSessionKey scope-aware
-    and those maps dedup across cycles automatically. A throwaway
-    "sessionsThisCycle" dict is redundant — and if you add it INSTEAD of
-    changing BuildSessionKey, dedup only works within one cycle and every
-    process gets a fresh session next cycle. There are exactly 6 call sites:
-        LogCollectorService.cs lines 261, 295, 324, 503 (definition), 544, 569
-    plus 5 _sessionRootItems uses (262, 310, 399, 544, 569). ALL must derive
-    the SAME key, or context updates (UpdateActivityContextAsync) and closes
-    will hit the wrong sessions.
+5. **Migration `013_session_identity.sql`**: add `installed_app_id`, `installed_package_id`, `grouped_by`, `cgroup_scope`, `context_label` to `app_sessions` (+ indexes). No FK constraint to avoid breaking ingestion if a referenced app row was never synced
+6. **Migration `014_app_items_journey.sql`**: add `process_id`, `object_type`, `action`, `journey_id`, `sequence`, `previous_path`, `current_path`, `window_id`, `tab_id`, `metadata_json` to `app_items` (+ indexes on journey_id/sequence)
+7. **Models** (`server/internal/models/app_session.go`): add new fields to `AppSession` and `AppItem`
+8. **DTOs** (`server/internal/dto/new_schema_dto.go`): extend `AppSessionEntry`/`AppSessionResponse` and `AppItemEntry`/`AppItemResponse`
+9. **Service** (`server/internal/services/new_schema_service.go`): map new fields in `SyncAppSessions`, `SyncAppItems`, `ListAppSessions`, `ListAppItems`
+10. **Repo** (`server/internal/repository/new_schema_repo.go`): extend `BulkInsertAppSessions`, `BulkInsertAppItems` SQL + `ListAppSessions`/`ListAppItems` SELECT/scan
 
-N2. Keep the machine|clientSessionId suffix in the key (see Correction 2).
-    Without it, keys collide across boots/machines.
+## Part C — Client payloads
 
-N3. Scope must ride through the resolvedLogs tuple alongside
-    displayName/appId/pkgId/isBrowser, and UpdateActivityContextAsync (which
-    already receives appId) must also receive scope. Do NOT re-read
-    /proc/<pid>/cgroup at 6 different places — resolve once per log, reuse.
+11. `client/Services/LogCollectorService.cs:1714` — add `binaryName`, `isBrowser`, `desktopId`, `categories` to installed-apps mapper
+12. `client/Services/LogCollectorService.cs:1816` — add `groupedBy`, `cgroupScope`, `contextLabel` to app-sessions mapper
+13. `client/Services/LogCollectorService.cs:1790` — add `processId`, `objectType`, `action`, `journeyId`, `sequence`, `previousPath`, `currentPath`, `windowId`, `tabId`, `metadataJson` to app-items mapper
 
-N4. Boot hydration (line 261): GetOpenSessionRecordsAsync must add
-    installed_app_id to the SELECT (new OpenSessionRecord field) and
-    BuildSessionKey must live-resolve scope for still-running PIDs.
-    Same-boot restart → process alive → scope matches → session reused.
-    Cross-boot → process dead → PID fallback → stale session closed next
-    cycle (existing behavior, correct). Verify this path during testing.
+## Part D — Verify
 
-═══════════════════════════════════════════════════════════════════════════
-CORRECTION 3 — Boot hydration + schema wiring (required)
-═══════════════════════════════════════════════════════════════════════════
-Schema additions (verified MigrateSql is exactly the ALTER mechanism,
-SqliteLogStore.cs:246-264 — fits with zero new plumbing; RunMigrationsAsync
-already tolerates duplicate-column errors):
-    ALTER TABLE app_sessions ADD COLUMN grouped_by TEXT;      -- 'cgroup'|'pid'|NULL
-    ALTER TABLE app_sessions ADD COLUMN cgroup_scope TEXT;    -- raw scope, for hydration
-    ALTER TABLE app_sessions ADD COLUMN context_label TEXT;   -- VS Code folder / Chrome profile
-Also: AppSession model (+GroupedBy/+CgroupScope/+ContextLabel — verified absent),
-InsertAppSessionSql (verified in DatabaseSchema.cs), MapAppSessionReader
-(verified in SqliteLogStore.cs ~1568). Server sync = separate later commit.
+14. Build both (`go build ./...`, `dotnet build`)
+15. **Restart** the running `alpha-ai-server` (port 8080) so migrations 013/014 apply; confirm both recorded in `schema_migrations`
+16. End-to-end smoke test: generate Redis secret for EMP-10002 → `employee-login` → POST small batch to `app-sessions/sync` + `app-items/sync` with new fields; confirm rows land and `{synced: N}` returned
+17. Update `AGENTS.md` changelog + `server/ARCHITECTURE.md` (project convention)
 
-═══════════════════════════════════════════════════════════════════════════
-CORRECTION 4 — parent_process_id: recalibrated target
-═══════════════════════════════════════════════════════════════════════════
-ResolveParent() IS wired (line ~334) and DOES set ParentProcessId — verified
-not dead code. It's NULL on 100% because ShouldLinkTo() only links
-IDE→(shell|terminal|runtime|build) and terminal→(shell|runtime|build), and the
-GUI gate removed bare shells — almost no legitimate children remain. Same-app
-subprocesses (code→code) were never meant to be linked by this matrix; the
-cgroup fix handles that instead.
+---
 
-Scope remaining work to:
-  - Debug logging in ResolveParent to trace PPID walks.
-  - Terminal classification: Categories OR KnownTerminalBinaries allowlist
-    {gnome-terminal-server, konsole, xterm, alacritty, kitty, foot, tilix}
-    (flatpak/snap gnome-terminal ships without Categories — valid concern).
-  - Acceptance target: parent_process_id populated ONLY for real
-    terminal → build-tool-run-inside-it chains. Near-empty column is the
-    EXPECTED state under the GUI-only gate. Do NOT chase 100%.
-
-═══════════════════════════════════════════════════════════════════════════
-PHASE ORDER
-═══════════════════════════════════════════════════════════════════════════
-Phase 0a — DONE (previous work). ADD: "gnome-control-center-search-provider"
-          → NonAppProcesses (verified open session exists).
-
-Phase 0b — cgroup dedup: CgroupResolver (client/Core/CgroupResolver.cs, Linux
-          only, null elsewhere), scope-aware BuildSessionKey (N1/N2/N3/N4),
-          schema columns + model + SQL + reader, SessionLabelResolver
-          (client/Core/SessionLabelResolver.cs; VS Code project folder from
-          argv, Chrome --profile-directory=; do NOT use wmctrl as primary —
-          silent no-op on Wayland).
-          GATE: 1 VS Code window → exactly 1 app_sessions row; 2 windows → 2
-          rows with different context_label.
-
-Phase 0c — terminal classification + PPID walk logging + ShouldLinkTo fixes
-          (narrow scope per Correction 4). Not a blocker for 0d.
-
-Phase 0d — CloseSessionsAndAppItemsAsync (Correction 1) wired into all 4
-          close paths. Closes the 11 confirmed orphans.
-
-Phase 0e — deferred. nautilus duplicates are literal double-inserts
-          (identifier='nautilus' placeholder, window_id/tab_id NULL,
-          current_path='' — verified identical). Unique constraint on
-          (app_session_id, item_type, identifier, opened_at) is UNSAFE until
-          identifier/window_id carry real distinguishing values. Data-
-          completeness work first, then the constraint. Multi-window
-          non-single-instance apps get separate scopes/sessions under 0b —
-          no special casing. Chrome profiles get separate scopes too; only
-          context_label labeling is missing (SessionLabelResolver covers it).
-
-═══════════════════════════════════════════════════════════════════════════
-FILES TOUCHED
-═══════════════════════════════════════════════════════════════════════════
-  client/Core/CgroupResolver.cs                NEW
-  client/Core/SessionLabelResolver.cs          NEW
-  client/Core/Models/AppSession.cs             +GroupedBy, +CgroupScope, +ContextLabel
-  client/Core/Abstractions/ILogStore.cs        +CloseSessionsAndAppItemsAsync
-  client/Storage/SqliteLogStore.cs             +composite method, +reader, +insert columns
-  client/Storage/DatabaseSchema.cs             MigrateSql ALTERs, InsertAppSessionSql
-  client/Services/LogCollectorService.cs       6 key sites, hydration, NonAppProcesses,
-                                               resolvedLogs scope field, 4 close paths
-  server/ (separate, later commit)             migration + DTOs for new columns
-
-═══════════════════════════════════════════════════════════════════════════
-VERIFICATION (post-implementation)
-═══════════════════════════════════════════════════════════════════════════
--- 0 orphans on fresh data:
-SELECT COUNT(*) FROM app_items ai
-JOIN app_sessions s ON ai.app_session_id = s.id
-WHERE s.ended_at IS NOT NULL AND ai.closed_at IS NULL;            -- expect 0
-
--- ≤1 session per (installed_app_id, grouped_by) after deploy:
-SELECT installed_app_id, grouped_by, COUNT(*)
-FROM app_sessions WHERE started_at > '<deploy_timestamp>'
-GROUP BY installed_app_id, grouped_by;
-
--- 2 VS Code windows → 2 rows, distinct context_label:
-SELECT id, process_id, started_at, context_label
-FROM app_sessions WHERE process_name = 'code' AND ended_at IS NULL;
-
-═══════════════════════════════════════════════════════════════════════════
-OPEN QUESTIONS (need user call before implementation)
-═══════════════════════════════════════════════════════════════════════════
-1. Historical data: 11 open 'code' sessions + 11 orphaned app_items are
-   pre-fix. Leave as-is (ages out naturally) or one-time cleanup at deploy?
-2. Server-side sync of grouped_by/context_label/cgroup_scope: client-only
-   first (recommended, unblocks 0b/0d) or bundled with server migration?
+## Notes / Confirmation Points
+- Backup path: `server/bin/backup/`
+- Steps 15–16 require briefly stopping/restarting the running `alpha-ai-server` (port 8080)

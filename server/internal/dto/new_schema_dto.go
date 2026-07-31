@@ -202,6 +202,11 @@ type AppSessionEntry struct {
 	Platform        string  `json:"platform"`
 	ProcessID       *int    `json:"processId,omitempty"`
 	ParentProcessID *int    `json:"parentProcessId,omitempty"`
+	InstalledAppID  *string `json:"installedAppId,omitempty"`
+	InstalledPackageID *string `json:"installedPackageId,omitempty"`
+	GroupedBy       *string `json:"groupedBy,omitempty"`
+	CgroupScope     *string `json:"cgroupScope,omitempty"`
+	ContextLabel    *string `json:"contextLabel,omitempty"`
 }
 
 type SyncAppSessionsRequest struct {
@@ -222,6 +227,11 @@ type AppSessionResponse struct {
 	Platform        string     `json:"platform"`
 	ProcessID       *int       `json:"processId,omitempty"`
 	ParentProcessID *int       `json:"parentProcessId,omitempty"`
+	InstalledAppID  *string    `json:"installedAppId,omitempty"`
+	InstalledPackageID *string `json:"installedPackageId,omitempty"`
+	GroupedBy       *string    `json:"groupedBy,omitempty"`
+	CgroupScope     *string    `json:"cgroupScope,omitempty"`
+	ContextLabel    *string    `json:"contextLabel,omitempty"`
 	SyncedAt        *time.Time `json:"syncedAt,omitempty"`
 }
 
@@ -298,6 +308,16 @@ type AppItemEntry struct {
 	Domain       string  `json:"domain"`
 	OpenedAt     string  `json:"openedAt"`
 	ClosedAt     *string `json:"closedAt,omitempty"`
+	ProcessID    *int    `json:"processId,omitempty"`
+	ObjectType   string  `json:"objectType"`
+	Action       string  `json:"action"`
+	JourneyID    string  `json:"journeyId"`
+	Sequence     int     `json:"sequence"`
+	PreviousPath string  `json:"previousPath"`
+	CurrentPath  string  `json:"currentPath"`
+	WindowID     *int    `json:"windowId,omitempty"`
+	TabID        *int    `json:"tabId,omitempty"`
+	MetadataJSON string  `json:"metadataJson"`
 }
 
 type SyncAppItemsRequest struct {
@@ -318,6 +338,16 @@ type AppItemResponse struct {
 	Domain       string     `json:"domain"`
 	OpenedAt     time.Time  `json:"openedAt"`
 	ClosedAt     *time.Time `json:"closedAt,omitempty"`
+	ProcessID    *int       `json:"processId,omitempty"`
+	ObjectType   string     `json:"objectType"`
+	Action       string     `json:"action"`
+	JourneyID    string     `json:"journeyId"`
+	Sequence     int        `json:"sequence"`
+	PreviousPath string     `json:"previousPath"`
+	CurrentPath  string     `json:"currentPath"`
+	WindowID     *int       `json:"windowId,omitempty"`
+	TabID        *int       `json:"tabId,omitempty"`
+	MetadataJSON string     `json:"metadataJson"`
 	SyncedAt     *time.Time `json:"syncedAt,omitempty"`
 }
 

@@ -13,6 +13,7 @@ import (
 	"github.com/alpha-ai-tracker/server/internal/config"
 	"github.com/alpha-ai-tracker/server/internal/database"
 	"github.com/alpha-ai-tracker/server/internal/handlers"
+	"github.com/alpha-ai-tracker/server/internal/jobs"
 	goredis "github.com/alpha-ai-tracker/server/internal/redis"
 	"github.com/alpha-ai-tracker/server/internal/repository"
 	"github.com/alpha-ai-tracker/server/internal/router"
@@ -94,6 +95,15 @@ func main() {
 	if err := authService.EnsureCompanyAdmin(ctx); err != nil {
 		log.Fatalf("[server] failed to ensure company admin: %v", err)
 	}
+
+	// ────────────────
+	// Background jobs
+	// ────────────────
+	sweepCtx, sweepCancel := context.WithCancel(context.Background())
+	defer sweepCancel()
+	stalenessSweep := jobs.NewStalenessSweep(pool, cfg.LinkStaleDays)
+	stalenessSweep.Start(sweepCtx)
+	log.Printf("[server] staleness sweep started (stale window: %d days)", cfg.LinkStaleDays)
 
 	// ────────────────
 	// Setup Echo

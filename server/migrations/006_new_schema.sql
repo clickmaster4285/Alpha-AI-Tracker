@@ -1,5 +1,5 @@
 -- 006_new_schema.sql
--- Add new Phase 1 & Phase 2 tables, drop activity_logs
+-- Add new Phase 1 & Phase 2 tables, drop legacy activity_logs / child tables
 
 -- ─────────────────────────────────────
 -- PHASE 1: DEVICE & SYSTEM INFO TABLES
@@ -105,80 +105,17 @@ CREATE INDEX IF NOT EXISTS idx_app_sessions_employee
 CREATE INDEX IF NOT EXISTS idx_app_sessions_timestamp
     ON app_sessions(started_at DESC);
 
-CREATE TABLE IF NOT EXISTS browser_contexts (
-    id                   TEXT PRIMARY KEY,
-    employee_id          VARCHAR(20) NOT NULL REFERENCES employees(employee_id),
-    app_session_id       TEXT NOT NULL REFERENCES app_sessions(id),
-    browser_profile_name TEXT NOT NULL DEFAULT '',
-    tab_id               TEXT NOT NULL DEFAULT '',
-    opened_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    closed_at            TIMESTAMPTZ,
-    synced_at            TIMESTAMPTZ,
-    created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    deleted_at           TIMESTAMPTZ
-);
-
-CREATE INDEX IF NOT EXISTS idx_browser_ctx_employee
-    ON browser_contexts(employee_id, opened_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_browser_ctx_app_session
-    ON browser_contexts(app_session_id);
-
-CREATE TABLE IF NOT EXISTS urls (
-    id              TEXT PRIMARY KEY,
-    employee_id     VARCHAR(20) NOT NULL REFERENCES employees(employee_id),
-    url             TEXT NOT NULL,
-    domain          TEXT NOT NULL DEFAULT '',
-    first_seen_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    synced_at       TIMESTAMPTZ,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    deleted_at      TIMESTAMPTZ,
-    UNIQUE(employee_id, url)
-);
-
-CREATE INDEX IF NOT EXISTS idx_urls_employee
-    ON urls(employee_id, first_seen_at DESC);
-
-CREATE TABLE IF NOT EXISTS url_visits (
-    id                 TEXT PRIMARY KEY,
-    employee_id        VARCHAR(20) NOT NULL REFERENCES employees(employee_id),
-    browser_context_id TEXT NOT NULL REFERENCES browser_contexts(id),
-    url_id             TEXT NOT NULL REFERENCES urls(id),
-    path_and_query     TEXT NOT NULL DEFAULT '',
-    page_title         TEXT NOT NULL DEFAULT '',
-    visited_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    synced_at          TIMESTAMPTZ,
-    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    deleted_at         TIMESTAMPTZ
-);
-
-CREATE INDEX IF NOT EXISTS idx_url_visits_employee
-    ON url_visits(employee_id, visited_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_url_visits_browser_ctx
-    ON url_visits(browser_context_id);
-
-CREATE TABLE IF NOT EXISTS file_explorer_contexts (
-    id              TEXT PRIMARY KEY,
-    employee_id     VARCHAR(20) NOT NULL REFERENCES employees(employee_id),
-    app_session_id  TEXT NOT NULL REFERENCES app_sessions(id),
-    folder_path     TEXT NOT NULL DEFAULT '',
-    opened_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    closed_at       TIMESTAMPTZ,
-    synced_at       TIMESTAMPTZ,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    deleted_at      TIMESTAMPTZ
-);
-
-CREATE INDEX IF NOT EXISTS idx_file_explorer_employee
-    ON file_explorer_contexts(employee_id, opened_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_file_explorer_app_session
-    ON file_explorer_contexts(app_session_id);
-
 -- ─────────────────────────────────────
--- DROP ACTIVITY_LOGS TABLE
+-- DROP LEGACY TABLES
 -- ─────────────────────────────────────
--- This is a destructive change. No down-migration exists.
--- All data in activity_logs will be lost.
+-- These tables were superseded and are no longer created or used:
+--   activity_logs            → removed (migration 003 deleted)
+--   browser_contexts         → replaced by app_items (migration 008)
+--   urls / url_visits        → replaced by app_items (migration 008)
+--   file_explorer_contexts   → replaced by app_items (migration 008)
+-- DROP statements are idempotent so legacy databases are cleaned up.
+DROP TABLE IF EXISTS browser_contexts CASCADE;
+DROP TABLE IF EXISTS url_visits CASCADE;
+DROP TABLE IF EXISTS urls CASCADE;
+DROP TABLE IF EXISTS file_explorer_contexts CASCADE;
 DROP TABLE IF EXISTS activity_logs CASCADE;
