@@ -1,7 +1,10 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-07-30 (GUI-only tracking gate + concurrency + subprocess filtering)  
+> **Last audited:** 2026-07-31 (cgroup-based session dedup + atomic cascade-close)  
 > **Changelog:** 
+> - 2026-07-31: **cgroup-based session dedup (multi-process GUI apps → one session)** — `CgroupResolver.cs` (new) reads `/proc/<pid>/cgroup` and extracts the systemd transient scope (`app-gnome-code-*.scope`); every subprocess of one logical window shares it, so `BuildSessionKey` became scope-aware: `scope|{scope}|{installedAppId}|{machine}|{session}` for scoped processes, unchanged PID key as fallback. Scope resolved once per process and threaded through the `resolvedLogs` tuple — all 6 `BuildSessionKey` call sites consistent. Boot hydration recomputes scope live (`OpenSessionRecord.InstalledAppId` added to both open-session queries). `SessionLabelResolver.cs` (new) labels sessions (VS Code workspace folder via argv + PPID fallback, Chrome `--profile-directory`) into `context_label`. New `grouped_by`/`cgroup_scope`/`context_label` columns on `app_sessions` via `MigrateSql` ALTERs (client-only; server sync later). `gnome-control-center-search-provider` → `NonAppProcesses`.
+> - 2026-07-31: **Atomic cascade-close** — new composite `CloseSessionsAndAppItemsAsync()` acquires the connection gate once, closes sessions + their open `app_items` in ONE transaction. Wired into all 4 close paths (main loop — which was missing the item-close entirely —, crash recovery, garbage cleanup, non-GUI cleanup). Fixes 11 orphaned open items on closed sessions. Per-tab closes in `NativeMessageService`/`JourneyEngine` still use `CloseAppItemsBySessionIdsAsync`.
+> - 2026-07-31: **Terminal classification + PPID walk logging** — `TerminalEmulators` expanded (`gnome-terminal-server`, `foot`); `SessionHierarchyResolver` takes optional `ILogger` and logs `ResolveParent` walks at Debug.
 > - 2026-07-30: **Software classification pipeline** — Added `SoftwareCategoryResolver.cs` (metadata-driven category resolution: `.desktop Categories` → Browser/IDE/FileManager/Application, macOS bundle ID fallback), `SoftwareClassifier.cs` (joint dedup pipeline: GUI apps win over matching package entries), `SoftwareIdentityResolver.cs` (SHA-256 stable identity for cross-source dedup across InstalledAppDetector vs PackageDetector). Refactored `AppProcessClassifier.cs`: renamed `FileManagerProcesses`/`IdeProcesses` → `FileManagerFallbacks`/`IdeFallbacks`, added `ResolveCategory()` and new `ResolveRootItemType()` overload with `categories`/`desktopId` params. Upgraded `InstalledAppDetector.cs`: Linux `.desktop` scanning now follows `$XDG_DATA_DIRS` (covers snap `/var/lib/snapd/desktop/applications/` and flatpak exports), macOS `IsMacOSBrowserApp()` → `InspectMacOSBundle()` returning `CFBundleIdentifier` + browser flag, added `ExtractPlistString()` helper, browser detection via `Categories=WebBrowser` (Linux) / `URLAssociations` http/https (Windows) / `CFBundleURLSchemes` http+https (macOS). Added server migration 012 (`desktop_id`, `categories`, `is_browser` columns).
 > - 2026-07-30: **File logger** — Added `FileLoggerProvider.cs` for `dotnetrunlog.txt` output, registered in `Program.cs`.
 > - 2026-07-30: **GUI-apps-only tracking gate** — New rule: only processes resolving to `installed_applications` or detected as GUI apps (has .desktop file / .app bundle / Start Menu) are tracked. Removed shell-always-tracked, build-tool auto-registration, runtime auto-registration, package fallback tracking from `ResolveAppInfoInner`. Added `IsGuiApplication()` to `IInstalledAppDetector`/`InstalledAppDetector` with `CheckGuiPath()`. Simplified main loop filter, removed `_knownPackageNames`, `CloseStalePackageSessionsAsync`. Renamed `AutoDetectInstalledApp` → `AutoDetectInstalledGuiApp`.
@@ -33,7 +36,7 @@
 > - 2026-07-27: **Broadened `AutoDetectInstalledApp`** — now accepts `/home/*` and `/media/*` paths as valid install locations (covers project-local compiled binaries like `./bin/alpha-ai-server`).
 > - 2026-07-27: **Fixed file manager path resolution** — `ParseFileManagerContext` now resolves folder display names to absolute paths by searching `~/`, `~/Documents`, `~/Desktop`, `/media/<user>/`, etc.
 > - 2026-07-27: **Fixed `SessionHierarchyResolver`** — `ResolveParent` now walks through build tools and runtime packages as intermediate PPID steps; `ShouldLinkTo` now accepts build tools as children of IDEs and terminals.
-> **Service completion (honest):** ~85%
+> **Service completion (honest):** ~87%
 
 ---
 
@@ -120,6 +123,8 @@ client/
 │   │   ├── SessionInfo.cs              # Static session ID (generated once per app launch)
 │   │   └── ShellCommand.cs             # Shell command model (15 fields)
 │   ├── EncryptedConfigService.cs       # AES-256-GCM encryption with transport key + machine-derived key
+│   ├── CgroupResolver.cs               # Linux /proc/<pid>/cgroup → systemd app-*.scope (session dedup key; null elsewhere)
+│   ├── SessionLabelResolver.cs         # Session context_label: VS Code workspace folder / Chrome --profile-directory
 │   ├── InstalledAppDetector.cs         # Cross-platform installed app detection (desktop files, registry, .app bundles) — GUI only
 │   ├── PackageDetector.cs              # Cross-platform installed package detection (npm, pip, apt, brew, choco, winget, scoop, etc.)
 │   ├── ProcessFilter.cs                # Filters kernel/system processes from collection
@@ -331,6 +336,11 @@ CREATE TABLE IF NOT EXISTS app_sessions (
     synced_at           TEXT,
     created_at          TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
 );
+-- Added via MigrateSql ALTERs (idempotent):
+--   process_id, parent_process_id,
+--   grouped_by   ('cgroup' | 'pid' | NULL),   -- how the session's identity was grouped
+--   cgroup_scope (raw systemd app-*.scope string),  -- needed for boot hydration
+--   context_label (VS Code workspace folder / Chrome profile)
 ```
 
 **`employee_info` table**
