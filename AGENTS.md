@@ -1,7 +1,8 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-07-31 (cgroup-based session dedup + atomic cascade-close)  
-> **Changelog:** 
+> **Last audited:** 2026-08-01 (docs re-synced with code — routes, migrations, tables)**Changelog:**
+>
+> - 2026-08-01: **Docs audit (AGENTS.md + client/server ARCHITECTURE.md)** — removed all stale `activity-logs/sync` and `shell-commands/sync` references (both endpoints/tables/code are deleted from the product). Fixed the mermaid diagram + cross-service contracts to show the real 7 sync endpoints. Server: migration inventory corrected to 001–016 (15 files), added `jobs/staleness_sweep.go`, `employee_installed_applications`/`employee_installed_packages` junctions, and all 12 Postgres tables; API surface now lists `GET /app-sessions` + `GET /app-items` and drops the removed `activity-logs` section. Client: corrected SQLite schema (11 tables incl. `storage_devices`, `permission_status`, `app_items`), documented the `MigrateSql` migration strategy, the real sync batch size (500), the file logger (`dotnetrunlog.txt`), `install-extensions.sh`, and flagged `IShellCommandCollector`/`ShellCommand` as dead code. Branch updated to `restructureClient`.
 > - 2026-07-31: **Cross-service payload + employee↔catalog dedup (migrations 013–016)** — tracking tables were washed out (backup at `server/bin/backup/alpha_ai_tracker_20260731_134750.dump`) and server + client landed together. 013 adds `installed_app_id`/`installed_package_id`/`grouped_by`/`cgroup_scope`/`context_label` to `app_sessions`; 014 adds `process_id` + 9 journey fields to `app_items`; 015/016 add company-global app/package catalogs (`app_fingerprint=desktop_id|binary_name`, `package_fingerprint=package_name|source_manager`) with junction tables `employee_installed_applications`/`employee_installed_packages` (per-install version/path/date + `first_seen_at`/`last_seen_at`/`is_active`; FKs → `employees(employee_id)` VARCHAR per convention). `SyncInstalledApps`/`SyncInstalledPackages` rewritten to upsert-catalog-then-link in one tx. Hourly `jobs/staleness_sweep.go` deactivates links idle > `LINK_STALE_DAYS=7`. Client: installed-apps mapper sends `binaryName`/`isBrowser`/`desktopId`/`categories`; app-sessions sends `groupedBy`/`cgroupScope`/`contextLabel`; app-items sends `processId` + 9 journey fields; apps conflict-update resets `is_synced=0`; packages dedup to `ON CONFLICT(package_name, source_manager)` + unique index (fixes 6,530 duplicate package rows from the old `ON CONFLICT(id)`). Smoke-tested: happy path, two-employee-same-app → 1 catalog + 2 links, malformed/partial payloads → 4xx/200 not 500.
 > - 2026-07-31: **Atomic cascade-close of app_items with sessions** — the main collection loop closed sessions but never closed their `app_items` (11 orphaned open items on already-closed sessions in the live DB). New composite `CloseSessionsAndAppItemsAsync()` store method acquires the connection gate ONCE and closes sessions + items in ONE transaction (a crash mid-close can no longer leave orphans). Wired into all 4 close paths: main-loop normal close (was missing entirely — root cause of the orphans), `ReconcileStaleSessionsOnBootAsync`, garbage cleanup, and non-GUI cleanup. Per-tab closes in `NativeMessageService`/`JourneyEngine` still use `CloseAppItemsBySessionIdsAsync`.
 > - 2026-07-31: **Terminal classification + PPID walk logging** — `TerminalEmulators` set expanded (`gnome-terminal-server`, `foot`) so flatpak/snap-packaged terminals resolve correctly without `Categories=` metadata. `SessionHierarchyResolver` now takes an optional `ILogger` and logs `ResolveParent` PPID walks at Debug level (wired from `LogCollectorService`).
@@ -27,20 +28,20 @@
 > - 2026-07-28: **Added crash-safe session ended_at tracking** — heartbeat persisted every cycle (`last_heartbeat_at` in `app_status`), stale heartbeat detection on boot, and automatic reconciliation of orphaned sessions with the last heartbeat time as approximate crash time. Includes cross-platform `GetSystemUptime()` for diagnostic logging. Handles poweroff, process crash, and fast restart scenarios.
 > - 2026-07-27: Full activity hierarchy engine — PID-persisted sessions, `SessionHierarchyResolver` (node→terminal→IDE), browser `browser_navigation` URL items, file manager `folder`/`file` path items, 30s context dedup cooldown.
 > - 2026-07-27: Added `process_id` / `parent_process_id` to `app_sessions` (client SQLite + server migration 010).
-> - 2026-07-27: Added `binary_name` to `installed_applications` model/SQLite table for process→display-name mapping.  
-> - 2026-07-27: Added `installed_app_id` / `installed_package_id` FK columns to `app_sessions` (client SQLite only).  
-> - 2026-07-27: Replaced in-memory `IsInstalledApp()` filter with SQLite-backed `ResolveAppInfo()` — processes not in DB get auto-detected via filesystem heuristics and saved before tracking.  
-> - 2026-07-27: Fixed Linux ProcessCollector `resolvedTitle ??= name` bug (was assigning fake titles to all processes, bypassing window-title filter).  
-> - 2026-07-27: Added process-tree-based parent-child tracking for terminal shells inside IDE/terminal-emulator sessions (via `ParentItemId` fixup pass).  
-> - 2026-07-27: Added `waydroid`/`gnome-software` to `NonAppProcesses` blocklist.  
-> - 2026-07-27: `AppDisplayName` now uses the real app name from `installed_applications.app_name` (e.g., "Visual Studio Code"), not the process name ("code") or window title.  
-> - 2026-07-27: Removed hardcoded `CommonKnownApps` list from `InstalledAppDetector` — app detection is now 100% dynamic from OS (.desktop files, registry, .app bundles).  
+> - 2026-07-27: Added `binary_name` to `installed_applications` model/SQLite table for process→display-name mapping.
+> - 2026-07-27: Added `installed_app_id` / `installed_package_id` FK columns to `app_sessions` (client SQLite only).
+> - 2026-07-27: Replaced in-memory `IsInstalledApp()` filter with SQLite-backed `ResolveAppInfo()` — processes not in DB get auto-detected via filesystem heuristics and saved before tracking.
+> - 2026-07-27: Fixed Linux ProcessCollector `resolvedTitle ??= name` bug (was assigning fake titles to all processes, bypassing window-title filter).
+> - 2026-07-27: Added process-tree-based parent-child tracking for terminal shells inside IDE/terminal-emulator sessions (via `ParentItemId` fixup pass).
+> - 2026-07-27: Added `waydroid`/`gnome-software` to `NonAppProcesses` blocklist.
+> - 2026-07-27: `AppDisplayName` now uses the real app name from `installed_applications.app_name` (e.g., "Visual Studio Code"), not the process name ("code") or window title.
+> - 2026-07-27: Removed hardcoded `CommonKnownApps` list from `InstalledAppDetector` — app detection is now 100% dynamic from OS (.desktop files, registry, .app bundles).
 > - 2026-07-27: **Added `BuildToolProcesses` set** — `make`, `go`, `npm`, `npx`, `cargo`, `pip`, `tsc`, `rustc`, etc. Auto-registered as `installed_packages` (category=`tool`) on first sight, tracked without window.
 > - 2026-07-27: **Fixed process filter bug** — processes with `appId != null` or `IsBuildTool()` are now tracked even without a window title. Wayland-native apps (VSCode, Chrome) don't appear in X11 window list and were silently dropped.
 > - 2026-07-27: **Broadened auto-detect paths** — `/home/*` and `/media/*` now accepted as valid install locations (project-local compiled binaries like `alpha-ai-server` in `./bin/`).
 > - 2026-07-27: **Fixed file manager path resolution** — folder display names now resolved to absolute paths by checking `~/`, `~/Documents`, `~/Desktop`, `/media/<user>/`.
 > - 2026-07-27: **Fixed `SessionHierarchyResolver`** — PPID walk now traverses build tools and runtimes as intermediate steps; `ShouldLinkTo` accepts build tools as children of IDEs and terminals.
-> **Overall completion (honest):** ~43% across all 3 services
+>   **Overall completion (honest):** ~50% across all 3 services
 
 ---
 
@@ -48,7 +49,7 @@
 
 Alpha AI Tracker is an employee monitoring and productivity analytics system consisting of three services:
 
-1. **Desktop Client** (`client/`) — Installed on employee machines. Collects process activity, window titles, CPU/memory usage, and shell/terminal commands. Sends data to the central server via REST.
+1. **Desktop Client** (`client/`) — Installed on employee machines. Collects process activity, window titles, CPU/memory usage, and installed app/package information. Sends data to the central server via REST.
 2. **Server** (`server/`) — Go + Echo + PostgreSQL + Redis. Central API hub. Receives and stores client data, exposes admin-facing REST API for the web dashboard. Handles authentication for both web admins and employee desktop clients.
 3. **Web Dashboard** (`web/`) — Next.js 15 App Router. Admin-facing UI for viewing employee data, managing departments, generating login secrets, and analytics. Most pages currently render mock localStorage data rather than calling the real API.
 
@@ -58,7 +59,7 @@ Alpha AI Tracker is an employee monitoring and productivity analytics system con
 
 ```mermaid
 flowchart LR
-    EMP[Employee Machine\nDesktop Client\n.NET 10 / Avalonia UI] -->|REST / JSON\nPOST /api/v1/activity-logs/sync\nPOST /api/v1/shell-commands/sync *| SRV[Go Server\nEcho v4 / PostgreSQL\nPort 8080]
+    EMP[Employee Machine\nDesktop Client\n.NET 10 / Avalonia UI] -->|REST / JSON\nPOST /api/v1/{device-hardware,\ninstalled-apps,\ninstalled-packages,network-info,\nsession-events,app-sessions,app-items}/sync| SRV[Go Server\nEcho v4 / PostgreSQL\nPort 8080]
     EMP -->|POST /api/v1/auth/employee-login| SRV
 
     SRV -->|Query / Store| PG[(PostgreSQL)]
@@ -67,7 +68,7 @@ flowchart LR
     WEB[Web Dashboard\nNext.js 15 / React 18\nPort 3000] -->|REST / JSON\nhttpOnly Cookie Auth\nvia Next.js Rewrites proxy| SRV
 
     note_ws[⚠️ WebSocket / SSE / polling:\nNOT IMPLEMENTED\nWeb dashboard polls no API\nfor real-time updates]
-    
+  
     style EMP fill:#2d2a4e,color:#fff
     style SRV fill:#1a3a4a,color:#fff
     style WEB fill:#3a2a1a,color:#fff
@@ -76,17 +77,17 @@ flowchart LR
     style note_ws fill:#5a3a3a,color:#fff,stroke-dasharray: 5 5
 ```
 
-> `*` — `/api/v1/shell-commands/sync` is called by the client but **does not exist** on the server (no route, no table).
+> All 7 sync endpoints exist on the server. `activity-logs/sync` and `shell-commands/sync` were removed from the product entirely (client + server).
 
 ---
 
 ## 3. Service Breakdown Table
 
-| Service | Stack | Responsibility | Entry Point | Internal Doc |
-|---|---|---|---|---|
-| **client/** | .NET 10, Avalonia 12.1, CommunityToolkit.Mvvm, Microsoft.Data.Sqlite | Employee-side data collection & sync | `Program.cs`, `App.axaml.cs` | [client/ARCHITECTURE.md](./client/ARCHITECTURE.md) |
-| **server/** | Go 1.25, Echo v4.15, pgx v5.10, go-redis v9.21 | Central API hub, data storage, auth | `cmd/server/main.go` | [server/ARCHITECTURE.md](./server/ARCHITECTURE.md) |
-| **web/** | Next.js 15.3.4, React 18, Redux Toolkit, TanStack Query | Admin dashboard & analytics | `next.config.ts`, `src/app/layout.tsx` | [web/ARCHITECTURE.md](./web/ARCHITECTURE.md) |
+| Service           | Stack                                                                | Responsibility                       | Entry Point                                | Internal Doc                                      |
+| ----------------- | -------------------------------------------------------------------- | ------------------------------------ | ------------------------------------------ | ------------------------------------------------- |
+| **client/** | .NET 10, Avalonia 12.1, CommunityToolkit.Mvvm, Microsoft.Data.Sqlite | Employee-side data collection & sync | `Program.cs`, `App.axaml.cs`           | [client/ARCHITECTURE.md](./client/ARCHITECTURE.md) |
+| **server/** | Go 1.25, Echo v4.15, pgx v5.10, go-redis v9.21                       | Central API hub, data storage, auth  | `cmd/server/main.go`                     | [server/ARCHITECTURE.md](./server/ARCHITECTURE.md) |
+| **web/**    | Next.js 15.3.4, React 18, Redux Toolkit, TanStack Query              | Admin dashboard & analytics          | `next.config.ts`, `src/app/layout.tsx` | [web/ARCHITECTURE.md](./web/ARCHITECTURE.md)       |
 
 ---
 
@@ -94,24 +95,24 @@ flowchart LR
 
 ### Client ↔ Server
 
-| Direction | Protocol | Auth Method | Format |
-|---|---|---|---|
-| Employee login (client → server) | REST POST `/api/v1/auth/employee-login` | emp_id + secret_key (Redis-validated) | JSON `{employeeId, secretKey}` → `{employee, token}` |
-| Employee disconnect | REST POST `/api/v1/auth/employee-disconnect` | JWT token in body | JSON `{employeeId, token}` |
-| Device hardware sync (client → server) | REST POST `/api/v1/device-hardware/sync` | JWT token in request body | JSON `{employeeId, token, entries: [...]}` |
-| Installed apps sync (client → server) | REST POST `/api/v1/installed-apps/sync` | JWT token in request body | JSON `{employeeId, token, entries: [...]}` |
-| Installed packages sync (client → server) | REST POST `/api/v1/installed-packages/sync` | JWT token in request body | JSON `{employeeId, token, entries: [...]}` |
-| Network info sync (client → server) | REST POST `/api/v1/network-info/sync` | JWT token in request body | JSON `{employeeId, token, entries: [...]}` |
-| Session events sync (client → server) | REST POST `/api/v1/session-events/sync` | JWT token in request body | JSON `{employeeId, token, entries: [...]}` |
-| App sessions sync (client → server) | REST POST `/api/v1/app-sessions/sync` | JWT token in request body | JSON `{employeeId, token, entries: [...]}` |
-| App items sync (client → server) | REST POST `/api/v1/app-items/sync` | JWT token in request body | JSON `{employeeId, token, entries: [...]}` |
+| Direction                                  | Protocol                                      | Auth Method                           | Format                                                   |
+| ------------------------------------------ | --------------------------------------------- | ------------------------------------- | -------------------------------------------------------- |
+| Employee login (client → server)          | REST POST`/api/v1/auth/employee-login`      | emp_id + secret_key (Redis-validated) | JSON`{employeeId, secretKey}` → `{employee, token}` |
+| Employee disconnect                        | REST POST`/api/v1/auth/employee-disconnect` | JWT token in body                     | JSON`{employeeId, token}`                              |
+| Device hardware sync (client → server)    | REST POST`/api/v1/device-hardware/sync`     | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
+| Installed apps sync (client → server)     | REST POST`/api/v1/installed-apps/sync`      | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
+| Installed packages sync (client → server) | REST POST`/api/v1/installed-packages/sync`  | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
+| Network info sync (client → server)       | REST POST`/api/v1/network-info/sync`        | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
+| Session events sync (client → server)     | REST POST`/api/v1/session-events/sync`      | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
+| App sessions sync (client → server)       | REST POST`/api/v1/app-sessions/sync`        | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
+| App items sync (client → server)          | REST POST`/api/v1/app-items/sync`           | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
 
 ### Server ↔ Web
 
-| Direction | Protocol | Auth Method | Format |
-|---|---|---|---|
-| Web admin login | REST POST `/api/v1/auth/login` | email + password → httpOnly cookie | JSON `{email, password}` → sets cookie |
-| All web API calls | REST via Next.js rewrites (`/api/*` proxy) | httpOnly cookie (auto-sent) | JSON request/response |
+| Direction         | Protocol                                     | Auth Method                         | Format                                   |
+| ----------------- | -------------------------------------------- | ----------------------------------- | ---------------------------------------- |
+| Web admin login   | REST POST`/api/v1/auth/login`              | email + password → httpOnly cookie | JSON`{email, password}` → sets cookie |
+| All web API calls | REST via Next.js rewrites (`/api/*` proxy) | httpOnly cookie (auto-sent)         | JSON request/response                    |
 
 ### Contract Documentation
 
@@ -119,11 +120,11 @@ flowchart LR
 
 ### Inconsistencies Found
 
-1. **Shell commands REMOVED** — Shell command collection/sync removed from client. No endpoint exists on server. All related Go/C# code removed.
-2. **Old child tables removed** — `browser_contexts`, `file_explorer_contexts`, `urls`, `url_visits` tables and all Go/C# code replaced by single generic `app_items` table.
-3. **Employee disconnect** — Client sends `POST /api/v1/auth/employee-disconnect` with `{employeeId, token}`, route exists on server.
-4. **activity_logs removed** — The old `activity_logs` table (server Postgres + client SQLite) and all Go/C# code referencing it have been removed. Replaced by relational `app_sessions`.
-5. **Field naming** — Client uses `employeeId` in snake_case for the auth payload, server expects `employeeId` too (consistent). Activity log entries: client sends `processName`, `windowTitle`, etc. (camelCase), server DTO matches. **Consistent by convention, no validation schema enforces it.**
+1. **Shell commands REMOVED (resolved)** — Shell command collection/sync removed from client and server. No endpoint, no table (`shell_commands` dropped by migration 007). Only dead-code leftovers remain: the `IShellCommandCollector` interface, 3 platform `ShellCommandCollector` impls, and the `ShellCommand` model on the client (unused, not registered in DI); the `ShellCommand` model + DTO types on the server.
+2. **Legacy child tables removed (resolved)** — `browser_contexts`, `file_explorer_contexts`, `urls`, `url_visits` tables and all Go/C# code replaced by single generic `app_items` table.
+3. **`activity_logs` removed (resolved)** — The old `activity_logs` table (server Postgres + client SQLite) and all Go/C# code referencing it have been removed. Migration 006 drops the table with no rollback. Replaced by relational `app_sessions` + `app_items`; the web Logs/Comprehensive page now queries `GET /app-sessions`.
+4. **Field naming** — Client and server agree on `employeeId` (camelCase) for auth/sync payloads and camelCase field names throughout. **Consistent by convention, no validation schema enforces it.**
+5. **Catalog owner column** — `installed_applications.employee_id` / `installed_packages.employee_id` on the server are legacy "first uploader" markers; dedup is now fingerprint-based (`app_fingerprint`, `package_fingerprint`) with per-employee junction tables holding the real per-install metadata.
 
 ---
 
@@ -132,31 +133,37 @@ flowchart LR
 ### Server — ~50% complete
 
 **What works:**
-- Migrations 001-010 run on startup (010 adds `process_id`/`parent_process_id` on app_sessions)
+
+- Migrations 001-016 run on startup (15 files; 010 adds `process_id`/`parent_process_id`, 013 adds session identity, 014 adds journey fields, 015/016 add app/package catalogs + junction tables)
 - Full CRUD for users, employees, departments
 - Web admin auth (email/password → httpOnly cookie with encrypted JWT)
 - Employee auth (Redis one-time secret → JWT token)
-- 8 ingestion endpoints: device_hardware, installed_apps, installed_packages, network_info, session_events, app_sessions, app_items (+ synced_at for all)
-- App sessions + app items listing with filtering/pagination
+- 7 sync endpoints: device_hardware, installed_apps, installed_packages, network_info, session_events, app_sessions, app_items (+ synced_at for all)
+- Catalog dedup: apps keyed by `app_fingerprint` (desktop_id|binary_name), packages by `package_fingerprint` (package_name|source_manager), per-employee junction tables with `first_seen_at`/`last_seen_at`/`is_active`
+- Hourly `jobs/staleness_sweep.go` deactivates junction links idle > `LINK_STALE_DAYS=7`
+- App sessions + app items listing (`GET /app-sessions`, `GET /app-items`) with filtering/pagination
 - Company admin auto-initialization on first run
 - Graceful shutdown
 
 **What's missing:**
+
 - **No tests** (0 test files)
 - **No rate limiting** on any endpoint (including login)
 - **No structured logging** — uses `log.Printf` only
-- **No Redis fallback** — if Redis is down, employee auth is completely broken
+- **No Redis fallback** — if Redis is down, employee secret generation/validation fails (no DB fallback)
 - **No observability** — no metrics, tracing, health check depth
 - **No request validation library** — manual field checks in handlers
-- **No cleanup job** for old data (grows unbounded)
-- **Old browser_contexts/file_explorer_contexts/urls/url_visits code removed** — replaced by app_items
+- **No data-pruning job** — app_sessions/app_items accumulate indefinitely (staleness sweep only deactivates catalog links)
+- **No listing endpoints** for installed-apps, installed-packages, device-hardware, network-info, session-events (sync-only tables)
+- **Dead DTOs** — `BrowserContext*`, `Url*`, `UrlVisit*`, `ShellCommand*` types still in `new_schema_dto.go`
 
-### Client — ~80% complete
+### Client — ~85% complete
 
 **What works:**
+
 - Cross-platform process collection (Win/Linux/macOS)
 - **Crash-safe session ended_at tracking** — heartbeat persisted every cycle, stale heartbeat detection on boot closes orphaned sessions with approximate crash time. Handles poweroff, process crash, and fast restart.
-- SQLite local storage with relational schema (device_hw, installed_apps, network, session_events, app_sessions, app_items)
+- SQLite local storage with relational schema (device_hardware_info, storage_devices, installed_applications, installed_packages, network_info, session_events, app_sessions, app_items, app_status, permission_status, employee_info)
 - **PID-based session tracking** with `process_id` / `parent_process_id` on `app_sessions`
 - **cgroup-based session dedup**: multi-process GUI apps (VS Code, Chrome) collapse to ONE `app_sessions` row per logical window via systemd scope grouping; `grouped_by` / `cgroup_scope` / `context_label` columns record how each session was grouped + which window/profile it is (VS Code workspace folder, Chrome profile)
 - **Atomic cascade-close**: sessions and their `app_items` close in ONE transaction via `CloseSessionsAndAppItemsAsync()` — no orphaned open items when a session ends
@@ -188,6 +195,7 @@ flowchart LR
 - Windows power management (prevents sleep)
 
 **What's missing:**
+
 - **No tests** (0 test files)
 - **No auto-update mechanism**
 - **No crash reporting** — unhandled exceptions crash silently
@@ -199,7 +207,8 @@ flowchart LR
 ### Web — ~16% complete
 
 **What works:**
-- ~30 page routes exist with polished UI
+
+- ~45 page routes exist with polished UI
 - Login page with animated hero section
 - Auth check on mount (Redux + server cookie)
 - Users page — real API calls via TanStack Query (CRUD + generate secret)
@@ -209,7 +218,8 @@ flowchart LR
 - Dashboard shows mock stats and chart
 
 **What's missing (most pages):**
-- **~25 of 30+ pages use mock localStorage data** — not connected to real API
+
+- **~40 of 45 pages use mock localStorage data** — not connected to real API
 - **Client-side only permissions** — no server enforcement
 - **No error boundaries** — uncaught React errors crash the page
 - **No loading/empty/error states** on most mock-data pages
@@ -224,20 +234,20 @@ flowchart LR
 
 *Extracted from observed patterns, not documented anywhere:*
 
-| Convention | Observed Pattern |
-|---|---|
-| **API versioning** | All routes under `/api/v1` |
-| **Error responses** | `{code, message, detail?}` via `dto.APIError` (server) |
-| **Auth** | httpOnly cookies for web, JWT in request body for employee clients |
-| **Naming (Go)** | PascalCase exports, camelCase JSON fields |
-| **Naming (TypeScript)** | camelCase variables, PascalCase components |
-| **Naming (C#)** | PascalCase for classes/methods, `_camelCase` for private fields |
-| **Soft delete** | `deleted_at TIMESTAMPTZ` on all tables, filtered in queries |
-| **Migrations** | Sequential numbered SQL files in `server/migrations/` |
-| **Go module** | `github.com/alpha-ai-tracker/server` |
-| **Git branch** | Currently on `setup` branch — no PR/branch convention visible |
-| **Commit style** | Descriptive lowercase messages: "now remove the exit btn on the tray on windows", "fixit" |
-| **Monorepo tooling** | No shared tooling (no Turborepo, Nx, etc.). Each service has its own build system. |
+| Convention                    | Observed Pattern                                                                          |
+| ----------------------------- | ----------------------------------------------------------------------------------------- |
+| **API versioning**      | All routes under`/api/v1`                                                               |
+| **Error responses**     | `{code, message, detail?}` via `dto.APIError` (server)                                |
+| **Auth**                | httpOnly cookies for web, JWT in request body for employee clients                        |
+| **Naming (Go)**         | PascalCase exports, camelCase JSON fields                                                 |
+| **Naming (TypeScript)** | camelCase variables, PascalCase components                                                |
+| **Naming (C#)**         | PascalCase for classes/methods,`_camelCase` for private fields                          |
+| **Soft delete**         | `deleted_at TIMESTAMPTZ` on all tables, filtered in queries                             |
+| **Migrations**          | Sequential numbered SQL files in`server/migrations/`                                    |
+| **Go module**           | `github.com/alpha-ai-tracker/server`                                                    |
+| **Git branch**          | Currently on`restructureClient` branch — no PR/branch convention visible            |
+| **Commit style**        | Descriptive lowercase messages: "now remove the exit btn on the tray on windows", "fixit" |
+| **Monorepo tooling**    | No shared tooling (no Turborepo, Nx, etc.). Each service has its own build system.        |
 
 ---
 
@@ -245,18 +255,20 @@ flowchart LR
 
 ### Cross-Cutting
 
-| Gap | Severity | Details |
-|---|---|---|
-| **Shell commands sync** | 🔴 High | Client sends to non-existent endpoint. Shell command data is lost forever. |
-| **No tests anywhere** | 🔴 High | 0 test files across all 3 projects. Any refactor is blind. |
-| **No observability** | 🟠 Medium | No structured logging, metrics, tracing. Debugging production issues requires SSH + log scraping. |
-| **Client-side only RBAC** | 🟠 Medium | Permissions are enforced only in the web frontend localStorage. A malicious user can trivially bypass them. |
-| **No rate limiting** | 🟠 Medium | Login endpoint and all sync endpoints have no rate limiting. Brute-force / DoS is trivial. |
-| **Mock data dominance** | 🟠 Medium | ~90% of web pages use mock data, giving a false sense of completeness. |
-| **Default passwords** | 🟠 Medium | `AlphaAI@2024!` is the compiled-in default. Easy to forget to change. |
-| **No offline/retry strategy** | 🟢 Low | Client retries sync every cycle but has no exponential backoff or dedup. |
-| **activity_logs REMOVED** | 🟢 Low | `activity_logs` table (Postgres + SQLite) and all Go/C# code removed. Migration 006 drops the table with no rollback. The web comprehensive page now queries `app_sessions`. |
-| **Horizontal scaling** | 🟢 Low | Server uses Redis for employee secrets (short TTL), so scaling is straightforward — but DB queries have no query analysis. |
+| Gap                                 | Severity  | Details                                                                                                                                                                          |
+| ----------------------------------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **No tests anywhere**         | 🔴 High   | 0 test files across all 3 projects. Any refactor is blind.                                                                                                                       |
+| **No observability**          | 🟠 Medium | No structured logging, metrics, tracing. Debugging production issues requires SSH + log scraping.                                                                                |
+| **Client-side only RBAC**     | 🟠 Medium | Permissions are enforced only in the web frontend localStorage. A malicious user can trivially bypass them.                                                                      |
+| **No rate limiting**          | 🟠 Medium | Login endpoint and all sync endpoints have no rate limiting. Brute-force / DoS is trivial.                                                                                       |
+| **No server permission model**| 🟠 Medium | Any authenticated user can access all protected endpoints; no role checks server-side.                                                                                           |
+| **Cross-account injection**   | 🟠 Medium | Sync handlers validate the JWT but don't verify the body `employeeId` matches the JWT subject.                                                                                   |
+| **Mock data dominance**       | 🟠 Medium | ~90% of web pages use mock data, giving a false sense of completeness.                                                                                                           |
+| **Default passwords**         | 🟠 Medium | `AlphaAI@2024!` is the compiled-in default. Easy to forget to change.                                                                                                          |
+| **No offline/retry strategy** | 🟢 Low    | Client retries sync every cycle but has no exponential backoff or dedup.                                                                                                         |
+| **No data-pruning job**       | 🟢 Low    | Server's only background job (`staleness_sweep.go`) deactivates stale catalog links but never deletes old app_sessions/app_items data.                                            |
+| **Dead shell-command code**   | 🟢 Low    | `IShellCommandCollector` + 3 platform impls + `ShellCommand` model on client; `ShellCommand`/`BrowserContext`/`Url*` DTOs on server. Harmless leftovers from the removal.         |
+| **Horizontal scaling**        | 🟢 Low    | Server uses Redis for employee secrets (short TTL), so scaling is straightforward — but DB queries have no query analysis.                                                      |
 
 ---
 
