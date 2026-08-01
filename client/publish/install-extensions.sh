@@ -18,6 +18,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 EXTENSIONS_DIR="$PROJECT_DIR/extensions"
+MANIFEST_NAME="com.alphai.tracker.json"
 
 # ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ───
 # MODE 2: Update native host manifests with extension IDs
@@ -35,9 +36,8 @@ if [[ "${1:-}" == "--update-ids" ]]; then
     exit 1
   fi
 
-  MANIFEST_NAME="com.alphai.tracker.json"
-
   # Build allowed_origins dynamically
+  # (MANIFEST_NAME is defined near the top of the file.)
   ALLOWED_ORIGINS='['
   if [ -n "$CHROME_ID" ]; then
     ALLOWED_ORIGINS+="\"chrome-extension://${CHROME_ID}/\""
@@ -97,8 +97,67 @@ fi
 chmod +x "$NATIVE_HOST_PATH"
 echo "✓ Native host script: $NATIVE_HOST_PATH"
 
+# ─── Detect stale manifests from a previous install ───
+# If the user previously installed from a different location (e.g. the dev tree),
+# any existing manifest has a `path` pointing somewhere that may no longer exist.
+# Warn loudly so they know a reinstall is happening — but always overwrite.
+EXISTING_MANIFEST="$HOME/.config/google-chrome/NativeMessagingHosts/$MANIFEST_NAME"
+if [ -f "$EXISTING_MANIFEST" ]; then
+  EXISTING_PATH="$(python3 -c "
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        print(json.load(f).get('path', ''))
+except: pass
+" "$EXISTING_MANIFEST" 2>/dev/null)"
+  if [ -n "$EXISTING_PATH" ] && [ ! -f "$EXISTING_PATH" ]; then
+    echo ""
+    echo "  ⚠ Found stale manifest from a previous install:"
+    echo "    path: $EXISTING_PATH"
+    echo "    (file no longer exists — Chrome would silently reject native messaging calls)"
+    echo "  → Overwriting with current path: $NATIVE_HOST_PATH"
+    echo ""
+  fi
+fi
+
 # ─── Generate the Native Messaging manifest ───
-MANIFEST_NAME="com.alphai.tracker.json"
+# (MANIFEST_NAME is defined near the top of the file.)
+
+# ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ───
+# Pre-compute the Chrome extension ID from the resolved extension path.
+# Without this, Chrome silently rejects every native messaging call because
+# the extension's actual ID (SHA256 of its filesystem path) won't be in
+# allowed_origins. Users would have to run --update-ids separately, which
+# is the bug we're fixing here.
+# ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ───
+CHROME_EXT_DIR="${EXTENSIONS_DIR}/chrome"
+CHROME_EXT_ID=""
+if [ -d "$CHROME_EXT_DIR" ] && command -v python3 >/dev/null 2>&1; then
+  CHROME_EXT_ID="$(python3 -c "
+import hashlib, os, sys
+ext_path = os.path.realpath(sys.argv[1])
+path_hash = hashlib.sha256(ext_path.encode('utf-8')).hexdigest()
+alphabet = 'abcdefghijklmnop'
+ext_id = ''
+for i in range(16):
+    byte_val = int(path_hash[i*2:i*2+2], 16)
+    ext_id += alphabet[(byte_val >> 4) & 0xf]
+    ext_id += alphabet[byte_val & 0xf]
+print(ext_id)
+" "$CHROME_EXT_DIR" 2>/dev/null)"
+fi
+
+# Firefox accepts chrome-extension:// IDs in allowed_extensions (it's just an ID list).
+# We register the same ID for both; --update-ids can override later if the user
+# loads the extension from a different location.
+ALLOWED_ORIGINS='[]'
+if [ -n "$CHROME_EXT_ID" ]; then
+  ALLOWED_ORIGINS="[\"chrome-extension://${CHROME_EXT_ID}/\"]"
+  echo "✓ Pre-computed Chrome extension ID: $CHROME_EXT_ID"
+else
+  echo "  WARNING: Could not pre-compute Chrome extension ID (python3 missing or chrome/ dir not found)."
+  echo "  Manifest will have empty allowed_origins — run: $0 --update-ids YOUR_CHROME_EXTENSION_ID"
+fi
 
 cat > /tmp/"$MANIFEST_NAME" << EOF
 {
@@ -106,7 +165,7 @@ cat > /tmp/"$MANIFEST_NAME" << EOF
   "description": "Alpha AI Tracker — Native messaging bridge for browser tab/URL capture",
   "path": "$NATIVE_HOST_PATH",
   "type": "stdio",
-  "allowed_origins": []
+  "allowed_origins": $ALLOWED_ORIGINS
 }
 EOF
 

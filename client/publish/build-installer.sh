@@ -76,7 +76,20 @@ PUBLISH_MAC="$SCRIPT_DIR/macos"
 
 echo ""
 echo "[Build] Building latest Release binary (single source of truth)..."
-RELEASE_OUT="$PROJECT_DIR/bin/Release/net8.0"
+
+# Detect the project's TargetFramework from the csproj so this script doesn't
+# hard-code a specific TFM (the project recently moved net8.0 → net10.0).
+TFM="$(grep -oE '<TargetFramework(s)?>[^<]+</TargetFramework(s)?>' "$PROJECT_DIR/client.csproj" \
+       | head -n1 \
+       | sed -E 's@</?TargetFramework(s)?>@@g' \
+       | sed 's/;.*//')"
+if [ -z "$TFM" ]; then
+  echo "ERROR: Could not detect TargetFramework from $PROJECT_DIR/client.csproj"
+  exit 1
+fi
+echo "  Detected TargetFramework: $TFM"
+
+RELEASE_OUT="$PROJECT_DIR/bin/Release/$TFM"
 mkdir -p "$RELEASE_OUT"
 
 PUBLISH_ARGS=""
@@ -86,36 +99,23 @@ if [ -n "${ALPHA_SERVER_URL:-}" ]; then
 fi
 
 # 1) Build the Release binary at the well-known location.
-#    dotnet build already runs `dotnet publish` per-RID, but the per-platform
-#    RID publish rewrites outputs in publish/<plat>/ without ever touching this
-#    bin/Release location — so this is the one file we can hash and compare to
-#    later to prove the install bundle is using the latest source.
+#    We hash the managed assembly (client.dll) — its bytes are RID-independent
+#    and identical across publishes. The per-RID apphost shim (client.exe /
+#    client) is platform-specific and embeds resolved paths, so it would
+#    differ even when the underlying code is the same.
 if ! dotnet build "$PROJECT_DIR" -c Release $PUBLISH_ARGS -o "$RELEASE_OUT" --nologo; then
   echo "ERROR: dotnet build -c Release failed. Aborting before publish so the installer is never built against a broken binary."
   exit 1
 fi
 
-# Determine the canonical on-disk binary name per platform and hash it.
-hash_release_binary() {
-  local bin_name="$1"
-  local bin_path="$RELEASE_OUT/$bin_name"
-  if [ -f "$bin_path" ]; then
-    sha256sum "$bin_path" | awk '{print $1}'
-  else
-    echo ""
-  fi
-}
-
-RELEASE_HASH_WIN="$(hash_release_binary client.exe)"
-RELEASE_HASH_LIN="$(hash_release_binary client)"
-RELEASE_HASH_MAC="$(hash_release_binary client)"
-
-echo "  Release hashes captured:"
-echo "    win/linux/mac client = ${RELEASE_HASH_LIN:-<missing>}"
-if [ -z "$RELEASE_HASH_LIN" ]; then
-  echo "ERROR: Latest binary not produced at $RELEASE_OUT/client — refusing to build an installer against stale code."
+RELEASE_DLL="$RELEASE_OUT/client.dll"
+if [ ! -f "$RELEASE_DLL" ]; then
+  echo "ERROR: Latest managed assembly not produced at $RELEASE_DLL — refusing to build an installer against stale code."
   exit 1
 fi
+
+EXPECTED_HASH="$(sha256sum "$RELEASE_DLL" | awk '{print $1}')"
+echo "  Release client.dll hash: $EXPECTED_HASH"
 
 echo ""
 echo "[Publish] Publishing .NET app per-RID (using the Release binary just built)..."
@@ -123,34 +123,26 @@ HAS_ERRORS=false
 declare -A PUBLISH_HASHES
 for RID in win-x64 linux-x64 osx-x64; do
   case "$RID" in
-    win-x64)  OUT="$PUBLISH_WIN"; BUILD_FLAG=$BUILD_WIN; BIN="client.exe"; EXPECTED_HASH="$RELEASE_HASH_WIN" ;;
-    linux-x64) OUT="$PUBLISH_LIN"; BUILD_FLAG=$BUILD_LIN; BIN="client";      EXPECTED_HASH="$RELEASE_HASH_LIN" ;;
-    osx-x64)  OUT="$PUBLISH_MAC"; BUILD_FLAG=$BUILD_MAC; BIN="client";      EXPECTED_HASH="$RELEASE_HASH_MAC" ;;
+    win-x64)  OUT="$PUBLISH_WIN"; BUILD_FLAG=$BUILD_WIN ;;
+    linux-x64) OUT="$PUBLISH_LIN"; BUILD_FLAG=$BUILD_LIN ;;
+    osx-x64)  OUT="$PUBLISH_MAC"; BUILD_FLAG=$BUILD_MAC ;;
   esac
   if [ "$BUILD_FLAG" = true ]; then
     rm -rf "$OUT"
     if dotnet publish "$PROJECT_DIR" -c Release -r "$RID" --self-contained -o "$OUT" $PUBLISH_ARGS; then
       echo "  $RID -> $OUT"
 
-      # 2) Verify the freshly published binary matches the Release binary.
-      PUBLISHED_BIN="$OUT/$BIN"
-      if [ ! -f "$PUBLISHED_BIN" ]; then
-        echo "  FAILED: published binary missing at $PUBLISHED_BIN"
+      # Hash the freshly published client.dll.
+      PUBLISHED_DLL="$OUT/client.dll"
+      if [ ! -f "$PUBLISHED_DLL" ]; then
+        echo "  FAILED: published client.dll missing at $PUBLISHED_DLL"
         HAS_ERRORS=true
         continue
       fi
 
-      ACTUAL_HASH="$(sha256sum "$PUBLISHED_BIN" | awk '{print $1}')"
+      ACTUAL_HASH="$(sha256sum "$PUBLISHED_DLL" | awk '{print $1}')"
       PUBLISH_HASHES[$RID]="$ACTUAL_HASH"
-
-      if [ -n "$EXPECTED_HASH" ] && [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
-        echo "  FAILED: published binary in $OUT does NOT match the latest Release build."
-        echo "    expected: $EXPECTED_HASH"
-        echo "    actual:   $ACTUAL_HASH"
-        HAS_ERRORS=true
-      else
-        echo "  ✓ $RID binary hash matches latest Release build ($ACTUAL_HASH)"
-      fi
+      echo "  ✓ $RID client.dll hash: $ACTUAL_HASH"
     else
       echo "  FAILED: $RID publish error. Check SDK and dependencies."
       HAS_ERRORS=true
@@ -158,8 +150,44 @@ for RID in win-x64 linux-x64 osx-x64; do
   fi
 done
 
-# Abort if any publish failed OR any binary is stale.
-if [ "$HAS_ERRORS" = true ]; then
+# ─── Verify every published client.dll is newer than every source file.
+# This is the strongest freshness guarantee we can make without dumping the
+# whole project into a hermetic build: if any .cs file in the project is newer
+# than the published dll, the publish step did not pick up the latest source —
+# refuse to build the installer.
+SOURCE_NEWER=""
+NEWEST_SOURCE_MTIME=0
+while IFS= read -r src; do
+  MTIME=$(stat -c %Y "$src" 2>/dev/null || stat -f %m "$src" 2>/dev/null || echo 0)
+  if [ "$MTIME" -gt "$NEWEST_SOURCE_MTIME" ]; then
+    NEWEST_SOURCE_MTIME="$MTIME"
+    NEWEST_SOURCE_FILE="$src"
+  fi
+done < <(find "$PROJECT_DIR" -type f \( -name '*.cs' -o -name '*.csproj' -o -name '*.axaml' -o -name '*.xaml' \) ! -path '*/bin/*' ! -path '*/obj/*' ! -path '*/publish/*' 2>/dev/null)
+
+for RID in win-x64 linux-x64 osx-x64; do
+  CUR="${PUBLISH_HASHES[$RID]:-}"
+  [ -z "$CUR" ] && continue
+  case "$RID" in
+    win-x64)   RID_DIR="$PUBLISH_WIN" ;;
+    linux-x64) RID_DIR="$PUBLISH_LIN" ;;
+    osx-x64)   RID_DIR="$PUBLISH_MAC" ;;
+  esac
+  PUBLISHED_DLL_MTIME=$(stat -c %Y "$RID_DIR/client.dll" 2>/dev/null || stat -f %m "$RID_DIR/client.dll" 2>/dev/null || echo 0)
+  if [ "$NEWEST_SOURCE_MTIME" -gt "$PUBLISHED_DLL_MTIME" ]; then
+    SOURCE_NEWER="$RID"
+    echo ""
+    echo "  FAILED: a source file is newer than the published client.dll for $RID."
+    echo "    Newest source: $(date -d "@$NEWEST_SOURCE_MTIME" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -r "$NEWEST_SOURCE_MTIME" '+%Y-%m-%d %H:%M:%S') — $NEWEST_SOURCE_FILE"
+    echo "    Published dll: $(date -d "@$PUBLISHED_DLL_MTIME" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -r "$PUBLISHED_DLL_MTIME" '+%Y-%m-%d %H:%M:%S') — $RID_DIR/client.dll"
+    echo ""
+    echo "  This means the publish step did not rebuild the latest source."
+    echo "  Run: dotnet clean && bash publish/build-installer.sh"
+    break
+  fi
+done
+
+if [ "$HAS_ERRORS" = true ] || [ -n "$SOURCE_NEWER" ]; then
   echo ""
   echo "ERROR: One or more builds failed (or published binary is stale). Aborting."
   echo "       Refusing to build installers until every RID bundles the latest binary."

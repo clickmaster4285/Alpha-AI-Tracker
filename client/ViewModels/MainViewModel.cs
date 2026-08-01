@@ -183,6 +183,22 @@ public partial class MainViewModel : ViewModelBase
         _autoStart = autoStart;
         _logCollector = logCollector;
         _browserExt = browserExt;
+
+        // React to real heartbeat changes from NativeMessageService so the UI flips
+        // to "Connected" the moment the first ping arrives (≈ 2s after launch),
+        // not on the next manual refresh.
+        _browserExt.ExtensionConnectionChanged += OnExtensionConnectionChanged;
+    }
+
+    private void OnExtensionConnectionChanged(string browserName, bool isActive)
+    {
+        // Marshal back to the UI thread — the timer fires on a ThreadPool thread.
+        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            DetectedBrowsers.Clear();
+            foreach (var b in _browserExt.DetectedBrowsers) DetectedBrowsers.Add(b);
+            OnPropertyChanged(nameof(RequiresBrowserSetup));
+        });
     }
 
     public async Task InitializeAsync(CancellationToken ct)
@@ -904,6 +920,13 @@ public partial class MainViewModel : ViewModelBase
         IsStepWorking = true;
         ClearInstructions();
 
+        // Set the intermediate "Connecting…" state. We do NOT mark the browser as
+        // ExtensionActive until the heartbeat actually arrives — the BrowserExtensionService
+        // has a 2s timer that polls NativeMessageService.IsExtensionConnected() and fires
+        // ExtensionConnectionChanged when the state flips. Until then, the user sees the
+        // truthful "Connecting…" badge instead of a green "Connected" lie.
+        browser.Status = BrowserInstallStatus.Loading;
+
         try
         {
             // Step 1: Install native host manifests if not done
@@ -917,8 +940,12 @@ public partial class MainViewModel : ViewModelBase
                 {
                     ExtensionInstructionsTitle = "⚠ Installation Failed";
                     ExtensionInstructions = "Could not install the native messaging host automatically.\n\nTry running manually in terminal:\n  ./publish/install-extensions.sh";
+                    // Roll back — install actually failed.
+                    browser.Status = BrowserInstallStatus.ReadyToInstall;
+                    browser.NativeHostInstalled = false;
                     return;
                 }
+                browser.NativeHostInstalled = true;
             }
 
             // Step 2: Launch browser with extension or show instructions
@@ -937,10 +964,12 @@ public partial class MainViewModel : ViewModelBase
                         ExtensionInstructionsTitle = "✅ Extension Loaded!";
                         ExtensionInstructions = $"{browser.Name} has been launched with the extension loaded.\n\nThe extension will persist across browser restarts automatically.\n\nTo verify, open chrome://extensions and look for:\n  Alpha AI Tracker - Browser Journey";
                     }
-                    browser.Status = BrowserInstallStatus.ExtensionActive;
                 }
                 else
                 {
+                    // Roll back the optimistic UI state — install actually failed.
+                    browser.Status = BrowserInstallStatus.NativeHostReady;
+
                     ExtensionInstructionsTitle = "📋 Manual Installation Required";
                     var step2 = "Enable \"Developer mode\" (toggle in top-right)";
                     var step3 = "Click \"Load unpacked\"";
@@ -949,7 +978,11 @@ public partial class MainViewModel : ViewModelBase
             }
             else
             {
-                // Firefox: no --load-extension flag, show instructions
+                // Firefox: no --load-extension flag, show instructions.
+                // Firefox installs go through manual steps, so the extension is not
+                // "active" until the user completes them — roll back to NativeHostReady.
+                browser.Status = BrowserInstallStatus.NativeHostReady;
+
                 ExtensionInstructionsTitle = "📋 Firefox — Manual Installation";
                 var ffManifestPath = Path.Combine(browser.ExtensionDir, "manifest.json");
                 var ffStep2 = "Click \"Load Temporary Add-on\u2026\"";
@@ -957,25 +990,17 @@ public partial class MainViewModel : ViewModelBase
                 await _browserExt.InstallExtensionAsync(browser);
             }
 
-            // Re-scan after a brief delay to update browser status in the list.
-            // Wait for the extension's initial heartbeat (sent ~500ms after connect)
-            // before re-scanning, so the heartbeat-based detection confirms it alive.
-            for (int i = 0; i < 16; i++)
-            {
-                await Task.Delay(500);
-                await ScanBrowsersAsync(CancellationToken.None);
-                if (_browserExt.IsAnyExtensionActive) break;
-            }
-
-            // If after re-scan all browsers are connected, update the instructions
-            if (_browserExt.IsAnyExtensionActive && browser.IsChromeBased)
-            {
-                ExtensionInstructionsTitle = "✅ All Connected!";
-                ExtensionInstructions = "Your browser is now sending tab URLs and navigation data to the tracker. ✓";
-            }
+            // No aggressive re-scan here. We deliberately do NOT rebuild DetectedBrowsers,
+            // because every rebuild creates brand-new DetectedBrowser objects and would
+            // overwrite the optimistic ExtensionActive state we just set (the heartbeat
+            // from the extension takes ~27s to arrive, well past the 8s this loop used to
+            // wait). The next full refresh (click "Refresh", or restart, or explicit
+            // ScanBrowsersAsync call elsewhere) will validate the heartbeat and confirm.
         }
         catch (Exception ex)
         {
+            // On any exception, roll back to NativeHostReady so the user can retry.
+            browser.Status = BrowserInstallStatus.NativeHostReady;
             ExtensionInstructionsTitle = "⚠ Error";
             ExtensionInstructions = $"An error occurred: {ex.Message}";
         }

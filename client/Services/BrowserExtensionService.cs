@@ -33,6 +33,19 @@ public class BrowserExtensionService
     /// <summary>True if at least one browser has the extension active (confirmed via socket heartbeat).</summary>
     public bool IsAnyExtensionActive => _detected.Any(b => b.Status == BrowserInstallStatus.ExtensionActive);
 
+    /// <summary>
+    /// Raised when the NativeMessageService heartbeat flips. Args:
+    ///   (browserName, isActive). Subscribers (MainViewModel) update DetectedBrowsers
+    ///   in real time so the user sees "Connected" the moment the first ping arrives
+    ///   — not on the next manual refresh.
+    /// </summary>
+    public event Action<string, bool>? ExtensionConnectionChanged;
+
+    // Polls the heartbeat at 2s intervals so the UI updates within ~2s of the
+    // first ping, instead of waiting for the next user-triggered refresh.
+    private readonly System.Threading.Timer _heartbeatTimer;
+    private bool _lastHeartbeatState;
+
     public BrowserExtensionService(ILogger<BrowserExtensionService> logger, NativeMessageService nativeMessageService)
     {
         _logger = logger;
@@ -48,10 +61,58 @@ public class BrowserExtensionService
         _chromeNativeHostDir = Path.Combine(userHome, ".config", "google-chrome", "NativeMessagingHosts");
         _firefoxNativeHostDir = Path.Combine(userHome, ".mozilla", "native-messaging-hosts");
 
+        _heartbeatTimer = new System.Threading.Timer(_ => PollHeartbeat(), null,
+            TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
+
         // Clean up any orphaned native-host.py from a previous crashed session.
         // Stale processes would cause false positives in process-based detection;
         // with heartbeat-based detection they are harmless but wasteful.
         KillOrphanedNativeHostProcesses();
+    }
+
+    /// <summary>
+    /// Polls NativeMessageService.IsExtensionConnected() and emits ExtensionConnectionChanged
+    /// when the state flips. Updates _detected in-place so existing DetectedBrowser
+    /// instances (the same references the ViewModel is already rendering) flip status.
+    /// </summary>
+    private void PollHeartbeat()
+    {
+        try
+        {
+            var active = _nativeMessageService.IsExtensionConnected();
+            if (active == _lastHeartbeatState) return;
+            _lastHeartbeatState = active;
+
+            // Flip every browser to the new state. We don't know which browser
+            // specifically sent the heartbeat (the socket is shared), so apply to
+            // all browsers currently in NativeHostReady or Loading state.
+            foreach (var b in _detected)
+            {
+                if (active)
+                {
+                    if (b.Status == BrowserInstallStatus.Loading ||
+                        b.Status == BrowserInstallStatus.NativeHostReady)
+                    {
+                        b.Status = BrowserInstallStatus.ExtensionActive;
+                    }
+                }
+                else
+                {
+                    if (b.Status == BrowserInstallStatus.ExtensionActive)
+                    {
+                        b.Status = BrowserInstallStatus.NativeHostReady;
+                    }
+                }
+            }
+
+            // Fire-and-forget: callers handle on UI thread if they need to.
+            try { ExtensionConnectionChanged?.Invoke("all", active); }
+            catch (Exception ex) { _logger.LogDebug(ex, "ExtensionConnectionChanged handler threw"); }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Heartbeat poll failed");
+        }
     }
 
     /// <summary>
@@ -132,6 +193,15 @@ public class BrowserExtensionService
         if (!browser.CanInstall)
             return new BrowserInstallResult(false, false, "Browser is not in a state that can be installed.");
 
+        // Re-resolve the extension dir at install time so we never launch Chrome
+        // pointing at the dev-tree path when the user is running the installed binary.
+        if (browser.IsChromeBased)
+        {
+            var resolvedDir = ResolveChromeExtensionDir();
+            if (Directory.Exists(resolvedDir))
+                browser.ExtensionDir = resolvedDir;
+        }
+
         try
         {
             var alreadyRunning = IsChromeRunning(browser);
@@ -169,7 +239,18 @@ public class BrowserExtensionService
                         "Could not inject extension into browser profile.");
                 }
 
-                // Launch browser — extension should load from profile
+                // Launch browser — extension should load from profile.
+                // Strategy 1 may have left a Chrome process behind (started but without
+                // --load-extension honoring it); kill that before relaunching so the
+                // profile-injected extension is the one actually loaded.
+                if (IsChromeRunning(browser))
+                {
+                    _logger.LogInformation("Killing leftover Chrome from Strategy 1 before profile-injected launch");
+                    KillBrowserProcesses("chrome");
+                    for (int i = 0; i < 10 && IsChromeRunning(browser); i++)
+                        await Task.Delay(500);
+                }
+
                 // 🟡 FIX 2026-07-28: Removed --no-first-run (causes profile corruption on Chrome 150+).
                 // Added --disable-gcm to suppress GCM DEPRECATED_ENDPOINT noise from Chrome's internal
                 // push notification system (not needed by our extension).
@@ -768,11 +849,29 @@ for ext_id, ext_data in settings.items():
     {
         try
         {
-            var nativeHostPy = FindNativeHostPy();
-            if (string.IsNullOrEmpty(nativeHostPy)) return false;
+            // ─── Resolve at install-time, not at service construction time. ───
+            // The static _chromeExtDir / FindNativeHostPy can point at the dev tree
+            // (e.g. when running from /usr/share/alpha-ai-tracker/client but the manifest
+            // was last written by install-extensions.sh from /media/devteam/...).
+            // The manifest MUST point at the install paths that the running binary uses,
+            // otherwise Chrome launches native-host.py from a path that doesn't exist
+            // and silently drops every native messaging call.
+            var nativeHostPy = ResolveNativeHostPyPath();
+            if (!File.Exists(nativeHostPy))
+            {
+                _logger.LogWarning(
+                    "native-host.py not found at {Path} — cannot install native host", nativeHostPy);
+                return false;
+            }
 
-            var extensionPath = Path.GetFullPath(_chromeExtDir);
-            var extId = ComputeExtensionId(extensionPath);
+            var extensionDir = ResolveChromeExtensionDir();
+            var extId = ComputeExtensionId(extensionDir);
+            if (extId == "unknown")
+            {
+                _logger.LogWarning(
+                    "Could not compute extension ID for {Path} — manifest allowed_origins will be empty",
+                    extensionDir);
+            }
 
             var manifest = new
             {
@@ -780,10 +879,9 @@ for ext_id, ext_data in settings.items():
                 description = "Alpha AI Tracker — Native messaging bridge for browser tab/URL capture",
                 path = nativeHostPy,
                 type = "stdio",
-                allowed_origins = new[]
-                {
-                    $"chrome-extension://{extId}/"
-                },
+                allowed_origins = extId == "unknown"
+                    ? Array.Empty<string>()
+                    : new[] { $"chrome-extension://{extId}/" }
             };
 
             var json = System.Text.Json.JsonSerializer.Serialize(manifest, new System.Text.Json.JsonSerializerOptions
@@ -791,6 +889,8 @@ for ext_id, ext_data in settings.items():
                 WriteIndented = true
             });
 
+            // Write JSON-file manifest (Linux/macOS look here; Windows ignores it but
+            // it's harmless and lets reg-lookup failures fall back to file inspection).
             Directory.CreateDirectory(_chromeNativeHostDir);
             await File.WriteAllTextAsync(
                 Path.Combine(_chromeNativeHostDir, "com.alphai.tracker.json"), json, ct);
@@ -798,6 +898,25 @@ for ext_id, ext_data in settings.items():
             Directory.CreateDirectory(_firefoxNativeHostDir);
             await File.WriteAllTextAsync(
                 Path.Combine(_firefoxNativeHostDir, "com.alphai.tracker.json"), json, ct);
+
+            // Windows: Chrome/Edge/Brave look in the registry, not a file. Write a
+            // manifest next to native-host.py (so the registered path exists) and
+            // register the registry keys pointing at it.
+            if (OperatingSystem.IsWindows())
+            {
+                try
+                {
+                    var sideBySideManifest = Path.Combine(
+                        Path.GetDirectoryName(nativeHostPy) ?? AppDomain.CurrentDomain.BaseDirectory,
+                        "com.alphai.tracker.json");
+                    await File.WriteAllTextAsync(sideBySideManifest, json, ct);
+                    RegisterNativeHostWindows(sideBySideManifest, extId);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to register Windows native messaging host");
+                }
+            }
 
             if (File.Exists(nativeHostPy))
             {
@@ -812,13 +931,201 @@ for ext_id, ext_data in settings.items():
             }
 
             _logger.LogInformation(
-                "Native host manifests created manually (extension ID: {ExtId})", extId);
+                "Native host manifests created (path: {Path}, extension ID: {ExtId})",
+                nativeHostPy, extId);
             return true;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to create native host manifests manually");
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Resolve the absolute path to native-host.py from the running executable.
+    ///
+    /// Order (first hit wins):
+    ///   1. <code>{BaseDirectory}/extensions/native-host.py</code> — install bundle
+    ///   2. <code>{BaseDirectory}/publish/extensions/native-host.py</code> — install bundle variant
+    ///   3. <code>{BaseDirectory}/native-host.py</code> — flat bundle
+    ///   4. Walk up to 6 levels from BaseDirectory and from Environment.ProcessPath looking
+    ///      for any sibling native-host.py — handles the dev layout where extensions live at
+    ///      the repo root, not next to the binary.
+    ///
+    /// Unlike the static _chromeExtDir, this is safe to call at install time because it
+    /// re-walks the filesystem rather than caching a path captured at process start.
+    /// </summary>
+    public static string ResolveNativeHostPyPath()
+    {
+        var baseDir = AppDomain.CurrentDomain.BaseDirectory;
+        var sameDir = Path.Combine(baseDir, "native-host.py");
+
+        var candidates = new[]
+        {
+            Path.Combine(baseDir, "extensions", "native-host.py"),
+            Path.Combine(baseDir, "publish", "extensions", "native-host.py"),
+            sameDir,
+        };
+        foreach (var c in candidates)
+        {
+            if (File.Exists(c)) return Path.GetFullPath(c);
+        }
+
+        // Walk up from BaseDirectory
+        var dir = baseDir;
+        for (int i = 0; i < 6 && !string.IsNullOrEmpty(dir); i++)
+        {
+            var c = Path.Combine(dir, "native-host.py");
+            if (File.Exists(c)) return Path.GetFullPath(c);
+            var parent = Path.GetDirectoryName(dir);
+            if (parent == null || parent == dir) break;
+            dir = parent;
+        }
+
+        // Walk up from the actual executable (handles Windows apphost shims)
+        try
+        {
+            var exePath = Environment.ProcessPath;
+            if (!string.IsNullOrEmpty(exePath))
+            {
+                var exeDir = Path.GetDirectoryName(exePath);
+                if (!string.IsNullOrEmpty(exeDir))
+                {
+                    var walk = exeDir;
+                    for (int i = 0; i < 6 && !string.IsNullOrEmpty(walk); i++)
+                    {
+                        var c = Path.Combine(walk, "native-host.py");
+                        if (File.Exists(c)) return Path.GetFullPath(c);
+                        var parent = Path.GetDirectoryName(walk);
+                        if (parent == null || parent == walk) break;
+                        walk = parent;
+                    }
+                }
+            }
+        }
+        catch { /* best-effort */ }
+
+        // Fall back to sameDir — non-existent, but downstream code already handles that
+        // (returns false from InstallNativeHostManuallyAsync).
+        return Path.GetFullPath(sameDir);
+    }
+
+    /// <summary>
+    /// Resolve the absolute path to the chrome/ extension directory.
+    /// Same multi-strategy walk as <see cref="ResolveNativeHostPyPath"/> but for the
+    /// chrome/ subdirectory. Use this anywhere a browser launch needs the extension dir
+    /// at install time, not the cached _chromeExtDir captured at construction.
+    /// </summary>
+    public static string ResolveChromeExtensionDir()
+    {
+        var baseDir = AppDomain.CurrentDomain.BaseDirectory;
+        var candidates = new[]
+        {
+            Path.Combine(baseDir, "extensions", "chrome"),
+            Path.Combine(baseDir, "publish", "extensions", "chrome"),
+        };
+        foreach (var c in candidates)
+        {
+            if (Directory.Exists(c)) return Path.GetFullPath(c);
+        }
+
+        // Walk up from BaseDirectory
+        var dir = baseDir;
+        for (int i = 0; i < 6 && !string.IsNullOrEmpty(dir); i++)
+        {
+            var c = Path.Combine(dir, "extensions", "chrome");
+            if (Directory.Exists(c)) return Path.GetFullPath(c);
+            var parent = Path.GetDirectoryName(dir);
+            if (parent == null || parent == dir) break;
+            dir = parent;
+        }
+
+        // Walk up from the executable path (Windows apphost shims)
+        try
+        {
+            var exePath = Environment.ProcessPath;
+            if (!string.IsNullOrEmpty(exePath))
+            {
+                var exeDir = Path.GetDirectoryName(exePath);
+                if (!string.IsNullOrEmpty(exeDir))
+                {
+                    var walk = exeDir;
+                    for (int i = 0; i < 6 && !string.IsNullOrEmpty(walk); i++)
+                    {
+                        var c = Path.Combine(walk, "extensions", "chrome");
+                        if (Directory.Exists(c)) return Path.GetFullPath(c);
+                        var parent = Path.GetDirectoryName(walk);
+                        if (parent == null || parent == walk) break;
+                        walk = parent;
+                    }
+                }
+            }
+        }
+        catch { /* best-effort */ }
+
+        return Path.Combine(baseDir, "extensions", "chrome");
+    }
+
+    /// <summary>
+    /// Register the native messaging host in the Windows registry for every Chromium
+    /// browser we know about. Chrome on Windows reads HKCU\Software\&lt;Vendor&gt;\&lt;Browser&gt;\NativeMessagingHosts\&lt;name&gt;
+    /// instead of a filesystem path. The (Default) value must be the absolute path to a
+    /// manifest.json file that already exists on disk.
+    ///
+    /// No-op on non-Windows platforms.
+    /// </summary>
+    private void RegisterNativeHostWindows(string manifestPath, string extensionId)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        if (!File.Exists(manifestPath))
+        {
+            _logger.LogWarning("Manifest file does not exist at {Path} — skipping registry write", manifestPath);
+            return;
+        }
+
+        // Each browser reads its own vendor key. Path format:
+        //   HKCU\Software\<Vendor>\<Browser>\NativeMessagingHosts\<host-name>
+        //   (Default) REG_SZ = <absolute path to manifest.json>
+        var registryRoots = new[]
+        {
+            @"Software\Google\Chrome\NativeMessagingHosts",
+            @"Software\Microsoft\Edge\NativeMessagingHosts",
+            @"Software\BraveSoftware\Brave-Browser\NativeMessagingHosts",
+            @"Software\Vivaldi\NativeMessagingHosts",
+            @"Software\Opera Software\Opera Stable\NativeMessagingHosts",
+        };
+        var hostName = "com.alphai.tracker";
+
+        try
+        {
+            using var hkcu = Microsoft.Win32.Registry.CurrentUser;
+            foreach (var root in registryRoots)
+            {
+                try
+                {
+                    using var rootKey = hkcu.CreateSubKey(root, writable: true);
+                    if (rootKey == null) continue;
+
+                    using var hostKey = rootKey.CreateSubKey(hostName, writable: true);
+                    if (hostKey == null) continue;
+
+                    // (Default) value name is null in RegistryKey.SetValue on .NET 5+.
+                    hostKey.SetValue(null, manifestPath, Microsoft.Win32.RegistryValueKind.String);
+
+                    _logger.LogInformation(
+                        "Registered native messaging host in Windows registry: {Root}\\{Name}",
+                        root, hostName);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Failed to register under {Root}", root);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Windows registry registration failed");
         }
     }
 
@@ -873,23 +1180,67 @@ print(ext_id)
         return "unknown";
     }
 
-    /// <summary>Resolve the extensions/ directory from the repo root.</summary>
+    /// <summary>Resolve the extensions/ directory from the running executable.
+    /// Order (first hit wins):
+    ///   1. <code>{BaseDirectory}/extensions</code> — install bundle, portabledir, or `dotnet run`
+    ///   2. Walk up to 6 levels looking for <code>extensions/</code> — repo dev layout
+    ///   3. Walk up to 6 levels looking for <code>extensions/</code> relative to the executable
+    ///      (handles apphost shims where BaseDirectory differs from the actual exe dir)
+    ///   4. Fall back to <code>{BaseDirectory}/extensions</code> regardless of existence so
+    ///      downstream path-joining still produces a usable absolute path (the browser launch
+    ///      will simply fail and the user can click "Show instructions" to see the path).
+    ///
+    /// This is intentionally lenient: a non-existent path is preferable to a wrong one, and
+    /// the browser-extension install flow already handles the "extension dir not found" case
+    /// by showing manual-installation instructions.
+    /// </summary>
     private static string ResolveExtensionsRoot()
     {
-        var dir = AppDomain.CurrentDomain.BaseDirectory;
+        var baseDir = AppDomain.CurrentDomain.BaseDirectory;
 
+        // 1. Same-directory extensions/ — primary path for both install and `dotnet run`.
+        var sameDir = Path.Combine(baseDir, "extensions");
+        if (Directory.Exists(sameDir))
+            return sameDir;
+
+        // 2. Walk up from BaseDirectory (handles odd test runners / multi-level bin/...).
+        var dir = baseDir;
         for (int i = 0; i < 6; i++)
         {
             var candidate = Path.Combine(dir, "extensions");
-            if (Directory.Exists(candidate))
-                return candidate;
+            if (Directory.Exists(candidate)) return candidate;
             var parent = Path.GetDirectoryName(dir);
             if (parent == null) break;
             dir = parent;
         }
 
-        var fallback = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "extensions");
-        return Directory.Exists(fallback) ? fallback : AppDomain.CurrentDomain.BaseDirectory;
+        // 3. Walk up from the actual executable path. On Windows the apphost can have a
+        //    BaseDirectory different from the executable directory when the .exe is shimmed.
+        try
+        {
+            var exePath = Environment.ProcessPath;
+            if (!string.IsNullOrEmpty(exePath))
+            {
+                var exeDir = Path.GetDirectoryName(exePath);
+                if (!string.IsNullOrEmpty(exeDir))
+                {
+                    var walkDir = exeDir;
+                    for (int i = 0; i < 6; i++)
+                    {
+                        var candidate = Path.Combine(walkDir, "extensions");
+                        if (Directory.Exists(candidate)) return candidate;
+                        var parent = Path.GetDirectoryName(walkDir);
+                        if (parent == null) break;
+                        walkDir = parent;
+                    }
+                }
+            }
+        }
+        catch { /* best-effort */ }
+
+        // 4. Last-resort fallback — return the best-guess path even if it doesn't exist,
+        //    so call sites that just want to *display* the path can still do so.
+        return sameDir;
     }
 
     private static string? FindBinary(string name)
@@ -918,9 +1269,11 @@ print(ext_id)
 
     private static string? FindNativeHostPy()
     {
+        var extRoot = ResolveExtensionsRoot();
         var candidates = new[]
         {
-            Path.Combine(ResolveExtensionsRoot(), "..", "native-host.py"),
+            Path.Combine(extRoot, "native-host.py"),
+            Path.Combine(extRoot, "..", "native-host.py"),
             Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "extensions", "native-host.py"),
             Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "native-host.py"),
         };
@@ -934,9 +1287,10 @@ print(ext_id)
 
     private static string? FindInstallScript()
     {
+        var extRoot = ResolveExtensionsRoot();
         var candidates = new[]
         {
-            Path.Combine(ResolveExtensionsRoot(), "..", "publish", "install-extensions.sh"),
+            Path.Combine(extRoot, "..", "publish", "install-extensions.sh"),
             Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "publish", "install-extensions.sh"),
             Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "install-extensions.sh"),
         };
@@ -1010,6 +1364,7 @@ public enum BrowserInstallStatus
     NotInstalled,
     ReadyToInstall,
     NativeHostReady,
+    Loading,
     ExtensionActive,
 }
 
@@ -1029,6 +1384,7 @@ public class DetectedBrowser
     {
         BrowserInstallStatus.ReadyToInstall => "Ready",
         BrowserInstallStatus.NativeHostReady => "Host Ready",
+        BrowserInstallStatus.Loading => "Connecting…",
         BrowserInstallStatus.ExtensionActive => "✅ Active",
         _ => "Not detected",
     };
@@ -1037,6 +1393,7 @@ public class DetectedBrowser
     {
         BrowserInstallStatus.ReadyToInstall => "Add Extension",
         BrowserInstallStatus.NativeHostReady => "Launch Browser",
+        BrowserInstallStatus.Loading => "Connecting…",
         BrowserInstallStatus.ExtensionActive => "Connected",
         _ => "—",
     };
