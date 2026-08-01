@@ -1,6 +1,8 @@
 using Avalonia;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
+using Avalonia.Threading;
+using client.Core;
 using client.ViewModels;
 using client.Views;
 using Microsoft.Extensions.DependencyInjection;
@@ -79,6 +81,34 @@ public partial class App : Application
             
             var trayIcons = new Avalonia.Controls.TrayIcons { trayIcon };
             Avalonia.Controls.TrayIcon.SetIcons(this, trayIcons);
+
+            // ─── Single-instance activation ───
+            // This process is the primary (mutex-owning) instance — it may have
+            // been launched hidden (--background / --minimized by auto-start or
+            // systemd) and is the one that keeps tracking alive. When a second
+            // user launch (e.g. the user clicks the desktop entry) sends a SHOW
+            // signal via the named pipe, bring this window to the front. This is
+            // what makes "open the GUI any number of times" work without ever
+            // stopping the background tracker.
+            SingleInstanceService.OnShowRequested = () =>
+            {
+                Dispatcher.UIThread.Post(() =>
+                {
+                    try
+                    {
+                        if (mainWindow.WindowState == Avalonia.Controls.WindowState.Minimized)
+                            mainWindow.WindowState = Avalonia.Controls.WindowState.Normal;
+                        mainWindow.Show();
+                        mainWindow.Activate();
+                        mainWindow.Topmost = true;
+                        mainWindow.Topmost = false; // bring to front without pinning
+                    }
+                    catch
+                    {
+                        // Window may be in an odd state during shutdown — ignore.
+                    }
+                });
+            };
 
             var args = Environment.GetCommandLineArgs();
             if (!args.Contains("--background") && !args.Contains("--minimized"))
