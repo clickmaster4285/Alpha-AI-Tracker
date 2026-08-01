@@ -25,7 +25,8 @@ if [ -z "${REPO:-}" ] || [ -z "${ALPHA_SERVER_URL:-}" ]; then
   fi
 fi
 REPO="${REPO:-clickmaster4285/Alpha-AI-Tracker}"
-export ALPHA_SERVER_URLecho "=========================================="
+export ALPHA_SERVER_URL
+echo "=========================================="
 echo " Alpha AI Tracker — Release $VERSION"
 echo "=========================================="
 

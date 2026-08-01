@@ -75,23 +75,82 @@ PUBLISH_LIN="$SCRIPT_DIR/linux"
 PUBLISH_MAC="$SCRIPT_DIR/macos"
 
 echo ""
-echo "[Publish] Publishing .NET app..."
+echo "[Build] Building latest Release binary (single source of truth)..."
+RELEASE_OUT="$PROJECT_DIR/bin/Release/net8.0"
+mkdir -p "$RELEASE_OUT"
+
+PUBLISH_ARGS=""
+if [ -n "${ALPHA_SERVER_URL:-}" ]; then
+  PUBLISH_ARGS="-p:DefaultServerUrl=$ALPHA_SERVER_URL"
+  echo "  Baking in ALPHA_SERVER_URL=$ALPHA_SERVER_URL"
+fi
+
+# 1) Build the Release binary at the well-known location.
+#    dotnet build already runs `dotnet publish` per-RID, but the per-platform
+#    RID publish rewrites outputs in publish/<plat>/ without ever touching this
+#    bin/Release location — so this is the one file we can hash and compare to
+#    later to prove the install bundle is using the latest source.
+if ! dotnet build "$PROJECT_DIR" -c Release $PUBLISH_ARGS -o "$RELEASE_OUT" --nologo; then
+  echo "ERROR: dotnet build -c Release failed. Aborting before publish so the installer is never built against a broken binary."
+  exit 1
+fi
+
+# Determine the canonical on-disk binary name per platform and hash it.
+hash_release_binary() {
+  local bin_name="$1"
+  local bin_path="$RELEASE_OUT/$bin_name"
+  if [ -f "$bin_path" ]; then
+    sha256sum "$bin_path" | awk '{print $1}'
+  else
+    echo ""
+  fi
+}
+
+RELEASE_HASH_WIN="$(hash_release_binary client.exe)"
+RELEASE_HASH_LIN="$(hash_release_binary client)"
+RELEASE_HASH_MAC="$(hash_release_binary client)"
+
+echo "  Release hashes captured:"
+echo "    win/linux/mac client = ${RELEASE_HASH_LIN:-<missing>}"
+if [ -z "$RELEASE_HASH_LIN" ]; then
+  echo "ERROR: Latest binary not produced at $RELEASE_OUT/client — refusing to build an installer against stale code."
+  exit 1
+fi
+
+echo ""
+echo "[Publish] Publishing .NET app per-RID (using the Release binary just built)..."
 HAS_ERRORS=false
+declare -A PUBLISH_HASHES
 for RID in win-x64 linux-x64 osx-x64; do
   case "$RID" in
-    win-x64)  OUT="$PUBLISH_WIN"; BUILD_FLAG=$BUILD_WIN ;;
-    linux-x64) OUT="$PUBLISH_LIN"; BUILD_FLAG=$BUILD_LIN ;;
-    osx-x64)  OUT="$PUBLISH_MAC"; BUILD_FLAG=$BUILD_MAC ;;
+    win-x64)  OUT="$PUBLISH_WIN"; BUILD_FLAG=$BUILD_WIN; BIN="client.exe"; EXPECTED_HASH="$RELEASE_HASH_WIN" ;;
+    linux-x64) OUT="$PUBLISH_LIN"; BUILD_FLAG=$BUILD_LIN; BIN="client";      EXPECTED_HASH="$RELEASE_HASH_LIN" ;;
+    osx-x64)  OUT="$PUBLISH_MAC"; BUILD_FLAG=$BUILD_MAC; BIN="client";      EXPECTED_HASH="$RELEASE_HASH_MAC" ;;
   esac
   if [ "$BUILD_FLAG" = true ]; then
     rm -rf "$OUT"
-    PUBLISH_ARGS=""
-    if [ -n "${ALPHA_SERVER_URL:-}" ]; then
-      PUBLISH_ARGS="-p:DefaultServerUrl=$ALPHA_SERVER_URL"
-      echo "  Baking in ALPHA_SERVER_URL=$ALPHA_SERVER_URL"
-    fi
     if dotnet publish "$PROJECT_DIR" -c Release -r "$RID" --self-contained -o "$OUT" $PUBLISH_ARGS; then
       echo "  $RID -> $OUT"
+
+      # 2) Verify the freshly published binary matches the Release binary.
+      PUBLISHED_BIN="$OUT/$BIN"
+      if [ ! -f "$PUBLISHED_BIN" ]; then
+        echo "  FAILED: published binary missing at $PUBLISHED_BIN"
+        HAS_ERRORS=true
+        continue
+      fi
+
+      ACTUAL_HASH="$(sha256sum "$PUBLISHED_BIN" | awk '{print $1}')"
+      PUBLISH_HASHES[$RID]="$ACTUAL_HASH"
+
+      if [ -n "$EXPECTED_HASH" ] && [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
+        echo "  FAILED: published binary in $OUT does NOT match the latest Release build."
+        echo "    expected: $EXPECTED_HASH"
+        echo "    actual:   $ACTUAL_HASH"
+        HAS_ERRORS=true
+      else
+        echo "  ✓ $RID binary hash matches latest Release build ($ACTUAL_HASH)"
+      fi
     else
       echo "  FAILED: $RID publish error. Check SDK and dependencies."
       HAS_ERRORS=true
@@ -99,11 +158,39 @@ for RID in win-x64 linux-x64 osx-x64; do
   fi
 done
 
-# Abort if any publish failed
+# Abort if any publish failed OR any binary is stale.
 if [ "$HAS_ERRORS" = true ]; then
-  echo "ERROR: One or more builds failed. Aborting."
+  echo ""
+  echo "ERROR: One or more builds failed (or published binary is stale). Aborting."
+  echo "       Refusing to build installers until every RID bundles the latest binary."
   exit 1
 fi
+
+# ── Bundle the browser extension, native host, and install scripts into each
+#    publish output. Without this step the installed app cannot find extensions/
+#    or publish/install-extensions.sh, which is why `dotnet run` "is perfect"
+#    but the installer cannot track the browser journey.
+EXTENSIONS_DIR="$PROJECT_DIR/extensions"
+bundle_into_publish() {
+  local rid_dir="$1"
+  if [ -d "$EXTENSIONS_DIR" ]; then
+    mkdir -p "$rid_dir/extensions"
+    cp -r "$EXTENSIONS_DIR/." "$rid_dir/extensions/"
+    chmod +x "$rid_dir/extensions/native-host.py" 2>/dev/null || true
+    echo "  ✓ Bundled extensions/ into $rid_dir"
+  fi
+
+  if [ -d "$PROJECT_DIR/publish" ]; then
+    mkdir -p "$rid_dir/publish"
+    cp "$PROJECT_DIR/publish"/*.sh "$rid_dir/publish/" 2>/dev/null || true
+    chmod +x "$rid_dir/publish"/*.sh 2>/dev/null || true
+    cp "$PROJECT_DIR/publish"/*.iss "$rid_dir/publish/" 2>/dev/null || true
+    echo "  ✓ Bundled publish/*.sh into $rid_dir"
+  fi
+}
+[ "$BUILD_WIN" = true ] && bundle_into_publish "$PUBLISH_WIN"
+[ "$BUILD_LIN" = true ] && bundle_into_publish "$PUBLISH_LIN"
+[ "$BUILD_MAC" = true ] && bundle_into_publish "$PUBLISH_MAC"
 
 # ─── Step: Encrypt .env to config.enc and distribute to publish outputs ───
 echo ""
