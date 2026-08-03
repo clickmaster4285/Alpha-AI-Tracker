@@ -1,0 +1,151 @@
+# Alpha AI Tracker — One-Click Browser Extension Setup (Plan)
+
+Date: 2026-08-03 · Verified against: `client/Services/BrowserExtensionService.cs`, `client/Services/NativeMessageService.cs`, `client/Program.cs`, `client/ViewModels/MainViewModel.cs`, `client/Views/MainWindow.axaml`, `client/extensions/{chrome,firefox}/`, `client/extensions/native-host.py`, `client/extensions/com.alphai.tracker.json`, `client/publish/install-extensions.sh`, `client/client.csproj`.
+
+## Goal
+
+A single button in the Avalonia UI ("Setup All Browsers") that:
+1. Dynamically detects every installed browser per OS (no hardcoded list).
+2. Attaches the existing MV3 extension via the correct mechanism for each engine (Chromium vs Gecko).
+3. Replaces `native-host.py` with a **pure C# native messaging host** — zero Python in the shipped build.
+4. Rewrites the `com.alphai.tracker.json` native-messaging manifest per browser at the correct OS path, with `allowed_origins` computed from the extension ID.
+5. Degrades gracefully when elevation is unavoidable, and migrates existing installs off Python without breaking them.
+
+Constraints honored: **no code was changed** — this is a plan only, saved to `client/plan.txt`.
+
+---
+
+## Current state (what actually exists)
+
+| Piece | Where | Notes |
+|---|---|---|
+| Browser detection | `BrowserExtensionService.ScanAsync()` → `AddUniqueChromeAsync()` / `AddFirefoxAsync()` → `FindBinary()` | **Hardcoded** binary-name list (`google-chrome`, `chromium`, `brave-browser`, `microsoft-edge-stable`, `vivaldi`, `opera`, `firefox`) resolved via `which` — Unix-only, misses registry/.app/.desktop installs, no flatpak/snap detection. |
+| Chromium attach | `InstallExtensionAsync()` → `TryLaunchWithLoadExtensionAsync()` (Strategy 1) → `InjectExtensionViaPython()` (Strategy 2) | `--load-extension` is dev-only, killed by branded Chrome 137+ (150+ certainly). Profile injection is **Chrome-only** (`~/.config/google-chrome/Default/Preferences`), Python-based, hardcoded single profile. |
+| Firefox attach | `InstallExtensionAsync()` Firefox branch | Just launches Firefox + shows `about:debugging` manual instructions. No policy/`.xpi` support. |
+| Native host (Python) | `client/extensions/native-host.py` | Framed stdio (4-byte LE length + JSON) → opens a **fresh Unix socket connection per message** → `~/.local/share/alpha-ai-tracker/native-messaging.sock` → writes framed response to stdout. Protocol mirrored by `NativeMessageService.HandleConnectionAsync()` (reads ONE message per connection, acks, disposes handler). |
+| Manifest writing | `BrowserExtensionService.InstallNativeHostAsync()` (shells out to `install-extensions.sh`, which is **Python-heavy**) + `InstallNativeHostManuallyAsync()` (already pure C# — the seed for the new design) + `RegisterNativeHostWindows()` (HKCU registry, already pure C#) | Repo `com.alphai.tracker.json` is a sample with a dev-machine path; real manifests are written at runtime to user dirs. |
+| Extension ID | `ComputeExtensionId()` — **Python script** (SHA256(path) → a–p alphabet) | Same algorithm also inline in `install-extensions.sh` and `InjectExtensionViaPython()`. |
+| UI surface | `MainViewModel.DetectedBrowsers` + `AddExtensionToBrowserAsync()` + `MainWindow.axaml` `ItemsControl` (line ~260) + `ExtensionInstructions` / `ExtensionInstructionsTitle` card | Per-browser "Add Extension / Launch Browser" buttons today. No one-click-all. |
+| DI | `Program.cs` — `AddSingleton<NativeMessageService>()` + `AddHostedService(...)`, `AddSingleton<BrowserExtensionService>()` | NativeMessageService binds a **Unix socket** on all platforms (AF_UNIX works on Win10 1709+), so the C# host can keep using it on Windows too. |
+
+---
+
+## Decision — pure C# native host: Option (b), the main client exe in `--native-host` mode
+
+**Pick: (b) the `com.alphai.tracker.json` manifest `path` points at the main client executable, launched in a dedicated native-host mode.**
+
+Why (b) over (a) a standalone console exe:
+
+| | (a) separate self-contained console exe | (b) main exe + CLI mode |
+|---|---|---|
+| Artifacts | New publish target + RID set + extra bundle step in `publish/build-installer.sh` | **None** — the existing self-contained publish already ships one exe per RID |
+| Version skew | Host and tracker can drift | Impossible — same binary |
+| Memory/start | ~small if trimmed/NativeAOT (adds build complexity) | Larger exe, but the browser spawns the host once per connection anyway |
+| Elevation/entitlements | Separate signature/macOS entitlements to manage | Reuses the app's existing signing story |
+| Mode detection | Manifest `path` can't carry args → must use argv-origin trick regardless | Same argv-origin trick (below) |
+
+**The one real constraint on (b):** Chrome/Firefox native-messaging manifests allow only a single `path` string — the browser spawns the host with an identifying argument as `argv[1]`. Chromium passes the extension origin (`chrome-extension://<id>/`); Firefox passes the **bare Gecko application id** (`alpha-ai-tracker@alphai.com`, no URL-scheme prefix). So the host mode is entered by detecting that argument via the three-way check in Phase 1, plus an explicit `--native-host` flag for dev/manual testing (`dotnet run -- --native-host`).
+
+**Critical ordering requirement in `Program.cs`:** the native-host short-circuit must run immediately after the existing `--encrypt-config` block and **before** `EnvLoader.Load()`, the `new Mutex(true, "AlphaAITracker", ...)` single-instance gate, the `Host.CreateApplicationBuilder`, and `BuildAvaloniaApp()`. A host process spawned by the browser must never touch the mutex, the SQLite DB, or the DI container — it only does stdio ⇄ socket forwarding and exits.
+
+Host mode behavior (mirror `native-host.py` exactly, so `NativeMessageService` needs zero protocol changes):
+- Read framed message from raw stdin (`4-byte native-endian length` + UTF-8 JSON, 1 MB cap — identical to `native-host.py: read_message()`).
+- `action == "ping"` → forward to socket (so `NativeMessageService.IsExtensionConnected()` heartbeat updates), reply `{"status":"ok","detail":"pong"}`.
+- Otherwise forward to a **fresh** Unix socket connection at the same path `NativeMessageService` computes (`Path.Combine(UserProfile, ".local", "share", "alpha-ai-tracker", "native-messaging.sock")`), read the response, write it back framed on stdout. Catch socket failures and reply `{"status":"error",...}` instead of crashing (mirror `forward_to_tracker()`).
+- Loop until stdin EOF. Never instantiate Avalonia, never register in DI, never start services.
+- **Orphan cleanup:** `BrowserExtensionService.KillOrphanedNativeHostProcesses()` currently kills `native-host.py`. With (b) the host process has the *same exe name* as the tracker, so cleanup must match by command line (`--native-host`, `chrome-extension://`, or the Gecko application id in argv), never by bare exe name (or it would kill the tracker itself).
+
+Where the host code lives: new `client/Core/NativeMessagingHost.cs` (a plain static runner, no DI), invoked from `Program.cs`. The socket path constant should be centralized (currently duplicated between `NativeMessageService` ctor and `BrowserExtensionService` ctor) — a small `NativeMessagingPaths` helper is worth extracting in the same phase.
+
+---
+
+## What "attach" means per engine (real semantics + limitations)
+
+**No browser supports live-attaching into an already-open instance.** Every mechanism below requires a browser restart; the one-click flow must either (a) kill + relaunch the browser (Chromium — the service already does this via `KillBrowserProcesses()` + relaunch) or (b) prompt the user to restart (Firefox / policy paths).
+
+### Chromium family (Chrome, Chromium, Brave, Edge, Opera, Vivaldi)
+
+| Mechanism | Persistence | Privilege | Restart | Viability as one-click default |
+|---|---|---|---|---|
+| `--load-extension=<dir>` (current Strategy 1, `TryLaunchWithLoadExtensionAsync`) | None — only that launched process; unpacked dev mode | None | Auto (service kills + relaunches) | **Dev fallback only.** Branded Chrome 137+ ignores the flag; Chrome 150+ blocks it. Fine for Chromium/Brave/Edge/Opera/Vivaldi. |
+| **Profile injection** (`Preferences` JSON `extensions.settings[<id>].location=4`, current Strategy 2) | Yes — persists across restarts | None (user-profile file) | Auto (service relaunches) | **Recommended one-click default** — the only *persistent, no-elevation* mechanism for an unpacked extension. Must be generalized: today it's Chrome-only (`~/.config/google-chrome/Default/Preferences`); each browser has its own config dir (`~/.config/chromium`, `~/.config/BraveSoftware/Brave-Browser`, `~/.config/microsoft-edge`, `~/.config/vivaldi`, `~/.config/opera`) and default profile dir. Note: Chrome 137+ is increasingly strict about hand-edited `Preferences`; re-verify on target Chrome, keep `--load-extension` + manual instructions as the fallback ladder. |
+| Enterprise policy `ExtensionInstallForcelist` (managed JSON in `/etc/opt/<browser>/policies/managed/` etc.) | Yes — forced, survives everything | **Root** (pkexec) + browser restart | Prompt | **Not the default.** Policy installs come from the Web Store or a self-hosted `update_url` (CRX + update manifest) — our extension is unpacked/unsigned. Only viable if we self-host the CRX (out of scope for the one-click MVP; see Phase 5). |
+
+### Firefox (Gecko)
+
+| Mechanism | Persistence | Privilege | Restart | Viability |
+|---|---|---|---|---|
+| Temporary add-on via `about:debugging` (current behavior) | No — gone on restart | None | Prompt | What the button does today. Honest fallback. |
+| `policies.json` (`<firefox-install>/distribution/` or `/etc/firefox/policies/`) → `ExtensionSettings` + `install_url` to a **signed** `.xpi` | Yes — persistent, forced | **Root** | Prompt | Requires a signed `.xpi` (AMO submission or enterprise self-signing). Without signing, `install_url` is rejected. **Phase 5 opt-in**, not the one-click default. |
+| Native messaging manifest | n/a | None (`~/.mozilla/native-messaging-hosts/`) | n/a | Always install — needed for whichever attach path wins. |
+
+**Firefox one-click default for MVP:** install the native host manifest, launch Firefox, and show precise instructions (existing `ExtensionInstructions` flow). Auto-persistent Firefox attach is gated on signing the XPI — call that out explicitly in the UI copy.
+
+---
+
+## Elevation handling
+
+The **one-click happy path needs no elevation** (all user-scoped writes):
+- Linux/macOS native-messaging manifests → `~/.config/<browser>/NativeMessagingHosts/`, `~/.mozilla/native-messaging-hosts/`, `~/Library/Application Support/<Browser>/NativeMessagingHosts/`.
+- Windows → `HKCU\Software\<Vendor>\<Browser>\NativeMessagingHosts\com.alphai.tracker` (already implemented in `RegisterNativeHostWindows()`).
+- Chromium profile injection → user-profile `Preferences` file.
+
+Elevation is required **only** for the policy paths (Phase 5) and reuses the existing, proven patterns in this codebase:
+- Linux: `pkexec bash <tmp-script>` — exactly like `MainViewModel.GrantLinuxPermissionsAsync()` / `InstallDependenciesAsync()`. Write the managed-policy JSON via a temp script so pkexec args stay clean; keep the `sudo -u $USER gsettings` trick for per-user settings. The client itself stays non-root (per AGENTS.md 2026-08-03: it runs as a systemd-user service / autostart — a root policy write is a one-shot elevated child process, not a change of the service's identity).
+- Windows: `Verb = "runas"` UAC prompt — like `GrantWindowsPermissions()`.
+- macOS: System-Settings instructions (no CLI elevation API) — like `ShowMacOSPermissionInstructions()`.
+
+---
+
+## Phase plan (incrementally implementable)
+
+### Phase 1 — Pure C# native messaging host (kill Python at the protocol layer)
+- **New `client/Core/NativeMessagingHost.cs`** — static runner: framed stdin reader (4-byte LE length, 1 MB cap, UTF-8 JSON), framed stdout writer, per-message fresh socket forward to `~/.local/share/alpha-ai-tracker/native-messaging.sock`, ping special-case, error replies. Mirrors `native-host.py` 1:1 so `NativeMessageService` is untouched.
+- **New `client/Core/ExtensionIdCalculator.cs`** — pure C# SHA-256(path) → a–p 32-char ID. Replace the Python in `ComputeExtensionId()`, `InjectExtensionViaPython()`, and `install-extensions.sh`.
+- **`Program.cs`** — add native-host mode detection immediately after the `--encrypt-config` block, before mutex/DI/Avalonia. Host-mode entry is recognized when ANY of the following holds (checked in order): (a) `argv[1]` starts with `chrome-extension://` — Chromium family (Chrome, Chromium, Brave, Edge, Opera, Vivaldi, and any detected Chromium fork); (b) `argv[1]` **exactly equals** the Gecko application id `alpha-ai-tracker@alphai.com` (from `browser_specific_settings.gecko.id` in `extensions/firefox/manifest.json`) — Firefox does NOT pass a `chrome-extension://` prefix; it invokes the host with the bare applicationId as `argv[1]`, so this clause is what recognizes Firefox and Gecko forks (LibreWolf, Waterfox, Zen Browser) that Phase 2 detects and Phase 3 gives manifests; (c) the explicit `--native-host` flag for manual/dev invocation (`dotnet run -- --native-host`). The framed-JSON protocol payload (read stdin → forward → write stdout) is identical in all three cases — only the entry-detection condition differs. Returns cleanly on exit.
+- **`BrowserExtensionService`** — replace `InjectExtensionViaPython()` with a C# `Preferences` editor (System.Text.Json on `extensions.settings`); delete the Python body of `ComputeExtensionId()`; make `InstallNativeHostAsync()` call `InstallNativeHostManuallyAsync()` directly (drop the `install-extensions.sh` path); rewrite `KillOrphanedNativeHostProcesses()` to match `--native-host`, `chrome-extension://`, or the Gecko application id in argv, not exe name.
+- **Validate:** build + `dotnet run -- --native-host` echo test; send a synthetic framed message; confirm `NativeMessageService` logs it.
+
+### Phase 2 — Dynamic browser detection per OS (registration-based, name-free) + engine classification
+- **New `client/Core/BrowserDetector.cs`** — the *only* source of "is this a browser". No brand/binary-name list gates inclusion; detection is driven entirely by OS-level browser registration, so Tor Browser, LibreWolf, Waterfox, Epiphany, Falkon, Zen Browser and any future browser are caught automatically:
+  - **Linux:** reuse the `.desktop` scan skeleton from `InstalledAppDetector.GetLinuxDesktopApplicationDirs()` + `AddAppFromDesktopFile()` (keeping its `NoDisplay`/`Type=Application` gate), but the browser filter becomes: `MimeType=` contains `x-scheme-handler/http` (or `x-scheme-handler/https`) **OR** `Categories=` contains `WebBrowser`. Every `.desktop` under `$XDG_DATA_HOME`, `~/.local/share/applications`, each `$XDG_DATA_DIRS` entry + `/applications`, `/usr/share/applications`, `/usr/local/share/applications`, flatpak exports (`/var/lib/flatpak/exports/share/applications`, `~/.local/share/flatpak/exports/share/applications`) and snap (`/var/lib/snapd/desktop/applications`) is a candidate. `Exec=` → `BinaryPath` (via `ExtractBinaryFromExec()`), `Name=` → display name, `Icon=` → UI icon, desktop-file basename → stable `DesktopId`. **Default flag:** `xdg-settings get default-web-browser` (fallback `xdg-mime query default x-scheme-handler/http`) returns a `.desktop` id → set `IsDefault = true` on the matching entry.
+  - **Windows:** enumerate `HKLM\SOFTWARE\Clients\StartMenuInternet\*` — the registry key the OS itself maintains for "all installed browsers" (name-free by construction). Implemented via **`reg.exe query` subprocess reads** (the existing write path `RegisterNativeHostWindows()` uses `Microsoft.Win32.Registry` behind an `OperatingSystem.IsWindows()` guard, but reads on the plain `net10.0` TFM follow the reg.exe/PowerShell convention — do not change the TFM): `reg.exe query "HKLM\SOFTWARE\Clients\StartMenuInternet"` → each subkey is a browser; per subkey `reg.exe query "HKLM\SOFTWARE\Clients\StartMenuInternet\<Name>\shell\open\command" /ve` yields the exe path and the subkey `(Default)` the display name. **Default flag:** `reg.exe query "HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice" /v ProgId`, resolve that ProgId's `shell\open\command` (`reg.exe query "HKCR\<ProgId>\shell\open\command" /ve`), and match the resolved exe — never string-match the ProgId (Firefox's is `FirefoxURL-<hash>`; Brave's is `BraveHTML`).
+  - **macOS:** enumerate **all** http/https URL-scheme handlers from the LaunchServices registration DB rather than checking named bundle IDs: `plutil -convert json -o - ~/Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist` (subprocess output parses with System.Text.Json — consistent with the codebase's existing subprocess + Info.plist text-scan conventions), filter entries whose `LSHandlerURLScheme` ∈ {http, https}, read the handler bundle ID (`LSHandlerRoleAll`), resolve each to its `.app` path via `mdfind "kMDItemCFBundleIdentifier == '<id>'"`. (Alternative with identical output: a small guarded P/Invoke to `LSCopyApplicationURLsForURL` — acceptable, but the `plutil`+`mdfind` pair avoids adding native TFM surface.) **Default flag:** `LSCopyDefaultHandlerForURLScheme("https")` via the same optional P/Invoke, or match the https `LSHandlerRoleAll` in the same plist.
+  - **Dedup + status:** keep symlink/alias dedup via `ResolveBinaryPath()` against a canonical-path set; keep status assignment (`ReadyToInstall` vs `NativeHostReady` vs `ExtensionActive` via `IsExtensionActiveAsync()` heartbeat) in `ScanAsync()`.
+- **New `client/Core/BrowserEngineDetector.cs`** — separates "is this a browser" (BrowserDetector) from "which engine". Classifies each candidate **Chromium / Gecko / Unknown from profile-directory shape, never from the binary name** (forks/rebrands change names but keep the underlying profile format):
+  - **Chromium signature:** a user-data root with `Preferences` JSON under a profile subdir (`<root>\<profile>\Preferences`, parses as JSON; `Local State` at the root is a secondary signature).
+  - **Gecko signature:** a `<root>\profiles.ini` (and/or `<profile>\prefs.js` / `user.js` — text `user_pref("...", ...)` lines); `compatibility.ini` is a secondary signature.
+  - **Candidate roots are derived from the detected binary itself** (basename of `Exec=`/exe, `.desktop` Id, bundle name → `~/.config/<derived>` / `%LOCALAPPDATA%\<derived>\User Data` / `~/Library/Application Support/<derived>`; flatpak additionally `~/.var/app/<appid>/config`, snap `~/snap/<name>`), **plus a name-free corpus sweep** of the standard roots (`~/.config/*`, `%LOCALAPPDATA%\*\User Data`, `%APPDATA%\*`, `~/Library/Application Support/*`) that finds every `Preferences`/`prefs.js` profile regardless of brand — attribute each candidate by strongest path overlap; a candidate with no attributable profile → `Unknown`. **Scope guard:** the corpus sweep is never a blind filesystem scan — it only runs against roots correlated to browsers `BrowserDetector` already confirmed via OS-level http/https handler registration (the `MimeType=`/`Categories=` `.desktop`, `StartMenuInternet`, or LaunchServices checks above). This is what excludes Electron apps (Slack, Discord, VS Code, etc.): they have Chromium-shaped `Preferences` files, but they never register as http/https handlers, so they never become `BrowserDetector` candidates in the first place — and the sweep never inspects their roots.
+- **`BrowserExtensionService.ScanAsync()`** — replace `AddUniqueChromeAsync()`/`AddFirefoxAsync()`/`FindBinary()` with `BrowserDetector` results + `BrowserEngineDetector` classification, stamping each `DetectedBrowser` with a new `Engine` property (`BrowserEngine` enum; the model field lands with Phase 3's `ConfigDir`/`DefaultProfileDir`/`ManifestPath`/`PolicyDir` additions). The existing named-brand list (Chrome/Chromium/Brave/Edge/Vivaldi/Opera/Firefox) is reduced to a **display-only `BrandCatalog`** (nicer `Name`/`Icon`/known-config-dir hint) — it must never gate scanning, inclusion, or classification.
+- **Engine = Unknown (fail safe, not fail silent):** the browser still gets a `DetectedBrowser` entry, still gets its native-messaging manifest installed in Phase 3, and still renders in the UI — but the one-click auto-attach ladder (Chromium `Preferences` injection / `--load-extension`, Firefox policy) is **skipped** and the flow lands on the existing `ExtensionInstructions` manual-instructions card, with copy noting the engine wasn't auto-detected.
+- **Validate:** scan a machine with a non-mainstream browser (Zen Browser, LibreWolf, Waterfox, or similar) installed; confirm it appears with no brand-list match, its engine classifies correctly from profile shape, and the OS-default flag is correct on Linux, Windows, and macOS.
+
+### Phase 3 — One-click orchestration + per-browser manifests
+- **`DetectedBrowser`** — add `ConfigDir`, `DefaultProfileDir`, `ManifestPath`, `PolicyDir` fields; set from Phase 2.
+- **`BrowserExtensionService.InstallNativeHostManuallyAsync()`** — generalize from the two hardcoded dirs (`_chromeNativeHostDir`, `_firefoxNativeHostDir`) to a per-browser manifest-path map (Chrome/Chromium/Brave/Edge/Vivaldi/Opera/Firefox on Linux; the same browsers under `~/Library/Application Support/...` on macOS; registry per-vendor on Windows — `RegisterNativeHostWindows()` already has the vendor key list). Write both `allowed_origins` (Chrome) and `allowed_extensions` (Firefox) with the pure-C# extension ID; always overwrite so newly detected browsers get manifests immediately.
+- **`InstallExtensionAsync()`** — Chromium ladder becomes: `--load-extension` → **per-browser profile injection** (correct `ConfigDir`/`DefaultProfileDir`) → relaunch → manual instructions. Firefox stays manual-instructions (MVP).
+- **`MainViewModel`** — new `[RelayCommand] OneClickSetupAllAsync()`: `ScanBrowsersAsync()` → install native host per browser → attach per engine → aggregate into `ExtensionInstructions`/`ExtensionInstructionsTitle` (reusing the existing instructions card) → let the 2s heartbeat poller (`PollHeartbeat` + `ExtensionConnectionChanged`) flip statuses to `ExtensionActive`. 
+- **`MainWindow.axaml`** — one prominent "Setup All Browsers" button above the `ItemsControl` (line ~260), wired to the new command, with a per-browser status list beneath it.
+- **Validate:** on a machine with 2+ browsers, one click → both show "✅ Active" within ~30s (heartbeat).
+
+### Phase 4 — Windows & macOS parity
+- **Windows:** verify the AF_UNIX socket path round-trips (Win10 1709+); replace deprecated `wmic` calls in `IsNativeHostRunningForPidAsync()` with `PowerShell Get-CimInstance Win32_Process`; confirm HKCU registration + host spawn works with the C# host (`client.exe chrome-extension://<id>/`). Note: the extension's `background.js` sends `browser: "chrome"` for all Chromium browsers — acceptable today, but flag for later per-browser attribution.
+- **macOS:** confirm `.app` detection + `~/Library/Application Support/<Browser>/NativeMessagingHosts` manifests + unsigned-extension `--load-extension` launch works; document Accessibility-permission prompts if launching the browser from the tracker.
+
+### Phase 5 — Elevation-backed policy install (opt-in) + Firefox signing
+- Chromium `ExtensionInstallForcelist` via `pkexec`-written managed JSON (Phase-1 `GrantLinuxPermissionsAsync` pattern) — only if we later self-host the CRX/update manifest; keep gated behind an "Advanced" toggle, not the one-click default.
+- Firefox `policies.json` with `ExtensionSettings`/`install_url` — requires a signed `.xpi`; decide AMO submission vs enterprise signing before enabling. Until signed, Firefox button = native host + launch + instructions.
+- Restart UX: for policy paths, prompt "restart required" instead of auto-kill (auto-kill is reserved for the Chromium profile-injection path where it's already the behavior).
+
+### Phase 6 — Migration & retirement of Python (no breakage mid-upgrade)
+- **Graceful transition:** keep `native-host.py` + Python steps in the shipped bundle for one release. On next `ScanAsync`/`InstallNativeHostAsync`, manifests are rewritten to point at the C# host (`path` = main exe). Old Chrome/FF tabs using the old manifest reconnect after restart; the extension auto-reconnects via its alarm/`onDisconnect` logic (`background.js` `connectNative()`/`scheduleReconnect()`).
+- **Cleanup (second release):** delete `InjectExtensionViaPython`, Python `ComputeExtensionId`, `IsNativeHostRunningForPidAsync` Python checks, `FindInstallScript`, `FindNativeHostPy`; strip Python steps from `publish/install-extensions.sh`, then remove the script; delete `extensions/native-host.py`; update `publish/build-installer.sh` `bundle_into_publish()` (no `chmod +x` on a Python file anymore) and the `extensions/` doc references; update `AGENTS.md` + `client/ARCHITECTURE.md` changelog in the existing style; per the **Build-Parity rule** (AGENTS.md 2026-08-03), ship-test via `bash publish/build-installer.sh -b linux` → install the `.deb` → run the one-click flow from the installed binary.
+
+---
+
+## Files touched per phase (for the changelog)
+
+- **NEW:** `Core/NativeMessagingHost.cs`, `Core/ExtensionIdCalculator.cs`, `Core/BrowserDetector.cs`, `Core/BrowserEngineDetector.cs`, `Core/NativeMessagingPaths.cs` (path constants)
+- **MOD:** `Program.cs` (native-host mode), `Services/BrowserExtensionService.cs`, `Services/NativeMessageService.cs` (only if path helper extracted), `ViewModels/MainViewModel.cs`, `Views/MainWindow.axaml`, `publish/install-extensions.sh` (Phase 6), `publish/build-installer.sh` (Phase 6), `AGENTS.md` + `client/ARCHITECTURE.md` (changelog)
+- **DEL (Phase 6):** `extensions/native-host.py`, Python snippets in `BrowserExtensionService.cs`
+- **Untouched:** `extensions/chrome/`, `extensions/firefox/` (extension payloads already correct — they talk to `com.alphai.tracker` via `chrome.runtime.connectNative`), server, web.
