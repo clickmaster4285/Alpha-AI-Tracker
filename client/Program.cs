@@ -23,13 +23,29 @@ if (args.Contains("--encrypt-config"))
     if (!File.Exists(inputPath))
     {
         Console.Error.WriteLine($"Error: .env not found at {inputPath}");
-        return;
+        return 1;
     }
 
     Console.WriteLine($"Encrypting {inputPath} → {outputPath} (AES-256-GCM)...");
     EnvLoader.EncryptToFile(inputPath, outputPath);
     Console.WriteLine($"Done: {new FileInfo(outputPath).Length} bytes written.");
-    return;
+    return 0;
+}
+
+// ─── Native messaging host mode (pure C#, Phase 1) ───
+// The browser spawns THIS executable (the manifest `path` points at the main
+// binary) with a single identifying argument. Detect host mode when ANY of:
+//   (a) argv[1] starts with "chrome-extension://"  — Chromium family
+//   (b) argv[1] exactly equals the Gecko application id from
+//       extensions/firefox/manifest.json browser_specific_settings.gecko.id —
+//       Firefox invokes the host with the BARE id, no URL-scheme prefix
+//   (c) the explicit --native-host flag (manual/dev invocation)
+// Host mode ONLY does stdio ⇄ socket forwarding and exits cleanly — it must
+// NEVER touch the mutex, config, DI, SQLite, or Avalonia.
+if (args.Contains("--native-host") ||
+    (args.Length > 0 && IsNativeHostInvocation(args[0])))
+{
+    return NativeMessagingHost.Run();
 }
 
 EnvLoader.Load();
@@ -57,7 +73,7 @@ if (!mutexCreated)
     {
         SingleInstanceService.SignalExistingInstance();
     }
-    return;
+    return 0;
 }
 
 // We are the primary (mutex-owning) instance: start listening for SHOW
@@ -190,11 +206,22 @@ finally
     appMutex.Dispose();
 }
 
+return 0;
+
 static AppBuilder BuildAvaloniaApp()
     => AppBuilder.Configure<App>()
         .UsePlatformDetect()
         .WithInterFont()
         .LogToTrace();
+
+// ─── Native-host mode invocation detection ───
+// Matches the identifying argv[1] the browser appends when it spawns the host:
+//   (a) Chromium:  chrome-extension://<id>/
+//   (b) Firefox:   the bare Gecko application id (no prefix)
+// The explicit --native-host flag is handled separately in the main flow.
+static bool IsNativeHostInvocation(string firstArg) =>
+    firstArg.StartsWith("chrome-extension://", StringComparison.OrdinalIgnoreCase) ||
+    string.Equals(firstArg, NativeMessagingPaths.GeckoApplicationId, StringComparison.Ordinal);
 
 // ─── Log path resolution ───
 // Prefer the app dir (bin/... in dev, so the log sits next to the build

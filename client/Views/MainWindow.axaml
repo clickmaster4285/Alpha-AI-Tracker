@@ -251,10 +251,18 @@
                                            Foreground="{StaticResource FgBrush}"
                                            HorizontalAlignment="Center"/>
 
-                                <TextBlock Text="Install the browser extension to track URLs, page titles, and navigation history. Click a browser below to auto-install."
+                                <TextBlock Text="Install the browser extension to track URLs, page titles, and navigation history. Click a browser below to auto-install, or use one-click setup for everything."
                                            FontSize="13" Foreground="{StaticResource MutedFgBrush}"
                                            TextWrapping="Wrap" HorizontalAlignment="Center"
                                            TextAlignment="Center"/>
+
+                                <!-- One-click setup for ALL detected browsers -->
+                                <Button Classes="success"
+                                        Command="{Binding OneClickSetupAllCommand}"
+                                        IsEnabled="{Binding IsStepWorking, Converter={StaticResource BoolInvert}}"
+                                        Content="⚡ Setup All Browsers"
+                                        HorizontalAlignment="Center" MinWidth="220" Padding="16,10"
+                                        FontSize="13" Margin="0,2,0,0"/>
 
                                 <!-- Browser list -->
                                 <ItemsControl ItemsSource="{Binding DetectedBrowsers}"
@@ -269,7 +277,7 @@
                                                     <StackPanel VerticalAlignment="Center">
                                                         <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold"
                                                                    Foreground="{StaticResource FgBrush}"/>
-                                                        <TextBlock Text="{Binding StatusText}" FontSize="11"
+                                                        <TextBlock Text="{Binding StatusLine}" FontSize="11"
                                                                    Foreground="{StaticResource MutedFgBrush}"
                                                                    Margin="0,2,0,0"/>
                                                     </StackPanel>

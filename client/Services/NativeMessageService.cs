@@ -41,8 +41,9 @@ public class NativeMessageService : BackgroundService
     {
         _store = store;
         _logger = logger;
-        var baseDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        _socketPath = Path.Combine(baseDir, ".local", "share", "alpha-ai-tracker", "native-messaging.sock");
+        // Centralized in NativeMessagingPaths (Phase 1) — shared with the C#
+        // native messaging host and BrowserExtensionService.
+        _socketPath = client.Core.NativeMessagingPaths.SocketPath;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)

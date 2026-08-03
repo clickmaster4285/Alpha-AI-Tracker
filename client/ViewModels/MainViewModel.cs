@@ -4,6 +4,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using client.Configuration;
 using System.Collections.ObjectModel;
+using client.Core;
 using client.Core.Abstractions;
 using client.Core.Models;
 using client.Services;
@@ -1024,6 +1025,100 @@ public partial class MainViewModel : ViewModelBase
         {
             ExtensionInstructionsTitle = "✅ All Connected!";
             ExtensionInstructions = "All detected browsers are sending data to the tracker.";
+        }
+    }
+
+    /// <summary>
+    /// One-click setup for ALL detected browsers (Phase 3): fresh scan → install
+    /// the native messaging host manifest per browser → attach per engine.
+    /// Chromium: --load-extension then profile injection. Firefox/Gecko: host +
+    /// launch + manual instructions (MVP). Engine=Unknown: host installed, manual
+    /// instructions (fail safe, not fail silent). Statuses flip to "✅ Active"
+    /// automatically within ~30s once a browser connects (heartbeat poller).
+    /// </summary>
+    [RelayCommand]
+    private async Task OneClickSetupAllAsync()
+    {
+        if (IsStepWorking) return;
+        IsStepWorking = true;
+        ClearInstructions();
+
+        try
+        {
+            // Fresh scan so statuses reflect reality before we act.
+            await ScanBrowsersAsync(CancellationToken.None);
+
+            var pending = _browserExt.DetectedBrowsers
+                .Where(b => b.Status == BrowserInstallStatus.ReadyToInstall ||
+                            b.Status == BrowserInstallStatus.NativeHostReady)
+                .ToList();
+
+            if (pending.Count == 0)
+            {
+                ExtensionInstructionsTitle = "✅ All Connected";
+                ExtensionInstructions =
+                    "Every detected browser already has the extension active (heartbeat confirmed).";
+                return;
+            }
+
+            var results = new List<string>();
+            var hasUnknownEngine = false;
+
+            // Step 1 (once): native messaging host manifests for ALL detected
+            // browsers — the writer is idempotent and always overwrites.
+            var hostOk = await _browserExt.InstallNativeHostAsync(CancellationToken.None);
+
+            foreach (var browser in pending)
+            {
+                browser.Status = BrowserInstallStatus.Loading;
+                browser.NativeHostInstalled = hostOk;
+
+                if (!hostOk)
+                {
+                    results.Add($"{browser.Name}: ⚠ native host install failed — see manual steps.");
+                    browser.Status = BrowserInstallStatus.ReadyToInstall;
+                    continue;
+                }
+
+                // Step 2: engine-appropriate attach. Unknown → fail safe to manual.
+                if (browser.Engine == BrowserEngine.Unknown)
+                {
+                    hasUnknownEngine = true;
+                    results.Add($"{browser.Name}: ⚠ engine not auto-detected — native host installed. " +
+                                $"Follow the manual steps below for {browser.Name}.");
+                    browser.Status = BrowserInstallStatus.NativeHostReady;
+                    continue;
+                }
+
+                var result = await _browserExt.InstallExtensionAsync(browser);
+                results.Add(result.Success
+                    ? $"{browser.Name}: extension attach requested (host + launch)."
+                    : $"{browser.Name}: ⚠ {result.Message}");
+            }
+
+            ExtensionInstructionsTitle = "✅ Setup Complete";
+            var tail =
+                "\n\nStatus flips to \"✅ Active\" automatically within ~30s once a browser " +
+                "connects (heartbeat).";
+            ExtensionInstructions = string.Join("\n\n", results) + tail;
+
+            if (hasUnknownEngine)
+            {
+                var manualLines = pending
+                    .Where(b => b.Engine == BrowserEngine.Unknown)
+                    .Select(b => $"  • {b.Name}: open its extensions page → Load unpacked → {b.ExtensionDir}");
+                ExtensionInstructions +=
+                    "\n\nManual steps for unrecognized engines:" + "\n" + string.Join("\n", manualLines);
+            }
+        }
+        catch (Exception ex)
+        {
+            ExtensionInstructionsTitle = "⚠ Error";
+            ExtensionInstructions = $"One-click setup failed: {ex.Message}";
+        }
+        finally
+        {
+            IsStepWorking = false;
         }
     }
 
