@@ -1,7 +1,8 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-08-01 (docs re-synced with code — 11 SQLite tables, 7 sync endpoints, activity_logs/shell_commands removed, file logger, install-extensions.sh)  
+> **Last audited:** 2026-08-03 (installer-parity rule + single-instance/tray fix)  
 > **Changelog:** 
+> - 2026-08-03: **Single-instance + tray UX fix; Installer-Parity rule** — a second launch now restores the running window (`SingleInstance.cs` named-event signaling), the tray menu gains **Quit**, and on tray-less desktops (no StatusNotifierWatcher — `Services/TrayAvailability.cs` D-Bus check) closing the window exits instead of stranding an invisible process. Added the mandatory **Build-Parity Rule** (§8): every feature/modification must also be wired into the installer packaging and verified from an installed build — `dotnet run` is not a valid release test.
 > - 2026-08-01: **Docs audit** — removed stale `activity_logs` / `shell_commands` schema + sync references (both gone from the product), corrected sync endpoint table (7 endpoints, batch 500), documented the `MigrateSql` migration strategy, added `storage_devices`/`permission_status`/`app_items` tables, noted `IShellCommandCollector`/`ShellCommand` as dead code, added `FileLoggerProvider` (dotnetrunlog.txt), added `install-extensions.sh`, and cleaned up the completion % to ~85%.
 > - 2026-07-31: **Cross-service payload sync + local catalog dedup** — installed-apps mapper now sends `binaryName`/`isBrowser`/`desktopId`/`categories`; app-sessions sends `groupedBy`/`cgroupScope`/`contextLabel`; app-items sends `processId` + all 9 journey fields. `installed_applications` conflict-update resets `is_synced = 0` so re-detected apps re-sync (drives server `last_seen_at` freshness). `installed_packages` switches to `ON CONFLICT(package_name, source_manager)` with a dedup block (window fn keeps newest per fingerprint) + `CREATE UNIQUE INDEX IF NOT EXISTS idx_installed_packages_fingerprint` in `MigrateSql` — fixes the 6,530-row duplicate package bloat caused by `ON CONFLICT(id)` never conflicting.
 > - 2026-07-31: **cgroup-based session dedup (multi-process GUI apps → one session)** — `CgroupResolver.cs` (new) reads `/proc/<pid>/cgroup` and extracts the systemd transient scope (`app-gnome-code-*.scope`); every subprocess of one logical window shares it, so `BuildSessionKey` became scope-aware: `scope|{scope}|{installedAppId}|{machine}|{session}` for scoped processes, unchanged PID key as fallback. Scope resolved once per process and threaded through the `resolvedLogs` tuple — all 6 `BuildSessionKey` call sites consistent. Boot hydration recomputes scope live (`OpenSessionRecord.InstalledAppId` added to both open-session queries). `SessionLabelResolver.cs` (new) labels sessions (VS Code workspace folder via argv + PPID fallback, Chrome `--profile-directory`) into `context_label`. New `grouped_by`/`cgroup_scope`/`context_label` columns on `app_sessions` via `MigrateSql` ALTERs (client-only; server sync later). `gnome-control-center-search-provider` → `NonAppProcesses`.
@@ -94,6 +95,7 @@
 client/
 ├── Program.cs                          # Entry point. DI setup, CLI modes (--encrypt-config, --background), mutex
 ├── App.axaml / App.axaml.cs            # Avalonia app lifecycle, tray icon, window close interception (hide vs shutdown)
+├── SingleInstance.cs                   # Named-event signaling — a 2nd launch restores the running instance's window
 ├── app.manifest                        # Windows compatibility manifest
 ├── ViewLocator.cs                      # ViewModel → View resolution via reflection
 ├── client.csproj                       # Project file with NuGet references
@@ -160,6 +162,7 @@ client/
 │   ├── AutoStartService.cs              # Platform-specific auto-start: Run key, .desktop, launchd plist
 │   ├── DesktopEventService.cs           # BackgroundService: orchestrator — starts watchers, wires EventCoordinator → JourneyEngine
 │   ├── FileLoggerProvider.cs            # ILogger provider writing to dotnetrunlog.txt
+│   ├── TrayAvailability.cs              # D-Bus StatusNotifierWatcher detection — does this desktop show a tray icon?
 │   └── Watchers/
 │       ├── ATSPIEventWatcher.cs         # Linux AT-SPI via Tmds.DBus.Protocol — focus/window events + /proc/cwd for file manager paths
 │       ├── FileSystemEventWatcher.cs    # FileSystemWatcher on 7 user directories — create/delete/rename/modify enrichment
@@ -587,6 +590,21 @@ On startup it also runs, in order:
 - Releases are manually built and uploaded to GitHub
 - The web dashboard has a "Download App" dialog that fetches the latest release from GitHub API, filtering assets by platform pattern (`.exe`, `.deb`, `.dmg`)
 - Default GitHub repo in web config: `clickmaster4285/Alpha-AI-Tracker` (overridable via `NEXT_PUBLIC_GITHUB_REPO`). Note: `client/.env.example` still carries a stale `REPO=AlphaDev-7/Alpha-AI-Tracker` value that is **not read by the client** — the web dashboard is the source of the download link.
+
+### ⚠️ Build-Parity Rule (mandatory) — `dotnet run` ≠ installed build
+
+`dotnet run` compiles from the source tree, so it always runs the newest code. Installed builds (`.deb` / `.exe` / `.dmg` via `build-installer.sh` + the platform builders) ship the **publish output** plus only what the scripts explicitly bundle, from a root-owned install dir. **A change is NOT done until it works from an installed build.**
+
+Checklist:
+
+1. **Always ship-test** — build the installer, install the artifact, run the new functionality there. `dotnet run` success is not sufficient.
+2. **New runtime assets** (icons, JSON, images) — must be copied by `bundle_into_publish()` in `build-installer.sh` or by `build-deb.sh` / `build-dmg.sh` / `installer-windows.iss`.
+3. **New files in `extensions/`** — bundled automatically; keep extension / native-host files there.
+4. **New scripts in `publish/`** — copied into every publish output automatically.
+5. **New env vars** — add to `.env` BEFORE `encrypt-config.sh`; installers ship `config.enc` baked at build time (dev reads `.env` directly).
+6. **No writes to the exe dir** — installed app runs from root-owned `/usr/share/alpha-ai-tracker/` (Linux) / Program Files (Windows). Write only to `~/.config/alpha-ai-tracker/` (logs, machine-id) and `~/.local/share/alpha-ai-tracker/` (DB, sockets).
+7. **Packaging edits apply to all platforms** — update `build-installer.sh`, `build-deb.sh`, `build-dmg.sh`, `installer-windows.iss` together.
+8. **Stale-binary guard** — `build-installer.sh` aborts if source is newer than the published `client.dll`; run `dotnet clean && bash publish/build-installer.sh`. This guard covers compiled code only — assets are your responsibility (items 2–6).
 
 ---
 
