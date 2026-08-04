@@ -1,7 +1,9 @@
 # Web Architecture — Alpha AI Tracker Dashboard
 
-> **Last audited:** 2026-07-29  
-> **Changelog:** 2026-07-25: Updated comprehensive/logs page to use new app_sessions API (replaced old activityLogsApi). Added appSessionsApi to api.ts with AppSession types. Tabs removed (system log and productive/unproductive tabs not yet implemented for new schema).  
+> **Last audited:** 2026-08-04 (no web code changes — client-only native-host/extension session)  
+> **Changelog:**
+> - 2026-08-04: Client removed Python native-host and switched to engine-based extension packs — **no web API / UI changes** this session.
+> - 2026-07-25: Updated comprehensive/logs page to use new app_sessions API (replaced old activityLogsApi). Added appSessionsApi to api.ts with AppSession types. Tabs removed (system log and productive/unproductive tabs not yet implemented for new schema).  
 > **Service completion (honest):** ~16%
 
 ---
@@ -324,6 +326,8 @@ These are used by the permissions system as sample roles, not real users.
 
 ## 8. Immediate Next Steps
 
+> 2026-08-04: client-only session (C# native host + engine extensions) — no web changes.
+
 1. **Connect real API to dashboard** — at minimum, show real employee count and stats
 2. **Add tests** — start with the `api.ts` client and auth flows using MSW or similar
 3. **Add error boundaries** — wrap each page section in `React.ErrorBoundary`
@@ -332,3 +336,7 @@ These are used by the permissions system as sample roles, not real users.
 6. **Add loading/empty/error states to all pages** — especially the mock-data ones that will eventually use real APIs
 7. **Consider replacing localStorage mock data with MSW** — use Mock Service Worker for development instead of seeded localStorage data
 8. **Add code splitting** — dynamic imports for chart libraries, heavy pages
+
+---
+
+> **Last audited:** 2026-08-04, commit 37a1bf5 (no web code delta this session)

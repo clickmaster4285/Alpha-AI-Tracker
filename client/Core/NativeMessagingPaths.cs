@@ -26,11 +26,11 @@ public static class NativeMessagingPaths
     }
 
     /// <summary>
-    /// The Gecko application id from <c>extensions/firefox/manifest.json</c>
+    /// The Gecko application id from <c>extensions/gecko/manifest.json</c>
     /// (<c>browser_specific_settings.gecko.id</c>). Firefox invokes the native
     /// messaging host with this bare id as the first argument (no
     /// <c>chrome-extension://</c> prefix) — Program.cs uses it to detect
-    /// host-mode for Firefox and Gecko forks (LibreWolf, Waterfox, Zen Browser).
+    /// host-mode for any Gecko-engine browser.
     /// </summary>
     public const string GeckoApplicationId = "alpha-ai-tracker@alphai.com";
 }

@@ -486,6 +486,73 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
             }
             catch (UnauthorizedAccessException) { }
             catch { }
+
+            // Mark/add browsers from StartMenuInternet (URLAssociations on Uninstall
+            // keys miss Chrome/Edge when they aren't registered that way).
+            try
+            {
+                foreach (var rootPath in new[]
+                {
+                    @"SOFTWARE\Clients\StartMenuInternet",
+                    @"SOFTWARE\WOW6432Node\Clients\StartMenuInternet",
+                })
+                {
+                    using var root = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(rootPath);
+                    if (root == null) continue;
+                    foreach (var subName in root.GetSubKeyNames())
+                    {
+                        using var browserKey = root.OpenSubKey(subName);
+                        if (browserKey == null) continue;
+                        var displayName = browserKey.GetValue(null) as string ?? subName;
+                        using var cmdKey = browserKey.OpenSubKey(@"shell\open\command");
+                        var cmd = cmdKey?.GetValue(null) as string ?? "";
+                        var exePath = cmd.Trim();
+                        if (exePath.StartsWith('"'))
+                        {
+                            var end = exePath.IndexOf('"', 1);
+                            if (end > 1) exePath = exePath[1..end];
+                        }
+                        else
+                        {
+                            var sp = exePath.IndexOf(' ');
+                            if (sp > 0) exePath = exePath[..sp];
+                        }
+                        var binaryName = string.IsNullOrEmpty(exePath)
+                            ? ""
+                            : Path.GetFileNameWithoutExtension(exePath);
+
+                        // Update existing entry if we already have this binary.
+                        var existing = _installedApps.FirstOrDefault(a =>
+                            (!string.IsNullOrEmpty(binaryName) &&
+                             string.Equals(a.BinaryName, binaryName, StringComparison.OrdinalIgnoreCase)) ||
+                            string.Equals(a.AppName, displayName, StringComparison.OrdinalIgnoreCase));
+                        if (existing != null)
+                        {
+                            existing.IsBrowser = true;
+                            if (string.IsNullOrEmpty(existing.Categories))
+                                existing.Categories = "WebBrowser";
+                            continue;
+                        }
+
+                        if (string.IsNullOrEmpty(binaryName)) continue;
+                        _knownApps.Add(displayName);
+                        _knownApps.Add(binaryName);
+                        _binaryToDisplayName[binaryName] = displayName;
+                        _installedApps.Add(new InstalledApplication
+                        {
+                            AppName = displayName,
+                            BinaryName = binaryName,
+                            DesktopId = subName,
+                            Categories = "WebBrowser",
+                            InstallPath = Path.GetDirectoryName(exePath) ?? "",
+                            ChangeType = "installed",
+                            IsBrowser = true,
+                            DetectedAt = DateTime.UtcNow,
+                        });
+                    }
+                }
+            }
+            catch { }
         }
         catch (UnauthorizedAccessException) { }
         catch { }

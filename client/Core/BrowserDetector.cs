@@ -252,39 +252,78 @@ public static class BrowserDetector
         var candidates = new List<BrowserCandidate>();
         try
         {
-            const string root = @"HKLM\SOFTWARE\Clients\StartMenuInternet";
-            var listing = RunAndCapture("reg.exe", $"query \"{root}\"");
-            if (string.IsNullOrWhiteSpace(listing)) return candidates;
+            // Prefer the managed Registry API — reg.exe prints HKEY_LOCAL_MACHINE
+            // while older parsers looked for HKLM and skipped every entry. Also
+            // do NOT reject subkeys that contain spaces ("Google Chrome",
+            // "Microsoft Edge") — that was silently zeroing the browser list.
+            using var rootKey = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                @"SOFTWARE\Clients\StartMenuInternet");
+            if (rootKey == null) return candidates;
 
             var defaultExe = GetDefaultBrowserExeWindows();
 
-            foreach (var line in listing.Split('\n'))
+            foreach (var subKey in rootKey.GetSubKeyNames())
             {
-                var trimmed = line.Trim();
-                if (!trimmed.StartsWith(root, StringComparison.OrdinalIgnoreCase)) continue;
-                var subKey = trimmed[root.Length..].Trim('\\').Trim();
-                if (string.IsNullOrEmpty(subKey) || subKey.Contains(' ')) continue;
+                if (string.IsNullOrWhiteSpace(subKey)) continue;
 
-                // Display name: (Default) value of the subkey.
-                var name = ParseRegDefault(RunAndCapture("reg.exe", $"query \"{root}\\{subKey}\" /ve"));
-                if (string.IsNullOrEmpty(name)) name = subKey;
+                using var browserKey = rootKey.OpenSubKey(subKey);
+                if (browserKey == null) continue;
 
-                // Executable: (Default) value of ...\shell\open\command.
-                var cmd = ParseRegDefault(RunAndCapture("reg.exe",
-                    $"query \"{root}\\{subKey}\\shell\\open\\command\" /ve"));
+                var name = browserKey.GetValue(null) as string;
+                if (string.IsNullOrWhiteSpace(name)) name = subKey;
+
+                using var cmdKey = browserKey.OpenSubKey(@"shell\open\command");
+                var cmd = cmdKey?.GetValue(null) as string;
                 var exePath = StripExeQuotes(cmd);
-                if (string.IsNullOrEmpty(exePath)) continue;
+                if (string.IsNullOrEmpty(exePath) || !File.Exists(exePath.Trim('"')))
+                {
+                    // Still include if the path looks absolute — File.Exists can
+                    // fail under Wow64 redirection for some installs.
+                    if (string.IsNullOrEmpty(exePath)) continue;
+                }
 
+                exePath = exePath.Trim('"');
                 candidates.Add(new BrowserCandidate
                 {
-                    Name = name,
+                    Name = name!,
                     BinaryPath = exePath,
-                    BinaryName = Path.GetFileNameWithoutExtension(exePath),
+                    BinaryName = Path.GetFileNameWithoutExtension(exePath) ?? string.Empty,
                     DesktopId = subKey,
                     Icon = string.Empty,
                     IsDefault = !string.IsNullOrEmpty(defaultExe) &&
-                                string.Equals(exePath.Trim('"'), defaultExe.Trim('"'), StringComparison.OrdinalIgnoreCase),
+                                string.Equals(exePath, defaultExe.Trim('"'), StringComparison.OrdinalIgnoreCase),
                 });
+            }
+
+            // Also scan WOW6432Node for 32-bit browser registrations.
+            using var wowRoot = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                @"SOFTWARE\WOW6432Node\Clients\StartMenuInternet");
+            if (wowRoot != null)
+            {
+                var seen = new HashSet<string>(
+                    candidates.Select(c => c.BinaryPath), StringComparer.OrdinalIgnoreCase);
+                foreach (var subKey in wowRoot.GetSubKeyNames())
+                {
+                    if (string.IsNullOrWhiteSpace(subKey)) continue;
+                    using var browserKey = wowRoot.OpenSubKey(subKey);
+                    if (browserKey == null) continue;
+                    var name = browserKey.GetValue(null) as string ?? subKey;
+                    using var cmdKey = browserKey.OpenSubKey(@"shell\open\command");
+                    var exePath = StripExeQuotes(cmdKey?.GetValue(null) as string);
+                    if (string.IsNullOrEmpty(exePath)) continue;
+                    exePath = exePath.Trim('"');
+                    if (!seen.Add(exePath)) continue;
+                    candidates.Add(new BrowserCandidate
+                    {
+                        Name = name,
+                        BinaryPath = exePath,
+                        BinaryName = Path.GetFileNameWithoutExtension(exePath) ?? string.Empty,
+                        DesktopId = subKey,
+                        Icon = string.Empty,
+                        IsDefault = !string.IsNullOrEmpty(defaultExe) &&
+                                    string.Equals(exePath, defaultExe.Trim('"'), StringComparison.OrdinalIgnoreCase),
+                    });
+                }
             }
         }
         catch { /* best-effort */ }
@@ -471,51 +510,3 @@ public static class BrowserDetector
     }
 }
 
-/// <summary>
-/// Display-only brand catalog. It is NEVER used to gate scanning, inclusion, or
-/// engine classification — it only pretties up the name/icon and provides a known
-/// config-dir hint for browsers whose real user-data dir differs from the binary
-/// name (e.g. BraveSoftware/Brave-Browser). A browser missing from this table is
-/// still fully detected and classified.
-/// </summary>
-public static class BrandCatalog
-{
-    private static readonly Dictionary<string, (string Name, string ConfigDir)> Known =
-        new(StringComparer.OrdinalIgnoreCase)
-        {
-            ["google-chrome"] = ("Google Chrome", "google-chrome"),
-            ["google-chrome-stable"] = ("Google Chrome", "google-chrome"),
-            ["chromium"] = ("Chromium", "chromium"),
-            ["chromium-browser"] = ("Chromium", "chromium"),
-            ["brave-browser"] = ("Brave", "BraveSoftware/Brave-Browser"),
-            ["microsoft-edge"] = ("Microsoft Edge", "microsoft-edge"),
-            ["microsoft-edge-stable"] = ("Microsoft Edge", "microsoft-edge"),
-            ["vivaldi"] = ("Vivaldi", "vivaldi"),
-            ["opera"] = ("Opera", "opera"),
-            ["firefox"] = ("Firefox", "mozilla/firefox"),
-            ["firefox-esr"] = ("Firefox ESR", "mozilla/firefox"),
-            ["zen-browser"] = ("Zen Browser", "zen"),
-            ["librewolf"] = ("LibreWolf", "librewolf"),
-            ["waterfox"] = ("Waterfox", "waterfox"),
-            ["epiphany"] = ("GNOME Web", "epiphany"),
-            ["falkon"] = ("Falkon", "falkon"),
-        };
-
-    public static (string? Name, string? ConfigDir) Find(BrowserCandidate c)
-    {
-        if (!string.IsNullOrEmpty(c.BinaryName) && Known.TryGetValue(c.BinaryName, out var byBin))
-            return (byBin.Name, byBin.ConfigDir);
-        if (!string.IsNullOrEmpty(c.DesktopId) && Known.TryGetValue(c.DesktopId, out var byId))
-            return (byId.Name, byId.ConfigDir);
-
-        // Name-overlap fallback for rebrands we don't list yet (e.g. desktop name
-        // "Brave Software" → "Brave"): display-only, never gates anything.
-        foreach (var kvp in Known)
-        {
-            if (c.Name.Contains(kvp.Key, StringComparison.OrdinalIgnoreCase) ||
-                kvp.Key.Contains(c.Name, StringComparison.OrdinalIgnoreCase))
-                return (kvp.Value.Name, kvp.Value.ConfigDir);
-        }
-        return (null, null);
-    }
-}

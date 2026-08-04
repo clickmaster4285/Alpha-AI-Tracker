@@ -1,0 +1,363 @@
+# Alpha AI Tracker — Browser Extension Load / Persist Plan
+
+> **Status:** Active — P0a Windows load-extension hardening in code (seed timeout/kill/success/propagator/pack); still needs live Chrome Profile N + Edge + installed `.exe` verification  
+> **Written:** 2026-08-04 · **Updated:** 2026-08-04 (coverage contract + P0a code pass)  
+> **Scope:** How `--load-extension` and related attach paths work across **all browser engines**, what we tried before, what the tree does **now**, and what to do next.  
+> **Rule:** Engine-based only (Chromium / Gecko / WebKit). No brand-name hardcoding for detection or install ladders.
+
+---
+
+## 0. Coverage contract — new browsers & profile lifecycle
+
+**Honest guarantee:** This plan is **not** “whatever browser I download forever, zero friction,” and **not** live sync for every profile create/delete.
+
+### 0.1 New browser installed later
+
+Valid for any browser that (1) registers as an OS http(s) handler and (2) has a **Chromium** or **Gecko** profile shape. Brand-new forks work **without brand hardcoding** after **Refresh Browsers** + **Install Extension** / **Setup All**.
+
+| Case | Detected? | Install? |
+|------|-----------|----------|
+| New Chromium fork + OS handler + Local State / Preferences | Yes after Refresh | Yes (same Chromium ladder) |
+| New Gecko fork + `profiles.ini` | Yes after Refresh | Partial (Temporary Add-on until AMO/ESR) |
+| Safari / WebKit | Yes as WebKit | No — clear Not Supported (no Install button) |
+| Never launched (no profile dir) | Maybe as Unknown | No until first launch + Refresh |
+| Novel engine / no shape | Unknown | No — fail safe |
+| Not an http(s) handler (Electron apps) | No | N/A (by design) |
+
+There is **no** continuous watcher for newly installed browsers. User must Refresh (or restart tracker) then Install.
+
+### 0.2 Create / delete profiles later
+
+Install / Setup All re-reads `Local State` → `profile.info_cache` (or folder scan) and **idempotently** seeds only profiles that **lack** the extension entry; already-seeded profiles are skipped.
+
+| Event | Behavior |
+|-------|----------|
+| Create Profile N after Install | No auto-seed. Next Install / Setup All seeds the missing profile. |
+| Delete a profile | No special cleanup; prefs go with the profile. |
+| Switch `last_used` | Relaunch prefers `last_used`; unseeded profile needs Install again. |
+| Never re-run Install | New profiles stay without the extension. |
+
+**P0 contract:** no background profile filesystem watcher. Idempotent re-seed on Install / Setup All only. A P2 watcher may be justified later.
+
+**Do not market** as “any browser forever auto.”
+
+### 0.3 Implementation priority (strict)
+
+1. **P0a — Windows:** diagnose and close “failed to load-extension” (Chrome multi-profile + Edge) on `dotnet run` **and** installed `.exe` before macOS/Linux expansion.
+2. **P0b — macOS Chromium** path / signed-Chrome messaging.
+3. **P0c — Linux** flatpak/snap + `.desktop` Exec= persistence.
+4. Then Gecko AMO vs ESR decision, then P1 durable CRX/store.
+
+---
+
+## 1. Goal
+
+When an employee clicks **Install Extension** (or **Setup All Supported Browsers**):
+
+1. Detect installed browsers via OS http(s) handlers + `installed_applications.is_browser`.
+2. Classify **engine** from profile-directory shape (not product name).
+3. Install the matching engine pack (`extensions/chromium` or `extensions/gecko`).
+4. Register the **C# native messaging host** (tracker exe, not Python).
+5. Persist the extension across **browser restart** and across **all user profiles** where possible.
+6. Flip UI to **Connected** when the extension heartbeat reaches `NativeMessageService`.
+
+Honest product truth: **silent, permanent, unsigned install on branded Chrome/Edge/Firefox is constrained by vendor security policy.** The plan must separate “what works in-session” from “what survives restart” from “what requires enterprise / store / signed packages.”
+
+---
+
+## 2. Engine matrix (all browser types)
+
+| Engine | Examples (informational only — not detection keys) | Extension pack | Native messaging | Can use `--load-extension`? | Persist without store/enterprise? |
+|--------|-----------------------------------------------------|----------------|------------------|-------------------------------|-----------------------------------|
+| **Chromium** | Chrome, Edge, Brave, Opera, Vivaldi, Chromium OSS | `extensions/chromium/` (MV3) | `allowed_origins: chrome-extension://<id>/` | **Yes** (with `--disable-features=DisableLoadExtensionCommandLineSwitch` on Chrome 137+) | **Fragile.** Session flag works; permanent needs External Extensions / forcelist+CRX / browser-written prefs; forged Secure Preferences resets developer mode |
+| **Gecko** | Firefox, ESR, LibreWolf, Waterfox, Zen | `extensions/gecko/` (MV3 + gecko id) | `allowed_extensions: alpha-ai-tracker@alphai.com` | **No** (Chromium flag only) | Temporary Add-on / signed XPI / `policies.json` + Mozilla-signed XPI |
+| **WebKit** | Safari, some Epiphany builds | `extensions/webkit/` (docs only) | No WebExtensions NM bridge | **No** | **Not supported** |
+| **Unknown** | IE/Trident, new browser with no profile yet | none | none | **No** | Fail safe — show manual / “launch once then Refresh” |
+| **Legacy / non-WebExt** | Internet Explorer | none | none | **No** | Listed as Not supported |
+
+Detection order (unchanged principle):
+
+1. `BrowserDetector` — OS-confirmed browser candidates (handlers / StartMenuInternet / etc.).
+2. `BrowserEngineDetector` — profile shape → Chromium / Gecko / WebKit / Unknown.
+3. `BrowserExtensionService.ScanAsync` / `AttachExtensionAsync` — engine ladder only.
+
+---
+
+## 3. Previous approaches (historical — do not treat as “current git truth” without re-reading code)
+
+These were tried over 2026-07 → 2026-08. Documented so we do not re-learn the same failures.
+
+### 3.1 Phase A — Python native host + brand folders
+
+- Host: `extensions/native-host.py` + Chrome-specific paths.
+- Packs: `extensions/chrome/`, `extensions/firefox/`.
+- Install: `--load-extension` and/or Python Preferences injection.
+- **Problem:** Brand coupling; Python dependency; brittle on installed builds.
+
+### 3.2 Phase B — Pure C# host + engine packs
+
+- Host: tracker exe (`NativeMessagingHost`, `--native-host` / `chrome-extension://` / gecko id).
+- Packs: `extensions/chromium/`, `extensions/gecko/`, `extensions/webkit/`.
+- Removed Python host from the live path.
+- **Win:** Installer-parity clearer; one host binary.
+
+### 3.3 Phase C — `--load-extension` then Preferences injection (single profile)
+
+**Flow:**
+
+1. Kill browser.
+2. Launch with `--load-extension=<pack>`.
+3. If heartbeat missing → inject `extensions.settings[<id>]` (`location=4`) into `Preferences`.
+4. Relaunch without flag.
+
+**Observed results:**
+
+- Edge often **showed** the extension during tool-launched session (**Reload** button = session/unpacked).
+- After normal restart → **gone** (flag is session-only).
+- Branded Chrome 137+/150: `--load-extension` gated; Preferences hand-edit stripped by **Secure Preferences MAC**.
+- Developer mode toggled in UI did not survive tool restart when Secure Preferences was forged incorrectly.
+
+### 3.4 Phase D — Rev-3 “policy forcelist is the real persist path”
+
+From `client/plan.txt` (rev-3):
+
+- Default intended path: elevated `ExtensionInstallForcelist` → self-hosted signed **CRX** + update XML.
+- `--load-extension` + Preferences injection demoted to **dev fallbacks**.
+- Gecko permanent path blocked on **Mozilla-signed XPI** (release Firefox); ESR-only signature policy override.
+
+**Windows reality check (2026-08-04 live machine):**
+
+- Machine **not domain-joined**.
+- Edge docs: External Extensions via **HKLM / Wow6432Node**, not HKCU.
+- Chrome docs: Windows External installs effectively **Chrome Web Store `update_url`**, not local CRX path (since ~Chrome 33).
+- Edge non-AD forcelist limited to **Edge Add-ons** store for many cases.
+- Writing HKCU `path`+`version` to local CRX **does not** equal durable install on branded Chrome.
+
+### 3.5 Phase E — CRX pack + HKCU External + Preferences forge + shortcut flags
+
+**Added:**
+
+- Stage pack under `%LOCALAPPDATA%\AlphaAITracker\extensions\chromium`.
+- `--pack-extension` → `chromium.crx`.
+- HKCU External Extensions (later attempted HKLM).
+- `update.xml` + HKCU `ExtensionInstallForcelist` (file://).
+- Patch Start Menu / Desktop / Taskbar `.lnk` with `--load-extension` + DisableLoadExtension feature flag.
+- Forge `developer_mode=true` and settings into Preferences / sometimes Secure Preferences.
+
+**Failures:**
+
+- HKLM External often never landed (UAC / elevation path flaky).
+- Forging Secure Preferences **without valid HMAC / encrypted_hash** → browser resets **developer mode OFF** on next start (exact user report).
+- Single-instance relaunch without `--profile-directory` seeded **Default**, while daily Chrome use was **Profile 15**.
+- Propagator only read Secure Preferences when that file existed → missed Profile 15 entries that live in **Preferences** (no MAC).
+- Native-host `allowed_origins` sometimes held **wrong ID** (path-id vs key-id vs stale id) → yellow warning / no native messaging even when UI listed the extension.
+- User still saw: “failed to load-extension” / extension missing after tool restart.
+
+### 3.6 Phase F — Seed + propagate (latest code direction before this plan file)
+
+**Intent:**
+
+1. Stage pack (no Secure Preferences forge).
+2. For **each** profile: kill → launch  
+   `--user-data-dir=… --profile-directory="<name>" --load-extension=… --disable-features=DisableLoadExtensionCommandLineSwitch`.
+3. Wait until that profile’s prefs contain the extension (browser-authored).
+4. Propagate browser-authored entry to any missed profiles (Preferences **or** Secure Preferences; MAC only when present).
+5. Rewrite native-host manifests with **all** candidate IDs.
+6. Relaunch **last_used** profile with `--load-extension`.
+
+**Still open at plan time:** user reported **failed to load-extension** again — treat as **not closed**. Need log-backed diagnosis (seed timeout, flag ignored, profile lock, wrong staged path under installer, NM id mismatch).
+
+---
+
+## 4. Current approach (as implemented in the working tree — plan snapshot 2026-08-04)
+
+> Re-verify against source before implementing; this section describes the intended current design in code.
+
+### 4.1 Entry points
+
+| UI / API | Behavior |
+|----------|----------|
+| `AttachExtensionAsync` | Chromium: policy if `ALPHA_CRX_EXTENSION_ID` set, else `InstallExtensionAsync`. Gecko: install path. WebKit/Unknown: fail safe. |
+| `InstallExtensionAsync` | Engine ladder (Chromium seed-all-profiles; Gecko launch). |
+| `OneClickSetupAllAsync` | Fresh scan → native host → `AttachExtensionAsync` per installable browser. |
+| `MayAttach` | Allows `Loading` status so UI progress does not falsely block install. |
+
+### 4.2 Chromium ladder (current)
+
+```
+InstallExtensionAsync(Chromium)
+  ├─ ChromiumPersistentInstaller.Install
+  │    ├─ Stage unpacked + embed key → %LOCALAPPDATA%\AlphaAITracker\extensions\chromium\
+  │    ├─ Pack CRX via browser --pack-extension
+  │    ├─ Best-effort HKLM External + HKCU forcelist/update.xml
+  │    ├─ Patch .lnk shortcuts (--load-extension + feature flag; preserve --profile-directory)
+  │    └─ DO NOT forge Secure Preferences developer_mode (removed from happy path)
+  ├─ ChromiumProfileSeeder.SeedAllProfilesAsync
+  │    └─ per profile: --profile-directory + --load-extension + DisableLoadExtension…
+  ├─ ChromiumProfilePropagator.PropagateFromSeed
+  │    └─ copy browser-authored entry (Preferences and/or Secure Preferences)
+  ├─ Rewrite native-host allowed_origins (path-id + key-id + discovered ids)
+  └─ Relaunch last_used profile with --load-extension
+```
+
+**Supporting types:**
+
+- `ChromiumProfileSeeder` — Local State `info_cache` / `last_used`; per-profile seed.
+- `ChromiumProfilePropagator` — multi-profile copy; must search **both** pref files.
+- `ChromiumShortcutPersister` — consumer restart path when External/forcelist blocked.
+- `ChromiumPersistentInstaller` — stage/CRX/registry/shortcuts.
+- `ExtensionIdCalculator` — path-derived vs SPKI/key-derived IDs.
+
+### 4.3 Gecko ladder (current)
+
+- Write gecko native-host manifest (`allowed_extensions`).
+- Launch browser; instruct Temporary Add-on if unsigned.
+- Permanent: blocked pending Mozilla-signed XPI + optional `policies.json`.
+
+### 4.4 WebKit / Unknown (current)
+
+- UI: Not supported / engine unknown.
+- No `--load-extension`.
+
+### 4.5 `dotnet run` vs installer (parity)
+
+| Concern | `dotnet run` | Installed build |
+|---------|--------------|-----------------|
+| Extension pack source | Walk-up to repo `extensions/` or staged LocalAppData copy | Bundled `extensions/` beside exe (`build-installer.sh` `bundle_into_publish`) + stage to LocalAppData |
+| Native host binary | `bin/Debug/net10.0/client.exe` | Installed `client.exe` / product name under Program Files |
+| Writable staging | `%LOCALAPPDATA%\AlphaAITracker\…` | Same (must never write under root-owned install dir) |
+| Config | `.env` | `config.enc` baked at build (`ALPHA_CRX_*` missing if not in `.env` before encrypt) |
+| Validation rule | Dev convenience only | **Mandatory** ship-test per AGENTS.md Installer-Parity |
+
+`--load-extension` path must point at a **user-writable staged copy**, not a root-owned Program Files pack path, for both modes.
+
+---
+
+## 5. Why “failed to load-extension” still happens (diagnosis checklist)
+
+Do **not** guess in code until logs confirm which bucket:
+
+1. **Flag ignored** — branded Chrome without `DisableLoadExtensionCommandLineSwitch`; or single-instance reuse ignoring new argv.
+2. **Wrong profile** — seed Default; user looks at Profile N.
+3. **Seed timeout** — prefs not flushed within wait window; seeder marks failure.
+4. **Staged path missing** — installer/dotnet cannot find `extensions/chromium`; stage empty.
+5. **ID mismatch** — UI extension id ≠ `allowed_origins` → native host never starts → “load failed” / yellow warning.
+6. **Developer mode reset** — any remaining Secure Preferences forge without MAC.
+7. **Policy block** — “Managed by your organization” / `BlockExternalExtensions`.
+8. **Kill race** — kill before prefs write; propagate/read stale files.
+
+**Required evidence for next fix pass:** `ILogger` lines around `Seeding profile`, `Seeded profile`, `Seed timeout`, `Propagated`, `Launched … --load-extension`, plus `edge://extensions` / `chrome://extensions` id + developer mode after clean restart **without** the tool.
+
+---
+
+## 6. Future plan (ordered)
+
+### 6.1 P0 — Make Chromium seed reliable (consumer Windows)
+
+1. Log and surface per-profile seed success/fail in the UI (which profiles loaded).
+2. Confirm `--load-extension` + feature flag on Chrome **and** Edge for **last_used** and each `info_cache` profile.
+3. After seed, verify extension present in **Preferences and/or Secure Preferences**; never require MAC for Preferences-sourced entries.
+4. Ensure native-host `allowed_origins` always includes:
+   - path-derived id of staged unpacked dir,
+   - key-derived id from PEM/`manifest.key`,
+   - any id discovered in prefs.
+5. Never write `developer_mode` into Secure Preferences without a browser-authored MAC.
+6. Ship-test the same flow from an **installed** Windows build (Installer-Parity).
+
+### 6.2 P1 — Durable Chromium without relying on forever `--load-extension`
+
+| Path | When it works | Work required |
+|------|----------------|---------------|
+| **A. Self-hosted CRX + ExtensionInstallForcelist** | Managed / policy-capable machines; file/https update URL where policy allows | Finish `crxsign`, bake `ALPHA_CRX_EXTENSION_ID`, HKLM policy write that actually elevates, Edge/Chrome policy roots derived from install path |
+| **B. HKLM External Extensions (Edge)** | Edge still honors local CRX from **HKLM\Wow6432Node\…\Extensions** | Reliable elevated write; verify on Edge 151+ |
+| **C. Chrome Web Store / Edge Add-ons** | Consumer branded browsers | Publish (or unlisted) store package; External `update_url` only |
+| **D. Shortcut / launcher flags** | Consumer machines blocking A–C | Keep as **fallback**, not sole strategy; ensure all launchers (taskbar, desktop, Start) patched |
+
+Target architecture: **A when CRX configured**, else **B on Edge**, else **per-profile seed + shortcuts (D)**, never Preferences MAC forgery.
+
+### 6.3 P1 — Multi-profile contract
+
+- Source of truth: Local State `profile.info_cache` + `last_used`.
+- Seed **every** listed profile once on Install.
+- Propagate only **browser-authored** blobs; write back to the **same file type** (Preferences vs Secure Preferences) the seed used.
+- UI checklist: per-profile “seeded / failed / skipped”.
+
+### 6.4 P2 — Gecko
+
+1. MVP remains Temporary Add-on + native host.
+2. Decide signed-XPI workflow (AMO unlisted / enterprise).
+3. Then `policies.json` / `ExtensionSettings` force-install (elevated), parallel to Chromium Phase 5.
+
+### 6.5 P2 — WebKit
+
+- Keep NotSupported.
+- Document clearly in wizard (no false Install button).
+
+### 6.6 P3 — Hardening / product
+
+- Tests: fake user-data dirs for Chromium Preferences vs Secure Preferences; seed detection; id calculation; shortcut patch preserves `--profile-directory`.
+- Observability: structured log event `browser.attach` with engine, profile, strategy, success.
+- Remove dead Preference-forge helpers once P0 closed.
+- Update AGENTS.md / client ARCHITECTURE only after behavior is proven on installed builds.
+
+---
+
+## 7. Strategy comparison (cheat sheet)
+
+| Strategy | Session load | Survives restart | Needs elevation | Needs signed package | Engines |
+|----------|--------------|------------------|-----------------|----------------------|---------|
+| `--load-extension` (+ DisableLoadExtension flag) | Yes | No (unless every launch carries flags / shortcuts) | No | No | Chromium |
+| Hand-edit Preferences / Secure Preferences | Maybe | Often **No** (MAC / encrypted_hash) | No | No | Chromium — **reject as primary** |
+| Shortcut argv persistence | Yes if shortcut used | Yes if user always uses patched shortcuts | No | No | Chromium |
+| HKCU External local CRX | Rarely | No on modern Chrome; weak on Edge | No | CRX pack | Chromium — **insufficient alone** |
+| HKLM External local CRX | Edge: maybe | Edge: maybe | Yes | CRX | Chromium (Edge-oriented) |
+| ExtensionInstallForcelist + update.xml/CRX | Yes | Yes (when policy allows) | Usually | Yes (CRX) | Chromium |
+| Store listing + External update_url | Yes | Yes | No / low | Store review | Chromium |
+| Gecko Temporary Add-on | Yes | No (session/temporary) | No | No | Gecko |
+| Mozilla-signed XPI + policies | Yes | Yes | Often | Yes | Gecko |
+| WebKit | N/A | N/A | N/A | N/A | Unsupported |
+
+---
+
+## 8. Non-goals (explicit)
+
+- Do not hardcode Chrome/Edge/Brave/Firefox brand tables for detection or install.
+- Do not depend on Python native host.
+- Do not claim “works on all browsers permanently” without store/enterprise where vendors require it.
+- Do not treat `dotnet run` success as release validation.
+
+---
+
+## 9. Immediate next actions
+
+1. **P0a code landed:** 45s seed timeout, hardened kill/wait+singleton clear, Preferences-only propagate (no Secure Preferences forge), isolated CRX pack user-data-dir, fail install when zero profiles seed/skip, per-profile outcome logging.
+2. **P0a verify (required):** Reproduce on Windows Chrome multi-profile + Edge under `dotnet run`; confirm extension + developer mode after clean restart without the tool.
+3. Repeat P0a on **installed** Windows `.exe` (Installer-Parity). Do **not** start macOS/Linux attach work until verified.
+4. Confirm idempotent re-seed: create a new Chromium profile → Install again → only the new profile is seeded.
+5. Then P0b/P0c, then P1 CRX/forcelist or store path.
+
+---
+
+## 10. File / component map (for implementers)
+
+| Piece | Role |
+|-------|------|
+| `client/Services/BrowserExtensionService.cs` | Scan, attach, launch, NM manifests |
+| `client/Core/BrowserDetector.cs` | OS browser candidates |
+| `client/Core/BrowserEngineDetector.cs` | Engine from profile shape |
+| `client/Core/ChromiumPersistentInstaller.cs` | Stage, CRX, registry/policy, shortcuts |
+| `client/Core/ChromiumProfileSeeder.cs` | Per-profile `--load-extension` seed |
+| `client/Core/ChromiumProfilePropagator.cs` | Copy browser-authored prefs across profiles |
+| `client/Core/ChromiumShortcutPersister.cs` | Persist load flags on `.lnk` |
+| `client/Core/ExtensionIdCalculator.cs` | Path vs key extension IDs |
+| `client/Core/NativeMessagingHost.cs` | C# stdio host |
+| `client/extensions/chromium/` | MV3 Chromium pack |
+| `client/extensions/gecko/` | MV3 Gecko pack |
+| `client/publish/build-installer.sh` | Bundle `extensions/` into publish output |
+| `client/plan.txt` | Older rev-3 architecture notes (still useful; this root `plan.txt` is the load-extension master plan) |
+
+---
+
+## 11. One-paragraph summary
+
+**Coverage:** engine-based Chromium/Gecko after Refresh+Install; WebKit/Unknown not supported; new profiles need re-Install (idempotent skip of already-seeded). **Previously** session `--load-extension`, Preferences forgery, and incomplete External/forcelist failed across restart / Profile N / Secure Preferences MAC. **Currently** seed every Chromium profile (skip if already present), propagate browser-authored prefs, patch shortcuts; Gecko Temporary Add-on; “failed to load-extension” still **P0a on Windows** before macOS/Linux. **Future** signed CRX/policy/store, then optional P2 profile watcher.

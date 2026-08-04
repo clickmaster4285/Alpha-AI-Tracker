@@ -6,7 +6,8 @@
   "permissions": [
     "tabs",
     "nativeMessaging",
-    "storage"
+    "storage",
+    "alarms"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -20,9 +21,17 @@
       "strict_min_version": "109.0"
     }
   },
+  "action": {
+    "default_title": "Alpha AI Tracker",
+    "default_icon": {
+      "16": "icons/icon-16.svg",
+      "48": "icons/icon-48.svg",
+      "128": "icons/icon-128.svg"
+    }
+  },
   "icons": {
-    "16": "icon-16.png",
-    "48": "icon-48.png",
-    "128": "icon-128.png"
+    "16": "icons/icon-16.svg",
+    "48": "icons/icon-48.svg",
+    "128": "icons/icon-128.svg"
   }
 }

@@ -1,8 +1,9 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-08-03 (installer-parity rule + single-instance/tray fix)
+> **Last audited:** 2026-08-04 (pure C# native host + engine-based extensions)
 > **Changelog:**
 >
+> - 2026-08-04: **Client: remove Python native-host; engine-based generic extensions** — `native-host.py` deleted. Native messaging host is the tracker exe (`NativeMessagingHost.Run` via `--native-host` / `chrome-extension://` / Gecko app id). Extensions reorganized to `extensions/chromium/`, `extensions/gecko/`, `extensions/webkit/` (WebKit = not supported). Browser list comes from OS http(s) handlers × `installed_applications.is_browser`; engine from profile shape only — no brand-name hardcoding. GUI shows per-browser **Install Extension** (auto-load + launch). `install-extensions.sh` / `build-installer.sh` updated for C# host. Client completion → ~88%.
 > - 2026-08-03: **Installer-Parity rule + single-instance/tray UX fix** — codified a MANDATORY rule (see §6 below): every feature or modification must ALSO be wired into the installer functionality, and verified in an installed build — `dotnet run` alone is NOT a valid release test, because installed builds ship the publish output plus only what the `publish/*` scripts bundle (extensions/, publish/*.sh, config.enc) and run from a root-owned dir. Client fix behind the rule: a second launch now restores the running window (`client/SingleInstance.cs` named-event signaling), the tray menu gains **Quit**, and tray-less desktops (no StatusNotifierWatcher — `client/Services/TrayAvailability.cs` D-Bus check) quit on window-close instead of stranding an invisible process.
 > - 2026-08-01: **Docs audit (AGENTS.md + client/server ARCHITECTURE.md)** — removed all stale `activity-logs/sync` and `shell-commands/sync` references (both endpoints/tables/code are deleted from the product). Fixed the mermaid diagram + cross-service contracts to show the real 7 sync endpoints. Server: migration inventory corrected to 001–016 (15 files), added `jobs/staleness_sweep.go`, `employee_installed_applications`/`employee_installed_packages` junctions, and all 12 Postgres tables; API surface now lists `GET /app-sessions` + `GET /app-items` and drops the removed `activity-logs` section. Client: corrected SQLite schema (11 tables incl. `storage_devices`, `permission_status`, `app_items`), documented the `MigrateSql` migration strategy, the real sync batch size (500), the file logger (`dotnetrunlog.txt`), `install-extensions.sh`, and flagged `IShellCommandCollector`/`ShellCommand` as dead code. Branch updated to `restructureClient`.
 > - 2026-07-31: **Cross-service payload + employee↔catalog dedup (migrations 013–016)** — tracking tables were washed out (backup at `server/bin/backup/alpha_ai_tracker_20260731_134750.dump`) and server + client landed together. 013 adds `installed_app_id`/`installed_package_id`/`grouped_by`/`cgroup_scope`/`context_label` to `app_sessions`; 014 adds `process_id` + 9 journey fields to `app_items`; 015/016 add company-global app/package catalogs (`app_fingerprint=desktop_id|binary_name`, `package_fingerprint=package_name|source_manager`) with junction tables `employee_installed_applications`/`employee_installed_packages` (per-install version/path/date + `first_seen_at`/`last_seen_at`/`is_active`; FKs → `employees(employee_id)` VARCHAR per convention). `SyncInstalledApps`/`SyncInstalledPackages` rewritten to upsert-catalog-then-link in one tx. Hourly `jobs/staleness_sweep.go` deactivates links idle > `LINK_STALE_DAYS=7`. Client: installed-apps mapper sends `binaryName`/`isBrowser`/`desktopId`/`categories`; app-sessions sends `groupedBy`/`cgroupScope`/`contextLabel`; app-items sends `processId` + 9 journey fields; apps conflict-update resets `is_synced=0`; packages dedup to `ON CONFLICT(package_name, source_manager)` + unique index (fixes 6,530 duplicate package rows from the old `ON CONFLICT(id)`). Smoke-tested: happy path, two-employee-same-app → 1 catalog + 2 links, malformed/partial payloads → 4xx/200 not 500.
@@ -43,7 +44,7 @@
 > - 2026-07-27: **Broadened auto-detect paths** — `/home/*` and `/media/*` now accepted as valid install locations (project-local compiled binaries like `alpha-ai-server` in `./bin/`).
 > - 2026-07-27: **Fixed file manager path resolution** — folder display names now resolved to absolute paths by checking `~/`, `~/Documents`, `~/Desktop`, `/media/<user>/`.
 > - 2026-07-27: **Fixed `SessionHierarchyResolver`** — PPID walk now traverses build tools and runtimes as intermediate steps; `ShouldLinkTo` accepts build tools as children of IDEs and terminals.
->   **Overall completion (honest):** ~50% across all 3 services
+>   **Overall completion (honest):** ~52% across all 3 services (client ~88%, server ~50%, web ~16%)
 
 > **⚠️ MANDATORY RULE — Installer parity (`dotnet run` ≠ installed build).** `dotnet run` compiles from the source tree, so it always runs the newest code. Installed/released builds (`bash publish/build-installer.sh`, `bash publish/release.sh`) ship the **publish output** plus whatever the build scripts explicitly bundle. **A change is NOT "done" until it works in an installed build** — any new functionality or modification must also be added to the installer functionality. See §6 → *Installer-Parity Rule* for the full checklist.
 
@@ -161,7 +162,7 @@ flowchart LR
 - **No listing endpoints** for installed-apps, installed-packages, device-hardware, network-info, session-events (sync-only tables)
 - **Dead DTOs** — `BrowserContext*`, `Url*`, `UrlVisit*`, `ShellCommand*` types still in `new_schema_dto.go`
 
-### Client — ~85% complete
+### Client — ~88% complete
 
 **What works:**
 
@@ -267,7 +268,7 @@ flowchart LR
    sudo dpkg -i installers/alpha-ai-tracker_1.0.0_amd64.deb
    ```
 2. **New runtime assets** (icons, JSON, images, fonts) — bundled ONLY if copied by `build-installer.sh` (`bundle_into_publish`) or the platform builders (`build-deb.sh`, `build-dmg.sh`, `installer-windows.iss`). Add the copy step when you add the asset.
-3. **New files under `extensions/`** — ship automatically (bundled into every publish output). Keep new extension / native-host files inside `extensions/`.
+3. **New files under `extensions/`** — ship automatically (bundled into every publish output). Keep engine packs under `extensions/chromium|gecko|webkit/` (no Python host — the tracker exe is the native messaging host).
 4. **New scripts under `publish/`** — copied into every publish output automatically. Runtime-referenced scripts must live in `publish/` (or be added to the copy list).
 5. **New env vars / config** — must be added to `.env` BEFORE `encrypt-config.sh` runs; installers ship `config.enc` baked at build time. Dev reads `.env` directly — config that works in `dotnet run` is silently missing in the installer.
 6. **Path assumptions** — the installed app's working dir is root-owned / not user-writable. NEVER write files relative to cwd or the exe dir. Use `~/.config/alpha-ai-tracker/` (logs, machine-id) and `~/.local/share/alpha-ai-tracker/` (DB, sockets). `dotnet run` cannot catch this because the dev working dir is writable.

@@ -204,8 +204,9 @@ bundle_into_publish() {
   if [ -d "$EXTENSIONS_DIR" ]; then
     mkdir -p "$rid_dir/extensions"
     cp -r "$EXTENSIONS_DIR/." "$rid_dir/extensions/"
-    chmod +x "$rid_dir/extensions/native-host.py" 2>/dev/null || true
-    echo "  ✓ Bundled extensions/ into $rid_dir"
+    # Remove any leftover Python host if present in the source tree (should be gone).
+    rm -f "$rid_dir/extensions/native-host.py" 2>/dev/null || true
+    echo "  ✓ Bundled extensions/ into $rid_dir (chromium + gecko + webkit packs)"
   fi
 
   if [ -d "$PROJECT_DIR/publish" ]; then
@@ -233,6 +234,12 @@ if [ -f "$CONFIG_ENC" ]; then
       echo "    → $OUT/config.enc"
     fi
   done
+else
+  echo ""
+  echo "ERROR: config.enc was not generated."
+  echo "  Create client/.env (copy from .env.example) with ALPHA_SERVER_URL etc., then re-run."
+  echo "  The Windows installer requires publish/windows/config.enc."
+  exit 1
 fi
 
 # Windows installer

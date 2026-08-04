@@ -1,9 +1,8 @@
 {
   "name": "com.alphai.tracker",
   "description": "Alpha AI Tracker — Native messaging bridge for browser tab/URL capture",
-  "path": "/media/devteam/NewVolume/Alpha-AI-Tracker/client/extensions/native-host.py",
+  "path": "REPLACE_WITH_TRACKER_EXECUTABLE_PATH",
   "type": "stdio",
-  "allowed_origins": [
-    "chrome-extension://khdneopecajdokiibnnckjleclajingo/"
-  ]
+  "allowed_origins": [],
+  "allowed_extensions": ["alpha-ai-tracker@alphai.com"]
 }

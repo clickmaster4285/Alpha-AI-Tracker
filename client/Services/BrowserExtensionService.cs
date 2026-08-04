@@ -2,32 +2,36 @@ using System.Diagnostics;
 using System.Text.Json;
 using client.Configuration;
 using client.Core;
+using client.Core.Abstractions;
+using client.Core.Models;
 using Microsoft.Extensions.Logging;
 
 namespace client.Services;
 
 /// <summary>
-/// Detects installed browsers, manages extension auto-installation,
+/// Detects installed browsers (OS http/https handlers × installed_applications.is_browser),
+/// manages engine-based extension auto-install (chromium / gecko; webkit unsupported),
 /// and checks extension connectivity via NativeMessageService heartbeat.
 ///
-/// Strategy (cross-browser, cross-platform):
-///   Chrome-based (Chrome, Chromium, Edge, Brave, Opera, Vivaldi):
-///     1. Kill running instance
-///     2. Try --load-extension=<dir> --enable-automation (works on all Chromium, blocked on branded Chrome 150+)
-///     3. Fallback: inject extension into Chrome's Preferences JSON (profile injection)
-///   Firefox:
-///     Native host installed, show step-by-step instructions (unsigned .xpi cannot auto-install)
+/// Native messaging host is the tracker exe itself in --native-host / chrome-extension://
+/// / gecko-id mode (pure C# — no Python).
+///
+/// Chromium: --load-extension → profile Preferences injection → optional policy forcelist.
+/// Gecko: native host + launch; unsigned XPI still needs a one-time temporary add-on load
+///   on first install (browser security policy).
+/// WebKit: listed as NotSupported — no WebExtensions native-messaging bridge.
 /// </summary>
 public class BrowserExtensionService
 {
     private readonly ILogger<BrowserExtensionService> _logger;
     private readonly NativeMessageService _nativeMessageService;
+    private readonly IInstalledAppDetector _appDetector;
     private readonly AppConfig _config;
-    private readonly string _chromeExtDir;
-    private readonly string _firefoxExtDir;
+    private readonly string _chromiumExtDir;
+    private readonly string _geckoExtDir;
     private readonly string _socketPath;
-    private readonly string _chromeNativeHostDir;
-    private readonly string _firefoxNativeHostDir;
+    private readonly string _fallbackChromiumNativeHostDir;
+    private readonly string _geckoNativeHostDir;
     private readonly string _extensionsRoot;
 
     /// <summary>Cached browser detection results.</summary>
@@ -53,28 +57,31 @@ public class BrowserExtensionService
     public BrowserExtensionService(
         ILogger<BrowserExtensionService> logger,
         NativeMessageService nativeMessageService,
+        IInstalledAppDetector appDetector,
         AppConfig config)
     {
         _logger = logger;
         _nativeMessageService = nativeMessageService;
+        _appDetector = appDetector;
         _config = config;
         var userHome = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
-        // Resolve extension directories — walk up from build output to repo root
         _extensionsRoot = ResolveExtensionsRoot();
-        _chromeExtDir = Path.Combine(_extensionsRoot, "chrome");
-        _firefoxExtDir = Path.Combine(_extensionsRoot, "firefox");
+        _chromiumExtDir = Path.Combine(_extensionsRoot, "chromium");
+        // Dev/legacy fallback: older trees shipped as extensions/chrome/
+        if (!Directory.Exists(_chromiumExtDir))
+            _chromiumExtDir = Path.Combine(_extensionsRoot, "chrome");
+        _geckoExtDir = Path.Combine(_extensionsRoot, "gecko");
+        if (!Directory.Exists(_geckoExtDir))
+            _geckoExtDir = Path.Combine(_extensionsRoot, "firefox");
 
         _socketPath = NativeMessagingPaths.SocketPath;
-        _chromeNativeHostDir = Path.Combine(userHome, ".config", "google-chrome", "NativeMessagingHosts");
-        _firefoxNativeHostDir = Path.Combine(userHome, ".mozilla", "native-messaging-hosts");
+        _fallbackChromiumNativeHostDir = Path.Combine(userHome, ".config", "chromium", "NativeMessagingHosts");
+        _geckoNativeHostDir = Path.Combine(userHome, ".mozilla", "native-messaging-hosts");
 
         _heartbeatTimer = new System.Threading.Timer(_ => PollHeartbeat(), null,
             TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
 
-        // Clean up any orphaned native-host.py from a previous crashed session.
-        // Stale processes would cause false positives in process-based detection;
-        // with heartbeat-based detection they are harmless but wasteful.
         KillOrphanedNativeHostProcesses();
     }
 
@@ -126,19 +133,47 @@ public class BrowserExtensionService
     /// <summary>
     /// Scan the system for installed browsers and check their extension status.
     ///
-    /// Phase 2: inclusion is driven entirely by OS-level http/https handler
-    /// registration (BrowserDetector) — no hardcoded brand list. Each candidate
-    /// is then classified by PROFILE SHAPE into Chromium / Gecko / Unknown
-    /// (BrowserEngineDetector). The named-brand list survives only as the
-    /// display-only BrandCatalog (nicer name + config-dir hint); it never gates
-    /// scanning, inclusion, or classification.
+    /// Inclusion: OS-level http/https handler registration (BrowserDetector), enriched
+    /// with installed_applications rows where is_browser=1 (display name + confirmation).
+    /// Engine: profile-shape classification (Chromium / Gecko / WebKit / Unknown) — never
+    /// from the binary brand name.
     /// </summary>
     public async Task ScanAsync(CancellationToken ct)
     {
         var results = new List<DetectedBrowser>();
         var resolvedBinaries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        // Catalog browsers: IsBrowser apps from the live OS detector (same source that
+        // feeds installed_applications). Used for display names + to surface browsers
+        // that registered as WebBrowser but weren't caught as http handlers yet.
+        var catalogBrowsers = _appDetector.GetAllInstalledApplications()
+            .Where(a => a.IsBrowser)
+            .ToList();
+
         var candidates = BrowserDetector.DetectAll();
+
+        // Merge catalog-only browsers that BrowserDetector missed (still need a path).
+        foreach (var app in catalogBrowsers)
+        {
+            if (string.IsNullOrWhiteSpace(app.InstallPath) && string.IsNullOrWhiteSpace(app.BinaryName))
+                continue;
+            var already = candidates.Any(c =>
+                (!string.IsNullOrEmpty(app.BinaryName) &&
+                 string.Equals(c.BinaryName, app.BinaryName, StringComparison.OrdinalIgnoreCase)) ||
+                (!string.IsNullOrEmpty(app.DesktopId) &&
+                 string.Equals(c.DesktopId, app.DesktopId, StringComparison.OrdinalIgnoreCase)));
+            if (already) continue;
+
+            candidates.Add(new BrowserCandidate
+            {
+                Name = app.AppName,
+                BinaryPath = app.InstallPath ?? string.Empty,
+                BinaryName = app.BinaryName ?? string.Empty,
+                DesktopId = app.DesktopId ?? string.Empty,
+                Icon = string.Empty,
+            });
+        }
+
         foreach (var candidate in candidates)
         {
             if (string.IsNullOrWhiteSpace(candidate.BinaryPath) &&
@@ -146,35 +181,40 @@ public class BrowserExtensionService
                 continue;
 
             var resolved = ResolveBinaryPath(candidate.BinaryPath);
-            if (!resolvedBinaries.Add(resolved)) continue; // skip duplicate (same canonical binary)
+            if (!resolvedBinaries.Add(resolved)) continue;
 
             var engine = BrowserEngineDetector.DetectFor(candidate);
-            var (brandName, _) = BrandCatalog.Find(candidate);
+            var displayName = ResolveDisplayName(candidate, catalogBrowsers);
 
             var nativeHostManifest = GetNativeHostManifestPath(candidate, engine);
-            // Windows hosts live in HKCU (RegisterNativeHostWindows), not on disk —
-            // the .config path would never exist there, so check the registry instead.
-            var nativeHostInstalled = OperatingSystem.IsWindows()
-                ? IsWindowsNativeHostRegistered()
-                : File.Exists(nativeHostManifest);
-            var status = nativeHostInstalled
-                ? BrowserInstallStatus.NativeHostReady
-                : BrowserInstallStatus.ReadyToInstall;
+            var nativeHostInstalled = engine is BrowserEngine.WebKit or BrowserEngine.Unknown
+                ? false
+                : OperatingSystem.IsWindows()
+                    ? IsWindowsNativeHostRegistered(candidate)
+                    : File.Exists(nativeHostManifest);
 
-            if (await IsExtensionActiveAsync(ct))
+            var status = engine switch
+            {
+                BrowserEngine.WebKit => BrowserInstallStatus.NotSupported,
+                BrowserEngine.Unknown => BrowserInstallStatus.NotSupported,
+                _ when nativeHostInstalled => BrowserInstallStatus.NativeHostReady,
+                _ => BrowserInstallStatus.ReadyToInstall,
+            };
+
+            if (status != BrowserInstallStatus.NotSupported && await IsExtensionActiveAsync(ct))
                 status = BrowserInstallStatus.ExtensionActive;
 
-            var isChromeBased = engine == BrowserEngine.Chromium;
+            var isChromium = engine == BrowserEngine.Chromium;
             var profileRoot = BrowserEngineDetector.FindProfileRoot(candidate);
             results.Add(new DetectedBrowser
             {
-                Name = brandName ?? candidate.Name,
+                Name = displayName,
                 BinaryPath = resolved,
                 BinaryName = candidate.BinaryName,
-                ExtensionDir = engine == BrowserEngine.Gecko ? _firefoxExtDir : _chromeExtDir,
+                ExtensionDir = ResolveExtensionDirForEngine(engine),
                 Status = status,
-                IsChromeBased = isChromeBased,
-                BrowserType = isChromeBased ? BrowserType.ChromeBased : BrowserType.Firefox,
+                IsChromeBased = isChromium,
+                BrowserType = engine == BrowserEngine.Gecko ? BrowserType.Gecko : BrowserType.Chromium,
                 NativeHostInstalled = nativeHostInstalled,
                 Engine = engine,
                 IsDefault = candidate.IsDefault,
@@ -186,13 +226,14 @@ public class BrowserExtensionService
                     ? string.Empty
                     : Path.Combine(profileRoot.Value.Root, profileRoot.Value.DefaultProfile),
                 ManifestPath = nativeHostManifest,
-                // Phase 5 (rev-3 default): managed-policy dir per Chromium browser.
-                PolicyDir = GetChromiumPolicyDir(
-                    new DetectedBrowser
+                PolicyDir = isChromium
+                    ? GetChromiumPolicyDir(new DetectedBrowser
                     {
                         BinaryName = candidate.BinaryName,
                         DesktopId = candidate.DesktopId,
-                    }),
+                        ConfigDir = profileRoot?.Root ?? string.Empty,
+                    })
+                    : null,
             });
         }
 
@@ -201,6 +242,33 @@ public class BrowserExtensionService
             results.Count, results.Count(b => b.Status == BrowserInstallStatus.ExtensionActive),
             string.Join(", ", results.Select(b => $"{b.Name}={b.Engine}{(b.IsDefault ? "*" : "")}")));
     }
+
+    /// <summary>
+    /// Prefer installed_applications.app_name (is_browser) over the .desktop/registry
+    /// Name= — never a hardcoded brand table.
+    /// </summary>
+    private static string ResolveDisplayName(BrowserCandidate candidate, List<InstalledApplication> catalog)
+    {
+        foreach (var app in catalog)
+        {
+            if (!string.IsNullOrEmpty(candidate.BinaryName) &&
+                string.Equals(app.BinaryName, candidate.BinaryName, StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrWhiteSpace(app.AppName))
+                return app.AppName;
+            if (!string.IsNullOrEmpty(candidate.DesktopId) &&
+                string.Equals(app.DesktopId, candidate.DesktopId, StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrWhiteSpace(app.AppName))
+                return app.AppName;
+        }
+        return candidate.Name;
+    }
+
+    private string ResolveExtensionDirForEngine(BrowserEngine engine) => engine switch
+    {
+        BrowserEngine.Gecko => _geckoExtDir,
+        BrowserEngine.Chromium => _chromiumExtDir,
+        _ => string.Empty,
+    };
 
     /// <summary>
     /// Per-browser native-messaging manifest path, derived from the ACTUAL
@@ -293,33 +361,58 @@ public class BrowserExtensionService
     }
 
     /// <summary>
-    /// DEV FALLBACK (not the default): load/inject the unpacked extension into the
-    /// browser. The rev-3 default persistent mechanism for Chromium is the elevated
-    /// ExtensionInstallForcelist policy (InstallPolicyForcelistAsync); this method is
-    /// only used (a) when no CRX infrastructure is configured (ALPHA_CRX_EXTENSION_ID
-    /// unset — dev machines), or (b) as an explicitly labeled dev/testing path.
-    /// Branded Chrome 137+/150 rejects both strategies here (Secure Preferences MAC
-    /// validation) — see AGENTS.md 2026-08-03 Item-5 findings.
-    ///
-    /// Engine=Unknown: fail safe with manual-instruction message. The one-click
-    /// flow already gates on this in MainViewModel, but guard here too in case
-    /// InstallExtensionAsync is called directly per-browser.
-    ///
-    /// Strategy (Chrome-based):
-    ///   1. Kill existing browser process
-    ///   2. Try launching with --load-extension + --enable-automation
-    ///      (Works on: Chromium, Brave, Edge, Opera, Vivaldi, and Chrome with automation flag)
-    ///   3. If that fails (branded Chrome 150+ blocks --load-extension),
-    ///      fall back to profile injection (Preferences JSON edit)
+    /// Engine-based attach entry point (no brand names). Prefer this from the UI.
+    /// <list type="number">
+    /// <item>Chromium + CRX configured → elevated ExtensionInstallForcelist (persistent).</item>
+    /// <item>Else Chromium → --load-extension (re-enabled via DisableLoadExtension… flag)
+    ///       then Preferences injection.</item>
+    /// <item>Gecko → launch + temporary-addon path (signed XPI required for permanent).</item>
+    /// <item>WebKit / Unknown → fail safe (no WebExtensions NM bridge / no profile shape).</item>
+    /// </list>
+    /// Status may be <see cref="BrowserInstallStatus.Loading"/> while the UI shows progress —
+    /// that must not block attach (previous CanInstall gate was a bug).
+    /// </summary>
+    public async Task<BrowserInstallResult> AttachExtensionAsync(DetectedBrowser browser)
+    {
+        if (!browser.MayAttach)
+            return new BrowserInstallResult(false, false, "Browser is not in a state that can be installed.");
+
+        if (browser.Engine is BrowserEngine.Unknown or BrowserEngine.WebKit)
+        {
+            return new BrowserInstallResult(false, false,
+                browser.Engine == BrowserEngine.WebKit
+                    ? "WebKit has no WebExtensions native-messaging bridge."
+                    : "Engine not auto-detected. Launch the browser once, then Refresh.");
+        }
+
+        if (browser.Engine == BrowserEngine.Chromium &&
+            !string.IsNullOrWhiteSpace(_config.CrxExtensionId) &&
+            !string.IsNullOrWhiteSpace(_config.ServerUrl))
+        {
+            var policy = await InstallPolicyForcelistAsync(browser);
+            if (policy.Success)
+                return policy;
+
+            _logger.LogInformation(
+                "Policy attach for {Name} did not succeed ({Msg}) — falling through to launch ladder",
+                browser.Name, policy.Message);
+        }
+
+        return await InstallExtensionAsync(browser);
+    }
+
+    /// <summary>
+    /// Launch/inject the unpacked engine pack. Used as the no-CRX path and as
+    /// fallback when policy write is unavailable (e.g. Windows without CRX, elevation declined).
+    /// Chromium: kill → --load-extension → Preferences injection.
+    /// Gecko: launch (temporary add-on / signed XPI for permanent).
     /// </summary>
     public async Task<BrowserInstallResult> InstallExtensionAsync(DetectedBrowser browser)
     {
-        if (!browser.CanInstall)
+        if (!browser.MayAttach)
             return new BrowserInstallResult(false, false, "Browser is not in a state that can be installed.");
 
-        // Engine=Unknown: don't guess which ladder to run. The one-click flow
-        // already skips Unknown browsers, but a direct per-browser call must not
-        // silently default to the Chromium or Gecko path either.
+        // Engine=Unknown: don't guess which ladder to run.
         if (browser.Engine == BrowserEngine.Unknown)
         {
             _logger.LogInformation(
@@ -329,85 +422,141 @@ public class BrowserExtensionService
                 "Engine not auto-detected. Follow the manual steps shown in the extension card.");
         }
 
-        // Re-resolve the extension dir at install time so we never launch Chrome
-        // pointing at the dev-tree path when the user is running the installed binary.
-        if (browser.IsChromeBased)
+        // Re-resolve the extension dir at install time so we never launch pointing
+        // at a stale path when the user is running the installed binary.
+        if (browser.Engine == BrowserEngine.Chromium)
         {
-            var resolvedDir = ResolveChromeExtensionDir();
+            var resolvedDir = ResolveEngineExtensionDir(BrowserEngine.Chromium);
+            if (Directory.Exists(resolvedDir))
+                browser.ExtensionDir = resolvedDir;
+        }
+        else if (browser.Engine == BrowserEngine.Gecko)
+        {
+            var resolvedDir = ResolveEngineExtensionDir(BrowserEngine.Gecko);
             if (Directory.Exists(resolvedDir))
                 browser.ExtensionDir = resolvedDir;
         }
 
         try
         {
-            var alreadyRunning = IsChromeRunning(browser);
+            var alreadyRunning = IsBrowserProcessRunning(browser);
 
             if (alreadyRunning)
             {
                 _logger.LogInformation("{Name} is running — closing first", browser.Name);
-                KillBrowserProcesses(browser.IsChromeBased ? "chrome" : "firefox");
-                for (int i = 0; i < 10 && IsChromeRunning(browser); i++)
-                    await Task.Delay(500);
+                KillBrowserProcesses(browser);
+                await WaitForBrowserExitAsync(browser);
             }
 
-            if (browser.IsChromeBased)
+            if (browser.Engine == BrowserEngine.Chromium)
             {
-                // ─── Strategy 1: Try --load-extension (works on all Chromium browsers) ───
-                bool launchedWithFlag = await TryLaunchWithLoadExtensionAsync(browser);
-
-                if (launchedWithFlag)
-                {
-                    _logger.LogInformation(
-                        "Launched {Name} with --load-extension (Strategy 1)", browser.Name);
-                    return new BrowserInstallResult(true, alreadyRunning, "");
-                }
-
+                // 1) Stage CRX/unpacked + shortcut flags + best-effort registry/policy.
+                //    Never forge Secure Preferences / developer_mode here.
+                var persist = ChromiumPersistentInstaller.Install(
+                    browser, browser.ExtensionDir, _logger);
                 _logger.LogInformation(
-                    "--load-extension did not work for {Name}, trying profile injection (Strategy 2)",
-                    browser.Name);
+                    "Chromium stage for {Name}: external={Ext} policy={Pol} shortcuts={S} id={Id} — {Msg}",
+                    browser.Name, persist.ExternalRegistered, persist.PolicyRegistered,
+                    persist.ShortcutsPatched, persist.ExtensionId, persist.Message);
 
-                // ─── Strategy 2: Fallback — inject into Preferences JSON ───
-                var injected = InjectExtensionIntoProfile(browser);
-                if (!injected)
+                var stagedDir = Directory.Exists(ChromiumPersistentInstaller.StagedExtDir)
+                    ? ChromiumPersistentInstaller.StagedExtDir
+                    : browser.ExtensionDir;
+                browser.ExtensionDir = stagedDir;
+
+                EnsureProfilePaths(browser);
+                var userData = browser.ConfigDir;
+                if (string.IsNullOrEmpty(userData) || !Directory.Exists(userData))
                 {
-                    _logger.LogWarning("Profile injection also failed for {Name}", browser.Name);
                     return new BrowserInstallResult(false, false,
-                        "Could not inject extension into browser profile.");
+                        "Browser user-data directory not resolved — cannot seed profiles.");
                 }
 
-                // Launch browser — extension should load from profile.
-                // Strategy 1 may have left a Chrome process behind (started but without
-                // --load-extension honoring it); kill that before relaunching so the
-                // profile-injected extension is the one actually loaded.
-                if (IsChromeRunning(browser))
+                // 2) Idempotent seed: re-read info_cache; --load-extension only for
+                //    profiles missing the extension. Already-seeded profiles are skipped
+                //    so newly created profiles attach on the next Install / Setup All.
+                async Task KillWait()
                 {
-                    _logger.LogInformation("Killing leftover Chrome from Strategy 1 before profile-injected launch");
-                    KillBrowserProcesses("chrome");
-                    for (int i = 0; i < 10 && IsChromeRunning(browser); i++)
-                        await Task.Delay(500);
+                    KillBrowserProcesses(browser);
+                    await WaitForBrowserExitAsync(browser, clearLocks: true);
                 }
 
-                var (launchFile2, launchArgs2) = BuildLaunch(browser, "--disable-gcm");
-                var psi = new ProcessStartInfo
+                var seed = await ChromiumProfileSeeder.SeedAllProfilesAsync(
+                    browser.BinaryPath,
+                    browser.FlatpakAppId,
+                    userData,
+                    stagedDir,
+                    KillWait,
+                    _logger);
+
+                // 3) Backup propagate — Preferences only (never forge Secure Preferences).
+                await KillWait();
+                var propagated = ChromiumProfilePropagator.PropagateFromSeed(
+                    userData, stagedDir, _logger);
+
+                // 4) Native-host allowed_origins: path-id + key-id + whatever seed found.
+                var originIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (!string.IsNullOrEmpty(persist.ExtensionId)) originIds.Add(persist.ExtensionId);
+                if (!string.IsNullOrEmpty(seed.FirstExtensionId)) originIds.Add(seed.FirstExtensionId!);
+                if (propagated != null) originIds.Add(propagated.ExtensionId);
+                originIds.Add(ExtensionIdCalculator.Compute(Path.GetFullPath(stagedDir)));
+                await RewriteChromiumManifestsWithExtensionIdsAsync(originIds);
+                EnsureChromiumNativeHostRegistry(browser);
+
+                var profileSummary = string.Join("; ",
+                    seed.Outcomes.Select(o => $"{o.Profile}:{o.Status}"));
+
+                // Require at least one profile seeded or already attached — never succeed
+                // on shortcut patch / process start alone (false "Connected" mask).
+                var profilesOk = seed.ProfilesSeeded + seed.ProfilesSkipped > 0;
+                if (!profilesOk)
                 {
-                    FileName = launchFile2,
-                    Arguments = launchArgs2,
+                    return new BrowserInstallResult(false, false,
+                        "Could not seed any Chromium profile with --load-extension. " +
+                        $"Outcomes: [{profileSummary}]. {persist.Message} " +
+                        "Check logs for bucket=seed_timeout|launch|staged_path|singleton.");
+                }
+
+                // 5) Relaunch the user's last-used profile WITH --load-extension so the
+                //    window they see immediately has the extension + developer mode.
+                var profileArg = string.IsNullOrEmpty(seed.LastUsedProfile)
+                    ? ""
+                    : $"--profile-directory=\"{seed.LastUsedProfile}\" ";
+                var (launchFile, launchArgs) = BuildLaunch(
+                    browser,
+                    $"--user-data-dir=\"{userData}\" {profileArg}" +
+                    $"--load-extension=\"{Path.GetFullPath(stagedDir)}\" " +
+                    "--disable-features=DisableLoadExtensionCommandLineSwitch --no-first-run --disable-gcm");
+                var proc = Process.Start(new ProcessStartInfo
+                {
+                    FileName = launchFile,
+                    Arguments = launchArgs,
                     UseShellExecute = false,
                     CreateNoWindow = true,
-                };
+                });
 
-                var proc = Process.Start(psi);
-                if (proc != null)
-                {
-                    _logger.LogInformation(
-                        "Launched {Name} with extension from profile (Strategy 2): PID {Pid}",
-                        browser.Name, proc.Id);
-                    return new BrowserInstallResult(true, alreadyRunning, "");
-                }
+                var msg =
+                    $"Seeded {seed.ProfilesSeeded}, skipped {seed.ProfilesSkipped} already attached" +
+                    (seed.ProfilesFailed > 0 ? $", failed {seed.ProfilesFailed}" : "") +
+                    (string.IsNullOrEmpty(seed.LastUsedProfile) ? "" : $" (reopened {seed.LastUsedProfile})") +
+                    $". Propagated to {propagated?.ProfilesUpdated ?? 0} others. " +
+                    $"Profiles: [{profileSummary}]. " +
+                    $"IDs: {string.Join(", ", originIds)}. {persist.Message}" +
+                    " New browser profiles created later need Install / Setup All again.";
+
+                if (proc == null)
+                    _logger.LogWarning("Final relaunch of {Name} returned null process", browser.Name);
+
+                return new BrowserInstallResult(true, alreadyRunning, msg);
             }
-            else
+            else if (browser.Engine == BrowserEngine.Gecko)
             {
-                // Firefox/Gecko — launch normally, show instructions
+                // Gecko — launch with temporary addon when possible; otherwise normal launch.
+                var manifest = Path.Combine(browser.ExtensionDir, "manifest.json");
+                var geckoArgs = File.Exists(manifest)
+                    ? $"\"{manifest}\""
+                    : string.Empty;
+                // Firefox ignores random args; just launch so the user can load Temporary Add-on.
                 var (ffFile, ffArgs) = BuildLaunch(browser, string.Empty);
                 var ffPsi = new ProcessStartInfo
                 {
@@ -420,8 +569,14 @@ public class BrowserExtensionService
                 if (ffProc != null)
                 {
                     _logger.LogInformation("Launched {Name}: PID {Pid}", browser.Name, ffProc.Id);
-                    return new BrowserInstallResult(true, alreadyRunning, "");
+                    return new BrowserInstallResult(true, alreadyRunning,
+                        "Gecko launched. If the extension is not yet connected, open about:debugging → This Firefox → Load Temporary Add-on and select the gecko extension manifest.");
                 }
+            }
+            else
+            {
+                return new BrowserInstallResult(false, false,
+                    $"{browser.Engine} engine does not support WebExtensions native messaging.");
             }
         }
         catch (Exception ex)
@@ -456,7 +611,7 @@ public class BrowserExtensionService
     /// </summary>
     public async Task<BrowserInstallResult> InstallPolicyForcelistAsync(DetectedBrowser browser)
     {
-        if (!browser.CanInstall)
+        if (!browser.MayAttach)
             return new BrowserInstallResult(false, false, "Browser is not in a state that can be installed.");
         if (browser.Engine != BrowserEngine.Chromium)
             return new BrowserInstallResult(false, false,
@@ -468,6 +623,12 @@ public class BrowserExtensionService
         if (string.IsNullOrWhiteSpace(_config.ServerUrl))
             return new BrowserInstallResult(false, false,
                 "Server URL not configured (ALPHA_SERVER_URL) — cannot point policy at the update manifest.");
+
+        // Windows Chromium policy is HKLM registry (not /etc file paths). When CRX
+        // is configured we attempt registry forcelist; otherwise AttachExtensionAsync
+        // never reaches here. Failure returns soft so the launch ladder can run.
+        if (OperatingSystem.IsWindows())
+            return await TryWindowsRegistryForcelistAsync(browser);
 
         var policyDir = GetChromiumPolicyDir(browser);
         if (string.IsNullOrEmpty(policyDir))
@@ -487,7 +648,7 @@ public class BrowserExtensionService
 
         try
         {
-            var alreadyRunning = IsChromeRunning(browser);
+            var alreadyRunning = IsBrowserProcessRunning(browser);
 
             // Step 1: elevated policy write (pkexec on Linux, runas on Windows).
             var wrote = await WriteManagedPolicyAsync(policyDir, "alpha-ai-tracker.json", policyJson);
@@ -511,9 +672,8 @@ public class BrowserExtensionService
             if (alreadyRunning)
             {
                 _logger.LogInformation("{Name} is running — closing first for policy pickup", browser.Name);
-                KillBrowserProcesses("chrome");
-                for (int i = 0; i < 10 && IsChromeRunning(browser); i++)
-                    await Task.Delay(500);
+                KillBrowserProcesses(browser);
+                await WaitForBrowserExitAsync(browser);
             }
 
             var (launchFile, launchArgs) = BuildLaunch(browser, "--disable-gcm");
@@ -544,6 +704,48 @@ public class BrowserExtensionService
     }
 
     /// <summary>
+    /// Rewrite Chromium native-messaging manifests so allowed_origins includes
+    /// every candidate extension ID (path-derived and/or key-derived).
+    /// </summary>
+    private async Task RewriteChromiumManifestsWithExtensionIdsAsync(IEnumerable<string> extensionIds)
+    {
+        var ids = extensionIds
+            .Where(id => !string.IsNullOrWhiteSpace(id) && id != "unknown")
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (ids.Length == 0) return;
+
+        var hostPath = ResolveNativeHostBinaryPath();
+        foreach (var browser in _detected.ToList())
+        {
+            if (browser.Engine != BrowserEngine.Chromium) continue;
+            foreach (var (targetPath, isGecko) in GetManifestTargetsFor(browser))
+            {
+                if (isGecko) continue;
+                await WriteNativeHostManifestAsync(
+                    targetPath, hostPath, ids, isGecko: false, CancellationToken.None);
+            }
+        }
+
+        // Side-by-side + Windows registry host registration.
+        try
+        {
+            var sideBySide = Path.Combine(
+                Path.GetDirectoryName(hostPath) ?? AppDomain.CurrentDomain.BaseDirectory,
+                "com.alphai.tracker.json");
+            await WriteNativeHostManifestAsync(sideBySide, hostPath, ids, isGecko: false, CancellationToken.None);
+            RegisterNativeHostWindows(sideBySide);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Side-by-side native-host rewrite failed");
+        }
+    }
+
+    private async Task RewriteChromiumManifestsWithExtensionIdAsync(string extensionId) =>
+        await RewriteChromiumManifestsWithExtensionIdsAsync(new[] { extensionId });
+
+    /// <summary>
     /// Rewrite every Chromium native-messaging manifest so allowed_origins uses
     /// the CRX-derived extension ID (the ID Chrome assigns to a policy-installed
     /// CRX), not the path-derived ID used by the dev/unpacked flow. Gecko
@@ -552,15 +754,7 @@ public class BrowserExtensionService
     private async Task RewriteManifestsWithCrxIdAsync()
     {
         if (string.IsNullOrWhiteSpace(_config.CrxExtensionId)) return;
-        foreach (var browser in _detected.ToList())
-        {
-            if (browser.Engine != BrowserEngine.Chromium) continue;
-            foreach (var (targetPath, isGecko) in GetManifestTargetsFor(browser))
-            {
-                await WriteNativeHostManifestAsync(
-                    targetPath, GetManifestHostPath(), _config.CrxExtensionId, isGecko, CancellationToken.None);
-            }
-        }
+        await RewriteChromiumManifestsWithExtensionIdAsync(_config.CrxExtensionId!);
     }
 
     /// <summary>
@@ -572,29 +766,43 @@ public class BrowserExtensionService
     /// This is a structural per-vendor path map (the OS defines the layout), not
     /// a detection gate.
     /// </summary>
+    /// <summary>
+    /// Derive a Chromium managed-policy directory from the binary/config name —
+    /// probe common /etc layouts without a brand dictionary. First existing
+    /// parent wins; otherwise returns the conventional /etc/opt/&lt;name&gt;/policies/managed.
+    /// </summary>
     public static string? GetChromiumPolicyDir(DetectedBrowser browser)
     {
-        if (OperatingSystem.IsLinux())
+        if (!OperatingSystem.IsLinux())
         {
-            var bin = (browser.BinaryName ?? browser.DesktopId ?? string.Empty).ToLowerInvariant();
-            if (bin.Contains("chromium")) return "/etc/chromium/policies/managed";
-            if (bin.Contains("brave")) return "/etc/opt/brave/policies/managed";
-            if (bin.Contains("edge")) return "/etc/opt/microsoft-edge/policies/managed";
-            if (bin.Contains("vivaldi")) return "/etc/opt/vivaldi/policies/managed";
-            if (bin.Contains("opera")) return "/etc/opt/opera/policies/managed";
-            // Google Chrome + any other Chromium fork: Debian convention.
-            return "/etc/opt/chrome/policies/managed";
+            if (OperatingSystem.IsWindows()) return null; // registry-based; not file paths
+            if (OperatingSystem.IsMacOS()) return "/Library/Managed Preferences";
+            return null;
         }
-        if (OperatingSystem.IsWindows())
+
+        var names = new List<string>();
+        if (!string.IsNullOrEmpty(browser.BinaryName)) names.Add(browser.BinaryName);
+        if (!string.IsNullOrEmpty(browser.DesktopId)) names.Add(browser.DesktopId);
+        if (!string.IsNullOrEmpty(browser.ConfigDir))
+            names.Add(Path.GetFileName(browser.ConfigDir.TrimEnd(Path.DirectorySeparatorChar)));
+
+        foreach (var name in names.Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            // Registry path — Phase 5 Windows implementation is code-review-only.
-            return @"HKLM\SOFTWARE\Policies\Google\Chrome";
+            if (string.IsNullOrWhiteSpace(name)) continue;
+            foreach (var candidate in new[]
+                     {
+                         $"/etc/{name}/policies/managed",
+                         $"/etc/opt/{name}/policies/managed",
+                     })
+            {
+                var parent = Path.GetDirectoryName(candidate);
+                if (!string.IsNullOrEmpty(parent) && Directory.Exists(parent))
+                    return candidate;
+            }
         }
-        if (OperatingSystem.IsMacOS())
-        {
-            return "/Library/Managed Preferences";
-        }
-        return null;
+
+        var fallback = names.FirstOrDefault(n => !string.IsNullOrWhiteSpace(n)) ?? "chromium";
+        return $"/etc/opt/{fallback}/policies/managed";
     }
 
     /// <summary>
@@ -662,22 +870,25 @@ public class BrowserExtensionService
     }
 
     /// <summary>
-    /// Try launching the browser with --load-extension and --enable-automation flags.
-    /// Polls for native-host.py up to 7.5s to verify the extension actually loaded.
-    ///
-    /// Works on all Chromium-based browsers:
-    ///   - Chromium, Brave, Edge, Opera, Vivaldi: always works
-    ///   - Branded Google Chrome 150+: blocked, Chrome silently ignores --load-extension
-    ///
-    /// Detection: after launching, check if native-host.py was spawned by the new Chrome process.
-    /// If not detected within 7.5s, kills the Chrome instance and returns false for fallback.
+    /// Try launching with --load-extension. Polls for the C# native host
+    /// (tracker exe spawned with chrome-extension://) or socket heartbeat up to 7.5s.
+    /// Branded Chrome 137+ disables the switch by default; re-enable via
+    /// <c>--disable-features=DisableLoadExtensionCommandLineSwitch</c> (engine-wide,
+    /// not brand-specific).
     /// </summary>
-    private async Task<bool> TryLaunchWithLoadExtensionAsync(DetectedBrowser browser)
+    private async Task<bool> TryLaunchWithLoadExtensionAsync(DetectedBrowser browser, bool killOnFailure = true)
     {
         try
         {
-            var extDir = Path.GetFullPath(browser.ExtensionDir);
-                var args = $"--load-extension=\"{extDir}\" --disable-gcm";
+            var extDir = Directory.Exists(ChromiumPersistentInstaller.StagedExtDir)
+                ? Path.GetFullPath(ChromiumPersistentInstaller.StagedExtDir)
+                : Path.GetFullPath(browser.ExtensionDir);
+            // DisableLoadExtensionCommandLineSwitch: Chrome 137+ gate. Harmless on
+            // Edge/Brave/Chromium builds that never set the feature.
+            var args =
+                $"--load-extension=\"{extDir}\" " +
+                "--disable-features=DisableLoadExtensionCommandLineSwitch " +
+                "--no-first-run --disable-gcm";
 
             var (launchFile, launchArgs) = BuildLaunch(browser, args);
             var psi = new ProcessStartInfo
@@ -695,30 +906,229 @@ public class BrowserExtensionService
                 "Launched {Name} with --load-extension (Strategy 1): PID {Pid}",
                 browser.Name, proc.Id);
 
-            // Poll for up to 7.5s to detect native-host.py
-            for (int i = 0; i < 15; i++)
+            // Poll for up to 12s — first Chromium launch after kill is slower on Windows.
+            for (int i = 0; i < 24; i++)
             {
                 await Task.Delay(500);
 
-                if (await IsNativeHostRunningForPidAsync(proc.Id))
+                if (await IsNativeHostRunningForPidAsync(proc.Id) ||
+                    _nativeMessageService.IsExtensionConnected())
                 {
                     _logger.LogInformation(
-                        "Extension confirmed loaded for {Name} (native-host detected)", browser.Name);
+                        "Extension confirmed loaded for {Name} (native-host / heartbeat)", browser.Name);
                     return true;
                 }
             }
 
             _logger.LogInformation(
-                "Extension was NOT loaded via --load-extension (Chrome blocked it). " +
-                "Killing instance and falling back to profile injection.");
-            KillBrowserProcesses("chrome");
-            await Task.Delay(1000);
+                "Extension heartbeat not seen for {Name} via --load-extension (prefs may still be seeded).",
+                browser.Name);
+            if (killOnFailure)
+            {
+                KillBrowserProcesses(browser);
+                await WaitForBrowserExitAsync(browser);
+            }
             return false;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "TryLaunchWithLoadExtension failed");
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Wait until the browser process tree is gone and (Chromium) the profile
+    /// SingletonLock is released — otherwise a relaunch joins the old instance
+    /// and ignores --load-extension.
+    /// </summary>
+    private static async Task WaitForBrowserExitAsync(DetectedBrowser browser, bool clearLocks = false)
+    {
+        // Up to ~30s for process exit (cold Chrome + AV on Windows).
+        for (int i = 0; i < 60 && IsBrowserProcessRunning(browser); i++)
+            await Task.Delay(500);
+
+        if (IsBrowserProcessRunning(browser))
+        {
+            // Last resort — force clear locks only after we tried waiting.
+            if (clearLocks && !string.IsNullOrEmpty(browser.ConfigDir))
+                ChromiumProfileSeeder.ClearSingletonLocks(browser.ConfigDir);
+            return;
+        }
+
+        var lockPath = string.IsNullOrEmpty(browser.ConfigDir)
+            ? null
+            : Path.Combine(browser.ConfigDir, "SingletonLock");
+        if (string.IsNullOrEmpty(lockPath))
+        {
+            if (clearLocks && !string.IsNullOrEmpty(browser.ConfigDir))
+                ChromiumProfileSeeder.ClearSingletonLocks(browser.ConfigDir);
+            return;
+        }
+
+        for (int i = 0; i < 40; i++)
+        {
+            try
+            {
+                if (!File.Exists(lockPath) && !Directory.Exists(lockPath))
+                    break;
+            }
+            catch { break; }
+            await Task.Delay(250);
+        }
+
+        // Process is gone — safe to remove stale singleton files so the next
+        // --load-extension launch does not join a dead instance.
+        if (clearLocks && !string.IsNullOrEmpty(browser.ConfigDir))
+            ChromiumProfileSeeder.ClearSingletonLocks(browser.ConfigDir);
+    }
+
+    /// <summary>
+    /// Windows ExtensionInstallForcelist via HKLM, deriving Policies\&lt;Vendor&gt;\&lt;Product&gt;
+    /// from the install path shape (...\Vendor\Product\Application\exe) — not a brand table.
+    /// Soft-fails without elevation so AttachExtensionAsync can use the launch ladder.
+    /// </summary>
+    private async Task<BrowserInstallResult> TryWindowsRegistryForcelistAsync(DetectedBrowser browser)
+    {
+        if (string.IsNullOrWhiteSpace(_config.CrxExtensionId) ||
+            string.IsNullOrWhiteSpace(_config.ServerUrl))
+        {
+            return new BrowserInstallResult(false, false,
+                "CRX extension ID not configured (ALPHA_CRX_EXTENSION_ID).");
+        }
+
+        var policyKey = DeriveWindowsChromiumPolicyKey(browser.BinaryPath);
+        if (string.IsNullOrEmpty(policyKey))
+        {
+            return new BrowserInstallResult(false, false,
+                "Could not derive Windows policy registry path from the browser install layout.");
+        }
+
+        var updateUrl = $"{_config.ServerUrl.TrimEnd('/')}/api/v1/extensions/{_config.CrxExtensionId}/update.xml";
+        var policyValue = $"{_config.CrxExtensionId};{updateUrl}";
+
+        try
+        {
+            // Attempt HKLM write; UAC elevation via a tiny reg.exe / elevated child is
+            // required for machine policy. Soft-fail → launch ladder.
+            var wrote = await WriteWindowsPolicyRegistryAsync(policyKey, policyValue);
+            if (!wrote)
+            {
+                return new BrowserInstallResult(false, false,
+                    "Could not write HKLM ExtensionInstallForcelist (elevation declined or denied).");
+            }
+
+            await RewriteManifestsWithCrxIdAsync();
+
+            var alreadyRunning = IsBrowserProcessRunning(browser);
+            if (alreadyRunning)
+            {
+                KillBrowserProcesses(browser);
+                await WaitForBrowserExitAsync(browser);
+            }
+
+            var (launchFile, launchArgs) = BuildLaunch(browser, "--disable-gcm");
+            var proc = Process.Start(new ProcessStartInfo
+            {
+                FileName = launchFile,
+                Arguments = launchArgs,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            });
+            if (proc == null)
+                return new BrowserInstallResult(false, false, "Could not start the browser process.");
+
+            return new BrowserInstallResult(true, alreadyRunning,
+                "HKLM policy written; browser relaunched. Heartbeat flips to Active within ~30s.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Windows registry forcelist failed for {Name}", browser.Name);
+            return new BrowserInstallResult(false, false, $"Error: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// From ...\Vendor\Product\Application\browser.exe → Software\Policies\Vendor\Product.
+    /// </summary>
+    private static string? DeriveWindowsChromiumPolicyKey(string binaryPath)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(binaryPath) || !File.Exists(binaryPath))
+                return null;
+
+            var dir = Path.GetDirectoryName(binaryPath);
+            if (string.IsNullOrEmpty(dir)) return null;
+
+            // Expect ...\Vendor\Product\Application
+            var application = Path.GetFileName(dir);
+            if (!string.Equals(application, "Application", StringComparison.OrdinalIgnoreCase))
+            {
+                // Some Chromium builds omit Application — treat dir as Product.
+                var productAlt = Path.GetFileName(dir);
+                var vendorAlt = Path.GetFileName(Path.GetDirectoryName(dir) ?? "");
+                if (string.IsNullOrEmpty(productAlt) || string.IsNullOrEmpty(vendorAlt))
+                    return null;
+                return $@"Software\Policies\{vendorAlt}\{productAlt}";
+            }
+
+            var productDir = Path.GetDirectoryName(dir);
+            var vendorDir = Path.GetDirectoryName(productDir);
+            var product = Path.GetFileName(productDir);
+            var vendor = Path.GetFileName(vendorDir);
+            if (string.IsNullOrEmpty(product) || string.IsNullOrEmpty(vendor))
+                return null;
+
+            return $@"Software\Policies\{vendor}\{product}";
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task<bool> WriteWindowsPolicyRegistryAsync(string policyKeyRelative, string forcelistValue)
+    {
+        // Write via elevated powershell Set-ItemProperty. One UAC prompt.
+        var tmpPs1 = Path.Combine(Path.GetTempPath(), "aat_policy_" + Guid.NewGuid().ToString("N") + ".ps1");
+        try
+        {
+            var keyPath = $@"HKLM:\{policyKeyRelative}\ExtensionInstallForcelist";
+            var script =
+                $"New-Item -Path '{keyPath}' -Force | Out-Null; " +
+                $"Set-ItemProperty -Path '{keyPath}' -Name '1' -Value '{forcelistValue.Replace("'", "''")}' -Type String";
+            await File.WriteAllTextAsync(tmpPs1, script);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "powershell",
+                Arguments =
+                    $"-NoProfile -ExecutionPolicy Bypass -Command " +
+                    $"\"Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \\\"{tmpPs1}\\\"'\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+            };
+            using var proc = Process.Start(psi);
+            if (proc == null) return false;
+            var exited = proc.WaitForExit(120_000);
+            if (!exited)
+            {
+                try { proc.Kill(); } catch { }
+                return false;
+            }
+            return proc.ExitCode == 0;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Windows policy registry write failed");
+            return false;
+        }
+        finally
+        {
+            try { if (File.Exists(tmpPs1)) File.Delete(tmpPs1); } catch { }
         }
     }
 
@@ -731,9 +1141,8 @@ public class BrowserExtensionService
     {
         try
         {
-            if (OperatingSystem.IsLinux())
+            if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
             {
-                // pgrep -P <pid> shows child processes
                 var psi = new ProcessStartInfo
                 {
                     FileName = "pgrep",
@@ -743,72 +1152,29 @@ public class BrowserExtensionService
                     CreateNoWindow = true,
                 };
                 using var proc = Process.Start(psi);
-                if (proc != null)
-                {
-                    var children = (await proc.StandardOutput.ReadToEndAsync()).Trim();
-                    proc.WaitForExit(1000);
+                if (proc == null) return false;
+                var children = (await proc.StandardOutput.ReadToEndAsync()).Trim();
+                proc.WaitForExit(1000);
+                if (string.IsNullOrEmpty(children)) return false;
 
-                    if (!string.IsNullOrEmpty(children))
+                foreach (var childPid in children.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    if (!int.TryParse(childPid.Trim(), out var pid)) continue;
+                    var cmdPsi = new ProcessStartInfo
                     {
-                        foreach (var childPid in children.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-                        {
-                            if (int.TryParse(childPid.Trim(), out var pid))
-                            {
-                                var checkPsi = new ProcessStartInfo
-                                {
-                                    FileName = "ps",
-                                    Arguments = $"-p {pid} -o comm= --no-headers",
-                                    RedirectStandardOutput = true,
-                                    UseShellExecute = false,
-                                    CreateNoWindow = true,
-                                };
-                                using var checkProc = Process.Start(checkPsi);
-                                if (checkProc != null)
-                                {
-                                    var comm = (await checkProc.StandardOutput.ReadToEndAsync()).Trim();
-                                    checkProc.WaitForExit(500);
-                                    if (comm.Contains("python3", StringComparison.OrdinalIgnoreCase))
-                                    {
-                                        var cmdPsi = new ProcessStartInfo
-                                        {
-                                            FileName = "ps",
-                                            Arguments = $"-p {pid} -o args= --no-headers",
-                                            RedirectStandardOutput = true,
-                                            UseShellExecute = false,
-                                            CreateNoWindow = true,
-                                        };
-                                        using var cmdProc = Process.Start(cmdPsi);
-                                        if (cmdProc != null)
-                                        {
-                                            var cmdline = (await cmdProc.StandardOutput.ReadToEndAsync()).Trim();
-                                            cmdProc.WaitForExit(500);
-                                            if (cmdline.Contains("native-host.py", StringComparison.OrdinalIgnoreCase))
-                                                return true;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            else if (OperatingSystem.IsMacOS())
-            {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = "ps",
-                    Arguments = $"-o pid,comm -p {parentPid}",
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                };
-                using var proc = Process.Start(psi);
-                if (proc != null)
-                {
-                    var output = (await proc.StandardOutput.ReadToEndAsync()).Trim();
-                    proc.WaitForExit(1000);
-                    if (output.Contains("native-host", StringComparison.OrdinalIgnoreCase))
-                        return true;
+                        FileName = "ps",
+                        Arguments = OperatingSystem.IsMacOS()
+                            ? $"-p {pid} -o args="
+                            : $"-p {pid} -o args= --no-headers",
+                        RedirectStandardOutput = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                    };
+                    using var cmdProc = Process.Start(cmdPsi);
+                    if (cmdProc == null) continue;
+                    var cmdline = (await cmdProc.StandardOutput.ReadToEndAsync()).Trim();
+                    cmdProc.WaitForExit(500);
+                    if (IsNativeHostCommandLine(cmdline)) return true;
                 }
             }
             else if (OperatingSystem.IsWindows())
@@ -825,24 +1191,24 @@ public class BrowserExtensionService
                     CreateNoWindow = true,
                 };
                 using var proc = Process.Start(psi);
-                if (proc != null)
+                if (proc == null) return false;
+                var output = (await proc.StandardOutput.ReadToEndAsync()).Trim();
+                proc.WaitForExit(2000);
+                foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
                 {
-                    var output = (await proc.StandardOutput.ReadToEndAsync()).Trim();
-                    proc.WaitForExit(2000);
-                    if (output.Contains("native-host.py", StringComparison.OrdinalIgnoreCase) ||
-                        output.Contains("--native-host", StringComparison.OrdinalIgnoreCase) ||
-                        output.Contains("chrome-extension://", StringComparison.OrdinalIgnoreCase) ||
-                        output.Contains("alpha-ai-tracker@alphai.com", StringComparison.OrdinalIgnoreCase))
-                        return true;
+                    if (IsNativeHostCommandLine(line)) return true;
                 }
             }
         }
-        catch
-        {
-        }
-
+        catch { }
         return false;
     }
+
+    private static bool IsNativeHostCommandLine(string cmdline) =>
+        !string.IsNullOrEmpty(cmdline) &&
+        (cmdline.Contains("--native-host", StringComparison.OrdinalIgnoreCase) ||
+         cmdline.Contains("chrome-extension://", StringComparison.OrdinalIgnoreCase) ||
+         cmdline.Contains(NativeMessagingPaths.GeckoApplicationId, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// Inject the unpacked extension into a Chromium browser's Preferences JSON using
@@ -925,12 +1291,14 @@ public class BrowserExtensionService
     }
 
     /// <summary>
-    /// Fill in ConfigDir/DefaultProfileDir when the scan hadn't resolved them yet
-    /// (stale scan or direct install call). Reuses the same profile-shape probe.
+    /// Fill in ConfigDir/DefaultProfileDir. Always refresh ConfigDir when empty
+    /// even if DefaultProfileDir was set from a stale scan.
     /// </summary>
     private static void EnsureProfilePaths(DetectedBrowser browser)
     {
-        if (!string.IsNullOrEmpty(browser.DefaultProfileDir)) return;
+        if (!string.IsNullOrEmpty(browser.ConfigDir) && Directory.Exists(browser.ConfigDir) &&
+            !string.IsNullOrEmpty(browser.DefaultProfileDir))
+            return;
 
         var candidate = new BrowserCandidate
         {
@@ -949,25 +1317,32 @@ public class BrowserExtensionService
     }
 
     /// <summary>
-    /// Windows native-messaging hosts are registered in HKCU per vendor
-    /// (RegisterNativeHostWindows). Returns true if any known vendor key exists.
+    /// Windows hosts live in HKCU under vendor NativeMessagingHosts keys.
+    /// Structural scan — no brand list.
     /// </summary>
-    private static bool IsWindowsNativeHostRegistered()
+    private static bool IsWindowsNativeHostRegistered(BrowserCandidate? candidate = null)
     {
+        if (!OperatingSystem.IsWindows()) return false;
         try
         {
             using var hkcu = Microsoft.Win32.Registry.CurrentUser;
-            foreach (var root in new[]
+            using var software = hkcu.OpenSubKey(@"Software");
+            if (software == null) return false;
+
+            foreach (var vendor in software.GetSubKeyNames())
             {
-                @"Software\Google\Chrome\NativeMessagingHosts",
-                @"Software\Microsoft\Edge\NativeMessagingHosts",
-                @"Software\BraveSoftware\Brave-Browser\NativeMessagingHosts",
-                @"Software\Vivaldi\NativeMessagingHosts",
-                @"Software\Opera Software\Opera Stable\NativeMessagingHosts",
-            })
-            {
-                using var key = hkcu.OpenSubKey(Path.Combine(root, "com.alphai.tracker"));
-                if (key != null) return true;
+                using (var nm = software.OpenSubKey($@"{vendor}\NativeMessagingHosts\com.alphai.tracker"))
+                {
+                    if (nm != null) return true;
+                }
+
+                using var vendorKey = software.OpenSubKey(vendor);
+                if (vendorKey == null) continue;
+                foreach (var product in vendorKey.GetSubKeyNames())
+                {
+                    using var nm = vendorKey.OpenSubKey($@"{product}\NativeMessagingHosts\com.alphai.tracker");
+                    if (nm != null) return true;
+                }
             }
         }
         catch { }
@@ -990,23 +1365,38 @@ public class BrowserExtensionService
         return (browser.BinaryPath, args);
     }
 
-    /// <summary>Check if Chrome/Chromium-based process is currently running.</summary>
-    private static bool IsChromeRunning(DetectedBrowser browser)
+    /// <summary>True when a process matching this browser's binary name is running.</summary>
+    private static bool IsBrowserProcessRunning(DetectedBrowser browser)
     {
-        if (!browser.IsChromeBased) return false;
-        return IsChromeProcessRunning();
+        var name = browser.BinaryName;
+        if (string.IsNullOrWhiteSpace(name))
+            name = Path.GetFileNameWithoutExtension(browser.BinaryPath);
+        if (string.IsNullOrWhiteSpace(name)) return false;
+        return IsProcessNameRunning(name);
     }
 
-    /// <summary>Check if any chrome process is running.</summary>
-    private static bool IsChromeProcessRunning()
+    private static bool IsProcessNameRunning(string processName)
     {
-        var searchName = "chrome";
         try
         {
+            if (OperatingSystem.IsWindows())
+            {
+                var bare = Path.GetFileNameWithoutExtension(processName);
+                return Process.GetProcesses().Any(p =>
+                {
+                    try
+                    {
+                        return p.ProcessName.Equals(processName, StringComparison.OrdinalIgnoreCase) ||
+                               p.ProcessName.Equals(bare, StringComparison.OrdinalIgnoreCase);
+                    }
+                    catch { return false; }
+                });
+            }
+
             var psi = new ProcessStartInfo
             {
                 FileName = "pgrep",
-                Arguments = searchName,
+                Arguments = $"-f \"{processName}\"",
                 RedirectStandardOutput = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
@@ -1019,58 +1409,79 @@ public class BrowserExtensionService
         }
         catch
         {
-            try
-            {
-                var fallback = new ProcessStartInfo
-                {
-                    FileName = "ps",
-                    Arguments = "aux",
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                };
-                using var p = Process.Start(fallback);
-                if (p == null) return false;
-                var allProcs = p.StandardOutput.ReadToEnd();
-                p.WaitForExit(1000);
-                return allProcs.Contains(searchName, StringComparison.OrdinalIgnoreCase);
-            }
-            catch
-            {
-                return false;
-            }
+            return false;
         }
     }
 
-    /// <summary>Gracefully kill browser processes.</summary>
-    private static void KillBrowserProcesses(string processName)
+    /// <summary>Gracefully kill processes for this browser (prefer exe path match on Windows).</summary>
+    private static void KillBrowserProcesses(DetectedBrowser browser)
     {
+        var name = browser.BinaryName;
+        if (string.IsNullOrWhiteSpace(name))
+            name = Path.GetFileNameWithoutExtension(browser.BinaryPath);
+        if (string.IsNullOrWhiteSpace(name)) return;
+
         try
         {
-            var psi = new ProcessStartInfo
+            if (OperatingSystem.IsWindows())
             {
-                FileName = "pkill",
-                Arguments = processName,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-            using var proc = Process.Start(psi);
-            proc?.WaitForExit(2000);
+                var binFull = string.IsNullOrEmpty(browser.BinaryPath)
+                    ? null
+                    : Path.GetFullPath(browser.BinaryPath);
+                foreach (var proc in Process.GetProcesses())
+                {
+                    try
+                    {
+                        var match = false;
+                        if (!string.IsNullOrEmpty(binFull))
+                        {
+                            try
+                            {
+                                var path = proc.MainModule?.FileName;
+                                if (!string.IsNullOrEmpty(path) &&
+                                    path.Equals(binFull, StringComparison.OrdinalIgnoreCase))
+                                    match = true;
+                            }
+                            catch
+                            {
+                                // Access denied on some processes — fall back to name.
+                            }
+                        }
 
-            Thread.Sleep(500);
-            var killPsi = new ProcessStartInfo
+                        if (!match)
+                        {
+                            match = proc.ProcessName.Equals(name, StringComparison.OrdinalIgnoreCase) ||
+                                    Path.GetFileNameWithoutExtension(name)
+                                        .Equals(proc.ProcessName, StringComparison.OrdinalIgnoreCase);
+                        }
+
+                        if (match)
+                            proc.Kill(entireProcessTree: true);
+                    }
+                    catch { }
+                }
+                return;
+            }
+
+            using var p = Process.Start(new ProcessStartInfo
             {
                 FileName = "pkill",
-                Arguments = $"-9 {processName}",
+                Arguments = $"-f \"{name}\"",
                 UseShellExecute = false,
                 CreateNoWindow = true,
-            };
-            using var killProc = Process.Start(killPsi);
+            });
+            p?.WaitForExit(2000);
+            Thread.Sleep(500);
+            using var killProc = Process.Start(new ProcessStartInfo
+            {
+                FileName = "pkill",
+                Arguments = $"-9 -f \"{name}\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            });
             killProc?.WaitForExit(1000);
         }
-        catch
-        {
-        }
+        catch { }
     }
 
     /// <summary>
@@ -1104,73 +1515,49 @@ public class BrowserExtensionService
         return Task.FromResult(connected);
     }
 
-    /// <summary>Check if the extension is already injected in Chrome's Preferences file.</summary>
-    private bool IsExtensionInjectedInProfile()
+    /// <summary>Check if the extension is already injected in a Chromium Preferences file (pure C#).</summary>
+    private bool IsExtensionInjectedInProfile(DetectedBrowser browser)
     {
         try
         {
-            var userHome = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            var prefsPath = Path.Combine(userHome, ".config", "google-chrome", "Default", "Preferences");
+            EnsureProfilePaths(browser);
+            if (string.IsNullOrEmpty(browser.DefaultProfileDir)) return false;
+            var prefsPath = Path.Combine(browser.DefaultProfileDir, "Preferences");
             if (!File.Exists(prefsPath)) return false;
 
-            var pyScript = Path.Combine(Path.GetTempPath(), "alpha_ai_check_ext.py");
-            try
+            var extDir = Path.GetFullPath(browser.ExtensionDir);
+            using var doc = JsonDocument.Parse(File.ReadAllText(prefsPath));
+            if (!doc.RootElement.TryGetProperty("extensions", out var exts)) return false;
+            if (!exts.TryGetProperty("settings", out var settings)) return false;
+            foreach (var prop in settings.EnumerateObject())
             {
-                File.WriteAllText(pyScript, @"import json, sys
-
-prefs_path = sys.argv[1]
-ext_dir = sys.argv[2]
-
-with open(prefs_path, 'r') as f:
-    prefs = json.load(f)
-
-settings = prefs.get('extensions', {}).get('settings', {})
-for ext_id, ext_data in settings.items():
-    path = ext_data.get('path', '')
-    if path.startswith(ext_dir):
-        print(ext_id)
-");
-
-                var psi = new ProcessStartInfo
+                if (prop.Value.TryGetProperty("path", out var pathEl))
                 {
-                    FileName = "python3",
-                    Arguments = $"\"{pyScript}\" \"{prefsPath}\" \"{_chromeExtDir}\"",
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                };
-                using var proc = Process.Start(psi);
-                if (proc == null) return false;
-                var output = proc.StandardOutput.ReadToEnd().Trim();
-                proc.WaitForExit(3000);
-                return !string.IsNullOrEmpty(output);
-            }
-            finally
-            {
-                try { File.Delete(pyScript); } catch { }
+                    var path = pathEl.GetString() ?? "";
+                    if (path.StartsWith(extDir, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
             }
         }
-        catch
-        {
-            return false;
-        }
+        catch { }
+        return false;
     }
 
     private async Task<bool> InstallNativeHostManuallyAsync(CancellationToken ct)
     {
         try
         {
-            var nativeHostPy = ResolveNativeHostPyPath();
-            if (!File.Exists(nativeHostPy))
+            var hostPath = ResolveNativeHostBinaryPath();
+            if (string.IsNullOrEmpty(hostPath) || !File.Exists(hostPath))
             {
-                _logger.LogWarning(
-                    "native-host.py not found at {Path} — cannot install native host", nativeHostPy);
+                _logger.LogWarning("Tracker executable not found for native host path — cannot install native host");
                 return false;
             }
 
-            var extensionDir = ResolveChromeExtensionDir();
-            var extId = ExtensionIdCalculator.Compute(extensionDir);
+            var extensionDir = ResolveEngineExtensionDir(BrowserEngine.Chromium);
+            var extId = Directory.Exists(extensionDir)
+                ? ExtensionIdCalculator.Compute(extensionDir)
+                : "unknown";
             if (extId == "unknown")
             {
                 _logger.LogWarning(
@@ -1180,42 +1567,37 @@ for ext_id, ext_data in settings.items():
 
             var written = new List<string>();
 
-            // ─── Phase 3: per-browser manifests. Engine=Unknown browsers are
-            // skipped by GetManifestTargetsFor (no guessed shape). ───
             foreach (var browser in _detected.ToList())
             {
                 foreach (var (targetPath, isGecko) in GetManifestTargetsFor(browser))
                 {
-                    await WriteNativeHostManifestAsync(targetPath, nativeHostPy, extId, isGecko, ct);
+                    await WriteNativeHostManifestAsync(targetPath, hostPath, extId, isGecko, ct);
                     written.Add(targetPath);
                 }
             }
 
-            // Legacy fallback: no browsers detected (or scan not run yet) — keep the
-            // two known dirs in sync so a single-browser setup still works.
             if (written.Count == 0)
             {
                 await WriteNativeHostManifestAsync(
-                    Path.Combine(_chromeNativeHostDir, "com.alphai.tracker.json"),
-                    nativeHostPy, extId, isGecko: false, ct);
+                    Path.Combine(_fallbackChromiumNativeHostDir, "com.alphai.tracker.json"),
+                    hostPath, extId, isGecko: false, ct);
                 await WriteNativeHostManifestAsync(
-                    Path.Combine(_firefoxNativeHostDir, "com.alphai.tracker.json"),
-                    nativeHostPy, extId, isGecko: true, ct);
-                written.Add(_chromeNativeHostDir);
-                written.Add(_firefoxNativeHostDir);
+                    Path.Combine(_geckoNativeHostDir, "com.alphai.tracker.json"),
+                    hostPath, extId, isGecko: true, ct);
+                written.Add(_fallbackChromiumNativeHostDir);
+                written.Add(_geckoNativeHostDir);
             }
 
-            // Windows: Chrome/Edge/Brave look in the registry, not a file.
             if (OperatingSystem.IsWindows())
             {
                 try
                 {
                     var sideBySideManifest = Path.Combine(
-                        Path.GetDirectoryName(nativeHostPy) ?? AppDomain.CurrentDomain.BaseDirectory,
+                        Path.GetDirectoryName(hostPath) ?? AppDomain.CurrentDomain.BaseDirectory,
                         "com.alphai.tracker.json");
                     await File.WriteAllTextAsync(sideBySideManifest,
-                        BuildManifestJson(nativeHostPy, extId, isGecko: false), ct);
-                    RegisterNativeHostWindows(sideBySideManifest, extId);
+                        BuildManifestJson(hostPath, extId, isGecko: false), ct);
+                    RegisterNativeHostWindows(sideBySideManifest);
                 }
                 catch (Exception ex)
                 {
@@ -1223,21 +1605,9 @@ for ext_id, ext_data in settings.items():
                 }
             }
 
-            if (File.Exists(nativeHostPy))
-            {
-                var chmodPsi = new ProcessStartInfo
-                {
-                    FileName = "chmod",
-                    Arguments = $"+x \"{nativeHostPy}\"",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                };
-                Process.Start(chmodPsi);
-            }
-
             _logger.LogInformation(
                 "Native host manifests created for {Count} browsers (host: {Path}, extension ID: {ExtId})",
-                _detected.Count, nativeHostPy, extId);
+                _detected.Count, hostPath, extId);
             return true;
         }
         catch (Exception ex)
@@ -1248,30 +1618,24 @@ for ext_id, ext_data in settings.items():
     }
 
     /// <summary>
-    /// Manifest targets for a browser. Firefox/Gecko reads ~/.mozilla/native-messaging-hosts
-    /// (plus the snap-visible copy when the profile lives under ~/snap/...); Chromium reads
-    /// the per-browser NativeMessagingHosts dir derived in ScanAsync (browser.ManifestPath).
-    ///
-    /// Engine=Unknown: write NO manifest. A guessed shape (allowed_origins vs
-    /// allowed_extensions) silently fails at the browser's native-messaging layer;
-    /// better to have none and let the one-click UI show manual instructions.
+    /// Manifest targets for a browser. Gecko → ~/.mozilla/native-messaging-hosts (+ snap copy).
+    /// Chromium → per-browser NativeMessagingHosts from ManifestPath. WebKit/Unknown → none.
     /// </summary>
     private List<(string Path, bool IsGecko)> GetManifestTargetsFor(DetectedBrowser browser)
     {
         var targets = new List<(string, bool)>();
 
-        if (browser.Engine == BrowserEngine.Unknown)
+        if (browser.Engine is BrowserEngine.Unknown or BrowserEngine.WebKit)
         {
             _logger.LogDebug(
-                "Skipping native-messaging manifest for {Name} (Engine=Unknown)", browser.Name);
+                "Skipping native-messaging manifest for {Name} (Engine={Engine})", browser.Name, browser.Engine);
             return targets;
         }
 
         if (browser.Engine == BrowserEngine.Gecko)
         {
-            targets.Add((Path.Combine(_firefoxNativeHostDir, "com.alphai.tracker.json"), true));
+            targets.Add((Path.Combine(_geckoNativeHostDir, "com.alphai.tracker.json"), true));
 
-            // Snap-packaged Firefox: needs the manifest in the snap-visible .mozilla dir too.
             if (!string.IsNullOrEmpty(browser.ConfigDir) &&
                 browser.ConfigDir.Contains($"{Path.DirectorySeparatorChar}snap{Path.DirectorySeparatorChar}",
                     StringComparison.OrdinalIgnoreCase))
@@ -1287,114 +1651,93 @@ for ext_id, ext_data in settings.items():
         }
         else
         {
-            targets.Add((Path.Combine(_chromeNativeHostDir, "com.alphai.tracker.json"), false));
+            targets.Add((Path.Combine(_fallbackChromiumNativeHostDir, "com.alphai.tracker.json"), false));
         }
 
         return targets;
     }
 
-    /// <summary>
-    /// The host binary the native-messaging manifests point at. Phase 6 flips
-    /// this from native-host.py to the pure C# host (main exe in --native-host
-    /// mode); until then the Python host stays in place for parity/rollback.
-    /// </summary>
-    private string GetManifestHostPath() => ResolveNativeHostPyPath();
-
     /// <summary>Serialize and write one native-messaging host manifest.</summary>
     private static async Task WriteNativeHostManifestAsync(
-        string targetPath, string nativeHostPy, string extId, bool isGecko, CancellationToken ct)
+        string targetPath, string hostPath, string extId, bool isGecko, CancellationToken ct) =>
+        await WriteNativeHostManifestAsync(targetPath, hostPath, new[] { extId }, isGecko, ct);
+
+    private static async Task WriteNativeHostManifestAsync(
+        string targetPath, string hostPath, IEnumerable<string> extIds, bool isGecko, CancellationToken ct)
     {
-        var json = BuildManifestJson(nativeHostPy, extId, isGecko);
+        var json = BuildManifestJson(hostPath, extIds, isGecko);
         Directory.CreateDirectory(Path.GetDirectoryName(targetPath) ?? string.Empty);
         await File.WriteAllTextAsync(targetPath, json, ct);
     }
 
-    /// <summary>Build the manifest JSON for a specific engine family.</summary>
-    private static string BuildManifestJson(string nativeHostPy, string extId, bool isGecko)
+    /// <summary>Build the manifest JSON for a specific engine family (path = C# tracker exe).</summary>
+    private static string BuildManifestJson(string hostPath, string extId, bool isGecko) =>
+        BuildManifestJson(hostPath, new[] { extId }, isGecko);
+
+    private static string BuildManifestJson(string hostPath, IEnumerable<string> extIds, bool isGecko)
     {
-        var manifest = new
+        var ids = extIds
+            .Where(id => !string.IsNullOrWhiteSpace(id) && id != "unknown")
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        var manifest = new Dictionary<string, object?>
         {
-            name = "com.alphai.tracker",
-            description = "Alpha AI Tracker — Native messaging bridge for browser tab/URL capture",
-            path = nativeHostPy,
-            type = "stdio",
-            allowed_origins = isGecko
-                ? Array.Empty<string>()
-                : (extId == "unknown"
-                    ? Array.Empty<string>()
-                    : new[] { $"chrome-extension://{extId}/" }),
-            allowed_extensions = isGecko && extId != "unknown"
-                ? new[] { NativeMessagingPaths.GeckoApplicationId }
-                : Array.Empty<string>(),
+            ["name"] = "com.alphai.tracker",
+            ["description"] = "Alpha AI Tracker — Native messaging bridge for browser tab/URL capture",
+            ["path"] = hostPath,
+            ["type"] = "stdio",
         };
+        if (isGecko)
+            manifest["allowed_extensions"] = new[] { NativeMessagingPaths.GeckoApplicationId };
+        else
+            manifest["allowed_origins"] = ids.Select(id => $"chrome-extension://{id}/").ToArray();
+
         return System.Text.Json.JsonSerializer.Serialize(manifest,
             new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
     }
 
     /// <summary>
-    /// Resolve the absolute path to native-host.py from the running executable.
+    /// Absolute path of the tracker executable used as the native messaging host.
+    /// The browser spawns this binary; Program.cs detects host mode via argv and
+    /// runs <see cref="NativeMessagingHost.Run"/> without taking the app mutex.
     /// </summary>
-    public static string ResolveNativeHostPyPath()
+    public static string ResolveNativeHostBinaryPath()
     {
-        var baseDir = AppDomain.CurrentDomain.BaseDirectory;
-        var sameDir = Path.Combine(baseDir, "native-host.py");
-
-        var candidates = new[]
-        {
-            Path.Combine(baseDir, "extensions", "native-host.py"),
-            Path.Combine(baseDir, "publish", "extensions", "native-host.py"),
-            sameDir,
-        };
-        foreach (var c in candidates)
-        {
-            if (File.Exists(c)) return Path.GetFullPath(c);
-        }
-
-        var dir = baseDir;
-        for (int i = 0; i < 6 && !string.IsNullOrEmpty(dir); i++)
-        {
-            var c = Path.Combine(dir, "native-host.py");
-            if (File.Exists(c)) return Path.GetFullPath(c);
-            var parent = Path.GetDirectoryName(dir);
-            if (parent == null || parent == dir) break;
-            dir = parent;
-        }
-
         try
         {
-            var exePath = Environment.ProcessPath;
-            if (!string.IsNullOrEmpty(exePath))
-            {
-                var exeDir = Path.GetDirectoryName(exePath);
-                if (!string.IsNullOrEmpty(exeDir))
-                {
-                    var walk = exeDir;
-                    for (int i = 0; i < 6 && !string.IsNullOrEmpty(walk); i++)
-                    {
-                        var c = Path.Combine(walk, "native-host.py");
-                        if (File.Exists(c)) return Path.GetFullPath(c);
-                        var parent = Path.GetDirectoryName(walk);
-                        if (parent == null || parent == walk) break;
-                        walk = parent;
-                    }
-                }
-            }
+            var processPath = Environment.ProcessPath;
+            if (!string.IsNullOrEmpty(processPath) && File.Exists(processPath))
+                return Path.GetFullPath(processPath);
         }
         catch { }
 
-        return Path.GetFullPath(sameDir);
+        var baseDir = AppDomain.CurrentDomain.BaseDirectory;
+        foreach (var name in new[] { "client", "alpha-ai-tracker", "AlphaAITracker" })
+        {
+            foreach (var ext in OperatingSystem.IsWindows()
+                         ? new[] { ".exe", ".dll" }
+                         : new[] { "", ".dll" })
+            {
+                var candidate = Path.Combine(baseDir, name + ext);
+                if (File.Exists(candidate)) return Path.GetFullPath(candidate);
+            }
+        }
+        return Path.GetFullPath(Path.Combine(baseDir, OperatingSystem.IsWindows() ? "client.exe" : "client"));
     }
 
-    /// <summary>
-    /// Resolve the absolute path to the chrome/ extension directory.
-    /// </summary>
-    public static string ResolveChromeExtensionDir()
+    /// <summary>Resolve the absolute path to an engine extension directory (chromium / gecko).</summary>
+    public static string ResolveEngineExtensionDir(BrowserEngine engine)
     {
+        var folder = engine == BrowserEngine.Gecko ? "gecko" : "chromium";
+        var legacy = engine == BrowserEngine.Gecko ? "firefox" : "chrome";
         var baseDir = AppDomain.CurrentDomain.BaseDirectory;
         var candidates = new[]
         {
-            Path.Combine(baseDir, "extensions", "chrome"),
-            Path.Combine(baseDir, "publish", "extensions", "chrome"),
+            Path.Combine(baseDir, "extensions", folder),
+            Path.Combine(baseDir, "extensions", legacy),
+            Path.Combine(baseDir, "publish", "extensions", folder),
+            Path.Combine(baseDir, "publish", "extensions", legacy),
         };
         foreach (var c in candidates)
         {
@@ -1404,43 +1747,53 @@ for ext_id, ext_data in settings.items():
         var dir = baseDir;
         for (int i = 0; i < 6 && !string.IsNullOrEmpty(dir); i++)
         {
-            var c = Path.Combine(dir, "extensions", "chrome");
-            if (Directory.Exists(c)) return Path.GetFullPath(c);
+            foreach (var name in new[] { folder, legacy })
+            {
+                var c = Path.Combine(dir, "extensions", name);
+                if (Directory.Exists(c)) return Path.GetFullPath(c);
+            }
             var parent = Path.GetDirectoryName(dir);
             if (parent == null || parent == dir) break;
             dir = parent;
         }
 
-        try
-        {
-            var exePath = Environment.ProcessPath;
-            if (!string.IsNullOrEmpty(exePath))
-            {
-                var exeDir = Path.GetDirectoryName(exePath);
-                if (!string.IsNullOrEmpty(exeDir))
-                {
-                    var walk = exeDir;
-                    for (int i = 0; i < 6 && !string.IsNullOrEmpty(walk); i++)
-                    {
-                        var c = Path.Combine(walk, "extensions", "chrome");
-                        if (Directory.Exists(c)) return Path.GetFullPath(c);
-                        var parent = Path.GetDirectoryName(walk);
-                        if (parent == null || parent == walk) break;
-                        walk = parent;
-                    }
-                }
-            }
-        }
-        catch { }
-
-        return Path.Combine(baseDir, "extensions", "chrome");
+        return Path.Combine(baseDir, "extensions", folder);
     }
 
     /// <summary>
-    /// Register the native messaging host in the Windows registry for every Chromium
-    /// browser we know about. No-op on non-Windows platforms.
+    /// Ensure HKCU NativeMessagingHosts exists for this browser's Vendor\Product
+    /// (derived from BinaryPath), even if the key was never created before.
     /// </summary>
-    private void RegisterNativeHostWindows(string manifestPath, string extensionId)
+    private void EnsureChromiumNativeHostRegistry(DetectedBrowser browser)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        try
+        {
+            var soft = ChromiumPersistentInstaller.DeriveSoftwareVendorProductKey(browser.BinaryPath);
+            if (string.IsNullOrEmpty(soft)) return;
+
+            var hostPath = ResolveNativeHostBinaryPath();
+            var sideBySide = Path.Combine(
+                Path.GetDirectoryName(hostPath) ?? AppDomain.CurrentDomain.BaseDirectory,
+                "com.alphai.tracker.json");
+            if (!File.Exists(sideBySide)) return;
+
+            using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(
+                $@"{soft}\NativeMessagingHosts\com.alphai.tracker", true);
+            key?.SetValue(null, sideBySide, Microsoft.Win32.RegistryValueKind.String);
+            _logger.LogInformation("Ensured native-host registry {Soft}\\NativeMessagingHosts", soft);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "EnsureChromiumNativeHostRegistry failed");
+        }
+    }
+
+    /// <summary>
+    /// Register the native messaging host in HKCU for Chromium-shaped
+    /// NativeMessagingHosts keys already present. No hardcoded vendor list.
+    /// </summary>
+    private void RegisterNativeHostWindows(string manifestPath)
     {
         if (!OperatingSystem.IsWindows()) return;
         if (!File.Exists(manifestPath))
@@ -1449,34 +1802,59 @@ for ext_id, ext_data in settings.items():
             return;
         }
 
-        var registryRoots = new[]
-        {
-            @"Software\Google\Chrome\NativeMessagingHosts",
-            @"Software\Microsoft\Edge\NativeMessagingHosts",
-            @"Software\BraveSoftware\Brave-Browser\NativeMessagingHosts",
-            @"Software\Vivaldi\NativeMessagingHosts",
-            @"Software\Opera Software\Opera Stable\NativeMessagingHosts",
-        };
-        var hostName = "com.alphai.tracker";
+        const string hostName = "com.alphai.tracker";
+        var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         try
         {
             using var hkcu = Microsoft.Win32.Registry.CurrentUser;
-            foreach (var root in registryRoots)
+            using var software = hkcu.OpenSubKey(@"Software", writable: false);
+            if (software != null)
+            {
+                foreach (var vendor in software.GetSubKeyNames())
+                {
+                    using var vendorKey = software.OpenSubKey(vendor);
+                    if (vendorKey == null) continue;
+                    if (vendorKey.OpenSubKey("NativeMessagingHosts") != null)
+                        roots.Add($@"Software\{vendor}\NativeMessagingHosts");
+                    foreach (var product in vendorKey.GetSubKeyNames())
+                    {
+                        using var productKey = vendorKey.OpenSubKey(product);
+                        if (productKey?.OpenSubKey("NativeMessagingHosts") != null)
+                            roots.Add($@"Software\{vendor}\{product}\NativeMessagingHosts");
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed enumerating Windows NativeMessagingHosts roots");
+        }
+
+        foreach (var b in _detected.Where(x => x.Engine == BrowserEngine.Chromium))
+        {
+            if (!string.IsNullOrEmpty(b.DesktopId))
+                roots.Add($@"Software\{b.DesktopId}\NativeMessagingHosts");
+
+            // Always derive from install path (...\Vendor\Product\Application\exe).
+            var soft = ChromiumPersistentInstaller.DeriveSoftwareVendorProductKey(b.BinaryPath);
+            if (!string.IsNullOrEmpty(soft))
+                roots.Add($@"{soft}\NativeMessagingHosts");
+        }
+
+        try
+        {
+            using var hkcu = Microsoft.Win32.Registry.CurrentUser;
+            foreach (var root in roots)
             {
                 try
                 {
                     using var rootKey = hkcu.CreateSubKey(root, writable: true);
                     if (rootKey == null) continue;
-
                     using var hostKey = rootKey.CreateSubKey(hostName, writable: true);
                     if (hostKey == null) continue;
-
                     hostKey.SetValue(null, manifestPath, Microsoft.Win32.RegistryValueKind.String);
-
-                    _logger.LogInformation(
-                        "Registered native messaging host in Windows registry: {Root}\\{Name}",
-                        root, hostName);
+                    _logger.LogInformation("Registered native messaging host: {Root}\\{Name}", root, hostName);
                 }
                 catch (Exception ex)
                 {
@@ -1532,24 +1910,6 @@ for ext_id, ext_data in settings.items():
         catch { }
 
         return sameDir;
-    }
-
-    private static string? FindNativeHostPy()
-    {
-        var extRoot = ResolveExtensionsRoot();
-        var candidates = new[]
-        {
-            Path.Combine(extRoot, "native-host.py"),
-            Path.Combine(extRoot, "..", "native-host.py"),
-            Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "extensions", "native-host.py"),
-            Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "native-host.py"),
-        };
-        foreach (var c in candidates)
-        {
-            var normalized = Path.GetFullPath(c);
-            if (File.Exists(normalized)) return normalized;
-        }
-        return null;
     }
 
     private static string? FindInstallScript()
@@ -1615,7 +1975,7 @@ for ext_id, ext_data in settings.items():
 
 // ─── Models ───
 
-public enum BrowserType { ChromeBased, Firefox }
+public enum BrowserType { Chromium, Gecko, WebKit }
 
 public enum BrowserInstallStatus
 {
@@ -1624,6 +1984,7 @@ public enum BrowserInstallStatus
     NativeHostReady,
     Loading,
     ExtensionActive,
+    NotSupported,
 }
 
 public class DetectedBrowser
@@ -1633,69 +1994,62 @@ public class DetectedBrowser
     public string BinaryName { get; set; } = string.Empty;
     public string ExtensionDir { get; set; } = string.Empty;
     public BrowserInstallStatus Status { get; set; } = BrowserInstallStatus.NotInstalled;
-    public BrowserType BrowserType { get; set; } = BrowserType.ChromeBased;
+    public BrowserType BrowserType { get; set; } = BrowserType.Chromium;
     public bool IsChromeBased { get; set; } = true;
     public bool NativeHostInstalled { get; set; }
     public bool IsInstalled => !string.IsNullOrEmpty(BinaryPath);
 
-    /// <summary>Engine family classified from profile shape (never from the name).</summary>
     public BrowserEngine Engine { get; set; } = BrowserEngine.Unknown;
-
-    /// <summary>True when the OS reports this browser as the system default.</summary>
     public bool IsDefault { get; set; }
-
-    /// <summary>Stable OS identity: .desktop basename / registry subkey / bundle id.</summary>
     public string DesktopId { get; set; } = string.Empty;
-
-    /// <summary>Icon hint from the .desktop file (Linux).</summary>
     public string Icon { get; set; } = string.Empty;
-
-    /// <summary>Resolved user-data/config root for this browser (from profile shape).</summary>
     public string ConfigDir { get; set; } = string.Empty;
-
-    /// <summary>Full path to the default profile directory (Chromium "Default", Gecko Default=1 profile).</summary>
     public string DefaultProfileDir { get; set; } = string.Empty;
-
-    /// <summary>Per-browser native-messaging host manifest path.</summary>
     public string ManifestPath { get; set; } = string.Empty;
-
-    /// <summary>Enterprise policy dir (Phase 5).</summary>
-    public string PolicyDir { get; set; } = string.Empty;
-
-    /// <summary>Set when the browser runs through flatpak.</summary>
+    public string? PolicyDir { get; set; }
     public string? FlatpakAppId { get; set; }
 
     public string StatusText => Status switch
     {
-        BrowserInstallStatus.ReadyToInstall => "Ready",
-        BrowserInstallStatus.NativeHostReady => "Host Ready",
-        BrowserInstallStatus.Loading => "Connecting…",
-        BrowserInstallStatus.ExtensionActive => "✅ Active",
+        BrowserInstallStatus.ReadyToInstall => "Ready to install",
+        BrowserInstallStatus.NativeHostReady => "Host ready — click to load",
+        BrowserInstallStatus.Loading => "Installing & launching…",
+        BrowserInstallStatus.ExtensionActive => "Connected",
+        BrowserInstallStatus.NotSupported => "Engine not supported",
         _ => "Not detected",
     };
 
-    /// <summary>Engine family label (from profile shape, display only).</summary>
     public string EngineText => Engine switch
     {
         BrowserEngine.Chromium => "Chromium",
         BrowserEngine.Gecko => "Gecko",
-        _ => "Engine unknown",
+        BrowserEngine.WebKit => "WebKit",
+        _ => "Unknown engine",
     };
 
-    /// <summary>Combined status + engine line shown in the browser card.</summary>
     public string StatusLine =>
         $"{StatusText} · {EngineText}{(IsDefault ? " · System default" : "")}";
 
     public string ActionButtonText => Status switch
     {
-        BrowserInstallStatus.ReadyToInstall => "Add Extension",
-        BrowserInstallStatus.NativeHostReady => "Launch Browser",
-        BrowserInstallStatus.Loading => "Connecting…",
+        BrowserInstallStatus.ReadyToInstall => "Install Extension",
+        BrowserInstallStatus.NativeHostReady => "Install Extension",
+        BrowserInstallStatus.Loading => "Working…",
         BrowserInstallStatus.ExtensionActive => "Connected",
+        BrowserInstallStatus.NotSupported => "Not supported",
         _ => "—",
     };
 
     public bool CanInstall => Status is BrowserInstallStatus.ReadyToInstall or BrowserInstallStatus.NativeHostReady;
+
+    /// <summary>
+    /// True while an attach may proceed — includes <see cref="BrowserInstallStatus.Loading"/>
+    /// so the UI can set progress state before calling Attach without falsely rejecting.
+    /// </summary>
+    public bool MayAttach =>
+        Status is BrowserInstallStatus.ReadyToInstall
+            or BrowserInstallStatus.NativeHostReady
+            or BrowserInstallStatus.Loading;
 }
 
 /// <summary>Result of a browser extension install attempt.</summary>

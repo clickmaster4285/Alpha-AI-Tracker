@@ -12,10 +12,11 @@ namespace client.Services;
 
 /// <summary>
 /// Listens on a Unix domain socket (Linux/macOS) or named pipe (Windows)
-/// for browser navigation events forwarded by the Native Messaging host (native-host.py).
+/// for browser navigation events forwarded by the C# Native Messaging host
+/// (tracker exe in --native-host / chrome-extension:// / gecko-id mode).
 ///
 /// Messages arrive as JSON from the browser extension via the native messaging pipeline:
-///   Extension → native-host.py (stdin) → Unix socket → NativeMessageService
+///   Extension → NativeMessagingHost (stdio) → Unix socket → NativeMessageService
 ///
 /// Each message represents a tab navigation event (url, title, tabId, action)
 /// and is stored as an AppItem (browser_navigation) in the SQLite database.
@@ -144,7 +145,7 @@ public class NativeMessageService : BackgroundService
                     msg.Action, msg.TabId, TruncateUrl(msg.Url, 80));
 
                 // Always send a response, even if processing throws.
-                // If no response is sent, native-host.py blocks waiting for it
+                // If no response is sent, the C# native host blocks waiting for it
                 // and the entire messaging pipeline stalls after a few timeouts.
                 try
                 {
@@ -157,7 +158,7 @@ public class NativeMessageService : BackgroundService
                 }
                 finally
                 {
-                    // Always send acknowledgment — native-host.py blocks on this response
+                    // Always send acknowledgment — the C# native host blocks on this response
                     var response = JsonSerializer.Serialize(new { status = "ok", tabId = msg.TabId });
                     var responseBytes = Encoding.UTF8.GetBytes(response);
                     await handler.SendAsync(responseBytes, SocketFlags.None, ct);

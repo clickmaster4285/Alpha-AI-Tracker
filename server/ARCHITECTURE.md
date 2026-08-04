@@ -1,7 +1,8 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-08-01 (docs re-synced with code — routes, migrations 001–016, 12 tables, staleness job)
+> **Last audited:** 2026-08-04 (no server code changes — client-only native-host/extension session)
 > **Changelog:**
+> - 2026-08-04: Client removed Python native-host and switched to engine-based extension packs — **no server API / schema / contract changes** this session.
 > - 2026-08-01: **Docs audit** — removed stale `activity_logs` / `shell_commands` references (both dropped server-side), corrected migration inventory to 001–016 (15 files), added `jobs/staleness_sweep.go`, added `employee_app_link.go` junction models, corrected the API surface (7 sync endpoints + 2 list endpoints, no `/activity-logs`, no `/shell-commands`), and documented all 12 Postgres tables including the app/package catalogs.
 > - 2026-07-31: Migrations 013–016 + catalog/link sync rewrite. 013 adds `installed_app_id`/`installed_package_id`/`grouped_by`/`cgroup_scope`/`context_label` to `app_sessions`. 014 adds `process_id` + 9 journey fields to `app_items`. 015/016 build company-global app/package catalogs (`app_fingerprint = desktop_id|binary_name`, `package_fingerprint = package_name|source_manager`) with per-employee junction tables `employee_installed_applications`/`employee_installed_packages` (version/path/install_date + first/last_seen_at + is_active) — two employees with the same app now share ONE catalog row. `SyncInstalledApps`/`SyncInstalledPackages` rewritten to upsert-catalog-then-link inside one tx. New `internal/jobs/staleness_sweep.go` hourly deactivates links idle > `LINK_STALE_DAYS` (default 7, configurable). `NewSchemaRepo` gains `Begin()` + 4 upsert methods. App-session/item bulk inserts + list queries extended with the new fields.
 > - 2026-07-29: Browser/terminal/headless filtering arrived client-side only; server DTOs extended with `url`/`domain` (migration 011) and installed-application identity columns (migration 012).
@@ -625,6 +626,8 @@ The server is **mostly stateless**:
 
 ## 11. Immediate Next Steps
 
+> 2026-08-04: client-only session (C# native host + engine extensions) — no server route/schema changes.
+
 1. **Add rate limiting** — at minimum on `/auth/login` and sync endpoints
 2. **Fix the health check bug** — `c.RealIP()` is not a timestamp
 3. **Add structured logging** — replace `log.Printf` with `slog` (Go 1.21+ standard library)
@@ -635,3 +638,7 @@ The server is **mostly stateless**:
 8. **Add server-side permissions** — even a simple role check before allowing writes
 9. **Add listing endpoints for the remaining sync tables** — installed-apps, installed-packages, device-hardware, network-info, session-events
 10. **Prune dead DTOs** — remove `BrowserContext*`, `Url*`, `UrlVisit*`, `ShellCommand*` types from `new_schema_dto.go`
+
+---
+
+> **Last audited:** 2026-08-04, commit 37a1bf5 (no server code delta this session)

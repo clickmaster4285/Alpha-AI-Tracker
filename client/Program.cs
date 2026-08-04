@@ -37,7 +37,7 @@ if (args.Contains("--encrypt-config"))
 // binary) with a single identifying argument. Detect host mode when ANY of:
 //   (a) argv[1] starts with "chrome-extension://"  — Chromium family
 //   (b) argv[1] exactly equals the Gecko application id from
-//       extensions/firefox/manifest.json browser_specific_settings.gecko.id —
+//       extensions/gecko/manifest.json browser_specific_settings.gecko.id —
 //       Firefox invokes the host with the BARE id, no URL-scheme prefix
 //   (c) the explicit --native-host flag (manual/dev invocation)
 // Host mode ONLY does stdio ⇄ socket forwarding and exits cleanly — it must

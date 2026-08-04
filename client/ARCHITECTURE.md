@@ -1,7 +1,8 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-08-03 (installer-parity rule + single-instance/tray fix)  
+> **Last audited:** 2026-08-04 (pure C# native host + engine-based extensions)  
 > **Changelog:** 
+> - 2026-08-04: **Pure C# native messaging + engine-based extensions** — deleted `extensions/native-host.py`. Host is the main exe (`Core/NativeMessagingHost.cs`, entered from `Program.cs` before mutex). Extension packs: `extensions/chromium/`, `extensions/gecko/`, `extensions/webkit/` (WebKit unsupported). `BrowserDetector` + `BrowserEngineDetector` (profile shape → Chromium/Gecko/WebKit) + `installed_applications.is_browser` for display names — no brand catalog. `BrowserExtensionService` installs C# host manifests, auto-loads via `--load-extension` / Preferences injection (Chromium) or launches Gecko with temporary-addon instructions. GUI: progress bar on setup steps + per-browser **Install Extension**. `ExtensionIdCalculator` is pure C# (SHA-256 → a–p). Service completion → ~88%.
 > - 2026-08-03: **Single-instance + tray UX fix; Installer-Parity rule** — a second launch now restores the running window (`SingleInstance.cs` named-event signaling), the tray menu gains **Quit**, and on tray-less desktops (no StatusNotifierWatcher — `Services/TrayAvailability.cs` D-Bus check) closing the window exits instead of stranding an invisible process. Added the mandatory **Build-Parity Rule** (§8): every feature/modification must also be wired into the installer packaging and verified from an installed build — `dotnet run` is not a valid release test.
 > - 2026-08-01: **Docs audit** — removed stale `activity_logs` / `shell_commands` schema + sync references (both gone from the product), corrected sync endpoint table (7 endpoints, batch 500), documented the `MigrateSql` migration strategy, added `storage_devices`/`permission_status`/`app_items` tables, noted `IShellCommandCollector`/`ShellCommand` as dead code, added `FileLoggerProvider` (dotnetrunlog.txt), added `install-extensions.sh`, and cleaned up the completion % to ~85%.
 > - 2026-07-31: **Cross-service payload sync + local catalog dedup** — installed-apps mapper now sends `binaryName`/`isBrowser`/`desktopId`/`categories`; app-sessions sends `groupedBy`/`cgroupScope`/`contextLabel`; app-items sends `processId` + all 9 journey fields. `installed_applications` conflict-update resets `is_synced = 0` so re-detected apps re-sync (drives server `last_seen_at` freshness). `installed_packages` switches to `ON CONFLICT(package_name, source_manager)` with a dedup block (window fn keeps newest per fingerprint) + `CREATE UNIQUE INDEX IF NOT EXISTS idx_installed_packages_fingerprint` in `MigrateSql` — fixes the 6,530-row duplicate package bloat caused by `ON CONFLICT(id)` never conflicting.
@@ -39,7 +40,7 @@
 > - 2026-07-27: **Broadened `AutoDetectInstalledApp`** — now accepts `/home/*` and `/media/*` paths as valid install locations (covers project-local compiled binaries like `./bin/alpha-ai-server`).
 > - 2026-07-27: **Fixed file manager path resolution** — `ParseFileManagerContext` now resolves folder display names to absolute paths by searching `~/`, `~/Documents`, `~/Desktop`, `/media/<user>/`, etc.
 > - 2026-07-27: **Fixed `SessionHierarchyResolver`** — `ResolveParent` now walks through build tools and runtime packages as intermediate PPID steps; `ShouldLinkTo` now accepts build tools as children of IDEs and terminals.
-> **Service completion (honest):** ~85%
+> **Service completion (honest):** ~88%
 
 ---
 
@@ -141,7 +142,12 @@ client/
 │   ├── ParentProcessResolver.cs        # Resolves window titles from parent processes (e.g., terminal → shell)
 │   ├── AppProcessClassifier.cs         # Browser/file-manager/IDE/shell/runtime classification + item_type + headless-subprocess filter
 │   ├── ActivityContextParser.cs        # URL + file path extraction from window titles
-│   └── SessionHierarchyResolver.cs     # PID-tree parent linking (node→terminal→IDE)
+│   ├── SessionHierarchyResolver.cs     # PID-tree parent linking (node→terminal→IDE)
+│   ├── BrowserDetector.cs              # OS http(s) handler → BrowserCandidate (no brand list)
+│   ├── BrowserEngineDetector.cs        # Profile-shape → Chromium / Gecko / WebKit / Unknown
+│   ├── ExtensionIdCalculator.cs        # Pure C# Chrome unpacked-ID (SHA-256 → a–p)
+│   ├── NativeMessagingHost.cs          # Stdio ↔ tracker socket (replaces native-host.py)
+│   └── NativeMessagingPaths.cs         # Socket path + Gecko application id constants
 │
 ├── Platform/
 │   ├── Windows/
@@ -156,8 +162,8 @@ client/
 │
 ├── Services/
 │   ├── LogCollectorService.cs           # BackgroundService: collect → resolve → store app_sessions → sync → heartbeat cycle (30s loop)
-│   ├── NativeMessageService.cs          # BackgroundService: Unix socket listener for browser navigation events (Native Messaging bridge)
-│   ├── BrowserExtensionService.cs       # Browser detection + extension install (two-strategy: --load-extension / profile injection)
+│   ├── NativeMessageService.cs          # BackgroundService: Unix socket listener for browser navigation events (C# native-host bridge)
+│   ├── BrowserExtensionService.cs       # Engine-based browser detect + extension install (chromium/gecko; webkit unsupported)
 │   ├── BackgroundGuardService.cs        # Watchdog: re-installs auto-start/systemd if removed (60s check)
 │   ├── AutoStartService.cs              # Platform-specific auto-start: Run key, .desktop, launchd plist
 │   ├── DesktopEventService.cs           # BackgroundService: orchestrator — starts watchers, wires EventCoordinator → JourneyEngine
@@ -189,10 +195,10 @@ client/
 │   └── AppTheme.xaml                    # Dark theme color definitions, brushes, radii, fonts, button styles
 │
 ├── extensions/
-│   ├── chrome/background.js + manifest.json  # Chrome MV3 extension (tab/URL capture)
-│   ├── firefox/background.js + manifest.json # Firefox MV3 extension
-│   ├── native-host.py                    # Native Messaging stdio bridge (extension ↔ tracker socket)
-│   └── com.alphai.tracker.json          # Native Messaging host manifest
+│   ├── chromium/background.js + manifest.json  # Chromium-engine MV3 pack (service_worker)
+│   ├── gecko/background.js + manifest.json     # Gecko-engine MV3 pack (scripts + gecko.id)
+│   ├── webkit/README.md                        # WebKit = not supported (no WebExtensions NM bridge)
+│   └── com.alphai.tracker.json                 # Template NM host manifest (path filled at install)
 │
 └── publish/
     ├── build-installer.sh               # Cross-platform installer builder
@@ -599,7 +605,7 @@ Checklist:
 
 1. **Always ship-test** — build the installer, install the artifact, run the new functionality there. `dotnet run` success is not sufficient.
 2. **New runtime assets** (icons, JSON, images) — must be copied by `bundle_into_publish()` in `build-installer.sh` or by `build-deb.sh` / `build-dmg.sh` / `installer-windows.iss`.
-3. **New files in `extensions/`** — bundled automatically; keep extension / native-host files there.
+3. **New files in `extensions/`** — bundled automatically; keep packs under `chromium/` / `gecko/` / `webkit/` (native host = tracker exe, not Python).
 4. **New scripts in `publish/`** — copied into every publish output automatically.
 5. **New env vars** — add to `.env` BEFORE `encrypt-config.sh`; installers ship `config.enc` baked at build time (dev reads `.env` directly).
 6. **No writes to the exe dir** — installed app runs from root-owned `/usr/share/alpha-ai-tracker/` (Linux) / Program Files (Windows). Write only to `~/.config/alpha-ai-tracker/` (logs, machine-id) and `~/.local/share/alpha-ai-tracker/` (DB, sockets).
@@ -626,16 +632,25 @@ Checklist:
 
 ## 10. Immediate Next Steps
 
-1. **Add tests** — start with unit tests for `SqliteLogStore`, `ProcessFilter`, and `PackageDetector`
-2. **Add crash reporting** — subscribe to `AppDomain.CurrentDomain.UnhandledException` and log to a file
-3. **Enable SQLite encryption** — uncomment the sqlcipher path in `SqliteLogStore` constructor and switch provider
-4. **Fix macOS CPU measurement** — sample `TotalProcessorTime` like Windows/Linux
-5. **Fix macOS window title capture** — only captures foreground window currently
-6. **Add periodic data cleanup** — delete old synced rows (only `permission_status` is pruned today)
-7. **Add offline retry with backoff** — exponential backoff on sync failures to reduce server load
-8. **Consider auto-update** — integrate Velopack or Squirrel.Windows for silent updates
-9. **Remove dead shell-command code** — delete `IShellCommandCollector`, the 3 `ShellCommandCollector` impls, and the `ShellCommand` model
-10. ~~**Add process ancestry tracking** — persist parent PID chain from `ParentProcessResolver` into `AppItem`~~ ✅ DONE
-11. ~~**Browser extension for full URL capture** — MV3 extension + native messaging (chrome + firefox) implemented, URLs/domains stored on `app_items`~~ ✅ DONE
-12. ~~**AT-SPI for Wayland window enumeration** — File Explorer journey tracking (3 watchers + EventCoordinator + JourneyEngine)~~ ✅ DONE
-13. ~~**File manager via `xdg-open` hook or inotify** — RecentFilesWatcher + FileSystemEventWatcher + ATSPIEventWatcher~~ ✅ DONE
+> 2026-08-04: switched native messaging from Python `native-host.py` to pure C# tracker exe; extensions are engine packs (`chromium`/`gecko`/`webkit`), not chrome/firefox brand folders — see Project Structure + BrowserExtensionService.
+
+1. **Ship-test browser install from installed build** — verify C# native-host manifests + chromium `--load-extension` / gecko temporary add-on on a real `.deb`/`.exe` install (Installer-Parity)
+2. **Gecko permanent install** — Mozilla-signed XPI / ESR policy path (temporary add-on is session-only)
+3. **Add tests** — start with unit tests for `SqliteLogStore`, `ProcessFilter`, `BrowserEngineDetector`, `ExtensionIdCalculator`
+4. **Add crash reporting** — subscribe to `AppDomain.CurrentDomain.UnhandledException` and log to a file
+5. **Enable SQLite encryption** — uncomment the sqlcipher path in `SqliteLogStore` constructor and switch provider
+6. **Fix macOS CPU measurement** — sample `TotalProcessorTime` like Windows/Linux
+7. **Fix macOS window title capture** — only captures foreground window currently
+8. **Add periodic data cleanup** — delete old synced rows (only `permission_status` is pruned today)
+9. **Add offline retry with backoff** — exponential backoff on sync failures to reduce server load
+10. **Consider auto-update** — integrate Velopack or Squirrel.Windows for silent updates
+11. **Remove dead shell-command code** — delete `IShellCommandCollector`, the 3 `ShellCommandCollector` impls, and the `ShellCommand` model
+12. ~~**Pure C# native host + engine-based extensions**~~ ✅ DONE (2026-08-04)
+13. ~~**Add process ancestry tracking** — persist parent PID chain from `ParentProcessResolver` into `AppItem`~~ ✅ DONE
+14. ~~**Browser extension for full URL capture** — MV3 + native messaging implemented~~ ✅ DONE
+15. ~~**AT-SPI for Wayland window enumeration** — File Explorer journey tracking~~ ✅ DONE
+16. ~~**File manager via `xdg-open` hook or inotify** — RecentFilesWatcher + FileSystemEventWatcher + ATSPIEventWatcher~~ ✅ DONE
+
+---
+
+> **Last audited:** 2026-08-04, commit 37a1bf5 (docs reflect working tree; commit hash is pre-session HEAD)

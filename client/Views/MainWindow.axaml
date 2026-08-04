@@ -91,16 +91,25 @@
                     <Border IsVisible="{Binding RequiresPermissionAction}"
                             Background="{StaticResource CardBrush}"
                             CornerRadius="{StaticResource RadiusLg}"
-                            Padding="14,10"
-                            HorizontalAlignment="Center" Margin="0,0,0,24"
+                            Padding="16,12"
+                            HorizontalAlignment="Stretch" Margin="0,0,0,20"
                             BoxShadow="{StaticResource CardShadow}">
-                        <TextBlock FontSize="13" Foreground="{StaticResource MutedFgBrush}"
-                                   HorizontalAlignment="Center">
-                            <Run Text="Step "/>
-                            <Run Text="{Binding CurrentPermissionStepNumber}"/>
-                            <Run Text=" of "/>
-                            <Run Text="{Binding TotalPermissionSteps}"/>
-                        </TextBlock>
+                        <StackPanel Spacing="8">
+                            <TextBlock FontSize="12" FontWeight="SemiBold"
+                                       Foreground="{StaticResource MutedFgBrush}"
+                                       HorizontalAlignment="Center">
+                                <Run Text="Setup · Step "/>
+                                <Run Text="{Binding CurrentPermissionStepNumber}"/>
+                                <Run Text=" of "/>
+                                <Run Text="{Binding TotalPermissionSteps}"/>
+                            </TextBlock>
+                            <ProgressBar Minimum="0"
+                                         Maximum="{Binding TotalPermissionSteps}"
+                                         Value="{Binding CurrentPermissionStepNumber}"
+                                         Height="6"
+                                         Foreground="{StaticResource PrimaryBrush}"
+                                         Background="{StaticResource MutedBrush}"/>
+                        </StackPanel>
                     </Border>
 
                     <!-- Content area -->
@@ -238,12 +247,12 @@
                         <!-- ── Browser Extension Setup ── -->
                         <Border Classes="fade-in" IsVisible="{Binding IsBrowserSetup}">
                             <StackPanel VerticalAlignment="Top" HorizontalAlignment="Center"
-                                        MaxWidth="380" Spacing="12" Margin="0,8,0,0">
-                                <Border Background="{StaticResource WarningBrush}"
+                                        MaxWidth="400" Spacing="12" Margin="0,8,0,0">
+                                <Border Background="{StaticResource InfoBrush}"
                                         CornerRadius="{StaticResource RadiusLg}"
-                                        Width="48" Height="48" HorizontalAlignment="Center"
+                                        Width="52" Height="52" HorizontalAlignment="Center"
                                         BoxShadow="{StaticResource CardShadow}">
-                                    <TextBlock Text="🔗" FontSize="20"
+                                    <TextBlock Text="🌐" FontSize="22"
                                                HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                 </Border>
 
@@ -251,41 +260,53 @@
                                            Foreground="{StaticResource FgBrush}"
                                            HorizontalAlignment="Center"/>
 
-                                <TextBlock Text="Install the browser extension to track URLs, page titles, and navigation history. Click a browser below to auto-install, or use one-click setup for everything."
+                                <TextBlock Text="Detected browsers are grouped by engine (Chromium / Gecko / WebKit). New browsers: Refresh then Install. New profiles: Install / Setup All again (idempotent). WebKit is not supported."
                                            FontSize="13" Foreground="{StaticResource MutedFgBrush}"
                                            TextWrapping="Wrap" HorizontalAlignment="Center"
                                            TextAlignment="Center"/>
 
-                                <!-- One-click setup for ALL detected browsers -->
                                 <Button Classes="success"
                                         Command="{Binding OneClickSetupAllCommand}"
                                         IsEnabled="{Binding IsStepWorking, Converter={StaticResource BoolInvert}}"
-                                        Content="⚡ Setup All Browsers"
-                                        HorizontalAlignment="Center" MinWidth="220" Padding="16,10"
+                                        Content="Setup All Supported Browsers"
+                                        HorizontalAlignment="Center" MinWidth="240" Padding="16,10"
                                         FontSize="13" Margin="0,2,0,0"/>
 
-                                <!-- Browser list -->
                                 <ItemsControl ItemsSource="{Binding DetectedBrowsers}"
                                               Margin="0,4,0,0">
                                     <ItemsControl.ItemTemplate>
                                         <DataTemplate>
                                             <Border Background="{StaticResource CardBrush}"
                                                     CornerRadius="{StaticResource RadiusMd}"
-                                                    Padding="12,10" Margin="0,0,0,6"
-                                                    BoxShadow="{StaticResource CardShadow}">
-                                                <Grid ColumnDefinitions="*,Auto">
-                                                    <StackPanel VerticalAlignment="Center">
-                                                        <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold"
+                                                    Padding="14,12" Margin="0,0,0,8"
+                                                    BoxShadow="{StaticResource CardShadow}"
+                                                    BorderBrush="{StaticResource BorderBrush}"
+                                                    BorderThickness="1">
+                                                <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
+                                                    <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="4">
+                                                        <TextBlock Text="{Binding Name}" FontSize="15" FontWeight="SemiBold"
                                                                    Foreground="{StaticResource FgBrush}"/>
-                                                        <TextBlock Text="{Binding StatusLine}" FontSize="11"
+                                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                                            <Border Background="{StaticResource SecondaryBrush}"
+                                                                    CornerRadius="4" Padding="6,2">
+                                                                <TextBlock Text="{Binding EngineText}" FontSize="10"
+                                                                           FontWeight="SemiBold"
+                                                                           Foreground="{StaticResource SecondaryFgBrush}"/>
+                                                            </Border>
+                                                            <TextBlock Text="{Binding StatusText}" FontSize="11"
+                                                                       Foreground="{StaticResource MutedFgBrush}"
+                                                                       VerticalAlignment="Center"/>
+                                                        </StackPanel>
+                                                        <TextBlock Text="{Binding StatusLine}" FontSize="10"
                                                                    Foreground="{StaticResource MutedFgBrush}"
-                                                                   Margin="0,2,0,0"/>
+                                                                   Opacity="0.85"/>
                                                     </StackPanel>
-                                                    <Button Grid.Column="1"
+                                                    <Button Grid.Column="1" Grid.RowSpan="2"
                                                             Content="{Binding ActionButtonText}"
                                                             IsEnabled="{Binding CanInstall}"
                                                             Classes="primary"
-                                                            FontSize="12" Padding="10,6"
+                                                            FontSize="12" Padding="12,8"
+                                                            MinWidth="120"
                                                             Command="{Binding $parent[ItemsControl].DataContext.AddExtensionToBrowserCommand}"
                                                             CommandParameter="{Binding}"
                                                             VerticalAlignment="Center"/>
@@ -295,11 +316,12 @@
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
 
-                                <!-- ═══ Instruction Card (persistent, prominent) ═══ -->
                                 <Border IsVisible="{Binding HasInstructions}"
                                         Background="{StaticResource CardBrush}"
                                         CornerRadius="{StaticResource RadiusLg}"
                                         Padding="16" Margin="0,4,0,0"
+                                        BorderBrush="{StaticResource BorderBrush}"
+                                        BorderThickness="1"
                                         BoxShadow="{StaticResource CardShadow}">
                                     <StackPanel Spacing="10">
                                         <TextBlock Text="{Binding ExtensionInstructionsTitle}"
@@ -315,23 +337,21 @@
                                     </StackPanel>
                                 </Border>
 
-                                <!-- Status message (brief, for working state) -->
                                 <TextBlock Text="{Binding StepStatusText}" FontSize="12"
                                            Foreground="{StaticResource SuccessBrush}"
                                            TextWrapping="Wrap" HorizontalAlignment="Center"
                                            TextAlignment="Center"
                                            IsVisible="{Binding StepStatusText, Converter={StaticResource StringNotEmpty}}"/>
 
-                                <!-- Action buttons -->
                                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8" Margin="0,6,0,0">
                                     <Button Classes="secondary"
                                             Command="{Binding RefreshBrowsersCommand}"
-                                            Content="Refresh"
+                                            Content="Refresh Browsers"
                                             IsEnabled="{Binding IsStepWorking, Converter={StaticResource BoolInvert}}"
                                             FontSize="12" Padding="14,8"/>
                                     <Button Classes="success"
                                             Command="{Binding DismissBrowserSetupCommand}"
-                                            Content="Done"
+                                            Content="Continue to Profile"
                                             FontSize="12" Padding="14,8"/>
                                 </StackPanel>
                             </StackPanel>
@@ -380,6 +400,49 @@
                                                        Foreground="{StaticResource FgBrush}"
                                                        HorizontalAlignment="Right"/>
                                         </Grid>
+                                    </StackPanel>
+                                </Border>
+
+                                <!-- Pending setup / missing permissions -->
+                                <Border IsVisible="{Binding HasPendingSetup}"
+                                        Background="{StaticResource CardBrush}"
+                                        CornerRadius="{StaticResource RadiusLg}" Padding="14"
+                                        BorderBrush="{StaticResource WarningBrush}"
+                                        BorderThickness="1"
+                                        BoxShadow="{StaticResource CardShadow}">
+                                    <StackPanel Spacing="10">
+                                        <TextBlock Text="Setup incomplete"
+                                                   FontSize="14" FontWeight="SemiBold"
+                                                   Foreground="{StaticResource FgBrush}"/>
+                                        <TextBlock Text="These items still need attention. Tap Fix to reopen that step."
+                                                   FontSize="11" Foreground="{StaticResource MutedFgBrush}"
+                                                   TextWrapping="Wrap"/>
+                                        <ItemsControl ItemsSource="{Binding SetupChecklist}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Border Background="{StaticResource MutedBrush}"
+                                                            CornerRadius="8" Padding="10,8" Margin="0,0,0,6">
+                                                        <Grid ColumnDefinitions="*,Auto">
+                                                            <StackPanel Spacing="2">
+                                                                <TextBlock Text="{Binding Title}" FontSize="13"
+                                                                           FontWeight="SemiBold"
+                                                                           Foreground="{StaticResource FgBrush}"/>
+                                                                <TextBlock Text="{Binding Detail}" FontSize="11"
+                                                                           Foreground="{StaticResource MutedFgBrush}"
+                                                                           TextWrapping="Wrap"/>
+                                                            </StackPanel>
+                                                            <Button Grid.Column="1"
+                                                                    Content="{Binding ActionLabel}"
+                                                                    Classes="primary" FontSize="11"
+                                                                    Padding="10,6"
+                                                                    Command="{Binding $parent[ItemsControl].DataContext.FixSetupItemCommand}"
+                                                                    CommandParameter="{Binding}"
+                                                                    VerticalAlignment="Center"/>
+                                                        </Grid>
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
                                     </StackPanel>
                                 </Border>
 

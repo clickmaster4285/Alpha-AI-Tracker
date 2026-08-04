@@ -47,6 +47,26 @@ brew install create-dmg
 
 Run **from the `client/` directory**.
 
+### Windows (PowerShell) — do NOT use bare `bash`
+
+Plain `bash` on this machine hits broken WSL (`docker-desktop` only). Use **Git Bash** and put Inno Setup on `PATH`:
+
+```powershell
+cd C:\tracker\client
+
+# 1) Required once: create .env (installer needs encrypted config.enc)
+Copy-Item .env.example .env
+# Edit .env — set at least ALPHA_SERVER_URL=http://your-server:8080
+
+# 2) Build Windows installer
+$env:PATH = "C:\Program Files (x86)\Inno Setup 6;C:\Program Files\Git\bin;" + $env:PATH
+& "C:\Program Files\Git\bin\bash.exe" publish/build-installer.sh -b win
+```
+
+Output: `installers/AlphaAITracker-Setup-1.0.0.exe`
+
+### Linux / macOS / Git Bash terminal
+
 ```bash
 # Build everything available on this machine
 bash publish/build-installer.sh
@@ -60,6 +80,7 @@ bash publish/build-installer.sh -b mac     # macOS .dmg
 bash publish/build-installer.sh -h
 ```
 
+**Prerequisite:** `client/.env` must exist (copy from `.env.example`). Without it, `config.enc` is not generated and the Windows Inno Setup step aborts.
 ---
 
 ## Output Files

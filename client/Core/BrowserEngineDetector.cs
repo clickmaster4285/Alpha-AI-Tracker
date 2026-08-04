@@ -4,7 +4,7 @@ using System.Text.Json;
 namespace client.Core;
 
 /// <summary>Which browser engine family a detected browser uses.</summary>
-public enum BrowserEngine { Unknown, Chromium, Gecko }
+public enum BrowserEngine { Unknown, Chromium, Gecko, WebKit }
 
 /// <summary>
 /// Separates "is this a browser" (BrowserDetector) from "which engine it uses".
@@ -25,23 +25,7 @@ public static class BrowserEngineDetector
 {
     public static BrowserEngine DetectFor(BrowserCandidate candidate)
     {
-        // 1. Roots derived directly from the confirmed candidate.
-        foreach (var root in DeriveRoots(candidate))
-        {
-            var engine = ClassifyRoot(root);
-            if (engine != BrowserEngine.Unknown) return engine;
-        }
-
-        // 2. Correlated corpus sweep — standard roots overlapping the candidate.
-        foreach (var root in CorrelatedSweepRoots(candidate))
-        {
-            var engine = ClassifyRoot(root);
-            if (engine != BrowserEngine.Unknown) return engine;
-        }
-
-        // 3. Structural two-level probe (vendor-folder layouts like
-        //    BraveSoftware/Brave-Browser). See TwoLevelSweepRoots.
-        foreach (var root in TwoLevelSweepRoots(candidate))
+        foreach (var root in EnumerateCandidateRoots(candidate))
         {
             var engine = ClassifyRoot(root);
             if (engine != BrowserEngine.Unknown) return engine;
@@ -61,25 +45,35 @@ public static class BrowserEngineDetector
             if (File.Exists(Path.Combine(root, "profiles.ini"))) return BrowserEngine.Gecko;
             // Gecko secondary: compatibility.ini.
             if (File.Exists(Path.Combine(root, "compatibility.ini"))) return BrowserEngine.Gecko;
-            // Chromium secondary: Local State JSON at the user-data root.
+            // Chromium: Local State JSON at the user-data root.
             if (File.Exists(Path.Combine(root, "Local State"))) return BrowserEngine.Chromium;
 
-            // Per-profile subdirectories.
+            // Windows Chromium layout: <Vendor>/<Product>/User Data/Local State
+            // (probe stops at <Product> without this one-level descent).
+            var userData = Path.Combine(root, "User Data");
+            if (File.Exists(Path.Combine(userData, "Local State"))) return BrowserEngine.Chromium;
+
+            // WebKit: engine-shaped data dirs (no brand names — file signatures only).
+            if (IsWebKitRoot(root)) return BrowserEngine.WebKit;
+
+            // Per-profile subdirectories (Chromium Default/Preferences, Gecko prefs.js).
             foreach (var sub in Directory.GetDirectories(root))
             {
-                var prefs = Path.Combine(sub, "Preferences");
-                if (File.Exists(prefs))
+                var leaf = Path.GetFileName(sub);
+                // Descend into User Data when present (Windows Chromium).
+                if (string.Equals(leaf, "User Data", StringComparison.OrdinalIgnoreCase))
                 {
-                    try
+                    if (File.Exists(Path.Combine(sub, "Local State"))) return BrowserEngine.Chromium;
+                    foreach (var profile in Directory.GetDirectories(sub))
                     {
-                        using var doc = JsonDocument.Parse(File.ReadAllBytes(prefs));
-                        if (doc.RootElement.ValueKind == JsonValueKind.Object)
-                            return BrowserEngine.Chromium;
+                        if (HasChromiumPreferences(profile)) return BrowserEngine.Chromium;
                     }
-                    catch { /* unreadable/corrupt — not a Chromium signature */ }
                 }
+
+                if (HasChromiumPreferences(sub)) return BrowserEngine.Chromium;
                 if (File.Exists(Path.Combine(sub, "prefs.js")) || File.Exists(Path.Combine(sub, "user.js")))
                     return BrowserEngine.Gecko;
+                if (IsWebKitRoot(sub)) return BrowserEngine.WebKit;
             }
 
             // Rare: prefs.js directly at the root.
@@ -89,6 +83,41 @@ public static class BrowserEngineDetector
         return BrowserEngine.Unknown;
     }
 
+    private static bool HasChromiumPreferences(string profileDir)
+    {
+        var prefs = Path.Combine(profileDir, "Preferences");
+        if (!File.Exists(prefs)) return false;
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllBytes(prefs));
+            return doc.RootElement.ValueKind == JsonValueKind.Object;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// WebKit profile signatures — file/dir shapes only (History.db + Bookmarks.plist
+    /// for Safari-style; ephy-bookmarks.db / WebKitCache for WebKitGTK). Never matches
+    /// on application name.
+    /// </summary>
+    private static bool IsWebKitRoot(string root)
+    {
+        if (File.Exists(Path.Combine(root, "History.db")) &&
+            (File.Exists(Path.Combine(root, "Bookmarks.plist")) ||
+             File.Exists(Path.Combine(root, "LastSession.plist"))))
+            return true;
+
+        if (File.Exists(Path.Combine(root, "ephy-bookmarks.db")) ||
+            File.Exists(Path.Combine(root, "ephy-history.db")))
+            return true;
+
+        if (Directory.Exists(Path.Combine(root, "WebKitCache")) ||
+            Directory.Exists(Path.Combine(root, "webkit")))
+            return true;
+
+        return false;
+    }
+
     /// <summary>
     /// Find the resolved profile root + default profile directory for a candidate
     /// (same probe order as <see cref="DetectFor"/>). Returns null when the
@@ -96,14 +125,63 @@ public static class BrowserEngineDetector
     /// </summary>
     public static (string Root, string DefaultProfile)? FindProfileRoot(BrowserCandidate candidate)
     {
-        foreach (var root in DeriveRoots(candidate)
-                     .Concat(CorrelatedSweepRoots(candidate))
-                     .Concat(TwoLevelSweepRoots(candidate)))
+        foreach (var root in EnumerateCandidateRoots(candidate))
         {
             var engine = ClassifyRoot(root);
             if (engine == BrowserEngine.Unknown) continue;
-            return (root, FindDefaultProfile(root, engine));
+
+            // Normalize to the real Chromium user-data dir when we matched a parent.
+            var resolved = ResolveChromiumUserDataDir(root) ?? root;
+            return (resolved, FindDefaultProfile(resolved, engine));
         }
+        return null;
+    }
+
+    /// <summary>All profile-root probes for a candidate (order matters).</summary>
+    private static IEnumerable<string> EnumerateCandidateRoots(BrowserCandidate candidate) =>
+        DeriveRoots(candidate)
+            .Concat(RootsFromBinaryPath(candidate))
+            .Concat(CorrelatedSweepRoots(candidate))
+            .Concat(TwoLevelSweepRoots(candidate));
+
+    /// <summary>
+    /// From the browser exe path (…/Application/chrome.exe), walk up and look for a
+    /// sibling <c>User Data</c> directory — the standard Windows Chromium layout,
+    /// without any brand-name dictionary.
+    /// </summary>
+    private static List<string> RootsFromBinaryPath(BrowserCandidate c)
+    {
+        var roots = new List<string>();
+        try
+        {
+            var path = c.BinaryPath;
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return roots;
+
+            var dir = Path.GetDirectoryName(path);
+            for (int i = 0; i < 4 && !string.IsNullOrEmpty(dir); i++)
+            {
+                var userData = Path.Combine(dir, "User Data");
+                if (Directory.Exists(userData))
+                    roots.Add(userData);
+
+                // Also try the directory itself (may already be the product folder).
+                roots.Add(dir);
+
+                var parent = Path.GetDirectoryName(dir);
+                if (parent == null || parent == dir) break;
+                dir = parent;
+            }
+        }
+        catch { }
+        return roots;
+    }
+
+    /// <summary>If <paramref name="root"/> contains User Data/Local State, return that path.</summary>
+    private static string? ResolveChromiumUserDataDir(string root)
+    {
+        if (File.Exists(Path.Combine(root, "Local State"))) return root;
+        var userData = Path.Combine(root, "User Data");
+        if (File.Exists(Path.Combine(userData, "Local State"))) return userData;
         return null;
     }
 
@@ -236,6 +314,9 @@ public static class BrowserEngineDetector
             {
                 roots.Add(Path.Combine(userHome, "Library", "Application Support", name));
                 roots.Add(Path.Combine(userHome, "Library", "Application Support", name, "Default"));
+                // Safari (WebKit) keeps its profile under ~/Library/Safari — only
+                // accepted when ClassifyRoot finds WebKit signatures there.
+                roots.Add(Path.Combine(userHome, "Library", "Safari"));
             }
         }
 
@@ -313,12 +394,17 @@ public static class BrowserEngineDetector
 
     private static bool Overlaps(string rootName, BrowserCandidate c)
     {
-        return rootName.Contains(c.Name, StringComparison.OrdinalIgnoreCase) ||
-               c.Name.Contains(rootName, StringComparison.OrdinalIgnoreCase) ||
-               rootName.Contains(c.BinaryName, StringComparison.OrdinalIgnoreCase) ||
-               c.BinaryName.Contains(rootName, StringComparison.OrdinalIgnoreCase) ||
-               rootName.Contains(c.DesktopId, StringComparison.OrdinalIgnoreCase) ||
-               c.DesktopId.Contains(rootName, StringComparison.OrdinalIgnoreCase);
+        if (string.IsNullOrEmpty(rootName)) return false;
+        // Empty needles make string.Contains return true for every haystack — skip them.
+        return (!string.IsNullOrEmpty(c.Name) &&
+                    (rootName.Contains(c.Name, StringComparison.OrdinalIgnoreCase) ||
+                     c.Name.Contains(rootName, StringComparison.OrdinalIgnoreCase))) ||
+               (!string.IsNullOrEmpty(c.BinaryName) &&
+                    (rootName.Contains(c.BinaryName, StringComparison.OrdinalIgnoreCase) ||
+                     c.BinaryName.Contains(rootName, StringComparison.OrdinalIgnoreCase))) ||
+               (!string.IsNullOrEmpty(c.DesktopId) &&
+                    (rootName.Contains(c.DesktopId, StringComparison.OrdinalIgnoreCase) ||
+                     c.DesktopId.Contains(rootName, StringComparison.OrdinalIgnoreCase)));
     }
 
     /// <summary>
@@ -386,8 +472,13 @@ public static class BrowserEngineDetector
 
                 // Final gate: a real profile signature must exist here — the
                 // structural sweep never invents a root for empty dirs.
-                if (ClassifyRoot(l2) != BrowserEngine.Unknown)
-                    roots.Add(l2);
+                if (ClassifyRoot(l2) == BrowserEngine.Unknown) continue;
+
+                roots.Add(l2);
+                // Windows Chromium: real Local State lives under User Data/.
+                var userData = Path.Combine(l2, "User Data");
+                if (Directory.Exists(userData))
+                    roots.Add(userData);
             }
         }
 

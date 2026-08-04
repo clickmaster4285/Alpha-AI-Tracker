@@ -1,17 +1,14 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────
-# Alpha AI Tracker — Browser Extension Installer
-# ──────────────────────────────────────────────────────────────
-# This script:
-#   1. Locates native-host.py and makes it executable
-#   2. Creates the Native Messaging host manifest for Chrome, Chromium, Brave, Firefox
-#   3. Prints instructions for loading the extension in the browser
-#   4. With --update-ids: updates the native host manifest with extension IDs
+# Alpha AI Tracker — Native Messaging Host Installer (parity helper)
+#
+# The GUI (BrowserExtensionService) is the primary installer and writes
+# manifests pointing at the C# tracker executable (no Python).
+# This script remains for installed-build / CLI parity.
 #
 # Usage:
-#   ./install-extensions.sh                        # Install native host + print instructions
-#   ./install-extensions.sh --update-ids CHROME_ID FIREFOX_ID   # Update with extension IDs
-#   ./install-extensions.sh --update-ids CHROME_ID               # Chrome only
+#   ./install-extensions.sh                        # Install native host manifests
+#   ./install-extensions.sh --update-ids CHROME_ID  # Update Chromium allowed_origins
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -19,147 +16,101 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 EXTENSIONS_DIR="$PROJECT_DIR/extensions"
 MANIFEST_NAME="com.alphai.tracker.json"
+GECKO_ID="alpha-ai-tracker@alphai.com"
 
-# ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ───
-# MODE 2: Update native host manifests with extension IDs
-# ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ───
-if [[ "${1:-}" == "--update-ids" ]]; then
-  CHROME_ID="${2:-}"
-  FIREFOX_ID="${3:-$CHROME_ID}"
-
-  if [ -z "$CHROME_ID" ]; then
-    echo "Usage: $0 --update-ids <chrome-extension-id> [firefox-extension-id]"
-    echo ""
-    echo "  Get the extension ID from:"
-    echo "    Chrome: chrome://extensions (click the extension card)"
-    echo "    Firefox: about:debugging#/runtime/this-firefox"
-    exit 1
-  fi
-
-  # Build allowed_origins dynamically
-  # (MANIFEST_NAME is defined near the top of the file.)
-  ALLOWED_ORIGINS='['
-  if [ -n "$CHROME_ID" ]; then
-    ALLOWED_ORIGINS+="\"chrome-extension://${CHROME_ID}/\""
-  fi
-  if [ -n "$FIREFOX_ID" ] && [ "$FIREFOX_ID" != "$CHROME_ID" ]; then
-    [ "$ALLOWED_ORIGINS" != "[" ] && ALLOWED_ORIGINS+=", "
-    ALLOWED_ORIGINS+="\"chrome-extension://${FIREFOX_ID}/\""
-  elif [ -n "$CHROME_ID" ]; then
-    # Firefox also accepts chrome-extension:// ID format for chrome.runtime.connectNative
-    ALLOWED_ORIGINS+=", \"chrome-extension://${CHROME_ID}/\""
-  fi
-  ALLOWED_ORIGINS+=']'
-
-  # Update all installed manifests
-  for manifest_path in \
-    "$HOME/.config/google-chrome/NativeMessagingHosts/$MANIFEST_NAME" \
-    "$HOME/.config/chromium/NativeMessagingHosts/$MANIFEST_NAME" \
-    "$HOME/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts/$MANIFEST_NAME" \
-    "$HOME/.mozilla/native-messaging-hosts/$MANIFEST_NAME"; do
-
-    if [ -f "$manifest_path" ]; then
-      # Use Python for safe JSON manipulation
-      python3 -c "
-import json
-with open('$manifest_path', 'r') as f:
-    data = json.load(f)
-data['allowed_origins'] = $ALLOWED_ORIGINS
-with open('$manifest_path', 'w') as f:
-    json.dump(data, f, indent=2)
-print('✓ Updated: $manifest_path')
-" || echo "⚠ Could not update $manifest_path (python3 required)"
+# Resolve the tracker binary (C# native host)
+resolve_host() {
+  local candidates=(
+    "$PROJECT_DIR/client"
+    "$PROJECT_DIR/alpha-ai-tracker"
+    "$SCRIPT_DIR/../client"
+    "$(command -v alpha-ai-tracker 2>/dev/null || true)"
+  )
+  # Prefer the running publish output next to this script when bundled.
+  for c in "$SCRIPT_DIR/../client" "$SCRIPT_DIR/client" "${candidates[@]}"; do
+    if [ -n "$c" ] && [ -x "$c" ] && [ -f "$c" ]; then
+      echo "$(cd "$(dirname "$c")" && pwd)/$(basename "$c")"
+      return 0
     fi
   done
+  # Fallback: look for a .dll-hosted entry (dotnet client.dll) — not ideal for NM
+  # but better than failing silently.
+  if [ -f "$PROJECT_DIR/client.dll" ]; then
+    echo "dotnet $PROJECT_DIR/client.dll"
+    return 0
+  fi
+  return 1
+}
 
-  echo ""
-  echo "✓ Extension IDs registered!"
-  echo "  Restart your browser(s) to activate native messaging."
+if [[ "${1:-}" == "--update-ids" ]]; then
+  CHROME_ID="${2:-}"
+  if [ -z "$CHROME_ID" ]; then
+    echo "Usage: $0 --update-ids <chromium-extension-id>"
+    exit 1
+  fi
+  ALLOWED_ORIGINS="[\"chrome-extension://${CHROME_ID}/\"]"
+  shopt -s nullglob
+  for manifest_path in \
+    "$HOME"/.config/*/NativeMessagingHosts/"$MANIFEST_NAME" \
+    "$HOME"/.mozilla/native-messaging-hosts/"$MANIFEST_NAME"; do
+    [ -f "$manifest_path" ] || continue
+    # Pure bash JSON rewrite is fragile; use a tiny C#-free sed for the origins array.
+    if grep -q '"allowed_origins"' "$manifest_path"; then
+      tmp="$(mktemp)"
+      awk -v origins="$ALLOWED_ORIGINS" '
+        /"allowed_origins"/ {
+          print "  \"allowed_origins\": " origins ","
+          # skip until closing ]
+          while (getline line) { if (line ~ /]/) break }
+          next
+        }
+        { print }
+      ' "$manifest_path" > "$tmp" && mv "$tmp" "$manifest_path"
+      echo "✓ Updated: $manifest_path"
+    fi
+  done
+  echo "✓ Extension IDs registered. Restart your browser(s)."
   exit 0
 fi
 
-# ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ───
-# MODE 1: Install native host manifests + print instructions
-# ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ───
+NATIVE_HOST_PATH="$(resolve_host)" || {
+  echo "Error: tracker executable not found (C# native host)."
+  echo "Build/install the client first, then re-run this script."
+  exit 1
+}
+echo "✓ Native host binary: $NATIVE_HOST_PATH"
 
-# ─── Determine native host script path ───
-if [ -f "$EXTENSIONS_DIR/native-host.py" ]; then
-    NATIVE_HOST_PATH="$EXTENSIONS_DIR/native-host.py"
-elif [ -f "$SCRIPT_DIR/native-host.py" ]; then
-    NATIVE_HOST_PATH="$SCRIPT_DIR/native-host.py"
-else
-    echo "Error: native-host.py not found!"
-    echo "Looked in: $EXTENSIONS_DIR"
-    echo "Looked in: $SCRIPT_DIR"
-    exit 1
-fi
+CHROMIUM_EXT_DIR=""
+for d in "$EXTENSIONS_DIR/chromium" "$EXTENSIONS_DIR/chrome"; do
+  [ -d "$d" ] && CHROMIUM_EXT_DIR="$d" && break
+done
 
-chmod +x "$NATIVE_HOST_PATH"
-echo "✓ Native host script: $NATIVE_HOST_PATH"
-
-# ─── Detect stale manifests from a previous install ───
-# If the user previously installed from a different location (e.g. the dev tree),
-# any existing manifest has a `path` pointing somewhere that may no longer exist.
-# Warn loudly so they know a reinstall is happening — but always overwrite.
-EXISTING_MANIFEST="$HOME/.config/google-chrome/NativeMessagingHosts/$MANIFEST_NAME"
-if [ -f "$EXISTING_MANIFEST" ]; then
-  EXISTING_PATH="$(python3 -c "
-import json, sys
-try:
-    with open(sys.argv[1]) as f:
-        print(json.load(f).get('path', ''))
-except: pass
-" "$EXISTING_MANIFEST" 2>/dev/null)"
-  if [ -n "$EXISTING_PATH" ] && [ ! -f "$EXISTING_PATH" ]; then
-    echo ""
-    echo "  ⚠ Found stale manifest from a previous install:"
-    echo "    path: $EXISTING_PATH"
-    echo "    (file no longer exists — Chrome would silently reject native messaging calls)"
-    echo "  → Overwriting with current path: $NATIVE_HOST_PATH"
-    echo ""
-  fi
-fi
-
-# ─── Generate the Native Messaging manifest ───
-# (MANIFEST_NAME is defined near the top of the file.)
-
-# ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ───
-# Pre-compute the Chrome extension ID from the resolved extension path.
-# Without this, Chrome silently rejects every native messaging call because
-# the extension's actual ID (SHA256 of its filesystem path) won't be in
-# allowed_origins. Users would have to run --update-ids separately, which
-# is the bug we're fixing here.
-# ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ───
-CHROME_EXT_DIR="${EXTENSIONS_DIR}/chrome"
 CHROME_EXT_ID=""
-if [ -d "$CHROME_EXT_DIR" ] && command -v python3 >/dev/null 2>&1; then
-  CHROME_EXT_ID="$(python3 -c "
-import hashlib, os, sys
-ext_path = os.path.realpath(sys.argv[1])
-path_hash = hashlib.sha256(ext_path.encode('utf-8')).hexdigest()
-alphabet = 'abcdefghijklmnop'
-ext_id = ''
-for i in range(16):
-    byte_val = int(path_hash[i*2:i*2+2], 16)
-    ext_id += alphabet[(byte_val >> 4) & 0xf]
-    ext_id += alphabet[byte_val & 0xf]
-print(ext_id)
-" "$CHROME_EXT_DIR" 2>/dev/null)"
+if [ -n "$CHROMIUM_EXT_DIR" ] && command -v sha256sum >/dev/null 2>&1; then
+  # Mirror ExtensionIdCalculator: SHA-256 of realpath → first 16 bytes → a–p nibbles
+  EXT_REAL="$(cd "$CHROMIUM_EXT_DIR" && pwd -P)"
+  HASH="$(printf '%s' "$EXT_REAL" | sha256sum | awk '{print $1}')"
+  ALPHABET="abcdefghijklmnop"
+  CHROME_EXT_ID=""
+  for i in $(seq 0 15); do
+    BYTE_HEX="${HASH:$((i*2)):2}"
+    BYTE_VAL=$((16#$BYTE_HEX))
+    HI=$(( (BYTE_VAL >> 4) & 15 ))
+    LO=$(( BYTE_VAL & 15 ))
+    CHROME_EXT_ID+="${ALPHABET:$HI:1}${ALPHABET:$LO:1}"
+  done
+  echo "✓ Pre-computed Chromium extension ID: $CHROME_EXT_ID"
 fi
 
-# Firefox accepts chrome-extension:// IDs in allowed_extensions (it's just an ID list).
-# We register the same ID for both; --update-ids can override later if the user
-# loads the extension from a different location.
 ALLOWED_ORIGINS='[]'
 if [ -n "$CHROME_EXT_ID" ]; then
   ALLOWED_ORIGINS="[\"chrome-extension://${CHROME_EXT_ID}/\"]"
-  echo "✓ Pre-computed Chrome extension ID: $CHROME_EXT_ID"
-else
-  echo "  WARNING: Could not pre-compute Chrome extension ID (python3 missing or chrome/ dir not found)."
-  echo "  Manifest will have empty allowed_origins — run: $0 --update-ids YOUR_CHROME_EXTENSION_ID"
 fi
 
-cat > /tmp/"$MANIFEST_NAME" << EOF
+write_chromium_manifest() {
+  local dir="$1"
+  mkdir -p "$dir"
+  cat > "$dir/$MANIFEST_NAME" << EOF
 {
   "name": "com.alphai.tracker",
   "description": "Alpha AI Tracker — Native messaging bridge for browser tab/URL capture",
@@ -168,63 +119,46 @@ cat > /tmp/"$MANIFEST_NAME" << EOF
   "allowed_origins": $ALLOWED_ORIGINS
 }
 EOF
+  echo "✓ Installed Chromium manifest: $dir"
+}
 
-# ─── Install for Chrome/Chromium ───
-CHROME_HOST_DIR="$HOME/.config/google-chrome/NativeMessagingHosts"
-CHROMIUM_HOST_DIR="$HOME/.config/chromium/NativeMessagingHosts"
-BRAVE_HOST_DIR="$HOME/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts"
+write_gecko_manifest() {
+  local dir="$1"
+  mkdir -p "$dir"
+  cat > "$dir/$MANIFEST_NAME" << EOF
+{
+  "name": "com.alphai.tracker",
+  "description": "Alpha AI Tracker — Native messaging bridge for browser tab/URL capture",
+  "path": "$NATIVE_HOST_PATH",
+  "type": "stdio",
+  "allowed_extensions": ["$GECKO_ID"]
+}
+EOF
+  echo "✓ Installed Gecko manifest: $dir"
+}
 
-for dir in "$CHROME_HOST_DIR" "$CHROMIUM_HOST_DIR" "$BRAVE_HOST_DIR"; do
-    mkdir -p "$dir"
-    cp "/tmp/$MANIFEST_NAME" "$dir/$MANIFEST_NAME"
-    echo "✓ Installed native host manifest for: $(basename "$(dirname "$(dirname "$dir")")" 2>/dev/null || echo "$dir")"
-done
+# Chromium engines: write into every existing ~/.config/*/NativeMessagingHosts-capable root
+# that already has a Preferences / Local State profile (structural, not brand-keyed).
+if [ -d "$HOME/.config" ]; then
+  while IFS= read -r -d '' prefs; do
+    root="$(dirname "$(dirname "$prefs")")"
+    # Prefer user-data root (Local State sibling) when present
+    if [ -f "$root/Local State" ]; then
+      write_chromium_manifest "$root/NativeMessagingHosts"
+    else
+      write_chromium_manifest "$(dirname "$prefs")/../NativeMessagingHosts"
+    fi
+  done < <(find "$HOME/.config" -maxdepth 3 -type f \( -name Preferences -o -name 'Local State' \) -print0 2>/dev/null | head -z -n 40)
+fi
 
-# ─── Install for Firefox ───
-FIREFOX_HOST_DIR="$HOME/.mozilla/native-messaging-hosts"
-mkdir -p "$FIREFOX_HOST_DIR"
-cp "/tmp/$MANIFEST_NAME" "$FIREFOX_HOST_DIR/$MANIFEST_NAME"
-echo "✓ Installed native host manifest for Firefox"
+# Always ensure a chromium fallback + gecko host dir exist
+write_chromium_manifest "$HOME/.config/chromium/NativeMessagingHosts"
+write_gecko_manifest "$HOME/.mozilla/native-messaging-hosts"
 
-rm "/tmp/$MANIFEST_NAME"
-
-# ─── Print extension ID setup instructions ───
 echo ""
-echo "═══════════════════════════════════════════════════════════════"
-echo "  BROWSER EXTENSION SETUP"
-echo "═══════════════════════════════════════════════════════════════"
+echo "✓ Native messaging host installed (C# tracker binary)."
+echo "  Chromium extension pack: ${CHROMIUM_EXT_DIR:-extensions/chromium}"
+echo "  Gecko extension pack:    $EXTENSIONS_DIR/gecko"
+echo "  WebKit: not supported"
 echo ""
-echo "  Step 1: Load the extension in your browser"
-echo ""
-echo "  Chrome/Chromium/Brave:"
-echo "    1. Open chrome://extensions"
-echo "    2. Enable 'Developer mode' (top right)"
-echo "    3. Click 'Load unpacked'"
-echo "    4. Select folder: $EXTENSIONS_DIR/chrome"
-echo ""
-echo "  Firefox:"
-echo "    1. Open about:debugging#/runtime/this-firefox"
-echo "    2. Click 'Load Temporary Add-on…'"
-echo "    3. Select file: $EXTENSIONS_DIR/firefox/manifest.json"
-echo "    (For permanent install, see about:addons → Settings → Install Add-on From File)"
-echo ""
-echo "  Step 2: Get the extension ID"
-echo ""
-echo "  Chrome: The ID appears on chrome://extensions card"
-echo "    → Looks like: abcdefghijklmnopabcdefghijklmn"
-echo "  Firefox: The ID appears in about:debugging"
-echo ""
-echo "  Step 3: Register the extension ID with native messaging"
-echo ""
-echo "    Run:"
-echo "      $0 --update-ids YOUR_CHROME_EXTENSION_ID"
-echo ""
-echo "    Example:"
-echo "      $0 --update-ids abcdefghijklmnopabcdefghijklmn"
-echo ""
-echo "    Then restart the browser."
-echo ""
-echo "  To verify: Check the socket file exists after starting tracker:"
-echo "    ls -la ~/.local/share/alpha-ai-tracker/native-messaging.sock"
-echo ""
-echo "═══════════════════════════════════════════════════════════════"
+echo "  Prefer the GUI \"Install Extension\" button — it launches the browser and loads the pack."

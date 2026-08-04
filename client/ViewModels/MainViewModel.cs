@@ -61,12 +61,14 @@ public partial class MainViewModel : ViewModelBase
 
     // ─── Permission Step Flow ───
 
-    public enum PermissionStep { None, AutoStart, BackgroundRunning, Dependencies, OtherPermissions }
+    public enum PermissionStep { None, AutoStart, BackgroundRunning, Dependencies, OtherPermissions, BrowserExtension }
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsAutoStartStep))]
+    [NotifyPropertyChangedFor(nameof(IsBackgroundStep))]
     [NotifyPropertyChangedFor(nameof(IsDependencyStep))]
     [NotifyPropertyChangedFor(nameof(IsPermissionStep))]
+    [NotifyPropertyChangedFor(nameof(IsBrowserSetup))]
     [NotifyPropertyChangedFor(nameof(IsProfile))]
     [NotifyPropertyChangedFor(nameof(RequiresPermissionAction))]
     [NotifyPropertyChangedFor(nameof(StepTitle))]
@@ -82,16 +84,18 @@ public partial class MainViewModel : ViewModelBase
         PermissionStep.BackgroundRunning => 2,
         PermissionStep.Dependencies => 3,
         PermissionStep.OtherPermissions => OperatingSystem.IsLinux() ? 4 : 3,
+        PermissionStep.BrowserExtension => OperatingSystem.IsLinux() ? 5 : 4,
         _ => 0
     };
 
-    public int TotalPermissionSteps => OperatingSystem.IsLinux() ? 4 : 3;
+    public int TotalPermissionSteps => OperatingSystem.IsLinux() ? 5 : 4;
 
     public bool IsAutoStartStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.AutoStart;
     public bool IsBackgroundStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.BackgroundRunning;
     public bool IsDependencyStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.Dependencies;
     public bool IsPermissionStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.OtherPermissions;
-    public bool IsProfile => IsLoggedIn && CurrentPermissionStep == PermissionStep.None && !ShowBrowserSetup;
+    public bool IsBrowserSetup => IsLoggedIn && CurrentPermissionStep == PermissionStep.BrowserExtension;
+    public bool IsProfile => IsLoggedIn && CurrentPermissionStep == PermissionStep.None;
     public bool RequiresPermissionAction => IsLoggedIn && CurrentPermissionStep != PermissionStep.None;
 
     public string StepTitle => CurrentPermissionStep switch
@@ -100,6 +104,7 @@ public partial class MainViewModel : ViewModelBase
         PermissionStep.BackgroundRunning => "Enable Background Guard",
         PermissionStep.Dependencies => "Install Required Dependencies",
         PermissionStep.OtherPermissions => GetPlatformPermissionTitle(),
+        PermissionStep.BrowserExtension => "Browser Journey Tracking",
         _ => string.Empty
     };
 
@@ -109,6 +114,7 @@ public partial class MainViewModel : ViewModelBase
         PermissionStep.BackgroundRunning => "The background guard keeps the service alive even when the window is closed.",
         PermissionStep.Dependencies => "The following dependencies are missing and must be installed to grant permissions.",
         PermissionStep.OtherPermissions => GetPlatformPermissionDescription(),
+        PermissionStep.BrowserExtension => "Install the browser extension to track URLs and navigation. New Chromium/Gecko browsers: Refresh then Install. New browser profiles: run Install / Setup All again (already-seeded profiles are skipped).",
         _ => string.Empty
     };
 
@@ -145,13 +151,11 @@ public partial class MainViewModel : ViewModelBase
 
     // ─── Browser Extension State ───
 
+    /// <summary>True while the browser wizard step should be considered incomplete.</summary>
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsProfile))]
-    [NotifyPropertyChangedFor(nameof(IsBrowserSetup))]
     [NotifyPropertyChangedFor(nameof(RequiresBrowserSetup))]
-    private bool _showBrowserSetup;
-
-    // ─── Extension Instructions (persistent, shown in a dedicated card) ───
+    [NotifyPropertyChangedFor(nameof(HasPendingSetup))]
+    private bool _browserSetupPending = true;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasInstructions))]
@@ -164,9 +168,11 @@ public partial class MainViewModel : ViewModelBase
     public bool HasInstructions => !string.IsNullOrEmpty(ExtensionInstructions);
 
     public ObservableCollection<DetectedBrowser> DetectedBrowsers { get; } = new();
+    public ObservableCollection<SetupChecklistItem> SetupChecklist { get; } = new();
 
-    public bool IsBrowserSetup => IsLoggedIn && ShowBrowserSetup;
-    public bool RequiresBrowserSetup => IsLoggedIn && ShowBrowserSetup && DetectedBrowsers.Any(b => b.CanInstall);
+    public bool RequiresBrowserSetup => IsLoggedIn && BrowserSetupPending &&
+                                        (!_browserExt.IsAnyExtensionActive);
+    public bool HasPendingSetup => SetupChecklist.Count > 0;
 
     public MainViewModel(
         AppConfig config,
@@ -199,6 +205,7 @@ public partial class MainViewModel : ViewModelBase
             DetectedBrowsers.Clear();
             foreach (var b in _browserExt.DetectedBrowsers) DetectedBrowsers.Add(b);
             OnPropertyChanged(nameof(RequiresBrowserSetup));
+            RefreshSetupChecklist();
         });
     }
 
@@ -223,17 +230,17 @@ public partial class MainViewModel : ViewModelBase
             await _store.SetStatusAsync("perm_auto_start", "false", ct);
             await _store.SetStatusAsync("perm_background", "false", ct);
             await _store.SetStatusAsync("perm_other", "false", ct);
-
-            // Evaluate which permissions are actually configured vs missing.
-            // Does NOT trust any previous stored status.
-            CurrentPermissionStep = await GetNextPermissionStep();
+            await _store.SetStatusAsync("perm_browser", "false", ct);
+            BrowserSetupPending = true;
 
             // Forced auto-start — always ensure it's configured
             _autoStart.EnableAutoStartForced();
 
-            // Scan for browsers regardless of permission status
-            // The browser setup UI shows alongside permission steps
+            // Scan browsers BEFORE choosing the next wizard step so BrowserExtension
+            // is never skipped due to an empty detection list from a late scan.
             await ScanBrowsersAsync(ct);
+            CurrentPermissionStep = await GetNextPermissionStep();
+            RefreshSetupChecklist();
         }
         else
         {
@@ -245,8 +252,7 @@ public partial class MainViewModel : ViewModelBase
     /// <summary>
     /// Check each permission condition and return the first incomplete step.
     /// Always re-validates the ACTUAL condition — never trusts stored status alone.
-    /// If a permission was previously granted but is now revoked (e.g. user removed
-    /// auto-start or systemd service was deleted), it will show up again.
+    /// Browser extension is a real wizard step (never an optional overlay).
     /// </summary>
     private async Task<PermissionStep> GetNextPermissionStep()
     {
@@ -278,7 +284,20 @@ public partial class MainViewModel : ViewModelBase
             return PermissionStep.OtherPermissions;
         await _store.SetStatusAsync("perm_other", "true", CancellationToken.None);
 
-        // All permissions are granted
+        // Browser extension (final wizard step) — shown until connected or user Continues.
+        if (DetectedBrowsers.Count == 0)
+            await ScanBrowsersAsync(CancellationToken.None);
+
+        if (_browserExt.IsAnyExtensionActive)
+        {
+            await _store.SetStatusAsync("perm_browser", "true", CancellationToken.None);
+            BrowserSetupPending = false;
+            return PermissionStep.None;
+        }
+
+        if (BrowserSetupPending)
+            return PermissionStep.BrowserExtension;
+
         return PermissionStep.None;
     }
 
@@ -594,12 +613,13 @@ public partial class MainViewModel : ViewModelBase
             EmployeeAvatarColor = emp.AvatarColor ?? "#8B5CF6";
             StatusMessage = string.Empty;
 
-            // Advance through permission steps
-            CurrentPermissionStep = await GetNextPermissionStep();
-
-            // Scan for browsers and enable auto-start after GUI login too
+            // Advance through permission steps (scan browsers first)
             _autoStart.EnableAutoStartForced();
+            BrowserSetupPending = true;
+            await _store.SetStatusAsync("perm_browser", "false", CancellationToken.None);
             await ScanBrowsersAsync(CancellationToken.None);
+            CurrentPermissionStep = await GetNextPermissionStep();
+            RefreshSetupChecklist();
         }
         catch (HttpRequestException ex)
         {
@@ -642,6 +662,9 @@ public partial class MainViewModel : ViewModelBase
         await _store.SetStatusAsync("perm_auto_start", "false", CancellationToken.None);
         await _store.SetStatusAsync("perm_background", "false", CancellationToken.None);
         await _store.SetStatusAsync("perm_other", "false", CancellationToken.None);
+        await _store.SetStatusAsync("perm_browser", "false", CancellationToken.None);
+        BrowserSetupPending = true;
+        SetupChecklist.Clear();
 
         await _store.ClearEmployeeInfoAsync(CancellationToken.None);
         IsLoggedIn = false;
@@ -683,6 +706,7 @@ public partial class MainViewModel : ViewModelBase
 
             // Re-evaluate progress
             CurrentPermissionStep = await GetNextPermissionStep();
+            RefreshSetupChecklist();
             if (IsProfile)
             {
                 StepStatusText = string.Empty;
@@ -899,13 +923,19 @@ public partial class MainViewModel : ViewModelBase
         {
             await _browserExt.ScanAsync(ct);
 
-            // Batch-update ObservableCollection on UI thread
             DetectedBrowsers.Clear();
             foreach (var b in _browserExt.DetectedBrowsers)
                 DetectedBrowsers.Add(b);
 
-            ShowBrowserSetup = DetectedBrowsers.Count > 0;
+            if (_browserExt.IsAnyExtensionActive)
+            {
+                BrowserSetupPending = false;
+                await _store.SetStatusAsync("perm_browser", "true", CancellationToken.None);
+            }
+
             StepStatusText = string.Empty;
+            OnPropertyChanged(nameof(RequiresBrowserSetup));
+            RefreshSetupChecklist();
         }
         catch (Exception ex)
         {
@@ -940,7 +970,7 @@ public partial class MainViewModel : ViewModelBase
                 if (!hostOk)
                 {
                     ExtensionInstructionsTitle = "⚠ Installation Failed";
-                    ExtensionInstructions = "Could not install the native messaging host automatically.\n\nTry running manually in terminal:\n  ./publish/install-extensions.sh";
+                    ExtensionInstructions = "Could not install the native messaging host automatically.\n\nThe host is the tracker executable itself (pure C#) — ensure the app has write access to your browser's NativeMessagingHosts directory.";
                     // Roll back — install actually failed.
                     browser.Status = BrowserInstallStatus.ReadyToInstall;
                     browser.NativeHostInstalled = false;
@@ -949,110 +979,71 @@ public partial class MainViewModel : ViewModelBase
                 browser.NativeHostInstalled = true;
             }
 
-            // Step 2: Launch browser with extension or show instructions.
-            // Phase 5 (rev-3): the default persistent mechanism for Chromium is the
-            // elevated ExtensionInstallForcelist policy (one pkexec/UAC prompt per
-            // click, matching GrantLinuxPermissionsAsync). --load-extension and
-            // Preferences injection are DEV FALLBACKS only — used when no CRX
-            // infrastructure is configured, or the policy write was declined.
-            if (browser.Engine == BrowserEngine.Chromium)
+            // Step 2: Launch browser with extension (engine ladder — no brand names).
+            // Chromium: CRX policy when configured, else --load-extension / Preferences.
+            // Gecko: launch (+ temporary add-on if unsigned).
+            if (browser.Engine is BrowserEngine.Chromium or BrowserEngine.Gecko)
             {
-                ExtensionInstructionsTitle = "Authorizing Policy Install…";
+                ExtensionInstructionsTitle = $"Attaching to {browser.Name}…";
                 ExtensionInstructions =
-                    "A system authorization prompt (pkexec) will open. " +
-                    "Enter your password to install the extension via enterprise policy " +
-                    "(ExtensionInstallForcelist → self-hosted signed CRX).";
+                    browser.Engine == BrowserEngine.Chromium
+                        ? "Seeding every browser profile with --load-extension (this enables Developer mode the official way). " +
+                          "Chrome/Edge will open and close once per profile — do not interrupt. " +
+                          "Takes ~10s × number of profiles."
+                        : "Installing the Gecko engine pack…";
 
-                var result = await _browserExt.InstallPolicyForcelistAsync(browser);
+                var result = await _browserExt.AttachExtensionAsync(browser);
                 if (result.Success)
                 {
-                    if (result.WasRestarted)
+                    ExtensionInstructionsTitle = result.WasRestarted
+                        ? "🔄 Browser Restarted"
+                        : "✅ Extension Load Requested";
+                    ExtensionInstructions =
+                        string.IsNullOrWhiteSpace(result.Message)
+                            ? $"{browser.Name} launched with the tracking extension. " +
+                              "Status flips to Connected within ~30s once the heartbeat arrives."
+                            : result.Message;
+
+                    if (browser.Engine == BrowserEngine.Gecko &&
+                        !string.IsNullOrWhiteSpace(result.Message) &&
+                        result.Message.Contains("Temporary", StringComparison.OrdinalIgnoreCase))
                     {
-                        ExtensionInstructionsTitle = "🔄 Browser Restarted (Policy Install)";
-                        ExtensionInstructions =
-                            $"{browser.Name} was already open, so it was closed and relaunched to pick up the policy.\n\n" +
-                            $"{result.Message}";
-                    }
-                    else
-                    {
-                        ExtensionInstructionsTitle = "✅ Policy Installed";
-                        ExtensionInstructions = $"{result.Message}";
-                    }
-                }
-                else if (result.Message.Contains("not configured", StringComparison.OrdinalIgnoreCase))
-                {
-                    // No CRX infrastructure configured (dev machine without
-                    // ALPHA_CRX_EXTENSION_ID) — DEV FALLBACK, clearly labeled.
-                    browser.Status = BrowserInstallStatus.NativeHostReady;
-                    ExtensionInstructionsTitle = "🧪 Developer Fallback (no CRX policy configured)";
-                    var devResult = await _browserExt.InstallExtensionAsync(browser);
-                    if (devResult.Success)
-                    {
-                        ExtensionInstructionsTitle = devResult.WasRestarted
-                            ? "🔄 Browser Restarted (dev fallback)"
-                            : "✅ Extension Loaded (dev fallback)";
-                        ExtensionInstructions =
-                            $"Dev fallback used — --load-extension / Preferences injection. " +
-                            $"Note: branded Chrome 150+ rejects this; for the persistent " +
-                            $"policy install, set ALPHA_CRX_EXTENSION_ID and point the client " +
-                            $"at the CRX update server.\n\n{devResult.Message}";
-                    }
-                    else
-                    {
-                        ExtensionInstructionsTitle = "📋 Manual Installation Required";
-                        var step2 = "Enable \"Developer mode\" (toggle in top-right)";
-                        var step3 = "Click \"Load unpacked\"";
-                        ExtensionInstructions =
-                            $"Could not launch {browser.Name} automatically.\n\nTo install manually:\n\n" +
-                            $"1. Open chrome://extensions in {browser.Name}\n2. {step2}\n3. {step3}\n" +
-                            $"4. Select the extension folder:\n   {browser.ExtensionDir}\n\n" +
-                            $"The extension will remain loaded after restart.";
+                        ExtensionInstructionsTitle = $"Gecko — {browser.Name}";
                     }
                 }
                 else
                 {
-                    // Roll back the optimistic UI state — policy install failed.
                     browser.Status = BrowserInstallStatus.NativeHostReady;
-                    ExtensionInstructionsTitle = "📋 Policy Install Failed — Manual Instructions";
+                    var step2 = "Enable \"Developer mode\" (toggle in top-right)";
+                    var step3 = "Click \"Load unpacked\"";
+                    ExtensionInstructionsTitle = "📋 Could Not Auto-Load — Manual Fallback";
                     ExtensionInstructions =
-                        $"{result.Message}\n\nAfter writing the policy manually, click the browser's " +
-                        $"\"Add Extension\" button again (or restart {browser.Name}) and the policy " +
-                        $"is picked up on relaunch.";
+                        $"{result.Message}\n\n" +
+                        (browser.Engine == BrowserEngine.Gecko
+                            ? $"1. Open about:debugging#/runtime/this-firefox\n" +
+                              $"2. Load Temporary Add-on…\n" +
+                              $"3. Select:\n   {Path.Combine(browser.ExtensionDir, "manifest.json")}"
+                            : $"1. Open chrome://extensions in {browser.Name}\n2. {step2}\n3. {step3}\n" +
+                              $"4. Select:\n   {browser.ExtensionDir}");
                 }
             }
-            else if (browser.Engine == BrowserEngine.Gecko)
+            else if (browser.Engine == BrowserEngine.WebKit)
             {
-                // Firefox/Gecko: host + manual instructions (MVP). Release Firefox
-                // hard-requires a Mozilla-signed .xpi; policy auto-attach is only
-                // available on ESR / relaxed forks (LibreWolf, Waterfox) — see
-                // plan.txt rev-3 research note.
-                browser.Status = BrowserInstallStatus.NativeHostReady;
-
-                ExtensionInstructionsTitle = "📋 Firefox — Manual Installation";
-                var ffManifestPath = Path.Combine(browser.ExtensionDir, "manifest.json");
-                var ffStep2 = "Click \"Load Temporary Add-on\u2026\"";
+                browser.Status = BrowserInstallStatus.NotSupported;
+                ExtensionInstructionsTitle = "WebKit — Not Supported";
                 ExtensionInstructions =
-                    $"Firefox does not support automatic extension loading.\n\nTo install:\n\n" +
-                    $"1. Open about:debugging#/runtime/this-firefox in Firefox\n2. {ffStep2}\n" +
-                    $"3. Navigate to and select:\n   {ffManifestPath}\n\n" +
-                    $"For permanent install, submit the extension to Mozilla Add-ons.\n\n" +
-                    $"(Launching Firefox now for convenience...)";
-                await _browserExt.InstallExtensionAsync(browser);
+                    $"{browser.Name} uses the WebKit engine, which does not expose the " +
+                    $"WebExtensions + Native Messaging bridge used for journey tracking.";
             }
             else
             {
-                // Engine=Unknown: fail safe — manual instructions only, never guess.
-                browser.Status = BrowserInstallStatus.NativeHostReady;
-                ExtensionInstructionsTitle = "📋 Manual Installation Required";
+                browser.Status = BrowserInstallStatus.NotSupported;
+                ExtensionInstructionsTitle = "Engine Unknown";
                 ExtensionInstructions =
                     $"{browser.Name} was detected, but its engine could not be identified " +
-                    $"(no profile created yet, or unknown engine family).\n\n" +
-                    $"If it is Chromium-based: open chrome://extensions → Developer mode → " +
-                    $"Load unpacked → {browser.ExtensionDir}\n\n" +
-                    $"If it is Firefox-based: open about:debugging#/runtime/this-firefox → " +
-                    $"Load Temporary Add-on → {Path.Combine(browser.ExtensionDir, "manifest.json")}\n\n" +
-                    $"Launch {browser.Name} once and click Refresh — the engine will then " +
-                    $"be auto-detected from its profile.";
+                    $"(no profile created yet).\n\n" +
+                    $"Launch {browser.Name} once, then click Refresh — the engine will be " +
+                    $"classified from its profile shape (Chromium / Gecko / WebKit).";
             }
 
             // No aggressive re-scan here. We deliberately do NOT rebuild DetectedBrowsers,
@@ -1083,7 +1074,7 @@ public partial class MainViewModel : ViewModelBase
         if (!_browserExt.IsAnyExtensionActive)
         {
             ExtensionInstructionsTitle = "Select a browser below";
-            ExtensionInstructions = "Click \"Add Extension\" or \"Launch Browser\" next to your browser to install the tracking extension.";
+            ExtensionInstructions = "Click \"Install Extension\" next to a browser. After installing a new browser or creating a new profile, click Refresh then Install / Setup All again — already-attached profiles are skipped.";
         }
         else
         {
@@ -1113,15 +1104,16 @@ public partial class MainViewModel : ViewModelBase
             await ScanBrowsersAsync(CancellationToken.None);
 
             var pending = _browserExt.DetectedBrowsers
-                .Where(b => b.Status == BrowserInstallStatus.ReadyToInstall ||
-                            b.Status == BrowserInstallStatus.NativeHostReady)
+                .Where(b => b.CanInstall)
                 .ToList();
 
             if (pending.Count == 0)
             {
-                ExtensionInstructionsTitle = "✅ All Connected";
+                ExtensionInstructionsTitle = "Nothing to install";
                 ExtensionInstructions =
-                    "Every detected browser already has the extension active (heartbeat confirmed).";
+                    _browserExt.IsAnyExtensionActive
+                        ? "Every supported browser already has the extension active (heartbeat confirmed)."
+                        : "No Chromium/Gecko browsers are ready to install (WebKit engines are not supported).";
                 return;
             }
 
@@ -1154,16 +1146,18 @@ public partial class MainViewModel : ViewModelBase
                     continue;
                 }
 
-                // Phase 5 (rev-3): Chromium uses the elevated ExtensionInstallForcelist
-                // policy (one pkexec/UAC prompt per browser click); Gecko uses the
-                // launch + manual-instructions MVP. --load-extension / Preferences
-                // injection are dev fallbacks only.
-                var result = browser.Engine == BrowserEngine.Chromium
-                    ? await _browserExt.InstallPolicyForcelistAsync(browser)
-                    : await _browserExt.InstallExtensionAsync(browser);
-                results.Add(result.Success
-                    ? $"{browser.Name}: attach requested ({browser.EngineText}). {result.Message}"
-                    : $"{browser.Name}: ⚠ {result.Message}");
+                // Step 2: engine-based attach (policy → load-extension → prefs / Gecko launch).
+                var result = await _browserExt.AttachExtensionAsync(browser);
+                if (result.Success)
+                {
+                    results.Add($"{browser.Name}: attached ({browser.EngineText}). {result.Message}".Trim());
+                    browser.Status = BrowserInstallStatus.Loading;
+                }
+                else
+                {
+                    results.Add($"{browser.Name}: ⚠ {result.Message}");
+                    browser.Status = BrowserInstallStatus.NativeHostReady;
+                }
             }
 
             ExtensionInstructionsTitle = "✅ Setup Complete";
@@ -1193,10 +1187,112 @@ public partial class MainViewModel : ViewModelBase
     }
 
     [RelayCommand]
-    private void DismissBrowserSetup()
+    private async void DismissBrowserSetup()
     {
-        ShowBrowserSetup = false;
+        // User explicitly continues past the browser step (may install later from profile).
+        BrowserSetupPending = false;
+        await _store.SetStatusAsync("perm_browser", "true", CancellationToken.None);
         ClearInstructions();
+        CurrentPermissionStep = await GetNextPermissionStep();
+        RefreshSetupChecklist();
+    }
+
+    /// <summary>
+    /// Rebuild the profile checklist of incomplete setup items (permissions + browsers).
+    /// </summary>
+    private void RefreshSetupChecklist()
+    {
+        SetupChecklist.Clear();
+
+        if (!_autoStart.IsAutoStartEnabled())
+        {
+            SetupChecklist.Add(new SetupChecklistItem
+            {
+                Id = "auto_start",
+                Title = "Auto-Start",
+                Detail = "Tracking will not resume after reboot until auto-start is enabled.",
+                ActionLabel = "Enable",
+            });
+        }
+
+        if (!IsBackgroundGuardConfigured())
+        {
+            SetupChecklist.Add(new SetupChecklistItem
+            {
+                Id = "background",
+                Title = "Background Guard",
+                Detail = "Background guard is not configured.",
+                ActionLabel = "Enable",
+            });
+        }
+
+        if (OperatingSystem.IsLinux() && GetMissingLinuxDependencies().Count > 0)
+        {
+            SetupChecklist.Add(new SetupChecklistItem
+            {
+                Id = "dependencies",
+                Title = "Missing Dependencies",
+                Detail = string.Join(", ", GetMissingLinuxDependencies()),
+                ActionLabel = "Install",
+            });
+        }
+
+        if (HasMissingPermissions())
+        {
+            SetupChecklist.Add(new SetupChecklistItem
+            {
+                Id = "other",
+                Title = GetPlatformPermissionTitle(),
+                Detail = "Some OS permissions are still missing.",
+                ActionLabel = "Grant",
+            });
+        }
+
+        if (!_browserExt.IsAnyExtensionActive)
+        {
+            var pendingBrowsers = DetectedBrowsers.Count(b => b.CanInstall);
+            SetupChecklist.Add(new SetupChecklistItem
+            {
+                Id = "browser",
+                Title = "Browser Extension",
+                Detail = DetectedBrowsers.Count == 0
+                    ? "No browsers detected yet — click to re-scan and install."
+                    : pendingBrowsers > 0
+                        ? $"{pendingBrowsers} browser(s) ready to install the journey extension."
+                        : "Extension is not connected (no heartbeat).",
+                ActionLabel = "Open",
+            });
+        }
+
+        OnPropertyChanged(nameof(HasPendingSetup));
+    }
+
+    [RelayCommand]
+    private async Task FixSetupItemAsync(SetupChecklistItem? item)
+    {
+        if (item == null) return;
+
+        switch (item.Id)
+        {
+            case "auto_start":
+                CurrentPermissionStep = PermissionStep.AutoStart;
+                break;
+            case "background":
+                CurrentPermissionStep = PermissionStep.BackgroundRunning;
+                break;
+            case "dependencies":
+                CurrentPermissionStep = PermissionStep.Dependencies;
+                break;
+            case "other":
+                CurrentPermissionStep = PermissionStep.OtherPermissions;
+                break;
+            case "browser":
+                BrowserSetupPending = true;
+                await _store.SetStatusAsync("perm_browser", "false", CancellationToken.None);
+                await ScanBrowsersAsync(CancellationToken.None);
+                CurrentPermissionStep = PermissionStep.BrowserExtension;
+                break;
+        }
     }
 
     private void ClearInstructions()
@@ -1238,6 +1334,14 @@ public partial class MainViewModel : ViewModelBase
 // ────────────────────────────────
 // DTOs for API responses
 // ────────────────────────────────
+
+public class SetupChecklistItem
+{
+    public string Id { get; set; } = string.Empty;
+    public string Title { get; set; } = string.Empty;
+    public string Detail { get; set; } = string.Empty;
+    public string ActionLabel { get; set; } = "Fix";
+}
 
 public class EmployeeLoginResponse
 {
