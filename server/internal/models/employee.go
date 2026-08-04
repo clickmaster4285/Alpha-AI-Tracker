@@ -17,8 +17,9 @@ type Employee struct {
 	IsOnline        bool      `json:"isOnline" db:"is_online"`
 	Avatar          string    `json:"avatar" db:"avatar"`
 	AvatarColor     string    `json:"avatarColor" db:"avatar_color"`
-	CreatedAt       time.Time `json:"createdAt" db:"created_at"`
-	UpdatedAt       time.Time `json:"updatedAt" db:"updated_at"`
+	CreatedAt       time.Time    `json:"createdAt" db:"created_at"`
+	UpdatedAt       time.Time    `json:"updatedAt" db:"updated_at"`
+	DeletedAt       *time.Time   `json:"deletedAt" db:"deleted_at"`
 }
 
 // EmployeePublic is the public-facing employee info.

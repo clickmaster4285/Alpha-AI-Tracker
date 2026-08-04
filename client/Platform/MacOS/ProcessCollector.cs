@@ -52,10 +52,18 @@ public class ProcessCollector : IActivityCollector
                 long mem = 0;
                 try { mem = proc.WorkingSet64; } catch { }
 
+                // Filter out headless Chromium/Electron subprocesses (renderer, GPU, utility,
+                // zygote, etc.) by querying the full command line via `ps`.
+                // ProcessName returns just "Google Chrome" without args on macOS, so we must
+                // query `ps -o command=` to detect --type= flags.
+                var cmdline = GetProcessCommandLine(pid);
+                if (AppProcessClassifier.IsHeadlessSubprocess(cmdline))
+                    continue;
+
                 var resolvedTitle = ParentProcessResolver.ResolveWindowTitle(
                     pid, name, procTree, knownTitles, foreground?.pid);
 
-                var profile = ParentProcessResolver.GetChromeProfile(name, pid);
+                var profile = ParentProcessResolver.GetBrowserProfile(name, pid);
 
                 var title = profile != null
                     ? $"{resolvedTitle} [{profile}]"
@@ -114,6 +122,38 @@ public class ProcessCollector : IActivityCollector
         catch
         {
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Get the full command line of a process on macOS via `ps -o command=`.
+    /// Returns null if the process has exited or the command fails.
+    /// Used to detect --type= flags in Chromium/Electron subprocesses.
+    /// </summary>
+    private static string? GetProcessCommandLine(int pid)
+    {
+        try
+        {
+            using var proc = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = "ps",
+                    Arguments = $"-o command= -p {pid}",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                }
+            };
+            proc.Start();
+            var output = proc.StandardOutput.ReadToEnd().Trim();
+            proc.WaitForExit(2000);
+            return string.IsNullOrEmpty(output) ? null : output;
+        }
+        catch
+        {
+            return null;
         }
     }
 

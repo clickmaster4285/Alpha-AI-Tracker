@@ -32,8 +32,10 @@ func (r *DepartmentRepo) List(ctx context.Context) ([]Department, error) {
 		LEFT JOIN (
 			SELECT department_id, COUNT(*) AS count
 			FROM employees
+			WHERE deleted_at IS NULL
 			GROUP BY department_id
 		) e ON d.id = e.department_id
+		WHERE d.deleted_at IS NULL
 		ORDER BY d.name
 	`
 	rows, err := r.pool.Query(ctx, query)
@@ -61,9 +63,10 @@ func (r *DepartmentRepo) GetByID(ctx context.Context, id int) (*Department, erro
 		LEFT JOIN (
 			SELECT department_id, COUNT(*) AS count
 			FROM employees
+			WHERE deleted_at IS NULL
 			GROUP BY department_id
 		) e ON d.id = e.department_id
-		WHERE d.id = $1
+		WHERE d.id = $1 AND d.deleted_at IS NULL
 	`
 	var d Department
 	err := r.pool.QueryRow(ctx, query, id).Scan(&d.ID, &d.Name, &d.EmployeeCount)
@@ -94,7 +97,7 @@ func (r *DepartmentRepo) Update(ctx context.Context, id int, name string) (*Depa
 
 // Delete removes a department by ID.
 func (r *DepartmentRepo) Delete(ctx context.Context, id int) error {
-	tag, err := r.pool.Exec(ctx, "DELETE FROM departments WHERE id = $1", id)
+	tag, err := r.pool.Exec(ctx, "UPDATE departments SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL", id)
 	if err != nil {
 		return fmt.Errorf("delete department: %w", err)
 	}

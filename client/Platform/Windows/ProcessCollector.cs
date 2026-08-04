@@ -59,10 +59,18 @@ public class ProcessCollector : IActivityCollector
                     cpu = (curr - prev).TotalSeconds / (Environment.ProcessorCount * 0.1) * 100;
                 }
 
+                // Filter out headless Chromium/Electron subprocesses (renderer, GPU, utility,
+                // zygote, etc.) by querying the full command line via WMI.
+                // ProcessName returns just "chrome" without args on Windows, so we must
+                // query Win32_Process.CommandLine to detect --type= flags.
+                var cmdline = GetProcessCommandLine(pid);
+                if (AppProcessClassifier.IsHeadlessSubprocess(cmdline))
+                    continue;
+
                 var resolvedTitle = ParentProcessResolver.ResolveWindowTitle(
                     pid, name, procTree, knownTitles, foregroundPid);
 
-                var profile = ParentProcessResolver.GetChromeProfile(name, pid);
+                var profile = ParentProcessResolver.GetBrowserProfile(name, pid);
 
                 var title = profile != null && resolvedTitle != null
                     ? $"{resolvedTitle} [{profile}]"
@@ -176,4 +184,36 @@ public class ProcessCollector : IActivityCollector
     private static extern bool IsWindowVisible(IntPtr hWnd);
 
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    /// <summary>
+    /// Get the full command line of a process on Windows via PowerShell.
+    /// Returns null if the process has exited or the query fails.
+    /// Used to detect --type= flags in Chromium/Electron subprocesses.
+    /// Uses PowerShell (always available on modern Windows) instead of WMI
+    /// to avoid a dependency on the System.Management NuGet package.
+    /// </summary>
+    private static string? GetProcessCommandLine(int pid)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "powershell",
+                Arguments = $"-NoProfile -Command \"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine\"",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var proc = Process.Start(psi);
+            if (proc == null) return null;
+            var output = proc.StandardOutput.ReadToEnd().Trim();
+            proc.WaitForExit(5000);
+            return string.IsNullOrEmpty(output) ? null : output;
+        }
+        catch
+        {
+            return null;
+        }
+    }
 }

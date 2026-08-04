@@ -17,8 +17,9 @@ func Setup(
 	authHandler *handlers.AuthHandler,
 	userHandler *handlers.UserHandler,
 	employeeHandler *handlers.EmployeeHandler,
-	activityLogHandler *handlers.ActivityLogHandler,
 	departmentHandler *handlers.DepartmentHandler,
+	newSchemaHandler *handlers.NewSchemaHandler,
+	extensionsHandler *handlers.ExtensionsHandler,
 ) {
 	// ─────────────────────────────
 	// Global Middleware
@@ -50,14 +51,28 @@ func Setup(
 	// ─────────────────────────────
 	// Public Routes (no auth required)
 	// ─────────────────────────────
-	auth := e.Group("/api/v1/auth")
-	auth.POST("/login", authHandler.Login)
-	auth.POST("/employee-login", authHandler.EmployeeLogin)        // employee desktop client login
-	auth.POST("/employee-disconnect", authHandler.EmployeeDisconnect) // employee desktop client disconnect
+	a := e.Group("/api/v1/auth")
+	a.POST("/login", authHandler.Login)
+	a.POST("/employee-login", authHandler.EmployeeLogin)
+	a.POST("/employee-disconnect", authHandler.EmployeeDisconnect)
 
-	// Activity log sync — authenticated by employee token in body (not cookie)
-	activityLogs := e.Group("/api/v1/activity-logs")
-	activityLogs.POST("/sync", activityLogHandler.SyncLogs)
+	// Phase 1 sync endpoints — authenticated by employee token in body (not cookie)
+	e.POST("/api/v1/device-hardware/sync", newSchemaHandler.SyncDeviceHardware)
+	e.POST("/api/v1/installed-apps/sync", newSchemaHandler.SyncInstalledApps)
+	e.POST("/api/v1/installed-packages/sync", newSchemaHandler.SyncInstalledPackages)
+	e.POST("/api/v1/network-info/sync", newSchemaHandler.SyncNetworkInfo)
+	e.POST("/api/v1/session-events/sync", newSchemaHandler.SyncSessionEvents)
+
+	// Phase 2 sync endpoints
+	e.POST("/api/v1/app-sessions/sync", newSchemaHandler.SyncAppSessions)
+	e.POST("/api/v1/app-items/sync", newSchemaHandler.SyncAppItems)
+
+	// ─────────────────────────────
+	// Self-hosted extension update channel (sub-phase 5A) — public, browsers
+	// fetch these during ExtensionInstallForcelist policy installs.
+	// ─────────────────────────────
+	e.GET("/api/v1/extensions/:id/update.xml", extensionsHandler.UpdateManifest)
+	e.GET("/api/v1/extensions/:id/crx", extensionsHandler.ServeCrx)
 
 	// ─────────────────────────────
 	// Semi-Protected Routes (optional auth)
@@ -65,7 +80,6 @@ func Setup(
 	semiProtected := e.Group("/api/v1")
 	semiProtected.Use(appMiddleware.OptionalAuth(authService))
 
-	// Auth check — returns {authenticated: false} gracefully when no cookie
 	semiProtected.GET("/auth/check", authHandler.CheckAuth)
 
 	// ─────────────────────────────
@@ -78,7 +92,7 @@ func Setup(
 	protected.GET("/auth/me", authHandler.Me)
 	protected.POST("/auth/logout", authHandler.Logout)
 
-	// Users (admin users only)
+	// Users
 	users := protected.Group("/users")
 	users.GET("", userHandler.ListUsers)
 	users.GET("/:id", userHandler.GetUser)
@@ -95,10 +109,13 @@ func Setup(
 	employees.DELETE("/:id", employeeHandler.DeleteEmployee)
 	employees.POST("/:id/generate-secret", employeeHandler.GenerateSecret)
 
-	// Activity Logs listing (protected — web admin access)
-	protected.GET("/activity-logs", activityLogHandler.ListLogs)
+	// App Sessions listing (protected — web admin access, replaces old activity-logs)
+	protected.GET("/app-sessions", newSchemaHandler.ListAppSessions)
 
-	// Departments (dynamic CRUD)
+	// App Items listing (protected — web admin access, shows browser URLs, file paths, etc.)
+	protected.GET("/app-items", newSchemaHandler.ListAppItems)
+
+	// Departments
 	depts := protected.Group("/departments")
 	depts.GET("", departmentHandler.ListDepartments)
 	depts.POST("", departmentHandler.CreateDepartment)

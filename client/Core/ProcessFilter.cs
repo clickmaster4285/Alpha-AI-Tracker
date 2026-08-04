@@ -29,8 +29,17 @@ public static partial class ProcessFilter
             "pulseaudio", "rtkit-daemon", "colord", "cupsd", "cups-browsed",
             "fwupd", "geoclue", "ModemManager", "NetworkManager",
             "packagekitd", "power-profiles-daemon", "snapd", "switcheroo",
-            "systemd-logind", "udisksd", "upowerd"
+            "systemd-logind", "udisksd", "upowerd",
+            "Xwayland", "at-spi2-registryd", "gnome-shell-calendar-server",
+            "tracker-extract", "tracker-store", "evolution-source-registry",
         };
+
+    private static readonly string[] KernelNamePrefixes =
+    {
+        "gvfsd-", "gvfs-", "gsd-", "goa-", "evolution-",
+        "ibus-", "at-spi2-", "gnome-shell-", "tracker-",
+        "gdm", "mutter-",
+    };
 
     private static readonly int CurrentSessionId = GetCurrentSessionId();
 
@@ -58,6 +67,8 @@ public static partial class ProcessFilter
             if (pid < 100) return false;
 
             if (KernelNames.Contains(name)) return false;
+            if (KernelNamePrefixes.Any(p => name.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
+                return false;
             if (KernelPattern.IsMatch(name)) return false;
 
             if (checkSession)

@@ -54,6 +54,14 @@ public partial class ProcessCollector : IActivityCollector
                 var name = proc.ProcessName;
                 var pid = proc.Id;
 
+                // Filter out headless Chromium/Electron subprocesses (renderer, GPU, utility,
+                // zygote, etc.) by reading /proc/{pid}/cmdline for --type= flags.
+                // Process.ProcessName returns just "chrome" for ALL Chrome processes on Linux,
+                // so cmdline inspection is the only reliable way to identify subprocesses.
+                var cmdline = ReadProcessCmdline(pid);
+                if (AppProcessClassifier.IsHeadlessSubprocess(cmdline))
+                    continue;
+
                 long mem = 0;
                 try { mem = proc.WorkingSet64; } catch { }
 
@@ -73,11 +81,7 @@ public partial class ProcessCollector : IActivityCollector
                 // Fallback to X11 window title if available
                 resolvedTitle ??= x11Titles.GetValueOrDefault(pid);
 
-                // Ultimate fallback: use process name so every user process gets logged
-                // (critical for Wayland where window detection is limited)
-                resolvedTitle ??= name;
-
-                var profile = ParentProcessResolver.GetChromeProfile(name, pid);
+                var profile = ParentProcessResolver.GetBrowserProfile(name, pid);
 
                 var title = profile != null && resolvedTitle != null
                     ? $"{resolvedTitle} [{profile}]"
@@ -122,10 +126,59 @@ public partial class ProcessCollector : IActivityCollector
         var map = new Dictionary<int, string?>();
         var seenPids = new HashSet<int>();
 
+        // 🟡 Step 1: Try GNOME Shell introspection — works on Wayland for ALL windows (Firefox, Chrome, etc.)
+        // This is the primary method on Wayland where xprop _NET_CLIENT_LIST only returns XWayland windows.
+        // The GNOME Shell org.gnome.Shell.Introspect.GetWindows method returns ALL windows on Wayland.
+        // We parse both the 'wm-pid' and 'title' fields using ShellPid() / ShellTitle() regexes.
+        try
+        {
+            var shellRaw = Run("gdbus", "call --session --dest org.gnome.Shell --object-path /org/gnome/Shell/Introspect --method org.gnome.Shell.Introspect.GetWindows", 5000);
+            if (shellRaw != null && !shellRaw.Contains("Access denied"))
+            {
+                // Parse all pid-title pairs from the GVariant array.
+                // Output format example:
+                // ({'title': <'Page Title - Mozilla Firefox'>, 'wm-pid': <int32 12345>, ...}, ...)
+                // ShellPid regex: pid\s*:?\s*(\d+)
+                // ShellTitle regex: title\s*:?\s*'([^']*)'
+                var pidMatches = ShellPidRegexAll().Matches(shellRaw);
+                var titleMatches = ShellTitleRegexAll().Matches(shellRaw);
+
+                for (int i = 0; i < Math.Min(pidMatches.Count, titleMatches.Count); i++)
+                {
+                    if (int.TryParse(pidMatches[i].Groups[1].Value, out var pid) && pid > 0 && seenPids.Add(pid))
+                    {
+                        var title = titleMatches[i].Groups[1].Value;
+                        map[pid] = string.IsNullOrWhiteSpace(title) ? null : title;
+                    }
+                }
+
+                // If GNOME Shell introspection returned results, merge with X11 and return
+                if (map.Count > 0)
+                {
+                    // Also get X11/XWayland windows for non-Wayland apps
+                    MergeX11WindowTitles(map, seenPids);
+                    return map;
+                }
+            }
+        }
+        catch { }
+
+        // 🟡 Step 2: Fallback to X11 xprop for XWayland windows (limited on Wayland)
+        MergeX11WindowTitles(map, seenPids);
+
+        return map;
+    }
+
+    /// <summary>
+    /// Enumerate X11/XWayland windows via xprop _NET_CLIENT_LIST.
+    /// On Wayland, this only returns XWayland windows (not native Wayland like Firefox, Chrome).
+    /// </summary>
+    private static void MergeX11WindowTitles(Dictionary<int, string?> map, HashSet<int> seenPids)
+    {
         try
         {
             var raw = Run("xprop", "-root -notype _NET_CLIENT_LIST", 2000);
-            if (raw == null) return map;
+            if (raw == null) return;
 
             var idMatches = WindowIdRegex().Matches(raw);
             foreach (Match idMatch in idMatches)
@@ -152,8 +205,6 @@ public partial class ProcessCollector : IActivityCollector
             }
         }
         catch { }
-
-        return map;
     }
 
     public static IReadOnlyDictionary<string, bool> GetPermissionStatus()
@@ -541,6 +592,26 @@ except:
         }
     }
 
+    /// <summary>
+    /// Read the full command line of a process from /proc/{pid}/cmdline.
+    /// Returns null if the process has exited or the file is unreadable.
+    /// </summary>
+    private static string? ReadProcessCmdline(int pid)
+    {
+        try
+        {
+            var cmdlinePath = $"/proc/{pid}/cmdline";
+            if (!File.Exists(cmdlinePath)) return null;
+            var content = File.ReadAllText(cmdlinePath);
+            // /proc/pid/cmdline uses null bytes as separators; replace with spaces
+            return content.Replace('\0', ' ');
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     [GeneratedRegex(@"0x[0-9a-f]+", RegexOptions.IgnoreCase)]
     private static partial Regex WindowIdRegex();
     [GeneratedRegex(@"=\s+(\d+)")]
@@ -555,4 +626,11 @@ except:
     private static partial Regex ShellPid();
     [GeneratedRegex(@"title\s*:?\s*'([^']*)'", RegexOptions.IgnoreCase)]
     private static partial Regex ShellTitle();
+    // GVariant patterns for GNOME Shell introspection array output
+    // Matches wm-pid in: 'wm-pid': <int32 12345>
+    [GeneratedRegex(@"wm-pid'?:\s*<int32\s+(\d+)>", RegexOptions.IgnoreCase)]
+    private static partial Regex ShellPidRegexAll();
+    // Matches title in: 'title': <'Page Title'>
+    [GeneratedRegex(@"'title':\s*<\s*'([^']*)'", RegexOptions.IgnoreCase)]
+    private static partial Regex ShellTitleRegexAll();
 }

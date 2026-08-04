@@ -75,8 +75,52 @@ PUBLISH_LIN="$SCRIPT_DIR/linux"
 PUBLISH_MAC="$SCRIPT_DIR/macos"
 
 echo ""
-echo "[Publish] Publishing .NET app..."
+echo "[Build] Building latest Release binary (single source of truth)..."
+
+# Detect the project's TargetFramework from the csproj so this script doesn't
+# hard-code a specific TFM (the project recently moved net8.0 → net10.0).
+TFM="$(grep -oE '<TargetFramework(s)?>[^<]+</TargetFramework(s)?>' "$PROJECT_DIR/client.csproj" \
+       | head -n1 \
+       | sed -E 's@</?TargetFramework(s)?>@@g' \
+       | sed 's/;.*//')"
+if [ -z "$TFM" ]; then
+  echo "ERROR: Could not detect TargetFramework from $PROJECT_DIR/client.csproj"
+  exit 1
+fi
+echo "  Detected TargetFramework: $TFM"
+
+RELEASE_OUT="$PROJECT_DIR/bin/Release/$TFM"
+mkdir -p "$RELEASE_OUT"
+
+PUBLISH_ARGS=""
+if [ -n "${ALPHA_SERVER_URL:-}" ]; then
+  PUBLISH_ARGS="-p:DefaultServerUrl=$ALPHA_SERVER_URL"
+  echo "  Baking in ALPHA_SERVER_URL=$ALPHA_SERVER_URL"
+fi
+
+# 1) Build the Release binary at the well-known location.
+#    We hash the managed assembly (client.dll) — its bytes are RID-independent
+#    and identical across publishes. The per-RID apphost shim (client.exe /
+#    client) is platform-specific and embeds resolved paths, so it would
+#    differ even when the underlying code is the same.
+if ! dotnet build "$PROJECT_DIR" -c Release $PUBLISH_ARGS -o "$RELEASE_OUT" --nologo; then
+  echo "ERROR: dotnet build -c Release failed. Aborting before publish so the installer is never built against a broken binary."
+  exit 1
+fi
+
+RELEASE_DLL="$RELEASE_OUT/client.dll"
+if [ ! -f "$RELEASE_DLL" ]; then
+  echo "ERROR: Latest managed assembly not produced at $RELEASE_DLL — refusing to build an installer against stale code."
+  exit 1
+fi
+
+EXPECTED_HASH="$(sha256sum "$RELEASE_DLL" | awk '{print $1}')"
+echo "  Release client.dll hash: $EXPECTED_HASH"
+
+echo ""
+echo "[Publish] Publishing .NET app per-RID (using the Release binary just built)..."
 HAS_ERRORS=false
+declare -A PUBLISH_HASHES
 for RID in win-x64 linux-x64 osx-x64; do
   case "$RID" in
     win-x64)  OUT="$PUBLISH_WIN"; BUILD_FLAG=$BUILD_WIN ;;
@@ -85,8 +129,20 @@ for RID in win-x64 linux-x64 osx-x64; do
   esac
   if [ "$BUILD_FLAG" = true ]; then
     rm -rf "$OUT"
-    if dotnet publish "$PROJECT_DIR" -c Release -r "$RID" --self-contained -o "$OUT"; then
+    if dotnet publish "$PROJECT_DIR" -c Release -r "$RID" --self-contained -o "$OUT" $PUBLISH_ARGS; then
       echo "  $RID -> $OUT"
+
+      # Hash the freshly published client.dll.
+      PUBLISHED_DLL="$OUT/client.dll"
+      if [ ! -f "$PUBLISHED_DLL" ]; then
+        echo "  FAILED: published client.dll missing at $PUBLISHED_DLL"
+        HAS_ERRORS=true
+        continue
+      fi
+
+      ACTUAL_HASH="$(sha256sum "$PUBLISHED_DLL" | awk '{print $1}')"
+      PUBLISH_HASHES[$RID]="$ACTUAL_HASH"
+      echo "  ✓ $RID client.dll hash: $ACTUAL_HASH"
     else
       echo "  FAILED: $RID publish error. Check SDK and dependencies."
       HAS_ERRORS=true
@@ -94,10 +150,89 @@ for RID in win-x64 linux-x64 osx-x64; do
   fi
 done
 
-# Abort if any publish failed
-if [ "$HAS_ERRORS" = true ]; then
-  echo "ERROR: One or more builds failed. Aborting."
+# ─── Verify every published client.dll is newer than every source file.
+# This is the strongest freshness guarantee we can make without dumping the
+# whole project into a hermetic build: if any .cs file in the project is newer
+# than the published dll, the publish step did not pick up the latest source —
+# refuse to build the installer.
+SOURCE_NEWER=""
+NEWEST_SOURCE_MTIME=0
+while IFS= read -r src; do
+  MTIME=$(stat -c %Y "$src" 2>/dev/null || stat -f %m "$src" 2>/dev/null || echo 0)
+  if [ "$MTIME" -gt "$NEWEST_SOURCE_MTIME" ]; then
+    NEWEST_SOURCE_MTIME="$MTIME"
+    NEWEST_SOURCE_FILE="$src"
+  fi
+done < <(find "$PROJECT_DIR" -type f \( -name '*.cs' -o -name '*.csproj' -o -name '*.axaml' -o -name '*.xaml' \) ! -path '*/bin/*' ! -path '*/obj/*' ! -path '*/publish/*' 2>/dev/null)
+
+for RID in win-x64 linux-x64 osx-x64; do
+  CUR="${PUBLISH_HASHES[$RID]:-}"
+  [ -z "$CUR" ] && continue
+  case "$RID" in
+    win-x64)   RID_DIR="$PUBLISH_WIN" ;;
+    linux-x64) RID_DIR="$PUBLISH_LIN" ;;
+    osx-x64)   RID_DIR="$PUBLISH_MAC" ;;
+  esac
+  PUBLISHED_DLL_MTIME=$(stat -c %Y "$RID_DIR/client.dll" 2>/dev/null || stat -f %m "$RID_DIR/client.dll" 2>/dev/null || echo 0)
+  if [ "$NEWEST_SOURCE_MTIME" -gt "$PUBLISHED_DLL_MTIME" ]; then
+    SOURCE_NEWER="$RID"
+    echo ""
+    echo "  FAILED: a source file is newer than the published client.dll for $RID."
+    echo "    Newest source: $(date -d "@$NEWEST_SOURCE_MTIME" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -r "$NEWEST_SOURCE_MTIME" '+%Y-%m-%d %H:%M:%S') — $NEWEST_SOURCE_FILE"
+    echo "    Published dll: $(date -d "@$PUBLISHED_DLL_MTIME" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -r "$PUBLISHED_DLL_MTIME" '+%Y-%m-%d %H:%M:%S') — $RID_DIR/client.dll"
+    echo ""
+    echo "  This means the publish step did not rebuild the latest source."
+    echo "  Run: dotnet clean && bash publish/build-installer.sh"
+    break
+  fi
+done
+
+if [ "$HAS_ERRORS" = true ] || [ -n "$SOURCE_NEWER" ]; then
+  echo ""
+  echo "ERROR: One or more builds failed (or published binary is stale). Aborting."
+  echo "       Refusing to build installers until every RID bundles the latest binary."
   exit 1
+fi
+
+# ── Bundle the browser extension, native host, and install scripts into each
+#    publish output. Without this step the installed app cannot find extensions/
+#    or publish/install-extensions.sh, which is why `dotnet run` "is perfect"
+#    but the installer cannot track the browser journey.
+EXTENSIONS_DIR="$PROJECT_DIR/extensions"
+bundle_into_publish() {
+  local rid_dir="$1"
+  if [ -d "$EXTENSIONS_DIR" ]; then
+    mkdir -p "$rid_dir/extensions"
+    cp -r "$EXTENSIONS_DIR/." "$rid_dir/extensions/"
+    chmod +x "$rid_dir/extensions/native-host.py" 2>/dev/null || true
+    echo "  ✓ Bundled extensions/ into $rid_dir"
+  fi
+
+  if [ -d "$PROJECT_DIR/publish" ]; then
+    mkdir -p "$rid_dir/publish"
+    cp "$PROJECT_DIR/publish"/*.sh "$rid_dir/publish/" 2>/dev/null || true
+    chmod +x "$rid_dir/publish"/*.sh 2>/dev/null || true
+    cp "$PROJECT_DIR/publish"/*.iss "$rid_dir/publish/" 2>/dev/null || true
+    echo "  ✓ Bundled publish/*.sh into $rid_dir"
+  fi
+}
+[ "$BUILD_WIN" = true ] && bundle_into_publish "$PUBLISH_WIN"
+[ "$BUILD_LIN" = true ] && bundle_into_publish "$PUBLISH_LIN"
+[ "$BUILD_MAC" = true ] && bundle_into_publish "$PUBLISH_MAC"
+
+# ─── Step: Encrypt .env to config.enc and distribute to publish outputs ───
+echo ""
+echo "[Config] Encrypting .env → config.enc..."
+bash "$SCRIPT_DIR/encrypt-config.sh"
+CONFIG_ENC="$PROJECT_DIR/config.enc"
+if [ -f "$CONFIG_ENC" ]; then
+  echo "  Distributing config.enc to publish outputs..."
+  for OUT in "$PUBLISH_WIN" "$PUBLISH_LIN" "$PUBLISH_MAC"; do
+    if [ -d "$OUT" ]; then
+      cp "$CONFIG_ENC" "$OUT/"
+      echo "    → $OUT/config.enc"
+    fi
+  done
 fi
 
 # Windows installer

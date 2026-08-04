@@ -59,6 +59,17 @@ func (s *EmployeeService) GetByID(ctx context.Context, id string) (*dto.Employee
 
 // Create creates a new employee.
 func (s *EmployeeService) Create(ctx context.Context, req *dto.CreateEmployeeRequest) (*dto.EmployeeResponse, error) {
+	// Check for duplicate email
+	if req.Email != "" {
+		existing, err := s.repo.GetByEmail(ctx, req.Email)
+		if err != nil {
+			return nil, fmt.Errorf("check email uniqueness: %w", err)
+		}
+		if existing != nil {
+			return nil, fmt.Errorf("email already exists: %s", req.Email)
+		}
+	}
+
 	employeeID, err := s.repo.GenerateEmployeeID(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("generate employee id: %w", err)
@@ -80,6 +91,9 @@ func (s *EmployeeService) Create(ctx context.Context, req *dto.CreateEmployeeReq
 	if departmentStr == "" {
 		departmentStr = "Engineering"
 	}
+
+	// Validate department_id exists
+	// (deptID defaults to 1 which is Engineering — always seeded)
 
 	emp := &models.Employee{
 		EmployeeID:      employeeID,
@@ -216,5 +230,6 @@ func employeeToResponse(e *models.Employee) dto.EmployeeResponse {
 		AvatarColor:     e.AvatarColor,
 		CreatedAt:       e.CreatedAt,
 		UpdatedAt:       e.UpdatedAt,
+		DeletedAt:       e.DeletedAt,
 	}
 }

@@ -17,9 +17,18 @@ mkdir -p "$PKG_ROOT/usr/share/$APP_NAME"
 mkdir -p "$PKG_ROOT/usr/share/applications"
 mkdir -p "$PKG_ROOT/usr/bin"
 mkdir -p "$PKG_ROOT/usr/share/icons/hicolor/256x256/apps"
+# /etc/alpha-ai-tracker no longer needed — config.enc is self-contained in app dir
 
 # Copy published binaries
 cp -r "$SCRIPT_DIR/linux/"* "$PKG_ROOT/usr/share/$APP_NAME/"
+
+# Copy config.enc (encrypted .env) if it exists
+if [ -f "$SCRIPT_DIR/linux/config.enc" ]; then
+  cp "$SCRIPT_DIR/linux/config.enc" "$PKG_ROOT/usr/share/$APP_NAME/"
+  echo "  Bundled config.enc"
+else
+  echo "  WARNING: config.enc not found! The app will need other config sources."
+fi
 
 # Placeholder for platform-specific files (AT-SPI now inline in C#)
 

@@ -1,350 +1,351 @@
-# AGENTS.md
+# Alpha AI Tracker — Project Map
 
-## Project overview
+> **Last audited:** 2026-08-03 (installer-parity rule + single-instance/tray fix)
+> **Changelog:**
+>
+> - 2026-08-03: **Installer-Parity rule + single-instance/tray UX fix** — codified a MANDATORY rule (see §6 below): every feature or modification must ALSO be wired into the installer functionality, and verified in an installed build — `dotnet run` alone is NOT a valid release test, because installed builds ship the publish output plus only what the `publish/*` scripts bundle (extensions/, publish/*.sh, config.enc) and run from a root-owned dir. Client fix behind the rule: a second launch now restores the running window (`client/SingleInstance.cs` named-event signaling), the tray menu gains **Quit**, and tray-less desktops (no StatusNotifierWatcher — `client/Services/TrayAvailability.cs` D-Bus check) quit on window-close instead of stranding an invisible process.
+> - 2026-08-01: **Docs audit (AGENTS.md + client/server ARCHITECTURE.md)** — removed all stale `activity-logs/sync` and `shell-commands/sync` references (both endpoints/tables/code are deleted from the product). Fixed the mermaid diagram + cross-service contracts to show the real 7 sync endpoints. Server: migration inventory corrected to 001–016 (15 files), added `jobs/staleness_sweep.go`, `employee_installed_applications`/`employee_installed_packages` junctions, and all 12 Postgres tables; API surface now lists `GET /app-sessions` + `GET /app-items` and drops the removed `activity-logs` section. Client: corrected SQLite schema (11 tables incl. `storage_devices`, `permission_status`, `app_items`), documented the `MigrateSql` migration strategy, the real sync batch size (500), the file logger (`dotnetrunlog.txt`), `install-extensions.sh`, and flagged `IShellCommandCollector`/`ShellCommand` as dead code. Branch updated to `restructureClient`.
+> - 2026-07-31: **Cross-service payload + employee↔catalog dedup (migrations 013–016)** — tracking tables were washed out (backup at `server/bin/backup/alpha_ai_tracker_20260731_134750.dump`) and server + client landed together. 013 adds `installed_app_id`/`installed_package_id`/`grouped_by`/`cgroup_scope`/`context_label` to `app_sessions`; 014 adds `process_id` + 9 journey fields to `app_items`; 015/016 add company-global app/package catalogs (`app_fingerprint=desktop_id|binary_name`, `package_fingerprint=package_name|source_manager`) with junction tables `employee_installed_applications`/`employee_installed_packages` (per-install version/path/date + `first_seen_at`/`last_seen_at`/`is_active`; FKs → `employees(employee_id)` VARCHAR per convention). `SyncInstalledApps`/`SyncInstalledPackages` rewritten to upsert-catalog-then-link in one tx. Hourly `jobs/staleness_sweep.go` deactivates links idle > `LINK_STALE_DAYS=7`. Client: installed-apps mapper sends `binaryName`/`isBrowser`/`desktopId`/`categories`; app-sessions sends `groupedBy`/`cgroupScope`/`contextLabel`; app-items sends `processId` + 9 journey fields; apps conflict-update resets `is_synced=0`; packages dedup to `ON CONFLICT(package_name, source_manager)` + unique index (fixes 6,530 duplicate package rows from the old `ON CONFLICT(id)`). Smoke-tested: happy path, two-employee-same-app → 1 catalog + 2 links, malformed/partial payloads → 4xx/200 not 500.
+> - 2026-07-31: **Atomic cascade-close of app_items with sessions** — the main collection loop closed sessions but never closed their `app_items` (11 orphaned open items on already-closed sessions in the live DB). New composite `CloseSessionsAndAppItemsAsync()` store method acquires the connection gate ONCE and closes sessions + items in ONE transaction (a crash mid-close can no longer leave orphans). Wired into all 4 close paths: main-loop normal close (was missing entirely — root cause of the orphans), `ReconcileStaleSessionsOnBootAsync`, garbage cleanup, and non-GUI cleanup. Per-tab closes in `NativeMessageService`/`JourneyEngine` still use `CloseAppItemsBySessionIdsAsync`.
+> - 2026-07-31: **Terminal classification + PPID walk logging** — `TerminalEmulators` set expanded (`gnome-terminal-server`, `foot`) so flatpak/snap-packaged terminals resolve correctly without `Categories=` metadata. `SessionHierarchyResolver` now takes an optional `ILogger` and logs `ResolveParent` PPID walks at Debug level (wired from `LogCollectorService`).
+> - 2026-07-30: **Software classification pipeline** — Added 3 new files: `SoftwareCategoryResolver.cs` (metadata-driven category resolution from .desktop Categories, macOS bundle IDs), `SoftwareClassifier.cs` (joint dedup pipeline — GUI apps from `InstalledAppDetector` win over matching package entries from `PackageDetector`), `SoftwareIdentityResolver.cs` (stable SHA-256 identity for cross-source dedup). Refactored `AppProcessClassifier.cs` — `FileManagerProcesses`/`IdeProcesses` renamed to `FileManagerFallbacks`/`IdeFallbacks`, added `ResolveCategory()` with metadata-first approach, added `ResolveRootItemType()` overload accepting `categories`/`desktopId` params. Upgraded `InstalledAppDetector.cs`: Linux .desktop scanning now follows `$XDG_DATA_DIRS` (snap/flatpak dirs), macOS bundle inspection returns `CFBundleIdentifier` + browser detection via `CFBundleURLSchemes`, browser detection for Linux via `Categories=WebBrowser`, Windows via `URLAssociations` http/https. Added server migration 012 (`desktop_id`, `categories`, `is_browser` columns on `installed_applications`).
+> - 2026-07-30: **File logger for dotnet run** — Added `FileLoggerProvider.cs` (writes `ILogger` output to `dotnetrunlog.txt`) and registered it in `Program.cs`.
+> - 2026-07-30: **GUI-apps-only tracking gate** — New tracking rule: only processes that resolve to `installed_applications` rows or are detected as GUI apps (have .desktop files on Linux, .app bundles on macOS, Start Menu/Program Files entries on Windows) are tracked. Removed shell-process-always-tracked, build-tool auto-registration, runtime auto-registration, and package fallback tracking from `ResolveAppInfoInner`. Added `IsGuiApplication()` to `IInstalledAppDetector`/`InstalledAppDetector` with `CheckGuiPath()` (cross-platform). Simplified main loop filter. Removed `_knownPackageNames`, `CloseStalePackageSessionsAsync`, `runningPackageIds`. Renamed `AutoDetectInstalledApp` → `AutoDetectInstalledGuiApp`. Historical data preserved as-is. 4 files changed.
+> - 2026-07-30: **Fixed app_display_name resolving to raw GUID in NativeMessageService** — `ResolveBrowserAppIdAsync` cached and returned `app.Id` (GUID) which the caller stored as `AppDisplayName`. Fixed: `_browserAppCache` now stores `(id, displayName)` tuple; method renamed to `ResolveBrowserAppAsync` with `(string? id, string? displayName)` return; caller uses `browserDisplayName` for `AppDisplayName`.
+> - 2026-07-30: **Chromium/Electron headless subprocess filter (cross-platform)** — Added `GetProcessCommandLine()` via PowerShell (Windows) and `ps -o command=` (macOS). Centralized `ChromiumSubprocessFlags` array + `IsHeadlessSubprocess()` in `AppProcessClassifier` for all 3 platforms. Linux renamed `IsChromeSubprocess()` → `ReadProcessCmdline()` using shared check. Startup cleanup: `CleanupGarbageSessionRowsAsync()` closes old rows with `--type=` flags or long process names.
+> - 2026-07-30: **Dynamic browser suffix stripping** — Removed hardcoded `BrowserSuffixes` array (12 entries) from `ActivityContextParser`. Added `appDisplayName` parameter to `Parse()` → threaded to `ParseBrowserContext()`. Suffix stripped dynamically using the real app name from `installed_applications`. No generic regex fallback — only strips when `rootItemType == "browser_tab"`.
+> - 2026-07-30: **SemaphoreSlim concurrency gate on SqliteLogStore** — Added `SemaphoreSlim(1,1)` guarding all public methods using `_connection`. Private ungated helpers (`SetStatusCoreAsync`, `GetEmployeeInfoCoreAsync`) avoid reentrancy deadlock from composite methods. Added `PRAGMA busy_timeout = 5000;`. Added `GatedTransaction` wrapper releasing gate on `DisposeAsync`. Fixed `BeginTransactionAsync` gate-leak edge case.
+> - 2026-07-30: **FileSystemEventWatcher exclusion list + per-process resilience** — Added `ExcludedDirectoryPrefixes` (Waydroid, Flatpak, Snap, cache, trash, containers, Steam, per-platform temp/cache). Removed `UserProfile` from `WatchDirectories`. Added inner try/catch around each `ResolveAppInfo` call so one bad process can't abort the entire collection cycle.
+> - 2026-07-29: **Fixed false positive "Connected" status in browser extension detection** — `IsExtensionActiveAsync()` was purely process-based (`pgrep -f native-host.py` + `pgrep ^chrome$`), producing false `ExtensionActive` when orphaned `native-host.py` processes or unrelated Chrome instances were running. Replaced with socket-level heartbeat: extension's background.js already sends `{action:"ping"}` every ~27s via `chrome.alarms`; `native-host.py` now forwards pings to the tracker socket (was swallowing them); `NativeMessageService` records `_lastHeartbeatAt` timestamp; `BrowserExtensionService.IsExtensionActiveAsync()` queries `NativeMessageService.IsExtensionConnected()` (60s threshold). Added `KillOrphanedNativeHostProcesses()` startup cleanup. `NativeMessageService` registered as singleton+hosted for DI injection into `BrowserExtensionService`. Three files changed: `native-host.py`, `NativeMessageService.cs`, `BrowserExtensionService.cs`, `Program.cs`.
+> - 2026-07-29: **Fixed GNOME daemon contamination via Xwayland empty binary_name** — Xwayland `.desktop` file has no `Exec=` line, so `InstalledAppDetector` stored it with `binary_name=""`. `GetInstalledAppByBinaryNameFuzzyAsync()` SQL `$name LIKE '%%'` (empty binary) matched every process — causing all GNOME services + Chrome to resolve to the Xwayland entry. Fixed by: (1) `WHERE binary_name != ''` in fuzzy match SQL, (2) `NonAppProcesses` expanded with 16 GNOME daemons + prefix-matching array, (3) `KernelNamePrefixes` in `ProcessFilter.cs` for first-stage filter, (4) `NoDisplay=true` + `Type!=Application` gate in `AddAppFromDesktopFile`. DB cleaned: Xwayland entry patched with proper `binary_name`, orphaned sessions closed, Chrome display names restored.
+> - 2026-07-29: **Added File Explorer journey tracking** — Full event-driven desktop event bus for file manager operations (Nautilus, Dolphin, Thunar, Nemo, etc.). Three watchers: `ATSPIEventWatcher` (Tmds.DBus.Protocol → AT-SPI `focus:`/`window:` events, detects foreground file manager via `xdotool` + `/proc/cwd`), `FileSystemEventWatcher` (FileSystemWatcher on 7 user directories), `RecentFilesWatcher` (XBEL monitor at `~/.local/share/recently-used.xbel`). `EventCoordinator` deduplicates (3s), correlates (500ms), normalizes raw→business events. `JourneyEngine` resolves `AppSession`, creates `AppItem` rows with 9 journey fields (`object_type`, `action`, `journey_id`, `sequence`, `previous_path`, `current_path`, `window_id`, `tab_id`, `metadata_json`). `IObservableEventSource` interface for all watchers — future IDE/terminal/Office integrations plug in the same way. Coexistence: `item_type` preserved, auto-derived from `object_type`+`action`; browser pipeline untouched. NuGet: `Tmds.DBus.Protocol` v0.94.2.
+> - 2026-07-28: **Added browser extension journey tracking** — Chrome MV3 extension (`extensions/chrome/background.js`) captures real-time tab navigations (URL, title, tabId, windowId) via `chrome.tabs.onUpdated/onActivated/onCreated/onRemoved`. Sent through native messaging (`chrome.runtime.connectNative`) → `native-host.py` (Native Messaging stdio bridge) → `NativeMessageService` (Unix socket listener) → SQLite `app_items` as `browser_tab`/`browser_navigation` entries with `url`/`domain` fields.
+> - 2026-07-28: **Added `NativeMessageService`** — `BackgroundService` listening on Unix domain socket (`~/.local/share/alpha-ai-tracker/native-messaging.sock`) for browser navigation events. Maintains `_tabSessionCache` mapping `browser:tabId` → `AppSession.Id`. Stores `browser_tab` root items + `browser_navigation` child items per navigation.
+> - 2026-07-28: **Added `BrowserExtensionService`** — Detects installed browsers (Chrome, Chromium, Edge, Brave, Opera, Vivaldi, Firefox). Two-strategy extension installation: (1) `--load-extension` with `--no-first-run` for Chromium-based browsers, (2) profile injection via Python SHA256→extension-ID → `Preferences.json` edit as fallback for branded Chrome 150+. Async-safe with `Task.Delay` polling. Extension detection via NativeMessageService socket-level heartbeat (replaced process-based `pgrep` on 2026-07-29).
+> - 2026-07-28: **Added `url`/`domain` columns to `app_items`** — client SQLite schema extended with `url TEXT` and `domain TEXT`. Server-side migrations and DTOs updated. NativeMessageService stores parsed URLs with proper domain extraction.
+> - 2026-07-28: **Added `ComputeExtensionId` helper** — runs Python SHA256→a-p alphabet to compute Chrome extension ID from directory path. Used for native messaging manifest `allowed_origins`.
+> - 2026-07-28: **Fixed `InstallNativeHostManuallyAsync`** — now computes and includes the extension ID in `allowed_origins` (was empty array, breaking native messaging).
+> - 2026-07-28: **Fixed extension active detection** — replaced `IsExtensionConnectedAsync` (socket-based `fuser` which failed because native-host.py only holds ephemeral connections) with `IsExtensionActiveAsync` (process-based `pgrep native-host.py` + `pgrep chrome`). Reliable on all platforms. *(Note: replaced again 2026-07-29 with socket-level heartbeat for precision.)*
+> - 2026-07-28: **Removed `--enable-automation` from Chrome launch args** — was triggering GCM errors (`QUOTA_EXCEEDED`, `DEPRECATED_ENDPOINT`) and "controlled by automation" banner. Unnecessary: `--load-extension` works without it on Chromium/Brave/Edge, and branded Chrome 150+ blocks it regardless.
+> - 2026-07-28: **Added crash-safe session ended_at tracking** — heartbeat persisted every cycle (`last_heartbeat_at` in `app_status`), stale heartbeat detection on boot, and automatic reconciliation of orphaned sessions with the last heartbeat time as approximate crash time. Includes cross-platform `GetSystemUptime()` for diagnostic logging. Handles poweroff, process crash, and fast restart scenarios.
+> - 2026-07-27: Full activity hierarchy engine — PID-persisted sessions, `SessionHierarchyResolver` (node→terminal→IDE), browser `browser_navigation` URL items, file manager `folder`/`file` path items, 30s context dedup cooldown.
+> - 2026-07-27: Added `process_id` / `parent_process_id` to `app_sessions` (client SQLite + server migration 010).
+> - 2026-07-27: Added `binary_name` to `installed_applications` model/SQLite table for process→display-name mapping.
+> - 2026-07-27: Added `installed_app_id` / `installed_package_id` FK columns to `app_sessions` (client SQLite only).
+> - 2026-07-27: Replaced in-memory `IsInstalledApp()` filter with SQLite-backed `ResolveAppInfo()` — processes not in DB get auto-detected via filesystem heuristics and saved before tracking.
+> - 2026-07-27: Fixed Linux ProcessCollector `resolvedTitle ??= name` bug (was assigning fake titles to all processes, bypassing window-title filter).
+> - 2026-07-27: Added process-tree-based parent-child tracking for terminal shells inside IDE/terminal-emulator sessions (via `ParentItemId` fixup pass).
+> - 2026-07-27: Added `waydroid`/`gnome-software` to `NonAppProcesses` blocklist.
+> - 2026-07-27: `AppDisplayName` now uses the real app name from `installed_applications.app_name` (e.g., "Visual Studio Code"), not the process name ("code") or window title.
+> - 2026-07-27: Removed hardcoded `CommonKnownApps` list from `InstalledAppDetector` — app detection is now 100% dynamic from OS (.desktop files, registry, .app bundles).
+> - 2026-07-27: **Added `BuildToolProcesses` set** — `make`, `go`, `npm`, `npx`, `cargo`, `pip`, `tsc`, `rustc`, etc. Auto-registered as `installed_packages` (category=`tool`) on first sight, tracked without window.
+> - 2026-07-27: **Fixed process filter bug** — processes with `appId != null` or `IsBuildTool()` are now tracked even without a window title. Wayland-native apps (VSCode, Chrome) don't appear in X11 window list and were silently dropped.
+> - 2026-07-27: **Broadened auto-detect paths** — `/home/*` and `/media/*` now accepted as valid install locations (project-local compiled binaries like `alpha-ai-server` in `./bin/`).
+> - 2026-07-27: **Fixed file manager path resolution** — folder display names now resolved to absolute paths by checking `~/`, `~/Documents`, `~/Desktop`, `/media/<user>/`.
+> - 2026-07-27: **Fixed `SessionHierarchyResolver`** — PPID walk now traverses build tools and runtimes as intermediate steps; `ShouldLinkTo` accepts build tools as children of IDEs and terminals.
+>   **Overall completion (honest):** ~50% across all 3 services
 
-Alpha AI Tracker — an employee monitoring & productivity dashboard. Three sub-projects:
-
-- **`server/`** — Go + Echo backend (PostgreSQL + Redis) — the primary API server
-- **`web/`** — Next.js 15 + React 18 frontend (admin UI)
-- **`client/`** — Avalonia UI desktop app (.NET 10/C#) — installed on employee machines
+> **⚠️ MANDATORY RULE — Installer parity (`dotnet run` ≠ installed build).** `dotnet run` compiles from the source tree, so it always runs the newest code. Installed/released builds (`bash publish/build-installer.sh`, `bash publish/release.sh`) ship the **publish output** plus whatever the build scripts explicitly bundle. **A change is NOT "done" until it works in an installed build** — any new functionality or modification must also be added to the installer functionality. See §6 → *Installer-Parity Rule* for the full checklist.
 
 ---
 
-## Commands
+## 1. Project Overview
 
-### Web (run from `web/`)
+Alpha AI Tracker is an employee monitoring and productivity analytics system consisting of three services:
 
-```bash
-cd web
-npm run dev      # dev server (port 3000)
-npm run build    # production build
-npm run lint     # ESLint via next lint
+1. **Desktop Client** (`client/`) — Installed on employee machines. Collects process activity, window titles, CPU/memory usage, and installed app/package information. Sends data to the central server via REST.
+2. **Server** (`server/`) — Go + Echo + PostgreSQL + Redis. Central API hub. Receives and stores client data, exposes admin-facing REST API for the web dashboard. Handles authentication for both web admins and employee desktop clients.
+3. **Web Dashboard** (`web/`) — Next.js 15 App Router. Admin-facing UI for viewing employee data, managing departments, generating login secrets, and analytics. Most pages currently render mock localStorage data rather than calling the real API.
+
+---
+
+## 2. System Architecture Diagram
+
+```mermaid
+flowchart LR
+    EMP[Employee Machine\nDesktop Client\n.NET 10 / Avalonia UI] -->|REST / JSON\nPOST /api/v1/{device-hardware,\ninstalled-apps,\ninstalled-packages,network-info,\nsession-events,app-sessions,app-items}/sync| SRV[Go Server\nEcho v4 / PostgreSQL\nPort 8080]
+    EMP -->|POST /api/v1/auth/employee-login| SRV
+
+    SRV -->|Query / Store| PG[(PostgreSQL)]
+    SRV -->|Store/Validate\nOne-Time Secrets| RD[(Redis\n5-min TTL)]
+
+    WEB[Web Dashboard\nNext.js 15 / React 18\nPort 3000] -->|REST / JSON\nhttpOnly Cookie Auth\nvia Next.js Rewrites proxy| SRV
+
+    note_ws[⚠️ WebSocket / SSE / polling:\nNOT IMPLEMENTED\nWeb dashboard polls no API\nfor real-time updates]
+  
+    style EMP fill:#2d2a4e,color:#fff
+    style SRV fill:#1a3a4a,color:#fff
+    style WEB fill:#3a2a1a,color:#fff
+    style PG fill:#2d4a2d,color:#fff
+    style RD fill:#4a2d2d,color:#fff
+    style note_ws fill:#5a3a3a,color:#fff,stroke-dasharray: 5 5
 ```
 
-### Server (run from `server/`)
+> All 7 sync endpoints exist on the server. `activity-logs/sync` and `shell-commands/sync` were removed from the product entirely (client + server).
+
+---
+
+## 3. Service Breakdown Table
+
+| Service           | Stack                                                                | Responsibility                       | Entry Point                                | Internal Doc                                      |
+| ----------------- | -------------------------------------------------------------------- | ------------------------------------ | ------------------------------------------ | ------------------------------------------------- |
+| **client/** | .NET 10, Avalonia 12.1, CommunityToolkit.Mvvm, Microsoft.Data.Sqlite | Employee-side data collection & sync | `Program.cs`, `App.axaml.cs`           | [client/ARCHITECTURE.md](./client/ARCHITECTURE.md) |
+| **server/** | Go 1.25, Echo v4.15, pgx v5.10, go-redis v9.21                       | Central API hub, data storage, auth  | `cmd/server/main.go`                     | [server/ARCHITECTURE.md](./server/ARCHITECTURE.md) |
+| **web/**    | Next.js 15.3.4, React 18, Redux Toolkit, TanStack Query              | Admin dashboard & analytics          | `next.config.ts`, `src/app/layout.tsx` | [web/ARCHITECTURE.md](./web/ARCHITECTURE.md)       |
+
+---
+
+## 4. Cross-Service Contracts
+
+### Client ↔ Server
+
+| Direction                                  | Protocol                                      | Auth Method                           | Format                                                   |
+| ------------------------------------------ | --------------------------------------------- | ------------------------------------- | -------------------------------------------------------- |
+| Employee login (client → server)          | REST POST`/api/v1/auth/employee-login`      | emp_id + secret_key (Redis-validated) | JSON`{employeeId, secretKey}` → `{employee, token}` |
+| Employee disconnect                        | REST POST`/api/v1/auth/employee-disconnect` | JWT token in body                     | JSON`{employeeId, token}`                              |
+| Device hardware sync (client → server)    | REST POST`/api/v1/device-hardware/sync`     | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
+| Installed apps sync (client → server)     | REST POST`/api/v1/installed-apps/sync`      | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
+| Installed packages sync (client → server) | REST POST`/api/v1/installed-packages/sync`  | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
+| Network info sync (client → server)       | REST POST`/api/v1/network-info/sync`        | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
+| Session events sync (client → server)     | REST POST`/api/v1/session-events/sync`      | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
+| App sessions sync (client → server)       | REST POST`/api/v1/app-sessions/sync`        | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
+| App items sync (client → server)          | REST POST`/api/v1/app-items/sync`           | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
+
+### Server ↔ Web
+
+| Direction         | Protocol                                     | Auth Method                         | Format                                   |
+| ----------------- | -------------------------------------------- | ----------------------------------- | ---------------------------------------- |
+| Web admin login   | REST POST`/api/v1/auth/login`              | email + password → httpOnly cookie | JSON`{email, password}` → sets cookie |
+| All web API calls | REST via Next.js rewrites (`/api/*` proxy) | httpOnly cookie (auto-sent)         | JSON request/response                    |
+
+### Contract Documentation
+
+**No formal contract documentation exists** beyond what is implicit in the Go DTO files (`server/internal/dto/`) and the TypeScript API client (`web/src/lib/api.ts`). These are manually kept in sync by the developer — there is no schema generation, OpenAPI spec, or shared type system.
+
+### Inconsistencies Found
+
+1. **Shell commands REMOVED (resolved)** — Shell command collection/sync removed from client and server. No endpoint, no table (`shell_commands` dropped by migration 007). Only dead-code leftovers remain: the `IShellCommandCollector` interface, 3 platform `ShellCommandCollector` impls, and the `ShellCommand` model on the client (unused, not registered in DI); the `ShellCommand` model + DTO types on the server.
+2. **Legacy child tables removed (resolved)** — `browser_contexts`, `file_explorer_contexts`, `urls`, `url_visits` tables and all Go/C# code replaced by single generic `app_items` table.
+3. **`activity_logs` removed (resolved)** — The old `activity_logs` table (server Postgres + client SQLite) and all Go/C# code referencing it have been removed. Migration 006 drops the table with no rollback. Replaced by relational `app_sessions` + `app_items`; the web Logs/Comprehensive page now queries `GET /app-sessions`.
+4. **Field naming** — Client and server agree on `employeeId` (camelCase) for auth/sync payloads and camelCase field names throughout. **Consistent by convention, no validation schema enforces it.**
+5. **Catalog owner column** — `installed_applications.employee_id` / `installed_packages.employee_id` on the server are legacy "first uploader" markers; dedup is now fingerprint-based (`app_fingerprint`, `package_fingerprint`) with per-employee junction tables holding the real per-install metadata.
+
+---
+
+## 5. Current Completion State
+
+### Server — ~50% complete
+
+**What works:**
+
+- Migrations 001-016 run on startup (15 files; 010 adds `process_id`/`parent_process_id`, 013 adds session identity, 014 adds journey fields, 015/016 add app/package catalogs + junction tables)
+- Full CRUD for users, employees, departments
+- Web admin auth (email/password → httpOnly cookie with encrypted JWT)
+- Employee auth (Redis one-time secret → JWT token)
+- 7 sync endpoints: device_hardware, installed_apps, installed_packages, network_info, session_events, app_sessions, app_items (+ synced_at for all)
+- Catalog dedup: apps keyed by `app_fingerprint` (desktop_id|binary_name), packages by `package_fingerprint` (package_name|source_manager), per-employee junction tables with `first_seen_at`/`last_seen_at`/`is_active`
+- Hourly `jobs/staleness_sweep.go` deactivates junction links idle > `LINK_STALE_DAYS=7`
+- App sessions + app items listing (`GET /app-sessions`, `GET /app-items`) with filtering/pagination
+- Company admin auto-initialization on first run
+- Graceful shutdown
+
+**What's missing:**
+
+- **No tests** (0 test files)
+- **No rate limiting** on any endpoint (including login)
+- **No structured logging** — uses `log.Printf` only
+- **No Redis fallback** — if Redis is down, employee secret generation/validation fails (no DB fallback)
+- **No observability** — no metrics, tracing, health check depth
+- **No request validation library** — manual field checks in handlers
+- **No data-pruning job** — app_sessions/app_items accumulate indefinitely (staleness sweep only deactivates catalog links)
+- **No listing endpoints** for installed-apps, installed-packages, device-hardware, network-info, session-events (sync-only tables)
+- **Dead DTOs** — `BrowserContext*`, `Url*`, `UrlVisit*`, `ShellCommand*` types still in `new_schema_dto.go`
+
+### Client — ~85% complete
+
+**What works:**
+
+- Cross-platform process collection (Win/Linux/macOS)
+- **Crash-safe session ended_at tracking** — heartbeat persisted every cycle, stale heartbeat detection on boot closes orphaned sessions with approximate crash time. Handles poweroff, process crash, and fast restart.
+- SQLite local storage with relational schema (device_hardware_info, storage_devices, installed_applications, installed_packages, network_info, session_events, app_sessions, app_items, app_status, permission_status, employee_info)
+- **PID-based session tracking** with `process_id` / `parent_process_id` on `app_sessions`
+- **cgroup-based session dedup**: multi-process GUI apps (VS Code, Chrome) collapse to ONE `app_sessions` row per logical window via systemd scope grouping; `grouped_by` / `cgroup_scope` / `context_label` columns record how each session was grouped + which window/profile it is (VS Code workspace folder, Chrome profile)
+- **Atomic cascade-close**: sessions and their `app_items` close in ONE transaction via `CloseSessionsAndAppItemsAsync()` — no orphaned open items when a session ends
+- **Hierarchy resolver**: node/bash → terminal → IDE via `parent_item_id` + OS process tree
+- **GUI-apps-only tracking**: only GUI apps with .desktop files (Linux), .app bundles (macOS), or Start Menu/Program Files entries (Windows) are tracked. CLI tools, shells, build tools, runtimes, and daemons are skipped entirely
+- **Wayland-native app tracking**: known GUI apps (VSCode, Chrome) tracked even without a window title — they don't appear in X11's `_NET_CLIENT_LIST` on Wayland
+- **Browser context**: `browser_tab` + `browser_navigation` items (URL from title / domain heuristic) via NativeMessageService + browser extension
+- **File explorer journey tracking**: 3 watchers (ATSPIEventWatcher, FileSystemEventWatcher, RecentFilesWatcher) → EventCoordinator (dedup/correlate/normalize) → JourneyEngine (resolve session, create AppItem rows with 9 journey fields)
+- **IObservableEventSource interface**: common contract for all watchers — IDE, Terminal, Office integrations plug in the same pattern
+- **Headless subprocess filtering (cross-platform)**: Chromium/Electron `--type=` flags detected via cmdline on Windows (PowerShell), macOS (`ps`), and Linux (`/proc/pid/cmdline`). Centralized `ChromiumSubprocessFlags` in `AppProcessClassifier`
+- Models: DeviceHardwareInfo (with mac/gpu/storage), InstalledApplication (with metadata + binary_name), NetworkInfo (with public IP), SessionEvent, AppSession (with FK to installed_apps/packages), AppItem (self-referencing via parent_item_id)
+- Encrypted config system (AES-256-GCM, transport→machine key migration)
+- Login/logout flow with server
+- Batched sync engine (every ~5 min, FK-ordered, 500-row batches, stop-on-failure per table)
+- **Device hardware**: now collects mac_address, storage_devices, gpu_model from OS
+- **Installed apps**: scans actual OS databases (registry, .desktop files, .app bundles) — GUI apps only, not running processes; binary_name mapping extracted from Exec= line
+- **Installed packages**: detects CLI tools/runtimes/libraries from npm/pip/apt/brew/choco/winget/scoop/cargo/snap/flatpak — separate table from installed_applications
+- **Network info**: has public IP lookup, dedup by IP change, mac_address removed (in device_hw)
+- **Shell commands REMOVED** — no longer collected or synced
+- **Generic app_items** replaces browser_contexts + file_explorer_contexts + urls + url_visits
+- **Process filtering**: SQLite-backed ResolveAppInfo() replaces in-memory IsInstalledApp() — processes not in DB auto-detected and saved before tracking
+- **AppDisplayName**: uses real app name from installed_applications (e.g., "Visual Studio Code"), not process name ("code") or window title
+- **Parent-child tracking**: `SessionHierarchyResolver` walks PPID chain + open-session PID registry; links via `parent_item_id` (nullable for standalone terminals)
+- **Linux filtering fixed**: removed resolvedTitle ??= name fallback that was bypassing window-title filters
+- **GNOME daemon contamination fixed**: Xwayland empty `binary_name` caused fuzzy-match SQL `$name LIKE '%%'` to match every process. Fixed via: `WHERE binary_name != ''` in fuzzy SQL, `NonAppProcesses` + `NonAppProcessPrefixes` blocklist expansion (16 GNOME daemons), `KernelNamePrefixes` in first-stage filter, `NoDisplay=true` + `Type!=Application` gate in `.desktop` file parsing
+- Auto-start persistence (all platforms)
+- Background guard watchdog
+- Tray icon (minimize to tray on close)
+- Windows power management (prevents sleep)
+
+**What's missing:**
+
+- **No tests** (0 test files)
+- **No auto-update mechanism**
+- **No crash reporting** — unhandled exceptions crash silently
+- **No offline queue analysis** — if server is unreachable, logs buffer locally with no back-pressure handling
+- **No encryption at rest** — SQLite encryption (sqlcipher) is commented out
+- **macOS CPU measurement** — macOS process collector skips CPU measurement (always 0%)
+- **macOS window titles** — only captures foreground window
+
+### Web — ~16% complete
+
+**What works:**
+
+- ~45 page routes exist with polished UI
+- Login page with animated hero section
+- Auth check on mount (Redux + server cookie)
+- Users page — real API calls via TanStack Query (CRUD + generate secret)
+- Departments page — real API calls (CRUD)
+- Logs/Comprehensive page — real API calls (now using new app_sessions API)
+- Sidebar with permission-based filtering (client-side only)
+- Dashboard shows mock stats and chart
+
+**What's missing (most pages):**
+
+- **~40 of 45 pages use mock localStorage data** — not connected to real API
+- **Client-side only permissions** — no server enforcement
+- **No error boundaries** — uncaught React errors crash the page
+- **No loading/empty/error states** on most mock-data pages
+- **No real-time updates** — no polling, WebSocket, or SSE
+- **No accessibility testing** — many interactive elements lack aria attributes
+- **No unit tests** — 0 test files
+- **GitHub release download** fetches from `clickmaster4285/Alpha-AI-Tracker`, not the org repo
+
+---
+
+## 6. Global Conventions
+
+*Extracted from observed patterns, not documented anywhere:*
+
+| Convention                    | Observed Pattern                                                                          |
+| ----------------------------- | ----------------------------------------------------------------------------------------- |
+| **API versioning**      | All routes under`/api/v1`                                                               |
+| **Error responses**     | `{code, message, detail?}` via `dto.APIError` (server)                                |
+| **Auth**                | httpOnly cookies for web, JWT in request body for employee clients                        |
+| **Naming (Go)**         | PascalCase exports, camelCase JSON fields                                                 |
+| **Naming (TypeScript)** | camelCase variables, PascalCase components                                                |
+| **Naming (C#)**         | PascalCase for classes/methods,`_camelCase` for private fields                          |
+| **Soft delete**         | `deleted_at TIMESTAMPTZ` on all tables, filtered in queries                             |
+| **Migrations**          | Sequential numbered SQL files in`server/migrations/`                                    |
+| **Go module**           | `github.com/alpha-ai-tracker/server`                                                    |
+| **Git branch**          | Currently on`restructureClient` branch — no PR/branch convention visible            |
+| **Commit style**        | Descriptive lowercase messages: "now remove the exit btn on the tray on windows", "fixit" |
+| **Monorepo tooling**    | No shared tooling (no Turborepo, Nx, etc.). Each service has its own build system.        |
+| **Build parity**        | `dotnet run` is NOT a release test — every change must be verified from an installed build; new assets/config/scripts must be bundled by the `publish/*` scripts (see below) |
+
+### Installer-Parity Rule (mandatory)
+
+**Why:** `dotnet run` always reflects the source tree, so it can never catch packaging gaps. The installed app runs from a root-owned dir (`/usr/share/alpha-ai-tracker/` on Linux, Program Files on Windows) with only what the `publish/*` scripts bundled. Recent real incidents: installed app crashed at startup (log written to a root-owned dir), browser-journey tracking dead (extensions/ not bundled), stale binary shipped (publish not rebuilt).
+
+**Every feature/modification must be verified end-to-end in an installed build:**
+
+1. **Always ship-test** — `dotnet run` success is NOT sufficient. Build the installer, install the artifact, and run the new functionality from there:
+   ```bash
+   cd client
+   bash publish/build-installer.sh -b linux   # or win / mac
+   sudo dpkg -i installers/alpha-ai-tracker_1.0.0_amd64.deb
+   ```
+2. **New runtime assets** (icons, JSON, images, fonts) — bundled ONLY if copied by `build-installer.sh` (`bundle_into_publish`) or the platform builders (`build-deb.sh`, `build-dmg.sh`, `installer-windows.iss`). Add the copy step when you add the asset.
+3. **New files under `extensions/`** — ship automatically (bundled into every publish output). Keep new extension / native-host files inside `extensions/`.
+4. **New scripts under `publish/`** — copied into every publish output automatically. Runtime-referenced scripts must live in `publish/` (or be added to the copy list).
+5. **New env vars / config** — must be added to `.env` BEFORE `encrypt-config.sh` runs; installers ship `config.enc` baked at build time. Dev reads `.env` directly — config that works in `dotnet run` is silently missing in the installer.
+6. **Path assumptions** — the installed app's working dir is root-owned / not user-writable. NEVER write files relative to cwd or the exe dir. Use `~/.config/alpha-ai-tracker/` (logs, machine-id) and `~/.local/share/alpha-ai-tracker/` (DB, sockets). `dotnet run` cannot catch this because the dev working dir is writable.
+7. **Packaging edits apply to ALL platforms** — when changing build scripts, update `build-installer.sh`, `build-deb.sh`, `build-dmg.sh`, and `installer-windows.iss` consistently.
+8. **Stale-binary guard** — `build-installer.sh` aborts if any source file is newer than the published `client.dll`; fix with `dotnet clean && bash publish/build-installer.sh`. This guard covers compiled code only — items 2–6 are the developer's responsibility.
+
+---
+
+## 7. Known Gaps / Risks
+
+### Cross-Cutting
+
+| Gap                                 | Severity  | Details                                                                                                                                                                          |
+| ----------------------------------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **No tests anywhere**         | 🔴 High   | 0 test files across all 3 projects. Any refactor is blind.                                                                                                                       |
+| **No observability**          | 🟠 Medium | No structured logging, metrics, tracing. Debugging production issues requires SSH + log scraping.                                                                                |
+| **Client-side only RBAC**     | 🟠 Medium | Permissions are enforced only in the web frontend localStorage. A malicious user can trivially bypass them.                                                                      |
+| **No rate limiting**          | 🟠 Medium | Login endpoint and all sync endpoints have no rate limiting. Brute-force / DoS is trivial.                                                                                       |
+| **No server permission model**| 🟠 Medium | Any authenticated user can access all protected endpoints; no role checks server-side.                                                                                           |
+| **Cross-account injection**   | 🟠 Medium | Sync handlers validate the JWT but don't verify the body `employeeId` matches the JWT subject.                                                                                   |
+| **Mock data dominance**       | 🟠 Medium | ~90% of web pages use mock data, giving a false sense of completeness.                                                                                                           |
+| **Default passwords**         | 🟠 Medium | `AlphaAI@2024!` is the compiled-in default. Easy to forget to change.                                                                                                          |
+| **No offline/retry strategy** | 🟢 Low    | Client retries sync every cycle but has no exponential backoff or dedup.                                                                                                         |
+| **No data-pruning job**       | 🟢 Low    | Server's only background job (`staleness_sweep.go`) deactivates stale catalog links but never deletes old app_sessions/app_items data.                                            |
+| **Dead shell-command code**   | 🟢 Low    | `IShellCommandCollector` + 3 platform impls + `ShellCommand` model on client; `ShellCommand`/`BrowserContext`/`Url*` DTOs on server. Harmless leftovers from the removal.         |
+| **Horizontal scaling**        | 🟢 Low    | Server uses Redis for employee secrets (short TTL), so scaling is straightforward — but DB queries have no query analysis.                                                      |
+
+---
+
+## 8. How to Run Locally
+
+### Prerequisites
+
+- Go 1.22+ (tested 1.25), PostgreSQL 16+, Redis 7+
+- Node.js 20+, npm
+- .NET 10 SDK (for client development with `dotnet run`)
+- Docker (optional, for PostgreSQL/Redis)
+
+### 1. Start PostgreSQL and Redis
+
+```bash
+# Using Docker (recommended)
+docker run -d --name pg -e POSTGRES_USER=alpha_ai -e POSTGRES_PASSWORD=yourpassword -e POSTGRES_DB=alpha_ai_tracker -p 5432:5432 postgres:16
+docker run -d --name redis -p 6379:6379 redis:7
+```
+
+### 2. Server
 
 ```bash
 cd server
-make setup       # copy .env.example → .env, install deps, build
-make run         # build & start the server (port 8080)
-make dev         # hot-reload dev mode (requires air)
-make test        # run tests
+cp .env.example .env
+# Edit .env — set DB_PASSWORD and JWT_SECRET
+make setup
+make run
+# Server starts on http://localhost:8080
 ```
 
-Prerequisites: Go 1.22+, PostgreSQL 16+, Redis 7+.
+### 3. Web Dashboard
 
-### Client (run from `client/`)
+```bash
+cd web
+npm install
+npm run dev
+# Dev server on http://localhost:3000
+```
+
+If server runs on a different host, set `NEXT_PUBLIC_API_URL` in `web/.env`.
+
+### 4. Desktop Client
 
 ```bash
 cd client
-dotnet build    # build the Avalonia desktop app
-dotnet run      # run locally
+# Ensure .env has ALPHA_SERVER_URL=http://localhost:8080
+dotnet run
 ```
 
----
+### Notes
 
-## Architecture
-
-### Server (`server/`)
-
-- **Go + Echo v4** — HTTP framework
-- **PostgreSQL via pgx v5** — database driver with connection pooling
-- **Redis via go-redis v9** — employee login secret storage (5-min TTL, one-time use)
-- **Clean/onion architecture**: Handler → Service → Repository → Database
-- **Three auth flows**: Web admin (email+password, httpOnly cookie) + Employee desktop (emp_id+secret_key via Redis, JWT token) + Employee API token (validated in handler body for log sync)
-- **Company admin auto-init**: on first run, creates a `company_admin` user using credentials from `.env`
-- **Employee ID format**: `EMP-XXXXX` (auto-generated by DB sequence)
-- **API versioning**: all endpoints under `/api/v1/`
-
-#### Directory structure
-
-```
-server/
-├── cmd/server/main.go              # Entry point
-├── internal/
-│   ├── config/config.go            # Environment-based config (godotenv)
-│   ├── database/postgres.go        # Pool + migration runner
-│   ├── redis/redis.go              # Redis client wrapper (employee secrets)
-│   ├── middleware/auth.go          # JWT cookie/header middleware
-│   ├── models/
-│   │   ├── user.go                 # User model (web admin auth only)
-│   │   ├── employee.go            # Employee model (tracked workers, dept_id FK)
-│   │   └── activity_log.go        # Activity log model (synced from desktop clients)
-│   ├── repository/
-│   │   ├── user_repo.go            # User CRUD (admins only)
-│   │   ├── employee_repo.go       # Employee CRUD with JOINs to departments
-│   │   ├── activity_log_repo.go   # Activity log bulk insert & list
-│   │   └── department_repo.go     # Departments CRUD with employee count
-│   ├── services/
-│   │   ├── auth_service.go         # Web login, JWT, admin init, employee token
-│   │   ├── user_service.go         # User business logic
-│   │   ├── employee_service.go     # Employee CRUD + secret generation (uses department_id)
-│   │   ├── activity_log_service.go # Log sync from clients + list
-│   │   ├── department_service.go   # Department CRUD
-│   │   └── redis_interface.go      # Redis interface for auth handler
-│   ├── handlers/
-│   │   ├── auth_handler.go         # Web login/logout + employee-login + employee-disconnect + DepartmentID
-│   │   ├── user_handler.go         # Admin user CRUD endpoints
-│   │   ├── employee_handler.go     # Employee CRUD + generate-secret
-│   │   ├── activity_log_handler.go # POST /sync + GET /activity-logs (token-validated)
-│   │   └── department_handler.go   # Departments CRUD endpoints
-│   ├── router/router.go            # Route definitions
-│   └── dto/
-│       ├── user_dto.go             # User request/response DTOs
-│       ├── employee_dto.go         # Employee request/response DTOs (includes departmentId)
-│       └── activity_log_dto.go     # Activity log sync & list DTOs
-├── migrations/
-│   ├── 001_init.sql                # Initial schema (users, departments)
-│   ├── 002_employees.sql           # Employees table + data migration
-│   ├── 003_activity_logs.sql       # Activity logs table for desktop client sync
-│   └── 004_employee_department_id.sql  # department_id FK in employees table
-├── .env.example                    # Environment variable template
-├── Makefile                        # Build automation
-└── go.mod / go.sum
-```
-
-#### API Endpoints
-
-| Method | Path                                    | Auth     | Description                              |
-|--------|-----------------------------------------|----------|------------------------------------------|
-| GET    | `/api/v1/health`                        | No       | Health check                             |
-| POST   | `/api/v1/auth/login`                    | No       | Web admin login (sets httpOnly cookie)   |
-| POST   | `/api/v1/auth/employee-login`           | No       | Employee login (emp_id + secret_key)     |
-| POST   | `/api/v1/auth/employee-disconnect`      | No       | Employee disconnect (token-validated)    |
-| GET    | `/api/v1/auth/check`                    | Optional | Auth status check                        |
-| POST   | `/api/v1/auth/logout`                   | Yes      | Logout (clears cookie)                   |
-| GET    | `/api/v1/auth/me`                       | Yes      | Current admin user profile               |
-| GET    | `/api/v1/users`                         | Yes      | List admin users (paginated)             |
-| GET    | `/api/v1/users/:id`                     | Yes      | Get admin user by ID                     |
-| POST   | `/api/v1/users`                         | Yes      | Create admin user                        |
-| PUT    | `/api/v1/users/:id`                     | Yes      | Update admin user                        |
-| DELETE | `/api/v1/users/:id`                     | Yes      | Delete admin user                        |
-| GET    | `/api/v1/employees`                     | Yes      | List employees (paginated, JOIN dept)    |
-| GET    | `/api/v1/employees/:id`                 | Yes      | Get employee by ID                       |
-| POST   | `/api/v1/employees`                     | Yes      | Create employee                          |
-| PUT    | `/api/v1/employees/:id`                 | Yes      | Update employee (supports department_id) |
-| DELETE | `/api/v1/employees/:id`                 | Yes      | Delete employee                          |
-| POST   | `/api/v1/employees/:id/generate-secret` | Yes      | Generate one-time login secret (Redis)   |
-| GET    | `/api/v1/activity-logs`                 | Yes      | List activity logs (paginated, filterable)|
-| POST   | `/api/v1/activity-logs/sync`            | No*      | Desktop client log sync (token in body)  |
-| GET    | `/api/v1/departments`                   | Yes      | List departments (with employee count)   |
-| POST   | `/api/v1/departments`                   | Yes      | Create department                        |
-| PUT    | `/api/v1/departments/:id`               | Yes      | Update department                        |
-| DELETE | `/api/v1/departments/:id`               | Yes      | Delete department                        |
-
-*\* Log sync endpoint authenticates via employee JWT token passed in request body, not via cookie middleware.*
-
-#### Employee Auth Flow (Desktop Client)
-
-1. **Web admin** clicks "Generate Login Secret" on employee → `POST /api/v1/employees/:id/generate-secret`
-2. **Server** generates random 12-char hex secret, stores in Redis with 5-min TTL
-3. **Web admin** copies secret and shares with employee
-4. **Employee** opens desktop client, enters `EMP-XXXXX` + secret key
-5. **Client** calls `POST /api/v1/auth/employee-login` with {employeeId, secretKey}
-6. **Server** validates secret from Redis (one-time use, auto-deletes on success), sets tracking_status="tracked"
-7. **Server** returns employee info + JWT token (includes DepartmentID)
-8. **Client** stores employee info in local SQLite, shows dashboard
-9. **Log sync**: Every ~5 min, client sends unsent logs (synced_at IS NULL) to `POST /api/v1/activity-logs/sync` with 100-log batches
-10. **On sync success**: Client marks logs as synced (sets synced_at)
-11. **Cleanup**: Synced logs older than 24h are auto-deleted from client SQLite
-
-#### Activity Log Sync Flow
-
-1. `LogCollectorService` collects process activity every 30s, attaches `employee_id` + `employee_name`
-2. Every ~5 min (10 cycles), `SyncUnsentLogs()` is called:
-   - Reads up to 100 unsent logs from SQLite (synced_at IS NULL)
-   - Sends to `POST /api/v1/activity-logs/sync` with employee token
-   - On 200 OK: marks all sent logs as synced (updates synced_at)
-3. Every ~60 min (120 cycles), `CleanupSyncedLogs()` runs:
-   - Deletes logs where synced_at IS NOT NULL AND timestamp < 24h ago
-4. On disconnect: sends `POST /api/v1/auth/employee-disconnect` — server sets untracked + offline
-
-#### Departments (Dynamic CRUD)
-
-Departments are now fully dynamic via REST API:
-- `GET /api/v1/departments` returns `{ departments: [{id, name, employeeCount}], total }`
-- `POST /api/v1/departments` creates a new department
-- `PUT /api/v1/departments/:id` renames a department
-- `DELETE /api/v1/departments/:id` removes a department
-- Employee `department_id` is a foreign key to `departments(id)`
-- Department name is resolved via LEFT JOIN for display
-
-#### Environment Variables
-
-| Variable              | Default                     | Description                    |
-|-----------------------|-----------------------------|--------------------------------|
-| `SERVER_PORT`         | `8080`                      | Server port                    |
-| `SERVER_HOST`         | `0.0.0.0`                  | Server host                    |
-| `DB_HOST`             | `localhost`                 | PostgreSQL host                |
-| `DB_PORT`             | `5432`                      | PostgreSQL port                |
-| `DB_USER`             | `alpha_ai`                  | DB user                        |
-| `DB_PASSWORD`         | *(required)*                | DB password                    |
-| `DB_NAME`             | `alpha_ai_tracker`          | Database name                  |
-| `DB_SSLMODE`          | `disable`                   | PostgreSQL SSL mode            |
-| `REDIS_HOST`          | `localhost`                 | Redis host                     |
-| `REDIS_PORT`          | `6379`                      | Redis port                     |
-| `REDIS_PASSWORD`      | *(empty)*                   | Redis password                 |
-| `REDIS_DB`            | `0`                         | Redis database index           |
-| `JWT_SECRET`          | *(required)*                | JWT signing secret             |
-| `JWT_ACCESS_EXPIRY`   | `24h`                       | JWT token expiry               |
-| `ADMIN_EMAIL`         | `admin@alphai.com`          | Company admin email            |
-| `ADMIN_PASSWORD`      | `AlphaAI@2024!`             | Company admin password         |
-| `ADMIN_NAME`          | `Company Admin`             | Company admin display name     |
-| `CORS_ALLOWED_ORIGINS`| `http://localhost:3000`     | CORS origins (comma-separated) |
-| `LOG_LEVEL`           | `info`                      | Log level                      |
-
----
-
-### Web (`web/`)
-
-- **Next.js 15 + React 18** — App Router with `(app)` route group for authenticated pages
-- **Redux Toolkit** — auth state management (authSlice with async thunks)
-- **TanStack Query v5** — server data fetching and caching
-- **shadcn/ui** components in `src/components/ui/`
-- **Sonner toast** — toast notifications via `toast()`
-- **All pages use `"use client"`** — fully client-side rendering
-- **Path alias**: `@/*` → `src/*`
-- **Fonts**: Plus Jakarta Sans (display), Inter (body)
-
-#### Auth flow
-
-1. On app load, `AuthProvider` dispatches `checkAuth()` thunk → calls `GET /api/v1/auth/check`
-2. If cookie is valid → user is authenticated → protected routes render
-3. If cookie is missing/expired → `isAuthenticated` is false → redirect to `/login`
-4. Login sends `POST /api/v1/auth/login` → server sets httpOnly `auth_token` cookie
-5. Logout sends `POST /api/v1/auth/logout` → cookie cleared
-6. Redux `auth` slice holds the current user, loading state, and error
-
-#### Protected routes
-
-`ProtectedRoute` component wraps `(app)/layout.tsx`. It:
-- Shows a loading spinner while checking auth
-- Redirects to `/login?redirect=<path>` if not authenticated
-- Checks module-based permissions via `usePermissions()`
-
-#### Employee management (Users page)
-
-The `/users` page manages **employees** (not web admin users):
-- Lists employees from `GET /api/v1/employees` (JOINs with departments for name)
-- Create/Edit/Delete employees via employees API
-- **Department dropdown** is dynamically loaded from `GET /api/v1/departments`
-- Employee form uses `departmentId` (integer FK) instead of department name string
-- **"Generate Login Secret"** action button per employee → calls `POST /api/v1/employees/:id/generate-secret`
-- Shows generated secret in a dialog with copy-to-clipboard (expires in 5 min)
-
-#### Departments page
-
-The `/departments` page now has full dynamic CRUD:
-- Lists departments from `GET /api/v1/departments` with employee count
-- Add department (POST), Edit department (PUT), Delete department (DELETE)
-- All operations use TanStack Query mutations with cache invalidation
-
-#### Logs / Comprehensive page
-
-The `/logs/comprehensive` page now fetches real data from server:
-- Employee dropdown dynamically loaded from employees API
-- Activity logs fetched from `GET /api/v1/activity-logs` with filtering
-- Three tabs: App Log (grouped by process), System Log (detail cards), Productive/Unproductive (foreground vs background)
-- Search by process name or window title
-- Pagination support
-- Shows employee name, CPU%, memory, platform for each entry
-
-#### Adding a new page
-
-1. Add route under `src/app/(app)/`
-2. Register module key in `ALL_MODULES` in `permissions.tsx`
-3. Add nav entry in `AppSidebar.tsx`
-4. Add page title in `AppLayout.tsx`
-
----
-
-### Client (`client/`)
-
-- **.NET 10 Avalonia UI desktop app** — installed on employee machines
-- **SQLite** via `Microsoft.Data.Sqlite` for local activity log storage + employee info persistence
-- **MVVM** with `CommunityToolkit.Mvvm` and `Microsoft.Extensions.Hosting` DI
-- **Value converters** in `client/Converters/` for XAML bindings
-
-#### Log sync architecture
-
-The client now actively syncs activity logs to the server:
-
-1. **Collection**: `LogCollectorService` collects process activity every ~30s
-2. **Employee association**: Each log is tagged with `employee_id` and `employee_name` from SQLite store
-3. **Local storage**: Logs stored in SQLite with `synced_at = NULL`
-4. **Sync**: Every ~5 min, up to 100 unsent logs are sent to `POST /api/v1/activity-logs/sync`
-5. **Mark sent**: On server acknowledgement, `synced_at` is set to current time
-6. **Cleanup**: Synced logs older than 24h are automatically deleted from local SQLite
-7. **Permission status**: Also associated with current employee via `employee_id`/`employee_name`
-
-#### Directory structure
-
-```
-client/
-├── Program.cs                         # Entry point, DI registration
-├── App.axaml / App.axaml.cs           # Application lifecycle, DI ServiceProvider
-├── ViewLocator.cs                     # ViewModel → View resolution
-├── Configuration/
-│   ├── AppConfig.cs                   # App configuration from env vars
-│   └── EnvLoader.cs                   # .env file loader
-├── Core/
-│   ├── Abstractions/
-│   │   ├── IActivityCollector.cs      # Process activity collection interface
-│   │   └── ILogStore.cs              # Storage interface (logs + employee info + cleanup)
-│   ├── Models/
-│   │   ├── ActivityLog.cs            # Activity log entry (includes EmployeeId, EmployeeName)
-│   │   ├── SessionInfo.cs            # Session tracking
-│   │   └── EmployeeInfo.cs           # Employee login info (SQLite-persisted)
-│   └── ProcessFilter.cs             # Process filtering utilities
-│── Platform/                         # OS-specific activity collectors
-│   ├── Windows/ProcessCollector.cs
-│   ├── MacOS/ProcessCollector.cs
-│   └── Linux/ProcessCollector.cs
-├── Storage/
-│   ├── DatabaseSchema.cs             # SQLite schema (activity_logs + employee_id cols)
-│   └── SqliteLogStore.cs             # SQLite implementation + CleanupSyncedAsync
-├── Services/
-│   └── LogCollectorService.cs        # Collection + sync + cleanup + permission status (now includes employee association)
-├── ViewModels/
-│   └── MainViewModel.cs              # Login state, employee info, API calls
-├── Views/
-│   └── MainWindow.axaml / .cs        # UI: login flow + employee info panel
-├── Converters/
-│   ├── BoolInvertConverter.cs        # Invert boolean for XAML visibility
-│   ├── StringNotEmptyConverter.cs    # Show when string is not empty
-│   └── LoadingToTextConverter.cs     # Show "Authenticating..." when loading
-└── publish/                          # Installer build scripts
-    ├── installer-windows.iss         # Inno Setup script (auto-kills running instances)
-    ├── build-installer.sh            # Cross-platform installer builder
-    ├── build-deb.sh                  # Linux .deb builder (prerm kills running instances)
-    └── build-dmg.sh                  # macOS .dmg builder
-```
-
-#### Client Employee Login Flow
-
-1. App starts, checks SQLite for existing `employee_info` record
-2. If logged in → shows employee info panel (name, department, role, avatar)
-3. If not logged in → shows "Not Connected" state with **Login** button
-4. Click Login → shows form with **Employee ID** (EMP-XXXXX) and **Secret Key** fields
-5. Submits to `POST /api/v1/auth/employee-login` on the server
-6. On success → saves employee + JWT token to local SQLite
-7. Shows employee info panel with avatar, name, department, role
-8. **Disconnect** button: sends disconnect to server (untrack + offline) then clears SQLite
-
-#### Installer behavior
-
-- **Windows**: Inno Setup installer auto-kills any running `client.exe` or `AlphaAITracker.exe` via `taskkill /F /IM` in `InitializeSetup` and `InitializeUninstall` (see `installer-windows.iss`)
-- **Linux**: `.deb` postrm script auto-kills running instances via `kill -9` before uninstall (see `build-deb.sh`)
-- **Mutex**: `AlphaAITracker` named mutex prevents multiple instances
-
----
-
-## Style conventions
-
-- Tailwind CSS with CSS variables for theming (light/dark via `class` strategy)
-- Use `cn()` from `src/lib/utils.ts` to merge class names
-- Custom animations defined in `tailwind.config.ts`: `fade-in`, `slide-in-left`, `pulse-soft`
-- Sidebar uses custom `sidebar-*` CSS variable tokens
-- API client in `src/lib/api.ts` uses `credentials: 'include'` for cookie auth
-- Redux store in `src/lib/store/redux.ts`
-- TanStack Query keys prefixed by resource name: `['employees', params]`, `['departments']`, `['activity-logs', params]`
+- No `docker-compose.yml` exists — you must start PostgreSQL and Redis manually.
+- The client requires a running server with at least one employee created via the web admin.
+- Login to the web dashboard with the default credentials from `.env` (admin@alphai.com / AlphaAI@2024!).

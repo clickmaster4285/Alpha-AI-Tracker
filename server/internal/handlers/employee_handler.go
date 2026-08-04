@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/labstack/echo/v4"
 	"github.com/alpha-ai-tracker/server/internal/dto"
@@ -18,6 +20,16 @@ type EmployeeHandler struct {
 // NewEmployeeHandler creates a new EmployeeHandler.
 func NewEmployeeHandler(employeeService *services.EmployeeService) *EmployeeHandler {
 	return &EmployeeHandler{employeeService: employeeService}
+}
+
+// logAndReturnError logs an error and returns a JSON error response.
+func (h *EmployeeHandler) logAndReturnError(c echo.Context, code int, message string, err error) error {
+	log.Printf("[employee] %s: %v", message, err)
+	return c.JSON(code, dto.APIError{
+		Code:    code,
+		Message: message,
+		Detail:  err.Error(),
+	})
 }
 
 // ListEmployees handles GET /api/v1/employees
@@ -36,11 +48,7 @@ func (h *EmployeeHandler) ListEmployees(c echo.Context) error {
 
 	result, err := h.employeeService.List(c.Request().Context(), params)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, dto.APIError{
-			Code:    http.StatusInternalServerError,
-			Message: "Failed to list employees",
-			Detail:  err.Error(),
-		})
+		return h.logAndReturnError(c, http.StatusInternalServerError, "Failed to list employees", err)
 	}
 
 	return c.JSON(http.StatusOK, result)
@@ -52,11 +60,7 @@ func (h *EmployeeHandler) GetEmployee(c echo.Context) error {
 
 	emp, err := h.employeeService.GetByID(c.Request().Context(), id)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, dto.APIError{
-			Code:    http.StatusInternalServerError,
-			Message: "Failed to get employee",
-			Detail:  err.Error(),
-		})
+		return h.logAndReturnError(c, http.StatusInternalServerError, "Failed to get employee", err)
 	}
 	if emp == nil {
 		return c.JSON(http.StatusNotFound, dto.APIError{
@@ -87,11 +91,11 @@ func (h *EmployeeHandler) CreateEmployee(c echo.Context) error {
 
 	emp, err := h.employeeService.Create(c.Request().Context(), &req)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, dto.APIError{
-			Code:    http.StatusInternalServerError,
-			Message: "Failed to create employee",
-			Detail:  err.Error(),
-		})
+		code := http.StatusInternalServerError
+		if isDuplicateError(err) {
+			code = http.StatusConflict
+		}
+		return h.logAndReturnError(c, code, "Failed to create employee", err)
 	}
 
 	return c.JSON(http.StatusCreated, emp)
@@ -112,11 +116,10 @@ func (h *EmployeeHandler) UpdateEmployee(c echo.Context) error {
 	emp, err := h.employeeService.Update(c.Request().Context(), id, &req)
 	if err != nil {
 		code := http.StatusInternalServerError
-		return c.JSON(code, dto.APIError{
-			Code:    code,
-			Message: "Failed to update employee",
-			Detail:  err.Error(),
-		})
+		if isDuplicateError(err) {
+			code = http.StatusConflict
+		}
+		return h.logAndReturnError(c, code, "Failed to update employee", err)
 	}
 	if emp == nil {
 		return c.JSON(http.StatusNotFound, dto.APIError{
@@ -137,10 +140,7 @@ func (h *EmployeeHandler) DeleteEmployee(c echo.Context) error {
 		if err.Error() == "employee not found" {
 			code = http.StatusNotFound
 		}
-		return c.JSON(code, dto.APIError{
-			Code:    code,
-			Message: err.Error(),
-		})
+		return h.logAndReturnError(c, code, "Failed to delete employee", err)
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
@@ -158,11 +158,13 @@ func (h *EmployeeHandler) GenerateSecret(c echo.Context) error {
 		if err.Error() == "employee not found" {
 			code = http.StatusNotFound
 		}
-		return c.JSON(code, dto.APIError{
-			Code:    code,
-			Message: err.Error(),
-		})
+		return h.logAndReturnError(c, code, "Failed to generate secret", err)
 	}
 
 	return c.JSON(http.StatusOK, resp)
+}
+
+// isDuplicateError checks if the error is a duplicate key violation.
+func isDuplicateError(err error) bool {
+	return err != nil && (strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "already exists"))
 }

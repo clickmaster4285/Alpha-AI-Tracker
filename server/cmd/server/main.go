@@ -13,6 +13,7 @@ import (
 	"github.com/alpha-ai-tracker/server/internal/config"
 	"github.com/alpha-ai-tracker/server/internal/database"
 	"github.com/alpha-ai-tracker/server/internal/handlers"
+	"github.com/alpha-ai-tracker/server/internal/jobs"
 	goredis "github.com/alpha-ai-tracker/server/internal/redis"
 	"github.com/alpha-ai-tracker/server/internal/repository"
 	"github.com/alpha-ai-tracker/server/internal/router"
@@ -66,14 +67,14 @@ func main() {
 	// ────────────────
 	userRepo := repository.NewUserRepo(pool)
 	employeeRepo := repository.NewEmployeeRepo(pool)
-	activityLogRepo := repository.NewActivityLogRepo(pool)
 	departmentRepo := repository.NewDepartmentRepo(pool)
+	newSchemaRepo := repository.NewNewSchemaRepo(pool)
 
 	authService := services.NewAuthService(userRepo, cfg.JWT, cfg.Admin)
 	userService := services.NewUserService(userRepo)
 	employeeService := services.NewEmployeeService(employeeRepo, redisClient)
-	activityLogService := services.NewActivityLogService(activityLogRepo, employeeRepo)
 	departmentService := services.NewDepartmentService(departmentRepo, employeeRepo)
+	newSchemaService := services.NewNewSchemaService(newSchemaRepo, employeeRepo)
 
 	// Cast Redis client to interface
 	var redisInterface services.RedisClientInterface
@@ -84,8 +85,10 @@ func main() {
 	authHandler := handlers.NewAuthHandler(authService, employeeRepo, redisInterface, cfg.JWT)
 	userHandler := handlers.NewUserHandler(userService)
 	employeeHandler := handlers.NewEmployeeHandler(employeeService)
-	activityLogHandler := handlers.NewActivityLogHandler(activityLogService, authService)
 	departmentHandler := handlers.NewDepartmentHandler(departmentService)
+	newSchemaHandler := handlers.NewNewSchemaHandler(newSchemaService, authService)
+	extensionsHandler := handlers.NewExtensionsHandler(cfg.CrxStoreDir, cfg.CrxPublicBaseURL)
+	log.Printf("[server] extension update channel: store=%s base=%s", cfg.CrxStoreDir, cfg.CrxPublicBaseURL)
 
 	// ────────────────
 	// Auto-initialize Company Admin
@@ -96,13 +99,22 @@ func main() {
 	}
 
 	// ────────────────
+	// Background jobs
+	// ────────────────
+	sweepCtx, sweepCancel := context.WithCancel(context.Background())
+	defer sweepCancel()
+	stalenessSweep := jobs.NewStalenessSweep(pool, cfg.LinkStaleDays)
+	stalenessSweep.Start(sweepCtx)
+	log.Printf("[server] staleness sweep started (stale window: %d days)", cfg.LinkStaleDays)
+
+	// ────────────────
 	// Setup Echo
 	// ────────────────
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
 
-	router.Setup(e, cfg, authService, authHandler, userHandler, employeeHandler, activityLogHandler, departmentHandler)
+	router.Setup(e, cfg, authService, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, extensionsHandler)
 
 	// ────────────────
 	// Graceful Shutdown

@@ -73,8 +73,9 @@ Desktop.ini
 *.tmp
 *.orig
 *.swp
-installers/
+/installers/
 
 ## Environment
 .env
-data/
+/data/
+/config.enc

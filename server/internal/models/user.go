@@ -18,8 +18,9 @@ type User struct {
 	Avatar         string   `json:"avatar" db:"avatar"`
 	AvatarColor    string   `json:"avatarColor" db:"avatar_color"`
 	IsCompanyAdmin bool     `json:"isCompanyAdmin" db:"is_company_admin"`
-	CreatedAt      time.Time `json:"createdAt" db:"created_at"`
-	UpdatedAt      time.Time `json:"updatedAt" db:"updated_at"`
+	CreatedAt      time.Time    `json:"createdAt" db:"created_at"`
+	UpdatedAt      time.Time    `json:"updatedAt" db:"updated_at"`
+	DeletedAt      *time.Time   `json:"deletedAt" db:"deleted_at"`
 }
 
 // UserPublic is the public-facing user info (no password hash, safe for API responses).

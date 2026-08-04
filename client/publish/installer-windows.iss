@@ -44,7 +44,7 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 
 [Files]
 Source: "windows\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "Platform\Linux\*"
-Source: "..\.env.example"; DestDir: "{app}"; DestName: ".env"; Flags: ignoreversion onlyifdoesntexist
+Source: "windows\config.enc"; DestDir: "{app}"; Flags: ignoreversion onlyifdoesntexist; Check: FileExists(ExpandConstant('{src}\windows\config.enc'))
 Source: "..\appsettings.json"; DestDir: "{app}"; Flags: ignoreversion
 
 [Registry]

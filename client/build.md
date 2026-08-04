@@ -117,6 +117,37 @@ bash publish/build-installer.sh
 
 ---
 
+## Stopping the Client
+
+The client runs as a **systemd user service**. Use these commands to stop it:
+
+### Stop the Running Service
+
+```bash
+systemctl --user stop alpha-ai-tracker.service
+```
+
+### Stop + Prevent Auto-Start
+
+```bash
+systemctl --user stop alpha-ai-tracker.service
+systemctl --user disable alpha-ai-tracker.service
+```
+
+### Kill Immediately
+
+```bash
+killall -9 client
+```
+
+### Remove Auto-Start on Desktop Login
+
+```bash
+rm ~/.config/autostart/alpha-ai-tracker.desktop
+```
+
+---
+
 ## Release to GitHub
 
 After building installers, you can publish them as a GitHub Release.
