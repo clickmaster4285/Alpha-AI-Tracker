@@ -19,6 +19,7 @@ func Setup(
 	employeeHandler *handlers.EmployeeHandler,
 	departmentHandler *handlers.DepartmentHandler,
 	newSchemaHandler *handlers.NewSchemaHandler,
+	extensionsHandler *handlers.ExtensionsHandler,
 ) {
 	// ─────────────────────────────
 	// Global Middleware
@@ -65,6 +66,13 @@ func Setup(
 	// Phase 2 sync endpoints
 	e.POST("/api/v1/app-sessions/sync", newSchemaHandler.SyncAppSessions)
 	e.POST("/api/v1/app-items/sync", newSchemaHandler.SyncAppItems)
+
+	// ─────────────────────────────
+	// Self-hosted extension update channel (sub-phase 5A) — public, browsers
+	// fetch these during ExtensionInstallForcelist policy installs.
+	// ─────────────────────────────
+	e.GET("/api/v1/extensions/:id/update.xml", extensionsHandler.UpdateManifest)
+	e.GET("/api/v1/extensions/:id/crx", extensionsHandler.ServeCrx)
 
 	// ─────────────────────────────
 	// Semi-Protected Routes (optional auth)

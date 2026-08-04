@@ -949,46 +949,110 @@ public partial class MainViewModel : ViewModelBase
                 browser.NativeHostInstalled = true;
             }
 
-            // Step 2: Launch browser with extension or show instructions
-            if (browser.IsChromeBased)
+            // Step 2: Launch browser with extension or show instructions.
+            // Phase 5 (rev-3): the default persistent mechanism for Chromium is the
+            // elevated ExtensionInstallForcelist policy (one pkexec/UAC prompt per
+            // click, matching GrantLinuxPermissionsAsync). --load-extension and
+            // Preferences injection are DEV FALLBACKS only — used when no CRX
+            // infrastructure is configured, or the policy write was declined.
+            if (browser.Engine == BrowserEngine.Chromium)
             {
-                var result = await _browserExt.InstallExtensionAsync(browser);
+                ExtensionInstructionsTitle = "Authorizing Policy Install…";
+                ExtensionInstructions =
+                    "A system authorization prompt (pkexec) will open. " +
+                    "Enter your password to install the extension via enterprise policy " +
+                    "(ExtensionInstallForcelist → self-hosted signed CRX).";
+
+                var result = await _browserExt.InstallPolicyForcelistAsync(browser);
                 if (result.Success)
                 {
                     if (result.WasRestarted)
                     {
-                        ExtensionInstructionsTitle = "🔄 Browser Restarted";
-                        ExtensionInstructions = $"Chrome was already open, so we closed it and reopened with the extension loaded.\n\nYour previous Chrome tabs and windows were closed. The extension is now active.\n\nClick Done to continue.";
+                        ExtensionInstructionsTitle = "🔄 Browser Restarted (Policy Install)";
+                        ExtensionInstructions =
+                            $"{browser.Name} was already open, so it was closed and relaunched to pick up the policy.\n\n" +
+                            $"{result.Message}";
                     }
                     else
                     {
-                        ExtensionInstructionsTitle = "✅ Extension Loaded!";
-                        ExtensionInstructions = $"{browser.Name} has been launched with the extension loaded.\n\nThe extension will persist across browser restarts automatically.\n\nTo verify, open chrome://extensions and look for:\n  Alpha AI Tracker - Browser Journey";
+                        ExtensionInstructionsTitle = "✅ Policy Installed";
+                        ExtensionInstructions = $"{result.Message}";
+                    }
+                }
+                else if (result.Message.Contains("not configured", StringComparison.OrdinalIgnoreCase))
+                {
+                    // No CRX infrastructure configured (dev machine without
+                    // ALPHA_CRX_EXTENSION_ID) — DEV FALLBACK, clearly labeled.
+                    browser.Status = BrowserInstallStatus.NativeHostReady;
+                    ExtensionInstructionsTitle = "🧪 Developer Fallback (no CRX policy configured)";
+                    var devResult = await _browserExt.InstallExtensionAsync(browser);
+                    if (devResult.Success)
+                    {
+                        ExtensionInstructionsTitle = devResult.WasRestarted
+                            ? "🔄 Browser Restarted (dev fallback)"
+                            : "✅ Extension Loaded (dev fallback)";
+                        ExtensionInstructions =
+                            $"Dev fallback used — --load-extension / Preferences injection. " +
+                            $"Note: branded Chrome 150+ rejects this; for the persistent " +
+                            $"policy install, set ALPHA_CRX_EXTENSION_ID and point the client " +
+                            $"at the CRX update server.\n\n{devResult.Message}";
+                    }
+                    else
+                    {
+                        ExtensionInstructionsTitle = "📋 Manual Installation Required";
+                        var step2 = "Enable \"Developer mode\" (toggle in top-right)";
+                        var step3 = "Click \"Load unpacked\"";
+                        ExtensionInstructions =
+                            $"Could not launch {browser.Name} automatically.\n\nTo install manually:\n\n" +
+                            $"1. Open chrome://extensions in {browser.Name}\n2. {step2}\n3. {step3}\n" +
+                            $"4. Select the extension folder:\n   {browser.ExtensionDir}\n\n" +
+                            $"The extension will remain loaded after restart.";
                     }
                 }
                 else
                 {
-                    // Roll back the optimistic UI state — install actually failed.
+                    // Roll back the optimistic UI state — policy install failed.
                     browser.Status = BrowserInstallStatus.NativeHostReady;
-
-                    ExtensionInstructionsTitle = "📋 Manual Installation Required";
-                    var step2 = "Enable \"Developer mode\" (toggle in top-right)";
-                    var step3 = "Click \"Load unpacked\"";
-                    ExtensionInstructions = $"Could not launch {browser.Name} automatically.\n\nTo install manually:\n\n1. Open chrome://extensions in {browser.Name}\n2. {step2}\n3. {step3}\n4. Select the extension folder:\n   {browser.ExtensionDir}\n\nThe extension will remain loaded after restart.";
+                    ExtensionInstructionsTitle = "📋 Policy Install Failed — Manual Instructions";
+                    ExtensionInstructions =
+                        $"{result.Message}\n\nAfter writing the policy manually, click the browser's " +
+                        $"\"Add Extension\" button again (or restart {browser.Name}) and the policy " +
+                        $"is picked up on relaunch.";
                 }
             }
-            else
+            else if (browser.Engine == BrowserEngine.Gecko)
             {
-                // Firefox: no --load-extension flag, show instructions.
-                // Firefox installs go through manual steps, so the extension is not
-                // "active" until the user completes them — roll back to NativeHostReady.
+                // Firefox/Gecko: host + manual instructions (MVP). Release Firefox
+                // hard-requires a Mozilla-signed .xpi; policy auto-attach is only
+                // available on ESR / relaxed forks (LibreWolf, Waterfox) — see
+                // plan.txt rev-3 research note.
                 browser.Status = BrowserInstallStatus.NativeHostReady;
 
                 ExtensionInstructionsTitle = "📋 Firefox — Manual Installation";
                 var ffManifestPath = Path.Combine(browser.ExtensionDir, "manifest.json");
                 var ffStep2 = "Click \"Load Temporary Add-on\u2026\"";
-                ExtensionInstructions = $"Firefox does not support automatic extension loading.\n\nTo install:\n\n1. Open about:debugging#/runtime/this-firefox in Firefox\n2. {ffStep2}\n3. Navigate to and select:\n   {ffManifestPath}\n\nFor permanent install, submit the extension to Mozilla Add-ons.\n\n(Launching Firefox now for convenience...)";
+                ExtensionInstructions =
+                    $"Firefox does not support automatic extension loading.\n\nTo install:\n\n" +
+                    $"1. Open about:debugging#/runtime/this-firefox in Firefox\n2. {ffStep2}\n" +
+                    $"3. Navigate to and select:\n   {ffManifestPath}\n\n" +
+                    $"For permanent install, submit the extension to Mozilla Add-ons.\n\n" +
+                    $"(Launching Firefox now for convenience...)";
                 await _browserExt.InstallExtensionAsync(browser);
+            }
+            else
+            {
+                // Engine=Unknown: fail safe — manual instructions only, never guess.
+                browser.Status = BrowserInstallStatus.NativeHostReady;
+                ExtensionInstructionsTitle = "📋 Manual Installation Required";
+                ExtensionInstructions =
+                    $"{browser.Name} was detected, but its engine could not be identified " +
+                    $"(no profile created yet, or unknown engine family).\n\n" +
+                    $"If it is Chromium-based: open chrome://extensions → Developer mode → " +
+                    $"Load unpacked → {browser.ExtensionDir}\n\n" +
+                    $"If it is Firefox-based: open about:debugging#/runtime/this-firefox → " +
+                    $"Load Temporary Add-on → {Path.Combine(browser.ExtensionDir, "manifest.json")}\n\n" +
+                    $"Launch {browser.Name} once and click Refresh — the engine will then " +
+                    $"be auto-detected from its profile.";
             }
 
             // No aggressive re-scan here. We deliberately do NOT rebuild DetectedBrowsers,
@@ -1090,9 +1154,15 @@ public partial class MainViewModel : ViewModelBase
                     continue;
                 }
 
-                var result = await _browserExt.InstallExtensionAsync(browser);
+                // Phase 5 (rev-3): Chromium uses the elevated ExtensionInstallForcelist
+                // policy (one pkexec/UAC prompt per browser click); Gecko uses the
+                // launch + manual-instructions MVP. --load-extension / Preferences
+                // injection are dev fallbacks only.
+                var result = browser.Engine == BrowserEngine.Chromium
+                    ? await _browserExt.InstallPolicyForcelistAsync(browser)
+                    : await _browserExt.InstallExtensionAsync(browser);
                 results.Add(result.Success
-                    ? $"{browser.Name}: extension attach requested (host + launch)."
+                    ? $"{browser.Name}: attach requested ({browser.EngineText}). {result.Message}"
                     : $"{browser.Name}: ⚠ {result.Message}");
             }
 

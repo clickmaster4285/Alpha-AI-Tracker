@@ -87,6 +87,8 @@ func main() {
 	employeeHandler := handlers.NewEmployeeHandler(employeeService)
 	departmentHandler := handlers.NewDepartmentHandler(departmentService)
 	newSchemaHandler := handlers.NewNewSchemaHandler(newSchemaService, authService)
+	extensionsHandler := handlers.NewExtensionsHandler(cfg.CrxStoreDir, cfg.CrxPublicBaseURL)
+	log.Printf("[server] extension update channel: store=%s base=%s", cfg.CrxStoreDir, cfg.CrxPublicBaseURL)
 
 	// ────────────────
 	// Auto-initialize Company Admin
@@ -112,7 +114,7 @@ func main() {
 	e.HideBanner = true
 	e.HidePort = true
 
-	router.Setup(e, cfg, authService, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler)
+	router.Setup(e, cfg, authService, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, extensionsHandler)
 
 	// ────────────────
 	// Graceful Shutdown

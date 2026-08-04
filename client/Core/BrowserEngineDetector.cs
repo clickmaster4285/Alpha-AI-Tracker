@@ -39,6 +39,14 @@ public static class BrowserEngineDetector
             if (engine != BrowserEngine.Unknown) return engine;
         }
 
+        // 3. Structural two-level probe (vendor-folder layouts like
+        //    BraveSoftware/Brave-Browser). See TwoLevelSweepRoots.
+        foreach (var root in TwoLevelSweepRoots(candidate))
+        {
+            var engine = ClassifyRoot(root);
+            if (engine != BrowserEngine.Unknown) return engine;
+        }
+
         return BrowserEngine.Unknown;
     }
 
@@ -88,7 +96,9 @@ public static class BrowserEngineDetector
     /// </summary>
     public static (string Root, string DefaultProfile)? FindProfileRoot(BrowserCandidate candidate)
     {
-        foreach (var root in DeriveRoots(candidate).Concat(CorrelatedSweepRoots(candidate)))
+        foreach (var root in DeriveRoots(candidate)
+                     .Concat(CorrelatedSweepRoots(candidate))
+                     .Concat(TwoLevelSweepRoots(candidate)))
         {
             var engine = ClassifyRoot(root);
             if (engine == BrowserEngine.Unknown) continue;
@@ -173,20 +183,35 @@ public static class BrowserEngineDetector
     /// <summary>
     /// Roots derived from the confirmed candidate itself: config dir named after
     /// the binary/desktop-id, plus the platform-specific wrappers (snap, flatpak,
-    /// %LOCALAPPDATA%, ~/Library/Application Support) and the display-only
-    /// BrandCatalog config-dir hint. No list gates anything here — every root is
-    /// simply probed for a profile signature.
+    /// %LOCALAPPDATA%, ~/Library/Application Support).
+    ///
+    /// Config-dir resolution is entirely generic — no brand-keyed dictionary.
+    /// Every name candidate (BinaryName, DesktopId, stripped variants) is simply
+    /// probed for a profile signature; first hit wins. This catches Brave's
+    /// (BraveSoftware/Brave-Browser) path and any other non-obvious layout
+    /// without a per-brand shortcut.
     /// </summary>
     private static List<string> DeriveRoots(BrowserCandidate c)
     {
         var roots = new List<string>();
         var userHome = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
-        var (_, configHint) = BrandCatalog.Find(c);
+        // Generic multi-candidate probe: try BinaryName, DesktopId, and
+        // stripped variants (remove -browser, -stable, -esr suffixes).
+        // No dictionary hint — every candidate is just a path probe that
+        // succeeds only if a real profile file is found there.
         var names = new List<string>();
         if (!string.IsNullOrEmpty(c.BinaryName)) names.Add(c.BinaryName);
         if (!string.IsNullOrEmpty(c.DesktopId)) names.Add(c.DesktopId);
-        if (!string.IsNullOrEmpty(configHint)) names.Add(configHint.Replace('/', Path.DirectorySeparatorChar));
+        // Stripped variants for non-obvious paths like BraveSoftware/Brave-Browser
+        if (!string.IsNullOrEmpty(c.BinaryName))
+        {
+            foreach (var suffix in new[] { "-browser", "-stable", "-esr" })
+            {
+                if (c.BinaryName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+                    names.Add(c.BinaryName[..^suffix.Length]);
+            }
+        }
 
         foreach (var name in names.Distinct(StringComparer.OrdinalIgnoreCase))
         {
@@ -294,5 +319,78 @@ public static class BrowserEngineDetector
                c.BinaryName.Contains(rootName, StringComparison.OrdinalIgnoreCase) ||
                rootName.Contains(c.DesktopId, StringComparison.OrdinalIgnoreCase) ||
                c.DesktopId.Contains(rootName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Structural two-level probe (STEP 1 fix, 2026-08-03): catches vendor-folder
+    /// layouts like BraveSoftware/Brave-Browser where the real user-data root sits
+    /// TWO levels below the config home (~/.config/&lt;Vendor&gt;/&lt;Browser&gt; on Linux,
+    /// %LOCALAPPDATA%/&lt;Vendor&gt;/&lt;Browser&gt; on Windows, ~/Library/Application
+    /// Support/&lt;Vendor&gt;/&lt;Browser&gt; on macOS).
+    ///
+    /// NOT name-keyed and NOT a per-brand dictionary: the two-level path is
+    /// generated structurally from the config home, and it is only accepted when
+    /// (a) the leaf or parent dir name correlates with the confirmed candidate
+    /// (same Overlaps gate as the one-level sweep — this is what excludes unrelated
+    /// Electron app configs from misattribution) AND (b) ClassifyRoot finds a real
+    /// profile signature file (Preferences / Local State / profiles.ini / prefs.js)
+    /// at that path. A future browser with a new vendor-folder layout is caught
+    /// automatically — no dictionary entry needed.
+    /// </summary>
+    private static List<string> TwoLevelSweepRoots(BrowserCandidate c)
+    {
+        var roots = new List<string>();
+        var userHome = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+        IEnumerable<string> level1;
+        if (OperatingSystem.IsLinux())
+        {
+            var config = Path.Combine(userHome, ".config");
+            level1 = Directory.Exists(config)
+                ? Directory.GetDirectories(config)
+                : Array.Empty<string>();
+        }
+        else if (OperatingSystem.IsWindows())
+        {
+            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            level1 = Directory.Exists(localAppData)
+                ? Directory.GetDirectories(localAppData)
+                : Array.Empty<string>();
+        }
+        else
+        {
+            var appSupport = Path.Combine(userHome, "Library", "Application Support");
+            level1 = Directory.Exists(appSupport)
+                ? Directory.GetDirectories(appSupport)
+                : Array.Empty<string>();
+        }
+
+        foreach (var l1 in level1)
+        {
+            var l1Name = Path.GetFileName(l1);
+            if (string.IsNullOrEmpty(l1Name)) continue;
+            IEnumerable<string> l2s;
+            try { l2s = Directory.GetDirectories(l1); }
+            catch { continue; }
+
+            foreach (var l2 in l2s)
+            {
+                var l2Name = Path.GetFileName(l2);
+                if (string.IsNullOrEmpty(l2Name)) continue;
+
+                // Correlation gate: leaf OR parent overlaps the confirmed candidate.
+                // (BraveSoftware/Brave-Browser matches via leaf "Brave-Browser" vs
+                //  binary "brave-browser"; parent "BraveSoftware" alone does not,
+                //  which is exactly why the one-level sweep missed it.)
+                if (!Overlaps(l1Name, c) && !Overlaps(l2Name, c)) continue;
+
+                // Final gate: a real profile signature must exist here — the
+                // structural sweep never invents a root for empty dirs.
+                if (ClassifyRoot(l2) != BrowserEngine.Unknown)
+                    roots.Add(l2);
+            }
+        }
+
+        return roots;
     }
 }

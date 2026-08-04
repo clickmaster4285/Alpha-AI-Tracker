@@ -22,6 +22,16 @@ type Config struct {
 	// LinkStaleDays is the staleness threshold (in days) after which an
 	// employee↔app/package junction link is marked is_active = false.
 	LinkStaleDays int
+
+	// CrxStoreDir is the directory where signed .crx files + version info
+	// live for the self-hosted extension update manifest endpoint (sub-phase
+	// 5A). Populated by cmd/crxsign.
+	CrxStoreDir string
+
+	// CrxPublicBaseURL is the externally reachable base URL the gupdate XML
+	// uses for its codebase attribute (browsers fetch the CRX from here).
+	// Defaults to http://localhost:8080.
+	CrxPublicBaseURL string
 }
 
 type ServerConfig struct {
@@ -116,6 +126,9 @@ func Load() (*Config, error) {
 		LogLevel: getEnv("LOG_LEVEL", "info"),
 
 		LinkStaleDays: getEnvInt("LINK_STALE_DAYS", 7),
+
+		CrxStoreDir:     getEnv("CRX_STORE_DIR", "./crx-store"),
+		CrxPublicBaseURL: getEnv("CRX_PUBLIC_BASE_URL", "http://localhost:8080"),
 	}
 
 	if cfg.Database.Password == "" {

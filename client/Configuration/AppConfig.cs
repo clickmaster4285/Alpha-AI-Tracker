@@ -12,6 +12,17 @@ public class AppConfig
     public string? ServerUrl { get; init; }
     public string? ApiKey { get; init; }
 
+    /// <summary>
+    /// The a–p extension ID of the PACKED (signed CRX) extension, derived from
+    /// the organization's CRX signing public key (see server/cmd/crxsign). This
+    /// is the ID Chrome assigns for policy force-installs (ExtensionInstallForcelist),
+    /// and it differs from the path-derived ID used for dev/unpacked loads — the
+    /// native-messaging manifest must use whichever ID the install method in use
+    /// actually produces. Empty → policy forcelist path is unavailable and the UI
+    /// falls back to dev attach / manual instructions.
+    /// </summary>
+    public string? CrxExtensionId { get; init; }
+
     public static AppConfig FromEnv()
     {
         return new AppConfig
@@ -22,7 +33,8 @@ public class AppConfig
             CollectIntervalSec = int.TryParse(GetEnv("ALPHA_COLLECT_INTERVAL_SEC"), out var sec) ? sec : 30,
             LogLevel = GetEnv("ALPHA_LOG_LEVEL") ?? "Info",
             ServerUrl = GetEnv("ALPHA_SERVER_URL") ?? GetDefaultServerUrl(),
-            ApiKey = GetEnv("ALPHA_API_KEY")
+            ApiKey = GetEnv("ALPHA_API_KEY"),
+            CrxExtensionId = GetEnv("ALPHA_CRX_EXTENSION_ID")
         };
     }
 
