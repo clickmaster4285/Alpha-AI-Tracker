@@ -2,16 +2,21 @@ ALPHA AI TRACKER — BROWSER JOURNEY ENGINE (DEBUGGER-ONLY)
 Architecture Plan
 ========================================================
 Status: APPROVED DIRECTION — debugger-only, engine-per-protocol. No code was modified in this session.
+Rev 2 (2026-08-05): folded in review refinements — runtime capability probing (ProbeCapabilities),
+per-capability Automatic/Admin-assisted/User-assisted/Unsupported classification, and a component
+dependency diagram (new §29).
 Date: 2026-08-05
 Decision: browser journey data is captured EXCLUSIVELY through each engine's debugger protocol.
           All other sources (MV3 extension, window-title parsing, history-DB backfill) are REMOVED.
-Protocols: Chromium → CDP · Gecko → RDP (+ partial CDP) · WebKit → Web Inspector Protocol.
-Debug port allocation starts at 30000 (dynamic, never hardcoded to one port).
+Protocols: Chromium → CDP · Gecko → RDP (+ partial CDP/BiDi) · WebKit → Web Inspector Protocol.
+Debug port: assign the FIRST FREE port; the search always starts at 30000 — never a fixed port.
 
 ========================================================
 1. ARCHITECTURE SUMMARY
 ========================================================
 Single capture path per engine, one normalized event model, one journey writer, full self-healing.
+Every engine advertises its capabilities at runtime (ProbeCapabilities); the system ADAPTS to what the
+engine can actually do — it never assumes a debugger is always available.
 
   Browser engine runtime (Chromium | Gecko | WebKit)
     ↓ debugger protocol (CDP / RDP / Web Inspector)
@@ -166,7 +171,12 @@ matched within the last 5s.
 
 5.8 Engine adapters (IBrowserEngineAdapter)
 - ChromiumEngineAdapter (CDP) · GeckoEngineAdapter (RDP/BiDi) · WebKitEngineAdapter (WIP).
-- Each: DetectRuntime, CanStartDebugger, StartDebugger, OpenConnection, QueryTabs, Subscribe, Control.
+- Each: DetectRuntime, ProbeCapabilities, CanStartDebugger, StartDebugger, OpenConnection,
+  QueryTabs, Subscribe, Control.
+- ProbeCapabilities() → BrowserCapabilities object (SupportsDebugger, SupportsHistory,
+  SupportsProfiles, SupportsIncognito, SupportsDownloads, SupportsExactUrl), each tagged with a
+  classification: Automatic | Admin-assisted | User-assisted | Unsupported. Probed at detection,
+  not assumed (drives §17).
 - Each ships its own normalizer.
 
 5.9 DI wiring (Program.cs)
@@ -251,13 +261,16 @@ Persistence is what makes recovery idempotent.
   installs → RuntimeManager. All transitions idempotent.
 
 ========================================================
-12. DEBUG PORT MANAGER (start 30000)
+12. DEBUG PORT MANAGER (first free port, search starts at 30000)
 ========================================================
-- DebugPortManager scans from port 30000 upward (configurable, e.g. BROWSER_DEBUG_PORT_START=30000).
-- Acquires the first free port via TcpListener probe; leases persisted runtimeId→port.
-- Conflict detection: process exited but port held → validate liveness, reclaim.
+- DebugPortManager ALWAYS assigns the FIRST FREE port: probe starting at 30000 (configurable,
+  BROWSER_DEBUG_PORT_START=30000), then 30001, 30002, … upward until a TcpListener bind succeeds.
+- It NEVER assigns a fixed port to a runtime (no Runtime1=30000 / Runtime2=30001 mapping) — a stale
+  process could otherwise block the sequence.
+- Acquire → reserve → persist the lease (runtimeId→port); validate liveness before reuse.
+- Conflict detection: process exited but port held → probe liveness, reclaim.
 - Crash recovery: on boot, validate each persisted lease before reuse.
-- Never a fixed/global port; every runtime gets its own.
+- Every runtime gets its own dynamically-found free port.
 
 ========================================================
 13. BROWSER CONNECTION MANAGER
@@ -313,21 +326,31 @@ PLATFORM-SPECIFIC:
 Server/Go and web/TypeScript: no changes (app_items metadata passes through).
 
 ========================================================
-17. BROWSER CAPABILITY MATRIX (target — VERIFY each during the relevant phase)
+17. BROWSER CAPABILITY MATRIX (live-probed, per-capability classified)
 ========================================================
-| Capability                    | Chromium (CDP) | Gecko (RDP/BiDi)  | WebKit (WIP)      |
-|-------------------------------|----------------|-------------------|-------------------|
-| Auto debugger launch          | Yes (flag)     | Yes (flag)        | No (admin/GTK)    |
-| Exact URL per navigation      | Yes            | Yes               | Yes (when enabled)|
-| SPA navigation                | Yes            | Yes               | Yes (when enabled)|
-| Multi-profile                 | Yes            | Yes               | Partial (1 on SF) |
-| Multi-window                  | Yes            | Yes               | Yes (when enabled)|
-| Multi-tab                     | Yes            | Yes               | Yes (when enabled)|
-| Incognito/private exact URL   | Yes (verify)   | Verify (likely no)| No                |
-| Tab restore / reconnect       | Yes            | Yes               | Yes               |
-| Browser upgrade handling      | Yes (watchdog) | Yes (watchdog)    | Yes (watchdog)    |
-| Enterprise-policy resistance  | Partial (symlink)| Partial           | No (needs consent)|
-Empty cells → honest "not supported" in GUI. NEVER fabricate data.
+Each capability is PROBED at detection via IBrowserEngineAdapter.ProbeCapabilities() → BrowserCapabilities.
+Classification: A=Automatic (no user/admin action) · ADM=Admin-assisted (enterprise/config action) ·
+USR=User-assisted (user action) · U=Unsupported. The table is the target; live probe results override it.
+
+| Capability                    | Chromium (CDP)     | Gecko (RDP/BiDi)   | WebKit (WIP)             |
+|-------------------------------|--------------------|--------------------|--------------------------|
+| Auto debugger launch          | A (flag)           | A (flag)           | ADM (Safari) / USR (GTK) |
+| Exact URL per navigation      | A                  | A                  | A (once enabled)         |
+| SPA navigation                | A                  | A                  | A (once enabled)         |
+| Multi-profile                 | A                  | A                  | U (Safari) / A (GTK)     |
+| Multi-window                  | A                  | A                  | A (once enabled)         |
+| Multi-tab                     | A                  | A                  | A (once enabled)         |
+| Incognito/private exact URL   | A (verify)         | U (likely no)      | U                        |
+| Tab restore / reconnect       | A                  | A                  | A                        |
+| Browser upgrade handling      | A (watchdog)       | A (watchdog)       | A (watchdog)             |
+| Enterprise-policy resistance  | ADM (symlink)      | ADM                | U (needs consent)        |
+
+Rules:
+- Capabilities are PROBED at runtime, never assumed; this kills future `if (engine == …)` branching.
+- Classification drives behavior: Automatic = no user action; Admin-assisted = surface admin action;
+  User-assisted = show instructions; Unsupported = shown as not available in the GUI.
+- NEVER fabricate data for a capability classified Unsupported. Feature gaps are surfaced
+  (recovery-required / manual-setup-required), never hidden.
 
 ========================================================
 18. DATABASE IMPACT ANALYSIS
@@ -370,6 +393,7 @@ client/
   Core/Browser/
     BrowserEngine.cs                     enum + engine-from-evidence resolver
     BrowserEvent.cs                      raw + canonical event model
+    BrowserCapabilities.cs               probed capability object + classification enum
     BrowserCapabilityMatrix.cs           capability table + runtime probe
     Abstractions/
       IBrowserEngineAdapter.cs
@@ -493,12 +517,15 @@ Maintenance:
 Self-healing:   §11 (state machine, watchdog, restore-on-boot, recovery tiers).
 Event-driven:   §1 / §14 (adapter → normalizer → coordinator → journey).
 Engine-based:   §2 (CDP / RDP+BiDi / WIP adapters; brand-agnostic).
+Capability-aware: §5.8 / §17 (ProbeCapabilities at runtime; per-capability Automatic/Admin/
+                 User/Unsupported classification; adapts to what each engine can do).
 No-extension:   §3 (extension + python removed entirely).
 Cross-platform: §2 (all 3 engines on Linux/Windows/macOS where supported).
 Maintainable:   single normalized model; one journey writer; engine-scoped adapters.
 Installer-safe: §22 ordering + §23 per-phase installed-build verification.
-Extensible:     new engine = new adapter + normalizer + capability row.
-Honest:         capability matrix (§17) + GUI disclosure; never fabricate data.
+Extensible:     new engine = new adapter + normalizer + capability probe.
+Honest:         capability probe (§17) + GUI disclosure; never fabricate data.
+No circular deps: §29 (runtime → coordinator → journey → store, one direction).
 
 ========================================================
 27. KNOWN LIMITATIONS (accepted, documented)
@@ -525,10 +552,48 @@ fallbacks are intentional.
   BROWSER_WATCHDOG_TICK_SECONDS=2
 
 ========================================================
-29. FINAL REQUIREMENT (this plan)
+29. COMPONENT DEPENDENCY DIAGRAM (no circular deps)
+========================================================
+                      ┌────────────────────────────────────────────┐
+                      │ GUI (Browser Journey Dashboard)             │
+                      │   reads RuntimeManager state + diagnostics  │
+                      └──────────────┬─────────────────────────────┘
+                                     │ status events (no adapter access)
+   ┌───────────────┐   detects      ▼
+   │BrowserWatchdog│──events──────► BrowserRuntimeManager (hosted)
+   └───────────────┘                │  ├──► IBrowserEngineAdapter (Chromium|Gecko|WebKit)
+        ▲ 2s tick                   │  │        ├──► BrowserProfileDiscovery
+        │                           │  │        └──► ProbeCapabilities() → BrowserCapabilities
+        │                           │  ├──► DebugPortManager (30000+ first-free)
+        │                           │  ├──► BrowserConnectionManager (WebSocket/heartbeat)
+        │                           │  └──► BrowserRuntimeStateStore ──► ILogStore (SQLite)
+        │                           ▼
+        │                BrowserEventCoordinator
+        │                    │  normalizers (per adapter) ← RawBrowserEvent stream
+        │                    ▼
+        │             BrowserJourneyEngine
+        │                    │  └──► ILogStore (app_sessions / app_items)
+        │                    └──► BrowserRuntimeStateStore (journey map)
+        │
+        └── RuntimeManager (process/port/debugger state feeds the watchdog)
+
+Dependency rules (enforced, one direction only):
+  - Runtime layer (RuntimeManager, Watchdog, DebugPortManager, ConnectionManager, adapters)
+    knows NOTHING about journeys/analytics; it only produces RawBrowserEvent.
+  - Journey layer (Coordinator, JourneyEngine) knows NOTHING about processes/ports; it only
+    consumes BrowserEvent and writes storage.
+  - Storage (ILogStore, BrowserRuntimeStateStore) is a leaf — nothing depends upward on it.
+  - Adapters are leaves on the engine side; referenced only by RuntimeManager + Coordinator.
+  - GUI depends only on RuntimeManager state + diagnostics; never touches adapters/storage.
+  Chain: RuntimeManager → Coordinator → JourneyEngine → Store  (acyclic).
+
+========================================================
+30. FINAL REQUIREMENT (this plan)
 ========================================================
 Track the browser user journey using ONLY each engine's native debugger protocol
 (Chromium→CDP, Gecko→RDP+partial CDP/BiDi, WebKit→Web Inspector Protocol). Remove the extension,
-title, and history capture paths entirely. Keep the self-healing runtime management. Debug ports
-allocate from 30000. All journey data written through one normalized model and one journey writer.
-No code was modified in this session; this document is the approved implementation plan.
+title, and history capture paths entirely. Keep the self-healing runtime management. Each engine
+adapter probes its capabilities at runtime (ProbeCapabilities) and every capability is classified
+Automatic / Admin-assisted / User-assisted / Unsupported. Debug ports: assign the FIRST FREE port,
+search always starting at 30000. All journey data written through one normalized model and one
+journey writer. No code was modified in this session; this document is the approved implementation plan.
