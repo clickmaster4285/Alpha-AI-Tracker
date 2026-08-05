@@ -59,68 +59,96 @@ public static class EnvLoader
 
     /// <summary>
     /// Load environment variables. Priority order:
-    ///   1. User config directory: ~/.config/alpha-ai-tracker/config.enc (Linux)
-    ///                              %APPDATA%\AlphaAITracker\config.enc (Windows)
-    ///                              ~/Library/Application Support/…/config.enc (macOS)
-    ///   2. Next to the binary: {AppDir}/config.enc (installed / portable)
-    ///   3. Plaintext .env (development fallback)
+    ///   DEV (source-tree build, i.e. `dotnet run`):
+    ///     1. Plaintext .env next to / above the assembly (authoritative — edits take
+    ///        effect immediately; a stale user config.enc must NOT shadow it)
+    ///   INSTALLED / PRODUCTION:
+    ///     1. User config directory: ~/.config/alpha-ai-tracker/config.enc (Linux)
+    ///                                %APPDATA%\AlphaAITracker\config.enc (Windows)
+    ///                                ~/Library/Application Support/…/config.enc (macOS)
+    ///     2. Next to the binary: {AppDir}/config.enc (install-time placement)
+    ///     3. Plaintext .env (development fallback only)
     ///
     /// If config.enc is found next to the binary but not in user config,
     /// it is automatically copied to user config on first launch.
     /// </summary>
     public static void Load(string? customPath = null)
     {
-        // ─── Phase 1: Resolve config.enc location ───
-        string? configEncPath = null;
-
+        // ─── Phase 1: Explicit path (--config-enc CLI mode) ───
         if (customPath != null)
         {
-            // Explicit path — use as-is
             if (File.Exists(customPath))
-                configEncPath = customPath;
-        }
-        else
-        {
-            // Try user config directory first (user-writable, primary location)
-            if (File.Exists(UserConfigPath))
             {
-                configEncPath = UserConfigPath;
+                if (customPath.EndsWith(".enc", StringComparison.OrdinalIgnoreCase))
+                    LoadFromEncrypted(customPath);
+                else
+                    LoadFromPlaintext(customPath);
             }
-            else
-            {
-                // Fallback: check next to the binary (install-time placement)
-                var appDir = AppDomain.CurrentDomain.BaseDirectory;
-                var appConfigEnc = Path.Combine(appDir, "config.enc");
-                if (File.Exists(appConfigEnc))
-                {
-                    // First launch on this machine: copy from app dir to user config
-                    try
-                    {
-                        File.Copy(appConfigEnc, UserConfigPath, overwrite: false);
-                        configEncPath = UserConfigPath;
-                    }
-                    catch
-                    {
-                        // Can't copy (e.g., app dir is read-only source) — use app dir directly
-                        configEncPath = appConfigEnc;
-                    }
-                }
-            }
-        }
-
-        // ─── Phase 2: Decrypt and load ───
-        if (configEncPath != null && File.Exists(configEncPath))
-        {
-            LoadFromEncrypted(configEncPath);
             return;
         }
 
-        // ─── Phase 3: Fallback to plaintext .env for development ───
-        var envPath = customPath ?? ResolvePlaintextPath();
-        if (envPath != null && File.Exists(envPath))
+        // ─── Phase 2: Development builds (dotnet run / dotnet build) ───
+        // The plaintext .env in the source tree is the source of truth. It is resolved
+        // BEFORE any config.enc so a stale encrypted copy in the user config dir cannot
+        // override fresh edits. Installed builds never reach this branch because their
+        // assembly dir (e.g. /usr/share/alpha-ai-tracker) is outside the source tree and
+        // contains no .env.
+        var devEnvPath = ResolvePlaintextPath();
+        if (devEnvPath != null && IsSourceTreeBuild())
         {
-            LoadFromPlaintext(envPath);
+            LoadFromPlaintext(devEnvPath);
+            return;
         }
+
+        // ─── Phase 3: Installed / production config.enc ───
+        // Try user config directory first (user-writable, primary location)
+        if (File.Exists(UserConfigPath))
+        {
+            LoadFromEncrypted(UserConfigPath);
+            return;
+        }
+
+        // Fallback: check next to the binary (install-time placement)
+        var appDir = AppDomain.CurrentDomain.BaseDirectory;
+        var appConfigEnc = Path.Combine(appDir, "config.enc");
+        if (File.Exists(appConfigEnc))
+        {
+            // First launch on this machine: copy from app dir to user config
+            try
+            {
+                File.Copy(appConfigEnc, UserConfigPath, overwrite: false);
+            }
+            catch
+            {
+                // Can't copy (e.g., app dir is read-only source) — use app dir directly
+            }
+            if (File.Exists(UserConfigPath))
+            {
+                LoadFromEncrypted(UserConfigPath);
+                return;
+            }
+            LoadFromEncrypted(appConfigEnc);
+            return;
+        }
+
+        // ─── Phase 4: Last-resort plaintext .env (dev tree, no config.enc anywhere) ───
+        if (devEnvPath != null && File.Exists(devEnvPath))
+        {
+            LoadFromPlaintext(devEnvPath);
+        }
+    }
+
+    /// <summary>
+    /// True when the assembly is running from a source-tree build output (bin/Debug or
+    /// bin/Release). Installed builds live in OS install dirs (Program Files, /usr/share,
+    /// /Applications) and are never considered a source-tree build, so they always use
+    /// config.enc.
+    /// </summary>
+    private static bool IsSourceTreeBuild()
+    {
+        var dir = AppDomain.CurrentDomain.BaseDirectory;
+        return dir.Contains($"bin{Path.DirectorySeparatorChar}Debug", StringComparison.OrdinalIgnoreCase)
+            || dir.Contains($"bin{Path.DirectorySeparatorChar}Release", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -138,6 +166,7 @@ public static class EnvLoader
             MigrateToMachineKey(plaintext, encPath);
         }
 
+        System.Console.WriteLine($"[EnvLoader] Loaded encrypted config from {encPath}");
         // Parse and set environment variables
         ParseAndSet(plaintext);
     }
@@ -230,6 +259,8 @@ public static class EnvLoader
     private static void LoadFromPlaintext(string envPath)
     {
         var content = File.ReadAllText(envPath);
+
+        System.Console.WriteLine($"[EnvLoader] Loaded plaintext .env from {envPath}");
 
         if (!content.Contains("ALPHA_SERVER_URL", StringComparison.OrdinalIgnoreCase))
         {

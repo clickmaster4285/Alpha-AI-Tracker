@@ -6,6 +6,9 @@ using client;
 using client.Configuration;
 using client.Core;
 using client.Core.Abstractions;
+using client.Core.Browser;
+using client.Core.Browser.Abstractions;
+using client.Core.Browser.Engines;
 using client.Core.DesktopEventBus;
 using client.Services;
 using client.Services.Watchers;
@@ -98,19 +101,7 @@ builder.Services.AddSingleton(config);
 // SQLite Log Store
 builder.Services.AddSingleton<ILogStore>(sp =>
 {
-    var dbPath = config.DbPath;
-    if (!Path.IsPathRooted(dbPath))
-    {
-        var baseDir = OperatingSystem.IsWindows()
-            ? Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "AlphaAITracker")
-            : Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".local", "share", "alpha-ai-tracker");
-        dbPath = Path.Combine(baseDir, dbPath);
-    }
-    return new SqliteLogStore(dbPath, config.DbEncryptionKey);
+    return new SqliteLogStore(ResolveDbPath(config.DbPath), config.DbEncryptionKey);
 });
 
 // HTTP Client
@@ -154,10 +145,49 @@ builder.Services.AddHostedService<BackgroundGuardService>();
 builder.Services.AddSingleton<LogCollectorService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<LogCollectorService>());
 
-// Native Messaging (browser extension bridge — Unix socket for tab/URL capture)
-builder.Services.AddSingleton<NativeMessageService>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<NativeMessageService>());
-builder.Services.AddSingleton<BrowserExtensionService>();
+// Browser Journey Engine (debugger-only: CDP / RDP+BiDi / WebKit inspector)
+// Chain (aiplan.txt §29): Runtime → Coordinator → JourneyEngine → Store
+var dbPath = ResolveDbPath(config.DbPath);
+if (config.BrowserTrackingEnabled)
+{
+    builder.Services.AddSingleton<BrowserRuntimeStateStore>();
+    builder.Services.AddSingleton<IBrowserRuntimeStore>(sp => sp.GetRequiredService<BrowserRuntimeStateStore>());
+    builder.Services.AddSingleton<BrowserEventCoordinator>(sp => new BrowserEventCoordinator(
+        id => sp.GetRequiredService<BrowserRuntimeManager>().Lookup(id)));
+    builder.Services.AddSingleton<BrowserConnectionManager>();
+    builder.Services.AddSingleton<DebugPortManager>(sp => new DebugPortManager(
+        config.BrowserDebugPortStart, sp.GetRequiredService<IBrowserRuntimeStore>()));
+    builder.Services.AddSingleton<BrowserRuntimeManager>(sp =>
+    {
+        var manager = new BrowserRuntimeManager(
+            new IBrowserEngineAdapter[]
+            {
+                new ChromiumEngineAdapter(sp.GetRequiredService<IInstalledAppDetector>(),
+                    config.BrowserAutoLaunch,
+                    sp.GetRequiredService<ILogger<ChromiumEngineAdapter>>()),
+                new GeckoEngineAdapter(sp.GetRequiredService<IInstalledAppDetector>(),
+                    config.BrowserAutoLaunch,
+                    sp.GetRequiredService<ILogger<GeckoEngineAdapter>>()),
+                new WebKitEngineAdapter(sp.GetRequiredService<IInstalledAppDetector>(),
+                    sp.GetRequiredService<ILogger<WebKitEngineAdapter>>()),
+            },
+            sp.GetRequiredService<IBrowserRuntimeStore>(),
+            sp.GetRequiredService<BrowserEventCoordinator>(),
+            sp.GetRequiredService<BrowserConnectionManager>(),
+            sp.GetRequiredService<DebugPortManager>(),
+            sp.GetRequiredService<ILogger<BrowserRuntimeManager>>());
+        return manager;
+    });
+    builder.Services.AddSingleton<BrowserJourneyEngine>();
+    builder.Services.AddHostedService(sp => new BrowserRuntimeHostedService(
+        sp.GetRequiredService<BrowserRuntimeManager>(),
+        sp.GetRequiredService<BrowserJourneyEngine>(),
+        sp.GetRequiredService<BrowserEventCoordinator>(),
+        sp.GetRequiredService<BrowserRuntimeStateStore>(),
+        dbPath,
+        sp.GetRequiredService<ILogger<BrowserRuntimeHostedService>>()));
+    builder.Services.AddHostedService<BrowserWatchdogService>();
+}
 
 // Desktop Event Bus (File Explorer tracking via AT-SPI + FileSystemWatcher)
 builder.Services.AddSingleton<EventCoordinator>();
@@ -195,6 +225,20 @@ static AppBuilder BuildAvaloniaApp()
         .UsePlatformDetect()
         .WithInterFont()
         .LogToTrace();
+
+// ─── Log path resolution ───
+static string ResolveDbPath(string dbPath)
+{
+    if (Path.IsPathRooted(dbPath)) return dbPath;
+    var baseDir = OperatingSystem.IsWindows()
+        ? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "AlphaAITracker")
+        : Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".local", "share", "alpha-ai-tracker");
+    return Path.Combine(baseDir, dbPath);
+}
 
 // ─── Log path resolution ───
 // Prefer the app dir (bin/... in dev, so the log sits next to the build
