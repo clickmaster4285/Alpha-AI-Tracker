@@ -1,0 +1,173 @@
+Update Plan — Browser Journey Tracking (no-extension, installer-only)
+
+Date: 2026-08-05
+Author: Copilot (drafted from AGENTS.md, client/ARCHITECTURE.md, aiplan.txt)
+
+Goal
+------
+Track complete browser user journeys in real time (searches, navigations, downloads, tab lifecycle, incognito/private windows when possible) across major browsers and platforms without requiring a browser extension or manual per-browser setup by the user. The installer may request and obtain all required OS-level permissions (admin consent, accessibility, network sniffing, file-system access) during install — no extra runtime steps for end users.
+
+Executive summary & feasibility
+---------------------------------
+- Primary feasible approach: debugger-protocol adapters (Chromium CDP, Firefox RDP/BiDi, WebKit Inspector) as a canonical, realtime source for URL/tabs/navigation/downloads. This is the approach captured in aiplan.txt and should be the core.
+- Limitations: some engines (Safari) require explicit admin or user consent (remote automation entitlement); some browsers/versions or enterprise policies may block remote-debug flags. Incognito/private-window visibility depends on the engine: Chromium CDP usually exposes private-window targets; Gecko/WebKit behaviors vary and must be probed at runtime.
+- Complete parity across all engines is impossible to guarantee without either (a) an extension installed into the browser, or (b) performing TLS interception (MITM) to see HTTPS paths. Both options have tradeoffs: extensions require per-browser install (not desired) and MITM requires installing a root CA (high legal/security cost). Therefore: offer exact-event coverage for engines that expose it automatically (Chromium via CDP), graceful degradation and clear user/admin messaging for engines that do not.
+
+High-level recommended architecture
+------------------------------------
+1. BrowserRuntimeManager + Watchdog: detect browser runtimes and profiles, allocate debug ports (first-free port start at 30000), and manage lifecycle.
+2. Engine adapters:
+   - ChromiumEngineAdapter (CDP): primary path. Connect to DevTools; subscribe to Network / Page / Target / Runtime / Browser events for exact URLs, SPA navigations, download events, file download metadata, incognito flag when available.
+   - GeckoEngineAdapter (RDP / BiDi): use RDP/BiDi to capture navigation events, downloads if exposed; verify private window coverage.
+   - WebKitEngineAdapter (Web Inspector): support WebKitGTK and Safari (Safari requires manual enable); detect capability via ProbeCapabilities.
+3. BrowserEventCoordinator & Normalizers: canonical BrowserEvent model (eventId, runtimeId, profileId, windowId, tabId, journeyId, action, url, title, domain, incognito flag, timestamp, source, reliability).
+4. BrowserJourneyEngine: single writer that maps tabs→app_sessions and emits app_items (browser_tab root + browser_navigation children), re-using existing sync pipeline (app_sessions/app_items) to avoid server changes.
+5. RuntimeStateStore: persist runtime/profile/tab UUIDs and debug-port leases to enable reconnect and idempotency.
+
+Permissions & installer behavior (what the installer must do)
+--------------------------------------------------------------
+- Request and obtain (during install/run-once) the following platform permissions:
+  - Windows: Administrator elevation for install (to allow port allocation, attach permissions if needed) and optionally Windows Accessibility consent (UI Automation) and Npcap installer for packet capture if network fallbacks required.
+  - macOS: Request accessibility (AX) permissions, Full Disk Access if monitoring downloads dirs, and inform admin if Safari automation entitlement must be enabled (safaridriver) — this one is manual for Apple.
+  - Linux: request access to accessibility (AT-SPI) via the desktop environment, and advise enabling WebKitGTK developer extras if needed. For packet capture, installer may request CAP_NET_RAW or configure a small privileged helper.
+- During install, if enterprise policy requires it, add symlink / launch wrapper to re-launch browser with --remote-debugging-port for Chromium when the browser is started by the user (where permissible). Avoid silently modifying user profile; prefer a helper that launches the browser under a debug-enabled user-data-dir with clear messaging.
+- Persist debug-port leases and runtime UUIDs in client SQLite to survive restarts.
+
+Data sources & fallbacks
+-------------------------
+Primary (exact when available):
+- CDP/RDP/WIP protocol events: exact URL (including path), timestamp, navigation type, download metadata, incognito flag (if available), tab/window lifecycle events.
+Fallbacks (when protocol doesn't expose a capability):
+- Accessibility/UI Automation: read address bar text from browser accessibility tree (Windows UIA, macOS AX, Linux AT-SPI) — best-effort though not guaranteed for all browsers and private modes.
+- Download detection via filesystem monitoring: watch known browser download folders per profile and correlate new files with browser process & network flows.
+- Network-level signals: DNS queries and TLS SNI for domain-level visibility (no URL path). Use libpcap/Npcap only as a supplementary domain-level fallback; TLS path not visible for HTTPS without MITM.
+- Browser-specific heuristics: reading profile Local State / profiles.ini to detect profile directories and monitor their download directories.
+
+Downloads tracking
+--------------------
+- CDP exposes Page.downloadWillBegin / Browser.download events (or Network.responseWillBeSent + Content-Disposition). Use these when CDP is available for exact download URL, filename, mime type, and disposition.
+- Fallback: monitor download directory for file creations; when a new file appears, correlate to recent navigation events and to the owning browser process (socket ownership) to infer which tab triggered the download.
+- For partial/in-progress downloads (e.g., .crdownload), monitor extensions and file size changes until completion; emit lifecycle events (download-started, download-complete).
+
+Incognito/private windows
+--------------------------
+- Probe per-engine: CDP may expose an incognito flag; record incognito when reported. If engine doesn't expose, treat incognito status as Unknown and surface that in UI and metadata.
+- Where private windows are explicitly blocked from debugger APIs, surface this as an explicit limitation and document it in GUI / admin docs.
+- Important: do not attempt to circumvent private modes or fabricate data — document capability gaps clearly.
+
+Real-time constraints & performance
+-----------------------------------
+- Events should be processed end-to-end (wire → app_items write) within 500ms p95.
+- Watchdog tick = 2s; Debugger heartbeat = 5s; coordinator dedup window = 5s.
+- Cap concurrent debugger sessions by config (default: all detected). Instrument memory and CPU; goal per runtime <50MB RSS and <5% CPU.
+
+Data model & DB impact (client-only changes)
+---------------------------------------------
+Add idempotent MigrateSql ALTERs and new runtime state tables (client SQLite only):
+- browser_runtimes(runtime_id, engine, binary_path, version, port_lease, state, detected_at, last_seen)
+- browser_profiles(profile_id, runtime_id, profile_dir, profile_name, detected_at)
+- browser_tabs(tab_id, runtime_id, profile_id, window_id, engine_target_id, url, title, incognito, last_event_at)
+- browser_journeys(journey_id, tab_id, app_session_id, opened_at, closed_at)
+- browser_debug_ports(runtime_id, port, leased_at, last_validated_at)
+
+Mapping to existing app_items: BrowserJourneyEngine writes browser_tab root and browser_navigation children into app_items, reusing url/domain/title/tab_id/window_id/metadata_json fields. This keeps server-side unchanged.
+
+Phased implementation (minimal-risk, installer-verified at each phase)
+------------------------------------------------------------------------
+P0 — Foundation (1–2 weeks):
+- Implement BrowserEvent model, DebugPortManager (first-free port), RuntimeStateStore, basic RuntimeManager + Watchdog skeleton. Persist runtime UUIDs and debug port leases. Implement capability Probe skeleton.
+- Acceptance: installed build detects Chrome binary and persists a runtime row and a leased port.
+
+P1 — Chromium CDP (2–3 weeks):
+- ChromiumEngineAdapter using DevToolsActivePort or --remote-debugging-port fallback; subscribe to Network/Page/TargetEvents; normalizer -> BrowserEvent -> BrowserJourneyEngine writes app_items.
+- Handle downloads via CDP.
+- Implement reconnect, port lease validation, and dedup.
+- Acceptance: installed build running Chrome captures exact navigations, SPA navs, downloads, incognito flag when available.
+
+P2 — Gecko RDP/BiDi (2–3 weeks):
+- Implement GeckoAdapter (RDP/BiDi) probe & normalizer; map events to BrowserEvent model.
+- Acceptance: installed build captures Firefox tab navigations; document private window behavior.
+
+P3 — WebKit (WebKitGTK + Safari) (2–3 weeks):
+- Implement WebKitAdapter; for Safari, surface manual admin steps if automation is required. For WebKitGTK, document enabling developer extras.
+- Acceptance: WebKitGTK captures events when developer extras are enabled; Safari shows manual-setup message where required.
+
+P4 — Fallbacks & robustness (2–3 weeks):
+- Add UIA/AX/AT-SPI address-bar read heuristics, download-directory watchers, DNS/SNI fallback (pcap) option behind admin opt-in, correlation logic.
+- Harden reconnection, persist mapping, implement limits, test multi-profile & multi-browser concurrency.
+- Acceptance: when a protocol is unavailable, fallbacks provide best-effort domain/filename visibility; GUI shows capability grade.
+
+P5 — Remove old extension path & ship (1 week):
+- After verifying debugger path in installed builds across representative OS/browsers, remove extension/native-host and socket bridge code; keep migration & backward compatibility for historical data.
+- Acceptance: installed build passes acceptance criteria and no data loss for verified runtimes.
+
+Testing & verification
+-----------------------
+- Unit tests for DebugPortManager, Normalizers, BrowserEventCoordinator dedup and dedupe window, BrowserJourneyEngine write path.
+- Integration tests on VM matrix: Windows (Chrome, Edge, Firefox), macOS (Safari, Chrome, Firefox), Linux (Chromium, Firefox, WebKitGTK). Include versions that block debug flags.
+- Acceptance testing: installed builds only — validate installer-parity rule: build installer, install and run from installed path.
+- Simulate enterprise policies: blocked --remote-debugging and blocked devtools to ensure GUI surfaces Recovery/ManualSetup.
+
+Security, privacy & legal (must be reviewed by legal)
+------------------------------------------------------
+- This plan requests powerful OS-level permissions and captures detailed browsing behavior. Legal and privacy reviews are required for every jurisdiction where this is deployed (GDPR, CCPA, local workplace laws). Documents to prepare: consent form, data retention policy, admin-only access logs, encryption-at-rest + in-transit, least privilege deployment guidance, and opt-out/opt-in controls for sensitive use-cases.
+- Avoid TLS MITM; do not recommend automatic root CA install. If domain-level only data is acceptable, use DNS/SNI fallback; otherwise require explicit enterprise-level agreement for MITM.
+- Store only what is necessary and encrypt DB at rest if possible; enable audit logging for who accessed browsing data.
+
+Risks & mitigations
+---------------------
+- Browser blocking of debug flags (esp. branded Chrome): surface recovery-required with instructions; fallback to address-bar/FS/network heuristics.
+- Safari automation requires admin consent: document and surface manual steps; cannot be automated on modern macOS.
+- Incognito gaps: probe and document per engine; never fabricate data.
+- Legal/regulatory: require legal sign-off and explicit admin/user consent; implement minimal retention and robust deletion policies.
+
+Scalability & server impact
+----------------------------
+- Keep client-side batching in place (500-row batches every ~5 minutes). Journey events are lightweight; compress payloads and use dedup on client.
+- On server side, app_items ingestion already exists — monitor for increased event rates and throttle client-side if server load exceeds targets.
+- Telemetry: add metrics for per-runtime event rate, connection churn, reconnection backoff events, and capability coverage.
+
+Acceptance criteria (installed build)
+--------------------------------------
+1. Chrome family: exact, realtime navigations and downloads captured on a live debug session; incognito flagged when exposed.
+2. Firefox: navigations captured via RDP/BiDi; private behavior documented when unsupported.
+3. Safari/WebKit: either exact capture (when automation enabled) or documented manual setup; no silent failures.
+4. Multi-browser & multi-profile runs: independent runtime sessions, no duplicated journeys, resource goals met.
+5. GUI shows capability matrix per runtime and surfaces manual steps/limitations.
+6. No user browser extensions required; installer obtains OS permissions.
+
+Immediate next tasks (first sprint)
+------------------------------------
+- P0 tasks: implement DebugPortManager, RuntimeStateStore, BrowserRuntimeManager skeleton, capability probe API, add DB tables for browser_runtimes/browser_profiles. (3–4 dev-days)
+- Build an installed test package and validate detection of Chrome on Windows, macOS, Linux. (1 dev-day)
+- Plan integration tests and legal review kickoff. (1 dev-day)
+
+Runtime thresholds & config knobs
+----------------------------------
+Recommended runtime thresholds (config knobs & defaults):
+- BROWSER_RUNTIME_PERSIST_THRESHOLD_SECONDS=30   # only persist runtime/tab after 30s active or after >N meaningful events
+- BROWSER_EPHEMERAL_TTL_SECONDS=300             # garbage-collect ephemeral runtime rows after 300s of inactivity
+- BROWSER_START_DEBOUNCE_SECONDS=10             # debounce rapid restarts within 10s to avoid churn
+- BROWSER_JOURNEY_IDLE_MINUTES=15               # close journeys after 15 minutes idle (already present)
+- BROWSER_DEBUG_PORT_START=30000                # first-free port scan start (already present in aiplan)
+- BROWSER_COORDINATOR_DEDUP_SECONDS=5           # dedup window for duplicate events
+- BROWSER_RECONNECT_BASE_SECONDS=1              # reconnect backoff base
+- BROWSER_RECONNECT_MAX_SECONDS=30              # reconnect backoff cap
+- BROWSER_MAX_CONCURRENT_SESSIONS=0             # 0 = no cap (all detected)
+- BROWSER_MIN_MEANINGFUL_EVENTS=2               # optional: only persist if >2 meaningful events in threshold
+
+Operational notes:
+- Metrics to collect: restart-rate, ephemeral-count, lease-reclaims, runtime-attach-failures.
+- Tune thresholds per org during pilot; defaults are conservative to reduce noise.
+
+Notes & final statement
+-------------------------
+This plan builds on the aiplan.txt debugger-first direction while adding practical fallbacks, permission requirements, legal cautions, and a phased, installer-verified rollout strategy. It accepts that 100% parity across all browsers is not technically guaranteed without either extensions or invasive TLS interception; instead it prioritizes correctness where the engine exposes events and graceful, honest degradation elsewhere.
+
+Appendix: short capability checklist for GUI (to show to admins/users)
+- Exact URL & title (protocol): Chromium=Yes, Firefox=Yes, WebKit=Conditional
+- Downloads metadata: Chromium=Yes, Firefox=Partial, WebKit=Conditional
+- Incognito detection: Chromium=Usually, Gecko/WebKit=Verify
+- No extension required: True (installer obtains OS permissions)
+
+End of plan.
