@@ -1,0 +1,534 @@
+ALPHA AI TRACKER — BROWSER JOURNEY ENGINE (DEBUGGER-ONLY)
+Architecture Plan
+========================================================
+Status: APPROVED DIRECTION — debugger-only, engine-per-protocol. No code was modified in this session.
+Date: 2026-08-05
+Decision: browser journey data is captured EXCLUSIVELY through each engine's debugger protocol.
+          All other sources (MV3 extension, window-title parsing, history-DB backfill) are REMOVED.
+Protocols: Chromium → CDP · Gecko → RDP (+ partial CDP) · WebKit → Web Inspector Protocol.
+Debug port allocation starts at 30000 (dynamic, never hardcoded to one port).
+
+========================================================
+1. ARCHITECTURE SUMMARY
+========================================================
+Single capture path per engine, one normalized event model, one journey writer, full self-healing.
+
+  Browser engine runtime (Chromium | Gecko | WebKit)
+    ↓ debugger protocol (CDP / RDP / Web Inspector)
+  IBrowserEngineAdapter (per engine: connect, query tabs, subscribe to events, control)
+    ↓ RawBrowserEvent (engine-shaped wire payload)
+  Normalizer (per engine) → BrowserEvent (canonical model)
+    ↓
+  BrowserEventCoordinator (dedup ~5s, sequencing, source priority)
+    ↓
+  BrowserJourneyEngine (single writer)
+    ↓
+  app_sessions + app_items (browser_tab root, browser_navigation children) → existing sync (unchanged)
+
+Everything above the adapter is engine-agnostic. No brand strings, no PIDs, no window titles as identity.
+
+========================================================
+2. ENGINE PROTOCOL STRATEGY
+========================================================
+2.1 Chromium (Chrome, Chromium, Edge, Brave, Opera, Vivaldi, Arc, ungoogled-chromium, ...)
+- Protocol: Chrome DevTools Protocol (CDP) over WebSocket.
+- Launch with `--remote-debugging-port=0` and read <user-data-dir>/DevToolsActivePort for the
+  actual port + ws path; fall back to an allocated port (30000+).
+- Target discovery: GET /json/list; subscribe Target.setDiscoverTargets (created/InfoChanged/destroyed).
+- Events: Page.frameNavigated (incl. SPA), Page.titleChanged, Page.domContentEventFired,
+  Network.requestWillBeSent (exact navigation URLs), Target.targetCrashed.
+- Profiles: parse <profile-parent>/Local State → profiles.info_cache.
+- Incognito: private windows live in the same process tree; their targets appear in the debug session
+  (VERIFY per build; some builds may filter).
+- Branded Chrome 136+ ignores --remote-debugging-port on the DEFAULT user-data-dir; mitigation =
+  symlinked custom --user-data-dir (verify per version). Enterprise policy may block → surfaced as
+  recovery-required, never silent.
+
+2.2 Gecko (Firefox, Waterfox, LibreWolf, ...)
+- Protocol: Remote Debugging Protocol (RDP) as the primary path. NOTE: Firefox REMOVED CDP support
+  in FF 85 (2021); "partial CDP" only exists on old/ESR builds and is NOT a supported target.
+  Forward path for Firefox is WebDriver BiDi (DevTools protocol); the adapter should speak RDP today
+  and be upgraded to BiDi as Firefox completes it.
+- Launch: `--start-debugging-server <port>` (classic RDP) or `--remote-debugging-port <port>`
+  (newer, BiDi) — probe at runtime, pick what the version supports.
+- RDP specifics: browser toolbox vs content-process targets are separate — enumerate content targets
+  to get per-tab navigation. Heavier than CDP; keep the adapter isolated.
+- Profiles: parse profiles.ini (ALL profiles), resolve current via `firefox -P`.
+- Private browsing: RDP may expose private windows — VERIFY; otherwise private windows are untracked
+  (documented, no fake data).
+
+2.3 WebKit
+- Protocol: Web Inspector Protocol.
+- WebKitGTK (GNOME Web/Epiphany, Linux): enable developer extras
+  (webkit_settings_set_enable_developer_extras) → inspector server on a Unix socket / port.
+- Safari (macOS): requires "Allow Remote Automation" (safaridriver) — ONE-TIME admin consent that the
+  agent cannot toggle. When enabled, safaridriver exposes WebDriver BiDi; the Web Inspector protocol
+  surface is available through the same automation entitlement.
+- Private browsing: WebKit does not expose private windows to the inspector → untracked (documented).
+- If admin consent is absent, WebKit produces NO journey data (unlike the old title layer). The GUI
+  must show "WebKit: manual setup required" so this is never silent.
+
+2.4 Parity statement
+- Normalized event model + journey writer identical across engines.
+- Capability parity NOT assumed; the capability matrix (§17) drives what each engine reports.
+- Feature gaps are surfaced in the GUI (recovery-required / manual-setup-required), never hidden.
+
+========================================================
+3. REMOVED SOURCES & CONSEQUENCES (deliberate)
+========================================================
+REMOVED (deleted in migration):
+- MV3 extension (chrome/, firefox/, chromium/, gecko/, webkit/ dirs, background.js).
+- native-host.py + Python native messaging host + com.alphai.tracker.json manifest.
+- Window-title parsing for journey data (ActivityContextParser title→navigation path).
+- History-DB backfill (Chromium History / places.sqlite / Safari History.db readers).
+- BrowserExtensionService (detection/install/heartbeat) and its hardcoded brand list.
+
+CONSEQUENCES (accepted, must be documented in GUI + docs):
+- Private/incognito windows: tracked ONLY where the debugger protocol exposes them
+  (Chromium CDP = yes; Gecko/WebKit = no).
+- Browser launched WITHOUT the debug flag → no journey data until RuntimeManager re-flags + relaunches
+  (or surfaces recovery-required for blocked engines).
+- No backfill after closed tabs / crashes / debugger downtime — journey data only covers the window
+  where the debug session is live.
+- No python3 dependency anywhere in the browser pipeline.
+
+========================================================
+4. BROWSER JOURNEY EVENT MODEL (normalized)
+========================================================
+BrowserEvent (canonical; every adapter emits this):
+  eventId        : Guid            — client-generated
+  runtimeId      : Guid            — owning BrowserRuntime (persisted)
+  engine         : BrowserEngine   — Chromium | Gecko | WebKit
+  profileId      : Guid            — owning BrowserProfile (persisted)
+  windowId       : Guid?           — owning window
+  tabId          : Guid            — owning tab (persisted UUID, stable across sessions)
+  journeyId      : Guid            — per-tab journey (persisted)
+  action         : string          — 'created' | 'activated' | 'deactivated' | 'navigated' |
+                                     'updated' | 'closed' | 'reloaded' | 'error'
+  url            : string?         — exact URL from protocol
+  title          : string?
+  domain         : string?
+  timestamp      : DateTimeOffset  — UTC
+  source         : EventSource     — Cdp | GeckoRdp | WebKitInspector
+  incognito      : bool?           — true/false when exposed; null when unknown
+  urlReliability : Reliability     — Exact (protocol URL) | Unknown
+  metadata       : Dictionary<string,string> — targetId, frameId, transitionType, profileName,
+                                     pageVisibility, incognitoReason, errorCode
+
+RawBrowserEvent: engine-shaped payload from the wire (CDP params, RDP params, WIP payload).
+Normalizers map RawBrowserEvent → BrowserEvent. One normalizer per engine.
+
+Duplicate suppression: coordinator drops a BrowserEvent whose (runtimeId, profileId, tabId, url, title)
+matched within the last 5s.
+
+========================================================
+5. SERVICE RESPONSIBILITIES
+========================================================
+5.1 BrowserRuntimeManager (singleton, hosted)
+- Detect engines/runtimes/profiles on boot and on change (engine adapters + InstalledAppDetector).
+- Own the per-runtime state machine (§11) and recovery tiers.
+- Issue debugger launch/relaunch commands; own the "monitored set" persistence.
+- Emit status events for the GUI.
+
+5.2 BrowserWatchdog (hosted, ~2s tick)
+- Diff process table by binary identity (never PID) → started/exited.
+- Probe debugger health (port + protocol heartbeat) → connected/disconnected.
+- Detect browser upgrades (binary path/version change), profile changes (Local State / profiles.ini mtime),
+  new installs, removals → feed RuntimeManager.
+- All recovery keyed on persisted UUIDs → no duplicate sessions.
+
+5.3 DebugPortManager (singleton)
+- Allocate TCP ports starting at 30000 (scan upward for a free port; TcpListener probe).
+- Persist runtimeId→port leases; validate liveness before reuse; reclaim stale leases after crashes.
+- Never a single hardcoded port.
+
+5.4 BrowserConnectionManager (singleton)
+- Open/own the debugger WebSocket/pipe per runtime (CDP / RDP / WIP).
+- Heartbeat (CDP /json/version; RDP status; WIP ping); reconnect with backoff; rebuild tab snapshot on
+  reconnect before streaming new events; protocol-version gate (unsupported version → recovery-required).
+- One connection per runtime covers all its profiles + windows + tabs.
+
+5.5 BrowserEventCoordinator (singleton)
+- Dispatch RawBrowserEvent → normalizer → BrowserEvent.
+- Dedup (5s), sequencing per journey, batching.
+- Feeds exactly one writer.
+
+5.6 BrowserJourneyEngine (singleton)
+- Sole writer of app_sessions / app_items for the browser pipeline.
+- Tab UUID → AppSession mapping (persisted); browser_tab root + browser_navigation children.
+- Journey boundaries: open on 'created'/first 'navigated', close on 'closed'/'deactivated long-idle'/
+  runtime disconnect with crash-safe ended_at.
+- metadata_json = {source, engine, profileId, windowId, tabId, incognito, urlReliability}.
+
+5.7 BrowserRuntimeStateStore
+- Persist runtimes/profiles/windows/tabs (UUIDs), debug-port leases, journey map, high-water marks.
+- Durable restore-on-boot → self-healing.
+
+5.8 Engine adapters (IBrowserEngineAdapter)
+- ChromiumEngineAdapter (CDP) · GeckoEngineAdapter (RDP/BiDi) · WebKitEngineAdapter (WIP).
+- Each: DetectRuntime, CanStartDebugger, StartDebugger, OpenConnection, QueryTabs, Subscribe, Control.
+- Each ships its own normalizer.
+
+5.9 DI wiring (Program.cs)
+- AddSingleton: RuntimeManager, Watchdog, DebugPortManager, ConnectionManager, Coordinator,
+  JourneyEngine, RuntimeStateStore, each adapter.
+- AddHostedService: RuntimeManager (start), Watchdog (tick).
+
+========================================================
+6. BROWSER RUNTIME HIERARCHY (object model)
+========================================================
+  BrowserEngine (Chromium|Gecko|WebKit)                 engineId (from evidence)
+    └ BrowserRuntime  (Chrome, Edge, Brave, Firefox, …) runtimeId (uuid, persisted)
+        └ BrowserProfile (Default, Work, Personal, …)   profileId (uuid, persisted)
+            └ BrowserWindow                              windowId (uuid, persisted)
+                └ BrowserTab                             tabId    (uuid, persisted)
+                    └ BrowserJourney                     journeyId (uuid, persisted)
+                        └ BrowserEvent                   eventId  (uuid)
+
+Rules: all IDs generated by the client and stored in SQLite. Never derived from titles, names, or PIDs.
+Persistence is what makes recovery idempotent.
+
+========================================================
+7. MULTI-PROFILE SUPPORT
+========================================================
+- Chromium: read Local State → profiles.info_cache; each profile dir → BrowserProfile (UUID).
+- Gecko: parse profiles.ini (all profiles); current profile via `-P`/`-Profile`.
+- WebKit: WebKitGTK profile dir; Safari single profile dir (documented as one profile).
+- Each profile may host multiple windows; journey data is tagged profileId in metadata_json.
+- Profiles added/removed while running → watchdog re-discovery, adopt/retire profile UUIDs.
+
+========================================================
+8. MULTIPLE RUNTIME SUPPORT
+========================================================
+- Each binary identity (Chrome vs Edge vs Brave vs Firefox) = its own BrowserRuntime with its own
+  debugger session (own port).
+- Running several engines at once is supported; each has an independent state machine.
+- Resource bound: cap concurrent debugger sessions via config (default all detected; knob to limit).
+
+========================================================
+9. MULTI-WINDOW SUPPORT
+========================================================
+- Windows discovered via Target.setDiscoverTargets (Chromium) / target list (RDP/WIP).
+- Each engine window → BrowserWindow UUID; tab→window association from protocol metadata.
+- Focus flips = 'activated'/'deactivated' events on the owning window/tab (journey accuracy).
+- Window closed → close journeys for its tabs (unless tabs are moved/restored).
+
+========================================================
+10. MULTI-TAB SUPPORT
+========================================================
+- Every tab = BrowserTab UUID + journeyId; tab lifetime events from the protocol.
+- Navigation/SPA changes append browser_navigation children under the tab's root; no new root per URL.
+- Tab closed → journey closed with accurate ended_at (crash-safe transaction).
+- Tab restored by browser (session restore) → adopt by UUID on reconnect, no duplicate roots.
+
+========================================================
+11. BROWSER RUNTIME MANAGEMENT (SELF-HEALING)
+========================================================
+11.1 States (per runtime):
+  Undetected → Detected → Managed → Running → DebuggerRequested → DebuggerConnected → JourneyActive
+              → Disconnected → Recovery → JourneyActive
+              → ManagedStopped (browser closed by user; monitoring paused)
+              → Unsupported / ManualSetupRequired (WebKit w/o automation; blocked Chrome)
+11.2 Transitions (preconditions + idempotent effects defined for each):
+  Detected:          runtime discovered; state-store row created (UUID).
+  Running:           process observed by watchdog.
+  DebuggerRequested: RuntimeManager decides tier:
+                       Automatic (Chromium, Gecko w/ flag): relaunch with debug flag + port.
+                       Admin-required (Safari automation): persist state, surface GUI action.
+                       Manual-setup (WebKitGTK): instructions, keep runtime idle until enabled.
+  DebuggerConnected: port lease bound + protocol handshake ok.
+  JourneyActive:     coordinator receiving events; tabs hydrated via adapter QueryTabs.
+  Disconnected:      heartbeat timeout / socket error / process exit.
+  Recovery:          relaunch with flag (Chromium/Gecko), reconnect, re-query tabs, resume journeys by UUID;
+                       blocked → surface "recovery required" + instructions (never silent).
+  ManagedStopped:    user closed browser; monitored-set kept; watchdog reactivates on next launch.
+11.3 Startup (boot / reboot):
+  1. Engine discovery → runtime + profiles (persisted).
+  2. Runtime liveness by binary identity; debugger availability probe.
+  3. Restore monitored set; re-attach connections; reconcile persisted tabs vs live (close ghosts,
+     adopt by UUID).
+11.4 Watchdog (2s tick): lifecycle diff, debugger probe, upgrade detection, profile mtime, new/removed
+  installs → RuntimeManager. All transitions idempotent.
+
+========================================================
+12. DEBUG PORT MANAGER (start 30000)
+========================================================
+- DebugPortManager scans from port 30000 upward (configurable, e.g. BROWSER_DEBUG_PORT_START=30000).
+- Acquires the first free port via TcpListener probe; leases persisted runtimeId→port.
+- Conflict detection: process exited but port held → validate liveness, reclaim.
+- Crash recovery: on boot, validate each persisted lease before reuse.
+- Never a fixed/global port; every runtime gets its own.
+
+========================================================
+13. BROWSER CONNECTION MANAGER
+========================================================
+- One WebSocket/pipe per runtime debug session.
+- Heartbeat cadence: CDP /json/version; RDP status; WIP ping (~5s).
+- Reconnect with exponential backoff; on reconnect rebuild tab snapshot (QueryTabs) BEFORE streaming
+  new events (prevents duplicate journeys).
+- Protocol-version gate: unsupported version → drop to recovery-required, never fabricate data.
+- Transport: System.Net.WebSockets.ClientWebSocket (BCL); JSON-RPC helpers in-repo (no CDP NuGet).
+
+========================================================
+14. BROWSER JOURNEY RECONSTRUCTION
+========================================================
+- journeys are persisted (journeyId ↔ tabId ↔ runtime/profile UUIDs) so a restart or reconnect resumes
+  the SAME journey instead of starting a new root session.
+- Idle boundary: configurable (default: close journey after 15 min of no events on the tab; config knob).
+- Crash-safe: session/app_items close uses the existing atomic CloseSessionsAndAppItemsAsync pattern.
+- Storage-level dedup reuses GetOpenAppItemAsync/GetOpenJourneyEventAsync helpers.
+
+========================================================
+15. GUI REDESIGN (Browser Journey Dashboard)
+========================================================
+15.1 Installed Browser Engines — Chromium/Gecko/WebKit, installed runtimes, profile counts, health badges.
+15.2 Per-runtime status:
+  • State badge (Managed/Running/DebuggerConnected/JourneyActive/Recovery/ManualSetup)
+  • Debugger session (port), active journeys, last event (url + timestamp)
+  • Tracking mode: Exact (protocol) / None (manual setup required)
+15.3 Recovery actions (tier-gated):
+  • Enable Browser Journey (auto where supported) · Reconnect Debugger · Refresh Detection ·
+    Reload Profiles · Restart Tracking · View Diagnostics
+  • Buttons disabled + tooltip for Admin-required (Safari) / Manual-setup (WebKitGTK) tiers.
+15.4 Private/incognito disclosure per engine:
+  • Chromium: "exact when debugger live" · Gecko/WebKit: "not tracked (protocol limitation)".
+  Removed sources (extension/title/history) are NOT shown as capabilities.
+
+========================================================
+16. DEPENDENCY CHANGES
+========================================================
+NEW (BCL / in-repo only, no new NuGet):
+  - System.Net.WebSockets.ClientWebSocket — CDP/RDP/WIP WebSocket transport.
+  - System.Text.Json — JSON-RPC (already referenced).
+  - Microsoft.Data.Sqlite — runtime-state tables (already referenced).
+  - In-repo JSON-RPC-over-WebSocket helper (~150 lines).
+REMOVED:
+  - Python runtime dependency (native-host.py, python helpers, install-extensions.sh python usage).
+  - MV3 extension assets + manifests; BrowserExtensionService; BrowserType enum; hardcoded brand lists.
+  - Title/history sources (ActivityContextParser journey path, HistoryReader).
+PLATFORM-SPECIFIC:
+  - Linux: `ss`/`fuser` optional for port liveness; existing gdbus/xprop retained for diagnostics only.
+  - Windows: named pipe not needed (pure WebSocket debugger path); existing Win32 infra retained.
+  - macOS: Safari automation entitlement check (safaridriver); WebKitGTK on Linux.
+Server/Go and web/TypeScript: no changes (app_items metadata passes through).
+
+========================================================
+17. BROWSER CAPABILITY MATRIX (target — VERIFY each during the relevant phase)
+========================================================
+| Capability                    | Chromium (CDP) | Gecko (RDP/BiDi)  | WebKit (WIP)      |
+|-------------------------------|----------------|-------------------|-------------------|
+| Auto debugger launch          | Yes (flag)     | Yes (flag)        | No (admin/GTK)    |
+| Exact URL per navigation      | Yes            | Yes               | Yes (when enabled)|
+| SPA navigation                | Yes            | Yes               | Yes (when enabled)|
+| Multi-profile                 | Yes            | Yes               | Partial (1 on SF) |
+| Multi-window                  | Yes            | Yes               | Yes (when enabled)|
+| Multi-tab                     | Yes            | Yes               | Yes (when enabled)|
+| Incognito/private exact URL   | Yes (verify)   | Verify (likely no)| No                |
+| Tab restore / reconnect       | Yes            | Yes               | Yes               |
+| Browser upgrade handling      | Yes (watchdog) | Yes (watchdog)    | Yes (watchdog)    |
+| Enterprise-policy resistance  | Partial (symlink)| Partial           | No (needs consent)|
+Empty cells → honest "not supported" in GUI. NEVER fabricate data.
+
+========================================================
+18. DATABASE IMPACT ANALYSIS
+========================================================
+NEW SQLite tables (client; idempotent MigrateSql ALTERs):
+  - browser_runtimes  (runtime_id, engine, binary_name, binary_path, version, port_lease, state)
+  - browser_profiles  (profile_id, runtime_id, profile_dir, profile_name)
+  - browser_tabs      (tab_id, runtime_id, profile_id, window_id, engine_target_id, url, title)
+  - browser_journeys  (journey_id, tab_id, session_id FK app_sessions, opened_at, closed_at)
+  - browser_debug_ports (runtime_id, port, leased_at, last_validated_at)
+UNCHANGED:
+  - app_sessions / app_items schema, sync pipeline, server tables, web.
+app_items continues to carry url/domain/title/tab_id/window_id/process_id/metadata_json as today;
+journey writes use the existing single-writer path. No server migrations required.
+
+========================================================
+19. BACKWARD COMPATIBILITY
+========================================================
+- app_items shape identical → existing server sync + web Logs page keep working unchanged.
+- Old extension-produced rows remain in the DB untouched (historical data preserved).
+- Migration ordering keeps the current extension/socket path alive until the debugger path is verified
+  from an installed build (see §24), then the old sources are deleted.
+- GUI "Browser Journey Tracking" card is replaced by the dashboard in the final phase only.
+
+========================================================
+20. PERFORMANCE REQUIREMENTS (measurable targets)
+========================================================
+- Watchdog tick: 2s, cost < 1ms (no per-tick process enumeration storm; diff using cached snapshots).
+- Per navigation event: end-to-end (protocol → app_items) < 500ms p95.
+- Per runtime debug session: < 5% CPU, < 50 MB RSS steady-state.
+- Coordinator dedup window: 5s.
+- Max concurrent debugger sessions: config knob (default all detected; limit option).
+- Reconnect: backoff capped at 30s; tab snapshot rebuild < 2s.
+- DB writes: existing batched sync unchanged (500-row batches, ~5 min).
+
+========================================================
+21. FILE / FOLDER STRUCTURE (proposed)
+========================================================
+client/
+  Core/Browser/
+    BrowserEngine.cs                     enum + engine-from-evidence resolver
+    BrowserEvent.cs                      raw + canonical event model
+    BrowserCapabilityMatrix.cs           capability table + runtime probe
+    Abstractions/
+      IBrowserEngineAdapter.cs
+      IBrowserEventNormalizer.cs
+      IBrowserJourneyBuilder.cs
+      IBrowserRuntimeStore.cs
+    Engines/
+      ChromiumEngineAdapter.cs           CDP adapter + CDP normalizer
+      GeckoEngineAdapter.cs              RDP/BiDi adapter + normalizer
+      WebKitEngineAdapter.cs             WIP adapter + normalizer (WebKitGTK + Safari)
+      WindowTitleSource.cs               DELETED (not part of this architecture)
+      HistoryReader.cs                   DELETED (not part of this architecture)
+    Runtime/
+      BrowserRuntimeManager.cs           state machine + recovery tiers
+      BrowserWatchdog.cs                 lifecycle monitor
+      DebugPortManager.cs                port allocation 30000+
+      BrowserConnectionManager.cs        connections/heartbeats/reconnect
+      BrowserProfileDiscovery.cs         Local State / profiles.ini / WebKit discovery
+      BrowserRuntimeStateMachine.cs      transition definitions
+    Journey/
+      BrowserEventCoordinator.cs         normalize + dedup + route
+      BrowserJourneyEngine.cs            session/items writer + reconstruction
+      BrowserSessionMapper.cs            tab UUID → AppSession map
+  Services/
+    NativeMessageService.cs              DELETED (socket bridge removed)
+    BrowserExtensionService.cs           DELETED
+    BrowserRuntimeManagerHost.cs         hosted wrapper (thin)
+    BrowserWatchdogHost.cs               hosted wrapper (thin)
+  extensions/                            DELETED (all dirs + native-host.py)
+  nativehost/                            DELETED (C# native host no longer needed)
+  publish/
+    install-extensions.sh                DELETED (nothing to install)
+    build-*.sh / installer-windows.iss   unchanged (nothing new to bundle)
+
+========================================================
+22. MIGRATION PLAN (file-by-file)
+========================================================
+DELETED:
+  - extensions/ (chrome, firefox, chromium, gecko, webkit, native-host.py, com.alphai.tracker.json)
+  - Services/NativeMessageService.cs, Services/BrowserExtensionService.cs
+  - Core/ActivityContextParser journey path (title→navigation); BrowserType enum; brand lists;
+    python helpers.
+NEW:
+  - Core/Browser/* (see §21), Services/BrowserRuntimeManagerHost.cs, BrowserWatchdogHost.cs.
+MODIFIED:
+  - Program.cs (DI + hosted services; remove old registrations).
+  - InstalledAppDetector.cs (engine-typed browser enumeration for runtime discovery).
+  - ParentProcessResolver.cs (profile path exposure for profile IDs).
+  - ILogStore / SqliteLogStore / DatabaseSchema.cs (browser state tables + dedup helpers).
+  - MainViewModel.cs / MainWindow.axaml (dashboard, final phase).
+  - .env.example (BROWSER_DEBUG_PORT_START=30000, reconnect backoff, idle boundary, session limit).
+Ordering guarantee: every phase compiles and ships from an installed build; the old extension path
+stays live until the debugger path is verified installed, so no data break is possible mid-migration.
+
+========================================================
+23. IMPLEMENTATION PHASES (each independently buildable + installable)
+========================================================
+P0 Foundation
+  BrowserEvent model, IBrowserEngineAdapter/IBrowserJourneyBuilder/IBrowserRuntimeStore abstractions,
+  DebugPortManager (30000+), state-store tables, RuntimeManager+Watchdog skeleton on Chromium.
+  Accept (installed build): Chrome detected → debugger launched on a 30000+ port → state rows persisted.
+P1 Chromium CDP
+  ChromiumEngineAdapter + ConnectionManager + DevToolsActivePort discovery + symlink workaround +
+  Coordinator + JourneyEngine. Accept: Chrome/Edge/Brave report exact url+title incl. SPA and (verified)
+  incognito; restart-without-flag auto-recovered; no duplicate sessions on reconnect.
+P2 Gecko RDP/BiDi
+  GeckoEngineAdapter behind capability probe. Accept: Firefox reports exact url+title; flag relaunch
+  auto-recovery; private windows reported as untracked (no fake rows).
+P3 WebKit WIP
+  WebKitEngineAdapter + WebKitGTK enable-developer-extras + Safari automation gate. Accept: WebKitGTK
+  exact url+title when developer extras on; Safari shows "manual setup required" when automation off.
+P4 Remove old sources
+  Delete extension dirs, native-host.py, NativeMessageService, BrowserExtensionService, python usage,
+  title/history paths. Accept: no python3 on machine; full pipeline works; no old files shipped.
+P5 GUI + docs
+  Dashboard (§15), .env.example knobs, AGENTS.md + client ARCHITECTURE.md + server ARCHITECTURE.md.
+
+========================================================
+24. RISK ASSESSMENT
+========================================================
+Technical:
+  R1 Chrome 136+ blocks --remote-debugging-port on default user-data-dir → symlink workaround (verify
+     per version); enterprise policy → recovery-required surfaced, never silent.
+  R2 CDP incognito target exposure varies → verify per build; if hidden, report incognito untracked.
+  R3 Firefox CDP removed in FF 85 → adapter speaks RDP today, BiDi as the forward path; probe version.
+  R4 RDP content-process targets are separate → enumerate content targets for per-tab events.
+  R5 Safari automation is admin-only → manual-setup state + instructions; zero-data state is EXPLICIT.
+  R6 Port conflicts / stale leases → DebugPortManager liveness probe + reclaim + persisted leases.
+  R7 Reconnect storms duplicating journeys → persisted tab UUIDs + snapshot rebuild + 5s dedup.
+  R8 Protocol version drift across releases → ConnectionManager version gate + recovery-required.
+Platform:
+  - macOS Safari requires entitlement; WebKitGTK needs developer-extras toggle (via settings/DB).
+  - Wayland: no title dependency anymore; debugger path is OS-independent.
+Maintenance:
+  - Engine-scoped adapters only; brand never appears in shared code.
+  - BiDi consolidation (Firefox/WebKit) → monitor; adapters isolate impact.
+
+========================================================
+25. ACCEPTANCE CRITERIA (installed build, per phase)
+========================================================
+ 1. Chrome with flag → exact journeys; browser restarted WITHOUT flag → auto re-flag + relaunch +
+    journeys resume with no duplicate sessions.
+ 2. Firefox → exact journeys via RDP/BiDi; private window → no fabricated rows, GUI shows untracked.
+ 3. WebKitGTK → exact journeys after enabling developer extras; Safari w/o automation → manual-setup
+    surfaced, no data fabricated.
+ 4. Multiple runtimes simultaneously (Chrome + Firefox + Edge) → independent sessions/ports, correct
+    journeys, bounded resources.
+ 5. Multiple profiles per runtime → journeys tagged profileId; profile added/removed adopted/retired.
+ 6. Multi-window/multi-tab → independent journeys; focus flips logged; closed tabs closed cleanly.
+ 7. Browser crash → watchdog detects, auto-recovery resumes journeys by UUID.
+ 8. OS reboot → monitored set restored; ghosts closed, live tabs adopted.
+ 9. Browser upgrade while running → version change detected, debugger reconnect, no data loss.
+10. Port conflict on 30000 → DebugPortManager scans to next free port.
+11. No python3 on machine → full pipeline works.
+12. Clean shutdown → all open journeys closed with accurate ended_at (crash-safe heartbeat + atomic
+    session close).
+
+========================================================
+26. REQUIREMENTS MAPPING
+========================================================
+Self-healing:   §11 (state machine, watchdog, restore-on-boot, recovery tiers).
+Event-driven:   §1 / §14 (adapter → normalizer → coordinator → journey).
+Engine-based:   §2 (CDP / RDP+BiDi / WIP adapters; brand-agnostic).
+No-extension:   §3 (extension + python removed entirely).
+Cross-platform: §2 (all 3 engines on Linux/Windows/macOS where supported).
+Maintainable:   single normalized model; one journey writer; engine-scoped adapters.
+Installer-safe: §22 ordering + §23 per-phase installed-build verification.
+Extensible:     new engine = new adapter + normalizer + capability row.
+Honest:         capability matrix (§17) + GUI disclosure; never fabricate data.
+
+========================================================
+27. KNOWN LIMITATIONS (accepted, documented)
+========================================================
+- Private/incognito: exact ONLY on Chromium (verify); Gecko/WebKit = untracked.
+- Safari requires one-time manual automation enablement.
+- No backfill: data exists only while the debug session is live.
+- Branded Chrome automation lockdowns may force "recovery-required" on some enterprises.
+- WebKitGTK needs developer-extras enabled once (via application settings).
+These are surfaced in the GUI/diagnostics rather than hidden — the removed extension/title/history
+fallbacks are intentional.
+
+========================================================
+28. CONFIGURATION KNOBS (.env.example)
+========================================================
+  BROWSER_DEBUG_PORT_START=30000
+  BROWSER_DEBUG_HEARTBEAT_SECONDS=5
+  BROWSER_RECONNECT_BASE_SECONDS=1      # exponential backoff: 1,2,4,8… capped at 30
+  BROWSER_RECONNECT_MAX_SECONDS=30
+  BROWSER_JOURNEY_IDLE_MINUTES=15       # close journey after idle
+  BROWSER_MAX_CONCURRENT_SESSIONS=0     # 0 = all detected
+  BROWSER_AUTO_LAUNCH_DEBUGGER=true     # auto relaunch with flag (Chromium/Gecko)
+  BROWSER_COORDINATOR_DEDUP_SECONDS=5
+  BROWSER_WATCHDOG_TICK_SECONDS=2
+
+========================================================
+29. FINAL REQUIREMENT (this plan)
+========================================================
+Track the browser user journey using ONLY each engine's native debugger protocol
+(Chromium→CDP, Gecko→RDP+partial CDP/BiDi, WebKit→Web Inspector Protocol). Remove the extension,
+title, and history capture paths entirely. Keep the self-healing runtime management. Debug ports
+allocate from 30000. All journey data written through one normalized model and one journey writer.
+No code was modified in this session; this document is the approved implementation plan.

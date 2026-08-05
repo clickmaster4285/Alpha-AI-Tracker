@@ -1,48 +1,866 @@
-CONTEXT — READ FIRST:
-Read @AGENTS.md, @client/ARCHITECTURE.md, @server/ARCHITECTURE.md, @web/ARCHITECTURE.md in full
-before touching any code. These are the current source of truth for this project's architecture,
-written by a previous session (possibly a different AI tool than you). Trust them as the baseline,
-but if you find code that contradicts what a doc says, the CODE is correct — the doc is stale and
-you must fix it in step 3.
+# Alpha AI Tracker — Browser Journey Engine Architecture Review & Rebuild Plan
 
-Do not ask me to re-explain the project. Everything you need is in those 4 files. If something is
-genuinely missing or ambiguous, say so explicitly rather than guessing.
+## Objective
 
-TASK FOR THIS SESSION:
-- i want to remove python completely and use purely dotnet C# on the extension also.
-- currently the extension built for chrome and firefox, but now i want to build according to browser engines that work on all type of browser, i want generice extension
-- on the tool gui shown the list of the installed browser with btn "install extension", and when i click the btn then navigate to that browser and auto load the extension, no manualy steps.
-- don't hardcode the browser name/code/binary with only hardcode the browser engine like gecko\webkit\chromiume and deduted the application (installed_applications) is browser with which extension and then auto configured, no hardcode,
-- enhance the gui of the client/ 
+Do **NOT** implement any code.
 
-RULES WHILE WORKING:
+Your task is to perform a **complete architecture audit** of the current repository and produce a **new implementation plan** for Browser Journey Tracking.
 
-- Stay inside the existing architecture and conventions described in the docs unless the task
-  explicitly requires changing them (e.g., new endpoint, new table, new IPC method). If you
-  introduce a new pattern, note it — it needs to go in the docs too.
-- Don't refactor unrelated code "while you're in there." Scope creep makes the next tool's handoff
-  harder to audit.
-- If you hit something blocking (missing dependency, unclear requirement, existing bug in the way),
-  stop and report it rather than working around it silently.
+The existing `aiplan.txt` should be treated only as historical reference.
 
-AFTER CHANGES — UPDATE DOCS:
-Update @AGENTS.md, @client/ARCHITECTURE.md, @server/ARCHITECTURE.md, @web/ARCHITECTURE.md to reflect
-exactly what changed in this session:
+Do not follow it blindly.
 
-- Only touch the sections affected by this session's work — don't rewrite unrelated sections.
-- If you added/changed an API route, DB table/column, config value, or cross-service contract,
-  update it in every file where it's referenced (a server route change often needs edits in both
-  server/ARCHITECTURE.md and client or web's "how it talks to server" section).
-- Update the "Current Completion State" / completion % in AGENTS.md if this session materially
-  moved it.
-- Add or update each file's "Immediate next steps" list — remove what you just finished, add
-  whatever this session surfaced as the next logical step.
-- Update the "Last audited: <date></date>, commit <hash if available></hash>" line at the bottom of each file
-  you touch.
-- If you deliberately deviated from something the old doc said, note it as a one-line changelog
-  entry at the top of that file's "Immediate next steps" section — e.g. "2026-07-25: switched
-  client sync from polling to WebSocket, see Sync section below" — so the next tool session isn't
-  confused by the discrepancy.
+The new plan must be based on the **actual current codebase**, current architecture, and current workflows.
 
-Before finishing, list exactly which doc sections you changed and why, so I can verify before the
-next session (possibly a different tool) picks this up.
+---
+
+# Primary Goal
+
+Design a production-grade Browser Journey Engine that provides the highest possible browser activity visibility while remaining maintainable, scalable, and cross-platform.
+
+The design should prioritize:
+
+* correctness
+* maintainability
+* extensibility
+* reliability
+* installer parity
+* cross-platform support
+* engine-based architecture
+
+The new architecture should avoid hacks whenever possible.
+
+---
+
+# Current Target
+
+Support browser engines instead of browser brands.
+
+Required browser engines:
+
+* Chromium
+* Gecko
+* WebKit
+
+Do not hardcode Chrome, Edge, Brave, Opera, etc.
+
+Everything should be engine driven.
+
+---
+
+# Required Repository Audit
+
+Perform a complete inspection of the client project.
+
+Review every relevant component including (but not limited to):
+
+* BrowserExtensionService
+* NativeMessageService
+* BrowserEvent pipeline
+* Browser session mapping
+* LogCollectorService
+* Process collectors
+* Window watchers
+* ActivityContextParser
+* InstalledApplication detection
+* Browser detection
+* Current browser extension architecture
+* Browser storage
+* SQLite schema
+* Existing AppItem generation
+* Session generation
+* Journey reconstruction
+* Dependency Injection
+* Installer scripts
+* Linux
+* Windows
+* macOS
+* Publish scripts
+* Native host
+* Browser manifests
+* Extension folders
+* Build scripts
+* AGENTS.md
+* ARCHITECTURE.md
+* README
+* Existing browser tracking workflow
+
+Determine how everything currently works before proposing changes.
+
+---
+
+# Browser Debugging Research
+
+Determine whether the current architecture can support engine-specific debugging.
+
+Review support for:
+
+## Chromium
+
+Evaluate integration using Chrome DevTools Protocol.
+
+## Gecko
+
+Evaluate integration using Firefox Remote Debugging / supported CDP compatibility.
+
+Determine practical implementation strategy.
+
+## WebKit
+
+Evaluate Web Inspector Remote Automation.
+
+Document limitations.
+
+---
+
+# Do NOT Assume
+
+Do not assume:
+
+* CDP already exists
+* Firefox implementation is identical
+* Safari behaves like Chromium
+* Extension remains primary
+* Existing services should stay
+
+Everything must be justified after repository analysis.
+
+---
+
+# Deliverables
+
+Produce a completely new architecture document.
+
+The document must contain:
+
+## 1. Current Architecture Analysis
+
+Explain how browser tracking currently works.
+
+Identify:
+
+* strengths
+* weaknesses
+* bottlenecks
+* technical debt
+* duplicated logic
+* incorrect abstractions
+
+---
+
+## 2. Current File Responsibilities
+
+List every important file involved.
+
+For each file explain:
+
+* current responsibility
+* dependencies
+* whether it should stay
+* whether it should be modified
+* whether it should be deleted
+* whether it should be split
+
+---
+
+## 3. Current Browser Tracking Workflow
+
+Produce the complete current flow.
+
+Example:
+
+Browser
+
+↓
+
+Extension
+
+↓
+
+Native Host
+
+↓
+
+Socket
+
+↓
+
+NativeMessageService
+
+↓
+
+...
+
+Use the real workflow from the repository.
+
+---
+
+## 4. Proposed Browser Journey Architecture
+
+Design a completely new architecture.
+
+Include:
+
+* services
+* coordinators
+* interfaces
+* event flow
+* ownership boundaries
+* responsibilities
+
+---
+
+## 5. Browser Engine Strategy
+
+Explain how Chromium, Gecko, and WebKit should be supported.
+
+Describe:
+
+* shared abstractions
+* engine-specific implementations
+* feature parity
+* limitations
+
+---
+
+## 6. Browser Journey Event Model
+
+Define one normalized BrowserEvent model.
+
+Every browser integration should emit the same event model.
+
+No implementation required.
+
+Architecture only.
+
+---
+
+## 7. Service Responsibilities
+
+For every proposed service explain:
+
+* responsibility
+* inputs
+* outputs
+* dependencies
+
+---
+
+## 8. Migration Plan
+
+Explain exactly:
+
+Which files stay unchanged.
+
+Which files require modification.
+
+Which files require refactoring.
+
+Which files should be deleted.
+
+Which new files should be created.
+
+Why.
+
+---
+
+## 9. Folder Structure
+
+Provide the proposed folder structure.
+
+---
+
+## 10. Dependency Changes
+
+List:
+
+New dependencies
+
+Removed dependencies
+
+Platform-specific dependencies
+
+Explain why each is needed.
+
+---
+
+## 11. Risk Assessment
+
+Identify:
+
+technical risks
+
+platform limitations
+
+browser limitations
+
+maintenance risks
+
+future browser changes
+
+---
+
+## 12. Implementation Phases
+
+Break implementation into logical phases.
+
+Each phase must be independently buildable and testable.
+
+No phase should leave the repository in a broken state.
+
+---
+
+## 13. Browser Runtime Management (Self-Healing)
+
+The new Browser Journey Engine must be self-healing.
+
+It must automatically maintain browser tracking without requiring manual intervention.
+
+### Browser Startup
+
+Whenever the client starts (including after OS reboot):
+
+1. Detect every installed browser.
+2. Detect its browser engine.
+3. Detect every installed profile.
+4. Detect whether the browser is currently running.
+5. Detect whether its debugging interface is available.
+6. Detect which Browser Journey layers are currently active.
+7. Restore the expected monitoring state automatically.
+
+---
+
+### Browser Debugger Management
+
+The architecture must define a Browser Runtime Manager.
+
+Responsibilities include:
+
+* Detect whether Chromium debugging is active.
+* Detect whether Gecko debugging is active.
+* Detect whether WebKit remote automation is available.
+* Detect active debugging ports.
+* Detect disconnected debugger sessions.
+* Detect browser restarts.
+* Detect browser crashes.
+* Detect debugger failures.
+* Detect multiple browser instances.
+* Detect multiple browser profiles.
+
+The Browser Runtime Manager must explain how each browser engine should be monitored continuously.
+
+---
+
+### Automatic Recovery
+
+If a browser is restarted:
+
+The system must automatically determine:
+
+* Is debugging already enabled?
+* Is the debugger reachable?
+* Is Browser Journey collection active?
+
+If not:
+
+Determine the safest supported recovery strategy for that browser engine.
+
+The proposal must clearly distinguish:
+
+* Fully automatic recovery
+* Administrator-required recovery
+* User-required recovery
+* Unsupported recovery
+
+Do not rely on undocumented hacks unless clearly identified as optional.
+
+---
+
+### Browser State Machine
+
+Design a runtime state machine.
+
+Example:
+
+Browser Detected
+
+↓
+
+Browser Running
+
+↓
+
+Debugger Available
+
+↓
+
+Journey Active
+
+↓
+
+Disconnected
+
+↓
+
+Recovery
+
+↓
+
+Journey Active
+
+Every transition should be defined.
+
+---
+
+### Browser Watchdog
+
+Design a Browser Watchdog service.
+
+Responsibilities:
+
+* Monitor browser lifecycle.
+* Monitor debugger lifecycle.
+* Detect unexpected browser exits.
+* Detect lost debugger connections.
+* Detect browser upgrades.
+* Detect profile changes.
+* Detect new browser installations.
+* Detect browser removal.
+
+The watchdog should explain how recovery should occur without producing duplicate sessions.
+
+---
+
+## 14. Browser Journey GUI Redesign
+
+Review the existing Browser Tracking UI.
+
+Completely redesign the workflow if necessary.
+
+The new GUI should focus on browser engines instead of browser brands.
+
+The interface should clearly show:
+
+### Installed Browser Engines
+
+For each detected engine display:
+
+* Engine name
+* Installed browsers
+* Installed profiles
+* Tracking status
+* Debugger status
+* History Reader status
+* Extension status (if used)
+* Overall health
+
+---
+
+### Browser Health Dashboard
+
+For every browser show live status indicators such as:
+
+✓ Connected
+
+✓ Journey Active
+
+✓ History Reader Running
+
+✓ Debugger Connected
+
+⚠ Recovery Required
+
+✕ Unsupported
+
+---
+
+### Runtime Status
+
+Display:
+
+* Active browser
+* Active profile
+* Current journey source
+* Active debugger session
+* Last received browser event
+* Current tracking mode
+* Current Browser Journey layer
+
+---
+
+### Recovery Actions
+
+The GUI should expose safe administrative actions such as:
+
+* Enable Browser Journey
+* Reconnect Debugger
+* Refresh Browser Detection
+* Reload Browser Profiles
+* Restart Browser Tracking
+* View Diagnostics
+
+The architecture should determine which actions can be fully automated and which require user or administrator intervention.
+
+---
+
+## 15. Final Requirement
+
+The proposal should produce a Browser Journey Engine that is:
+
+* Self-healing
+* Event-driven
+* Engine-based
+* Cross-platform
+* Maintainable
+* Installer-safe
+* Extensible
+* Production-ready
+
+No implementation should begin until this architecture has been reviewed and approved.
+
+16. Browser Runtime Hierarchy (Mandatory)
+
+The Browser Journey Engine must never identify browsers by process name alone.
+
+Instead, the architecture must model the complete runtime hierarchy.
+
+Browser Engine
+    │
+Browser Runtime
+    │
+Browser Profile
+    │
+Browser Window
+    │
+Browser Tab
+    │
+Browser Journey
+    │
+Browser Event
+
+Every object must have a globally unique identifier.
+
+The architecture must explain:
+
+Runtime ownership
+Profile ownership
+Window ownership
+Tab ownership
+Journey ownership
+Session ownership
+
+No object may rely on browser titles, profile names, or process IDs as permanent identifiers.
+
+17. Multi-Profile Support
+
+The architecture must fully support multiple browser profiles.
+
+Examples include:
+
+Chrome Default
+Chrome Profile 1
+Chrome Work
+Chrome Personal
+Firefox Profiles
+Safari Profiles
+
+The proposal must determine:
+
+Profile discovery
+Profile identification
+Profile lifecycle
+Profile switching
+Profile deletion
+Profile creation
+
+Each profile must operate independently.
+
+The Browser Journey Engine must never assume a browser has only one profile.
+
+18. Multiple Runtime Support
+
+The Browser Journey Engine must support multiple simultaneous browser runtimes.
+
+Example:
+
+Chrome Runtime A
+
+Chrome Runtime B
+
+Chrome Runtime C
+
+Firefox Runtime A
+
+Firefox Runtime B
+
+Every runtime may contain different profiles.
+
+The architecture must explain:
+
+Runtime discovery
+Runtime registration
+Runtime termination
+Runtime restart
+Runtime ownership
+19. Multi-Window Support
+
+The Browser Journey Engine must support unlimited browser windows.
+
+Each window must contain:
+
+Window ID
+Runtime ID
+Profile ID
+Engine ID
+Browser ID
+Window State
+Focus State
+Created Time
+Closed Time
+
+The architecture must explain how windows are synchronized.
+
+20. Multi-Tab Support
+
+Every browser window may contain many tabs.
+
+The proposal must explain:
+
+Tab discovery
+Tab creation
+Tab destruction
+Tab movement
+Tab switching
+Tab duplication
+Tab grouping (if supported)
+
+Each tab must have its own Browser Journey.
+
+21. Incognito / Private Window Support
+
+The proposal must include a complete Incognito strategy.
+
+Support:
+
+Multiple Incognito windows
+Multiple Private Browsing windows
+Multiple simultaneous private sessions
+
+The proposal must explain:
+
+Detection capabilities for each browser engine.
+Which browser engines expose private browsing state.
+Which browser engines do not.
+Limitations.
+Recovery behavior.
+Event model.
+
+Do not assume Incognito behaves identically across Chromium, Gecko, and WebKit.
+
+22. Browser Debugger Port Manager
+
+The proposal must define a Debug Port Manager.
+
+Requirements:
+
+Start searching from TCP port 30000.
+Never hardcode a single port.
+Dynamically allocate an available port.
+Prevent duplicate allocations.
+Persist runtime-to-port mappings.
+Release ports when runtimes terminate.
+Recover from unexpected process exits.
+Detect port conflicts.
+Detect stale mappings.
+
+Example:
+
+Chrome Runtime #1
+
+↓
+
+30000
+
+Chrome Runtime #2
+
+↓
+
+30001
+
+Firefox Runtime #1
+
+↓
+
+30002
+23. Browser Connection Manager
+
+Introduce a Browser Connection Manager.
+
+Responsibilities:
+
+Open debugger connections.
+Maintain heartbeats.
+Detect disconnects.
+Reconnect automatically.
+Rebuild runtime state.
+Recover Browser Journeys.
+Handle protocol version changes.
+24. Browser Event Normalization
+
+Every browser engine must emit a common BrowserEvent.
+
+No downstream service should know whether the event originated from:
+
+Chromium
+Gecko
+WebKit
+Extension
+History Reader
+
+The proposal must define:
+
+Raw Browser Event
+
+↓
+
+Normalizer
+
+↓
+
+BrowserEvent
+
+↓
+
+Journey Builder
+25. Browser Journey Reconstruction
+
+The proposal must explain how journeys are reconstructed.
+
+Example:
+
+Tab Created
+
+↓
+
+Google
+
+↓
+
+Search
+
+↓
+
+Stack Overflow
+
+↓
+
+GitHub
+
+↓
+
+ChatGPT
+
+↓
+
+Tab Closed
+
+The Journey Engine must explain:
+
+Session boundaries
+Idle detection
+Window switching
+Tab switching
+Navigation chains
+Duplicate suppression
+Timeline generation
+26. Browser Capability Matrix
+
+Produce a capability matrix.
+
+Example:
+
+Feature	Chromium	Gecko	WebKit
+Debugging	?	?	?
+Multiple Profiles	?	?	?
+Private Windows	?	?	?
+Tabs	?	?	?
+Navigation	?	?	?
+Downloads	?	?	?
+History	?	?	?
+
+Every capability must be documented.
+
+27. Database Impact Analysis
+
+Explain how the new Browser Journey Engine affects:
+
+SQLite schema
+PostgreSQL schema
+Redis
+Sync layer
+Existing migrations
+
+List:
+
+New tables
+Modified tables
+Removed tables
+New indexes
+Migration strategy
+28. Backward Compatibility
+
+The proposal must explain how existing Alpha AI Tracker deployments can upgrade without data loss.
+
+Include:
+
+Database migration strategy
+Configuration migration
+Runtime migration
+Existing journey compatibility
+Existing browser extension compatibility
+29. Performance Requirements
+
+Define measurable performance goals.
+
+Examples:
+
+Browser detection < 2 seconds
+Runtime recovery < 5 seconds
+Browser restart recovery < 3 seconds
+Memory usage targets
+CPU usage targets
+Maximum supported browser runtimes
+Maximum supported tabs
+Maximum supported concurrent profiles
+30. Acceptance Criteria
+
+The architecture is complete only if it demonstrates successful handling of scenarios such as:
+
+5 Chromium profiles active simultaneously.
+2 Firefox profiles active simultaneously.
+3 Incognito/Private windows.
+Multiple windows per profile.
+100+ open tabs.
+Browser crash and automatic recovery.
+Operating system reboot and automatic recovery.
+Browser update while the agent is running.
+Installation of a new supported browser while the agent is running.
+Removal of a browser while the agent is running.
+Debugger reconnection without duplicate Browser Journey sessions.
+Clean shutdown without data loss.
+
+# Important Rules
+
+Do NOT modify any code.
+
+Do NOT generate patches.
+
+Do NOT create commits.
+
+Do NOT rewrite existing files.
+
+Do NOT start implementation.
+
+Only analyze the repository and produce a complete architecture proposal.
+
+The proposal must reflect the repository's current state rather than assumptions from the previous `aiplan.txt`.
