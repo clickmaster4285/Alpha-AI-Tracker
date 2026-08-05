@@ -1,3 +1,4 @@
+using client.Configuration;
 using client.Core.Browser.Abstractions;
 using Microsoft.Extensions.Logging;
 
@@ -9,6 +10,7 @@ namespace client.Core.Browser;
 /// </summary>
 public sealed class BrowserConnectionManager
 {
+    private readonly AppConfig _config;
     private readonly ILogger<BrowserConnectionManager> _logger;
     private readonly BrowserEventCoordinator _coordinator;
     private readonly Dictionary<Guid, ManagedConnection> _managed = new();
@@ -22,15 +24,19 @@ public sealed class BrowserConnectionManager
         public required int Port { get; init; }
         public IBrowserConnection? Connection { get; set; }
         public DateTime LastReconnectAttempt { get; set; }
+        public int Failures { get; set; }
     }
 
-    public BrowserConnectionManager(BrowserEventCoordinator coordinator, ILogger<BrowserConnectionManager> logger)
+    public BrowserConnectionManager(BrowserEventCoordinator coordinator, AppConfig config, ILogger<BrowserConnectionManager> logger)
     {
         _coordinator = coordinator;
+        _config = config;
         _logger = logger;
     }
 
     public bool IsManaged(Guid runtimeId) { lock (_gate) return _managed.ContainsKey(runtimeId); }
+
+    public int ManagedCount() { lock (_gate) return _managed.Count; }
 
     public async Task StartAsync(IBrowserEngineAdapter adapter, DetectedBrowserRuntime runtime, int port, CancellationToken ct)
     {
@@ -50,7 +56,11 @@ public sealed class BrowserConnectionManager
         foreach (var managed in snapshot)
         {
             if (managed.Connection != null && managed.Connection.IsConnected) continue;
-            if ((DateTime.UtcNow - managed.LastReconnectAttempt).TotalSeconds < 10) continue;
+            // Exponential backoff: base * 2^failures, capped at max (was a hardcoded 10s).
+            var wait = Math.Min(
+                _config.BrowserReconnectMaxSeconds,
+                _config.BrowserReconnectBaseSeconds * (1 << Math.Min(managed.Failures, 6)));
+            if ((DateTime.UtcNow - managed.LastReconnectAttempt).TotalSeconds < wait) continue;
             managed.LastReconnectAttempt = DateTime.UtcNow;
             await ConnectAsync(managed.Runtime.Id, ct);
         }
@@ -70,10 +80,12 @@ public sealed class BrowserConnectionManager
             if (conn == null)
             {
                 managed.Runtime.State = BrowserRuntimeState.Recovery;
+                managed.Failures++;
                 _logger.LogWarning("No debugger available for {Runtime}; will retry", managed.Runtime.BinaryName);
                 return;
             }
 
+            managed.Failures = 0;
             managed.Runtime.State = BrowserRuntimeState.DebuggerConnected;
             _coordinator.Attach(conn);
             managed.Connection = conn;

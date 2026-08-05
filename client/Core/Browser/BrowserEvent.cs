@@ -237,15 +237,20 @@ public static class BrowserEngineFamily
 /// <summary>Shared process-alive probe for the watchdog/state machine.</summary>
 public static class BrowserProcessProbe
 {
-    public static bool IsRunning(DetectedBrowserRuntime runtime)
+    /// <summary>
+    /// True when any instance of the runtime's binary is running. When <paramref name="excludeCmdlineToken"/>
+    /// is set (e.g. our dedicated debug dir), processes whose cmdline contains that token are ignored —
+    /// the tracker's own debug instance is never mistaken for the user's real browser.
+    /// </summary>
+    public static bool IsRunning(DetectedBrowserRuntime runtime, string? excludeCmdlineToken = null)
     {
         try
         {
             if (OperatingSystem.IsWindows())
             {
                 var baseName = Path.GetFileNameWithoutExtension(runtime.BinaryPath ?? runtime.BinaryName);
-                if (Process.GetProcessesByName(baseName).Length > 0) return true;
-                return Process.GetProcessesByName(runtime.BinaryName).Length > 0;
+                if (Process.GetProcessesByName(baseName).Any(p => !ProcessCmdlineContains(p, excludeCmdlineToken))) return true;
+                return Process.GetProcessesByName(runtime.BinaryName).Any(p => !ProcessCmdlineContains(p, excludeCmdlineToken));
             }
 
             // Resolve the real binary through symlinks (google-chrome-stable → chrome) so
@@ -255,16 +260,112 @@ public static class BrowserProcessProbe
             {
                 var name = p.ProcessName;
                 if (string.IsNullOrWhiteSpace(name)) continue;
-                if (string.Equals(name, runtime.BinaryName, StringComparison.OrdinalIgnoreCase)) return true;
-                if (string.Equals(name, realName, StringComparison.OrdinalIgnoreCase)) return true;
-                // ProcessName may carry a wrapper suffix or the real name may be a prefix
-                // (chrome vs chrome_crashpad_handler); match by token containment.
-                if (realName != null && name.Contains(realName, StringComparison.OrdinalIgnoreCase)) return true;
-                if (name.Contains(runtime.BinaryName, StringComparison.OrdinalIgnoreCase)) return true;
+                var match =
+                    string.Equals(name, runtime.BinaryName, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(name, realName, StringComparison.OrdinalIgnoreCase) ||
+                    // ProcessName may carry a wrapper suffix or the real name may be a prefix
+                    // (chrome vs chrome_crashpad_handler); match by token containment.
+                    (realName != null && name.Contains(realName, StringComparison.OrdinalIgnoreCase)) ||
+                    name.Contains(runtime.BinaryName, StringComparison.OrdinalIgnoreCase);
+                if (!match) continue;
+                if (ProcessCmdlineContains(p, excludeCmdlineToken)) continue;
+                return true;
             }
         }
         catch { }
         return false;
+    }
+
+    /// <summary>Does this process's command line contain the token? (Linux: /proc/pid/cmdline;
+    /// macOS: ps; Windows: cached Win32_Process query — the cache makes per-process lookups cheap.)</summary>
+    private static bool ProcessCmdlineContains(Process p, string? token)
+    {
+        if (string.IsNullOrEmpty(token)) return false;
+        try
+        {
+            if (OperatingSystem.IsLinux())
+            {
+                var bytes = File.ReadAllBytes($"/proc/{p.Id}/cmdline");
+                if (bytes.Length == 0) return false;
+                var text = System.Text.Encoding.UTF8.GetString(bytes).Replace('\0', ' ');
+                return text.Contains(token, StringComparison.OrdinalIgnoreCase);
+            }
+            if (OperatingSystem.IsMacOS())
+            {
+                var psi = new ProcessStartInfo("ps", $"-p {p.Id} -o args=")
+                {
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                using var q = Process.Start(psi);
+                if (q != null)
+                {
+                    var output = q.StandardOutput.ReadToEnd();
+                    q.WaitForExit(3000);
+                    return output.Contains(token, StringComparison.OrdinalIgnoreCase);
+                }
+            }
+            if (OperatingSystem.IsWindows())
+            {
+                var cmdline = GetWindowsCmdline(p.Id);
+                return cmdline != null && cmdline.Contains(token, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    private static readonly Dictionary<int, string> _winCmdlineCache = new();
+    private static DateTime _winCmdlineCacheAt;
+
+    /// <summary>pid → command line for all Windows processes, cached for 2s (watchdog calls this per
+    /// runtime per tick — a fresh PowerShell query per process would be far too heavy).</summary>
+    private static string? GetWindowsCmdline(int pid)
+    {
+        var now = DateTime.UtcNow;
+        if ((now - _winCmdlineCacheAt).TotalSeconds <= 2)
+        {
+            lock (_winCmdlineCache) return _winCmdlineCache.TryGetValue(pid, out var hit) ? hit : null;
+        }
+        lock (_winCmdlineCache)
+        {
+            if ((now - _winCmdlineCacheAt).TotalSeconds > 2)
+            {
+                _winCmdlineCache.Clear();
+                try
+                {
+                    var psi = new ProcessStartInfo(
+                        "powershell",
+                        "-NoProfile -Command \"Get-CimInstance Win32_Process | "
+                        + "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress\"")
+                    {
+                        RedirectStandardOutput = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                    };
+                    using var q = Process.Start(psi);
+                    if (q != null)
+                    {
+                        var output = q.StandardOutput.ReadToEnd();
+                        q.WaitForExit(5000);
+                        if (!string.IsNullOrWhiteSpace(output))
+                        {
+                            using var doc = JsonDocument.Parse(output);
+                            foreach (var el in doc.RootElement.EnumerateArray())
+                            {
+                                if (el.TryGetProperty("ProcessId", out var pidProp)
+                                    && el.TryGetProperty("CommandLine", out var cmdProp))
+                                    _winCmdlineCache[pidProp.GetInt32()] = cmdProp.GetString() ?? string.Empty;
+                            }
+                        }
+                    }
+                }
+                catch { }
+                _winCmdlineCacheAt = DateTime.UtcNow;
+            }
+            return _winCmdlineCache.TryGetValue(pid, out var cached) ? cached : null;
+        }
     }
 
     private static string? ResolveRealBinary(string? binaryPath)
@@ -333,10 +434,12 @@ public static class BrowserProcessProbe
     /// <summary>
     /// Terminate all running instances of a browser binary (SIGTERM then SIGKILL on
     /// Unix, WM_CLOSE then force on Windows) so the real profile can be relaunched with
-    /// a debug flag. Returns the number of processes that matched. Snap-confined processes
-    /// (Permission denied) are skipped gracefully.
+    /// a debug flag. When <paramref name="preserveCmdlineToken"/> is set, processes whose
+    /// cmdline contains that token are left alive (e.g. our dedicated debug instance during
+    /// a real-profile hijack). Returns the number of processes that matched. Snap-confined
+    /// processes (Permission denied) are skipped gracefully.
     /// </summary>
-    public static int TerminateInstances(DetectedBrowserRuntime runtime)
+    public static int TerminateInstances(DetectedBrowserRuntime runtime, string? preserveCmdlineToken = null)
     {
         var realName = ResolveRealBinary(runtime.BinaryPath);
         var targets = new List<Process>();
@@ -351,7 +454,9 @@ public static class BrowserProcessProbe
                     (!string.IsNullOrEmpty(realName) && string.Equals(name, realName, StringComparison.OrdinalIgnoreCase)) ||
                     (realName != null && name.Contains(realName, StringComparison.OrdinalIgnoreCase)) ||
                     name.Contains(runtime.BinaryName, StringComparison.OrdinalIgnoreCase);
-                if (match) targets.Add(p);
+                if (!match) continue;
+                if (ProcessCmdlineContains(p, preserveCmdlineToken)) continue;
+                targets.Add(p);
             }
         }
         catch { }

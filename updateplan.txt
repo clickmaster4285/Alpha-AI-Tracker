@@ -5,6 +5,26 @@ Author: Copilot (drafted from AGENTS.md, client/ARCHITECTURE.md, aiplan.txt)
 
 Goal
 ------
+Status Summary (updated 2026-08-05 by FreeBuff plan — see freebuffplan.txt):
+- Executive summary & feasibility: completed
+- High-level recommended architecture: completed
+- BrowserEventCoordinator & Normalizers: completed
+- BrowserJourneyEngine: completed (ephemeral dead branch fixed; idle-close sweep added)
+- RuntimeStateStore & DebugPortManager: completed
+- Chromium CDP adapter: completed (real-profile hijack RESTORED w/ cooldown; tiered attach:
+  DevToolsActivePort → already-debugged real browser → hijack real profile → dedicated instance;
+  dedicated instance is never mistaken for the user's real browser)
+- Gecko RDP/BiDi adapter: completed (hijack cooldown now config-driven; running-process probe)
+- WebKit adapter: partialdone (unchanged — manual-setup-only by design)
+- Persist-after-threshold & ephemeral GC: completed
+- Download fallback (Downloads watcher): completed (gated, no orphan rows, case-insensitive dedup)
+- Running-process browser probe: completed (closes install→use→uninstall-in-5-min gap)
+- Reconnect backoff / start debounce / coordinator dedup knobs: completed (were dead, now wired)
+- Network-level fallbacks (pcap/SNI): notstarted
+- Installer permission bundling: partialdone (env knobs added to .env per parity rule; policy drop TBD)
+- DB migrations for browser_* tables in main schema: partialdone (3 of 5 tables; tabs/profiles in-memory)
+- Unit & integration tests: notstarted
+- Installed-build acceptance matrix: notstarted (must verify hijack on Chrome 151 w/ browser closed)
 Track complete browser user journeys in real time (searches, navigations, downloads, tab lifecycle, incognito/private windows when possible) across major browsers and platforms without requiring a browser extension or manual per-browser setup by the user. The installer may request and obtain all required OS-level permissions (admin consent, accessibility, network sniffing, file-system access) during install — no extra runtime steps for end users.
 
 Executive summary & feasibility

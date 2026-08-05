@@ -1,5 +1,6 @@
 using client.Core.Browser.Abstractions;
 using Microsoft.Extensions.Logging;
+using client.Configuration;
 
 namespace client.Core.Browser;
 
@@ -10,6 +11,7 @@ namespace client.Core.Browser;
 /// </summary>
 public sealed class BrowserRuntimeManager
 {
+    private readonly AppConfig _config;
     private readonly IReadOnlyList<IBrowserEngineAdapter> _adapters;
     private readonly IBrowserRuntimeStore _store;
     private readonly BrowserEventCoordinator _coordinator;
@@ -18,10 +20,12 @@ public sealed class BrowserRuntimeManager
     private readonly ILogger<BrowserRuntimeManager> _logger;
 
     private readonly Dictionary<Guid, DetectedBrowserRuntime> _runtimes = new();
+    private readonly Dictionary<Guid, DateTime> _firstSeen = new();
 
     public event EventHandler<Guid>? RuntimeGone;
 
     public BrowserRuntimeManager(
+        AppConfig config,
         IEnumerable<IBrowserEngineAdapter> adapters,
         IBrowserRuntimeStore store,
         BrowserEventCoordinator coordinator,
@@ -29,6 +33,7 @@ public sealed class BrowserRuntimeManager
         DebugPortManager ports,
         ILogger<BrowserRuntimeManager> logger)
     {
+        _config = config;
         _adapters = adapters.ToList();
         _store = store;
         _coordinator = coordinator;
@@ -87,13 +92,31 @@ public sealed class BrowserRuntimeManager
                 else
                 {
                     _runtimes[runtime.Id] = runtime;
+                    _firstSeen[runtime.Id] = DateTime.UtcNow;
                     _logger.LogInformation("Detected browser runtime {Display} ({Binary})", runtime.DisplayName, runtime.BinaryName);
                 }
 
                 await _store.UpsertRuntimeAsync(tracked, ct);
 
+                // Start debounce: suppress attach attempts within BrowserStartDebounceSec of the
+                // first sighting so a browser that keeps crashing/restarting does not churn the
+                // attach path (and the hijack) on every watchdog cycle.
+                if (_firstSeen.TryGetValue(tracked.Id, out var seen)
+                    && DateTime.UtcNow - seen < TimeSpan.FromSeconds(Math.Max(0, _config.BrowserStartDebounceSec)))
+                {
+                    _logger.LogDebug("Start debounce: skipping attach for {Runtime}", tracked.BinaryName);
+                    continue;
+                }
+
                 if (!_connections.IsManaged(tracked.Id) && IsAutoDebugger(tracked))
                 {
+                    if (_config.BrowserMaxConcurrentSessions > 0 && _connections.ManagedCount() >= _config.BrowserMaxConcurrentSessions)
+                    {
+                        _logger.LogDebug("Max concurrent browser sessions reached ({Max}) — skipping attach for {Runtime}",
+                            _config.BrowserMaxConcurrentSessions, tracked.BinaryName);
+                        continue;
+                    }
+
                     var port = await _ports.AllocateAsync(tracked.Id, ct);
                     tracked.DebugPort = port;
                     await _store.UpsertRuntimeAsync(tracked, ct);
@@ -114,7 +137,7 @@ public sealed class BrowserRuntimeManager
     /// <summary>Watchdog tick: reconcile process liveness, emit RuntimeGone when a browser exits.</summary>
     public async Task ScanProcessStateAsync(CancellationToken ct)
     {
-        foreach (var runtime in _runtimes.Values)
+        foreach (var runtime in _runtimes.Values.ToList())
         {
             var running = BrowserProcessProbe.IsRunning(runtime);
             runtime.IsRunning = running;
@@ -135,6 +158,28 @@ public sealed class BrowserRuntimeManager
                 runtime.State = BrowserRuntimeState.JourneyActive;
             }
             await _store.UpsertRuntimeAsync(runtime, ct);
+        }
+    }
+
+    /// <summary>Garbage-collect ephemeral runtimes that were never used actively.</summary>
+    public async Task GarbageCollectEphemeralAsync(CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+        var ttl = TimeSpan.FromSeconds(_config.BrowserEphemeralTtlSec);
+        var victims = _runtimes.Values.Where(r => !r.IsRunning && !_connections.IsManaged(r.Id) && r.LastSeenAt.HasValue && now - r.LastSeenAt.Value > ttl).ToList();
+        foreach (var runtime in victims)
+        {
+            try
+            {
+                _logger.LogInformation("Garbage-collecting ephemeral runtime {Binary}", runtime.BinaryName);
+                await _ports.ReleaseAsync(runtime.Id, ct);
+                await _store.DeleteRuntimeAsync(runtime.Id, ct);
+                _runtimes.Remove(runtime.Id);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Failed to garbage-collect runtime {Binary}", runtime.BinaryName);
+            }
         }
     }
 

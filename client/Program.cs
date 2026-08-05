@@ -153,20 +153,25 @@ if (config.BrowserTrackingEnabled)
     builder.Services.AddSingleton<BrowserRuntimeStateStore>();
     builder.Services.AddSingleton<IBrowserRuntimeStore>(sp => sp.GetRequiredService<BrowserRuntimeStateStore>());
     builder.Services.AddSingleton<BrowserEventCoordinator>(sp => new BrowserEventCoordinator(
-        id => sp.GetRequiredService<BrowserRuntimeManager>().Lookup(id)));
+        id => sp.GetRequiredService<BrowserRuntimeManager>().Lookup(id),
+        config.BrowserCoordinatorDedupSeconds));
     builder.Services.AddSingleton<BrowserConnectionManager>();
     builder.Services.AddSingleton<DebugPortManager>(sp => new DebugPortManager(
         config.BrowserDebugPortStart, sp.GetRequiredService<IBrowserRuntimeStore>()));
     builder.Services.AddSingleton<BrowserRuntimeManager>(sp =>
     {
+        var cfg = sp.GetRequiredService<AppConfig>();
         var manager = new BrowserRuntimeManager(
+            cfg,
             new IBrowserEngineAdapter[]
             {
                 new ChromiumEngineAdapter(sp.GetRequiredService<IInstalledAppDetector>(),
-                    config.BrowserAutoLaunch,
+                    cfg.BrowserAutoLaunch,
+                    TimeSpan.FromMinutes(cfg.BrowserHijackCooldownMinutes),
                     sp.GetRequiredService<ILogger<ChromiumEngineAdapter>>()),
                 new GeckoEngineAdapter(sp.GetRequiredService<IInstalledAppDetector>(),
-                    config.BrowserAutoLaunch,
+                    cfg.BrowserAutoLaunch,
+                    TimeSpan.FromMinutes(cfg.BrowserHijackCooldownMinutes),
                     sp.GetRequiredService<ILogger<GeckoEngineAdapter>>()),
                 new WebKitEngineAdapter(sp.GetRequiredService<IInstalledAppDetector>(),
                     sp.GetRequiredService<ILogger<WebKitEngineAdapter>>()),

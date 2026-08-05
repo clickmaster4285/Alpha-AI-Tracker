@@ -1,0 +1,181 @@
+FreeBuff Plan — "Always track the user's normal browser" + hardening fixes
+==========================================================================
+
+Date: 2026-08-05
+Author: FreeBuff (resuming from the uncommitted Copilot diff on brandnewBrowserjourneytrack)
+
+GOAL (user requirement)
+----------------------
+- Employees open their browser the normal way (double-click). They know nothing
+  about debug ports.
+- During installation the tool obtains consent / OS permissions, and the
+  requirement is: THE USER'S BROWSER IS ALWAYS TRACKED — including a normal
+  double-click launch.
+- Additionally: fix the other issues collected during analysis.
+
+THE CORE PROBLEM
+----------------
+Chrome 136+ ignores --remote-debugging-port when the browser is launched with
+the DEFAULT user data directory. A normally-launched browser can never be
+debugged retroactively — you can only attach to a browser that was STARTED with
+the flag (or that has DevToolsActivePort).
+
+Current (uncommitted) code removed the "hijack" (kill + relaunch real profile)
+and only launches a DEDICATED debug instance on a separate profile. That means:
+  - the employee's real browsing is NOT captured at all,
+  - an extra browser window appears that the employee didn't open.
+This fails the requirement. (Verified on this machine: Chrome 151; a fresh
+profile + debug port works — HTTP 200 — so the mechanism is fine, the default-
+profile path is the problem.)
+
+THE FIX — tiered attach, real-profile first (permission granted at install)
+---------------------------------------------------------------------------
+ChromiumEngineAdapter.LaunchAndConnectAsync is re-ordered so the REAL profile is
+always preferred, the dedicated instance is only a last resort:
+
+  0. Real profile has DevToolsActivePort  -> attach (never touch it).
+  1. Real browser already exposes a debug port (any chrome with the flag that
+     is NOT our dedicated instance) -> attach.
+  2. Real browser running WITHOUT a debugger (auto-launch on):
+     -> HIJACK (permission-approved): terminate the browser (preserving our
+        dedicated debug instance), relaunch the SAME real profile with an
+        explicit --user-data-dir=<real profile> + --remote-debugging-port.
+        - Chrome <136: works, real browsing tracked.
+        - Chrome 136+ if same-path --user-data-dir is allowed: works.
+        - Chrome 136+ if blocked: port never opens -> clean up stray, fall
+          through to step 5.
+        - Cooldown (new knob ALPHA_BROWSER_HIJACK_COOLDOWN_MINUTES=3) prevents
+          kill-loops. THIS RESTORES THE OLD hijack behaviour the user wants.
+  3. Nothing running (auto-launch on): launch the real profile with the flag
+     (same explicit --user-data-dir); on failure clean up the stray.
+  4. Leftover debug instance of this browser (our dedicated dir or any chrome
+     with a debug flag) -> attach (recovery across tracker restarts).
+  5. Dedicated debug instance (separate profile) -> last resort only.
+
+Supporting changes:
+  - BrowserProcessProbe.IsRunning / TerminateInstances gain an
+    "exclude/preserve cmdline token" parameter so the tracker never treats its
+    own dedicated debug instance as "the user's real browser" and never kills
+    it during a hijack.
+  - New RunningBrowserProbe: detects browsers that are RUNNING but not yet in
+    the installed-apps catalog (catalog scan runs every ~15 min). Closes the
+    "install new browser -> use it -> uninstall within 5 minutes" gap (Q3):
+    the tracker now sees the running binary immediately, resolves its real
+    profile, and can hijack/attach it.
+
+OTHER FIXES FROM THE ANALYSIS (all in this plan)
+------------------------------------------------
+1. Ephemeral-tab dead branch (BrowserJourneyEngine):
+   The delayed persist task's "ephemeral TTL drop" else-if was unreachable
+   (the delay equals the persist threshold, so age >= threshold is always
+   true). Simplified: after the threshold a still-open tab is persisted
+   (time-based guarantee); per-tab ephemeral dropping is handled by
+   CloseTabAsync (tabs closed before the threshold are dropped) and by the new
+   idle sweep. BrowserEphemeralTtlSec remains in use for runtime GC.
+2. Download watcher (BrowserJourneyEngine):
+   - Skip writing items when no open tab matched (prevents orphan rows with an
+     empty app_session_id that join to nothing locally or on the server).
+   - Read _openByTab under the engine gate (was a threadpool race, async void).
+   - Case-insensitive dedup of the Downloads paths (Windows case-insensitive FS
+     would otherwise record every file twice).
+   - Set TabId on download items for consistent ordering.
+3. Wire the 5 dead config knobs (were parsed but never read):
+   - BrowserJourneyIdleMinutes -> NEW idle-close sweep in the JourneyEngine
+     (closed by the watchdog every 60s). Prevents week-old open sessions
+     (Q1). Recovered/persisted tabs get LastNavAt = now so they are not
+     instantly closed.
+   - BrowserReconnectBaseSeconds / BrowserReconnectMaxSeconds -> exponential
+     reconnect backoff in BrowserConnectionManager (was a hardcoded 10s).
+     Defaults changed 1/30 -> 5/60.
+   - BrowserStartDebounceSec -> BrowserRuntimeManager skips attach attempts
+     within N seconds of first sighting (suppresses restart churn).
+   - BrowserCoordinatorDedupSeconds -> BrowserEventCoordinator dedup sweep
+     window (was hardcoded 5s).
+   - NEW knob ALPHA_BROWSER_HIJACK_COOLDOWN_MINUTES (default 3) replaces the
+     removed hardcoded 5-min hijack cooldown.
+4. Installer parity: all knobs are added to client/.env (not just .env.example)
+   so encrypt-config.sh bakes them into config.enc for installed builds.
+5. Program.cs: pass dedup seconds + hijack cooldown into the coordinator and
+   adapters; fix the mis-indented BrowserRuntimeManager factory (cosmetic).
+
+EXPLICITLY OUT OF SCOPE (documented, not silent)
+------------------------------------------------
+- Network-level fallbacks (pcap/SNI) — notstarted in updateplan, deferred.
+- browser_profiles / browser_tabs tables from updateplan — tabs/profiles stay
+  in-memory; open journeys are persisted in browser_journeys + open app_items
+  (recovery works). Revisit only if UI needs persisted profile tables.
+- Extension/native-messaging path — removed in the client; not resurrected.
+- Chrome policy drop (RemoteDebuggingAllowed) — unverified for the 136+ block;
+  can be added to the installer as a best-effort step if the hijack test shows
+  the same-path --user-data-dir is still blocked.
+
+ACCEPTANCE TESTS (installed build, installer-parity rule)
+---------------------------------------------------------
+1. On this machine (Chrome 151, browser CLOSED): launch Chrome normally
+   (double-click), wait ~30s -> the tracker terminates it once and relaunches
+   the REAL profile with the debug flag; verify http://127.0.0.1:<port>/json/version
+   responds and app_sessions/app_items rows appear for real navigation.
+   - If the real-profile port NEVER opens on 151 (same-path block): confirm the
+     fallback launches a dedicated instance, and decide whether to drop a
+     RemoteDebuggingAllowed policy file at install time.
+2. Restart the tracker while Chrome is running debug-enabled -> re-attach via
+   DevToolsActivePort / port discovery (no kill).
+3. Install a never-before-seen browser, launch + browse, uninstall within 5 min
+   -> journeys still recorded (RunningBrowserProbe).
+4. Open + close the browser 3x in one hour -> each cycle a separate clean
+   session; cycles < 30s produce no rows.
+5. Leave a tab open idle >15 min -> journey auto-closes (idle sweep).
+6. dotnet build clean; then bash publish/build-installer.sh and re-run 1-5 from
+   the installed build (mandatory).
+
+ACCEPTANCE TEST #1 RESULT (2026-08-05, verified empirically on THIS machine)
+---------------------------------------------------------------------------
+Chrome 151 + real profile (~/.config/google-chrome) + explicit SAME-path
+--user-data-dir + --remote-debugging-port:
+  - HEADLESS: 8 processes alive, debug port NEVER opened (polled 24s)
+  - GUI (tracker's actual launch path): 8 processes alive, port NEVER opened
+    (polled 20s)
+  - CONTROL (fresh temp profile + flag): port opens (HTTP 200)
+=> VERDICT: the real profile CANNOT be debugged via relaunch on Chrome 136+.
+   The plan's hijack will fire once, mark the runtime _realProfileBlocked, and
+   never kill again -> the employee's real browsing is NOT captured on modern
+   branded Chrome; only the dedicated debug instance is tracked.
+   The goal is ACHIEVED only on Chrome <136 and flag-honoring Chromium builds.
+
+DECISION REQUIRED (next lever for Chrome 136+ real-profile coverage):
+  (a) RemoteDebuggingAllowed enterprise policy — TESTED 2026-08-05: FAILED.
+      Wrote {"RemoteDebuggingAllowed": true, "DevToolsAvailability": 0} into
+      /etc/opt/chrome/policies/managed/alpha-ai-tracker.json (backup + restore
+      done) and re-ran the same-profile GUI launch: 8 procs alive, debug port
+      NEVER opened (polled 20s). The 136+ default-profile block ignores even
+      the explicit policy. DEAD END — do not wire into installers.
+  (b) Re-introduce the browser-extension capture path (background.js + native
+      messaging + forced install). The machine ALREADY carries the tracker's
+      ExtensionInstallForcelist policy pointing at the extension update server
+      (localhost:18080), and the codebase previously shipped this pipeline
+      (deleted in the restructure). This is the ONLY guaranteed real-profile
+      capture on Chrome 136+.
+  (c) Accept partial coverage (dedicated-instance only on Chrome 136+).
+
+FINAL VERDICT (verified 2026-08-05 on Chrome 151):
+  - Real-profile debugging on Chrome 136+ is CLOSED: same-path --user-data-dir
+    fails (headless + GUI), the RemoteDebuggingAllowed/DevToolsAvailability
+    policies do not restore it.
+  - The debugger-based implementation achieves the goal on Chrome <136 and
+    flag-honoring Chromium builds only.
+  - Chrome 136+ real browsing is captured ONLY via the extension path (b).
+
+STATUS (updated as work lands)
+------------------------------
+[x] freebuffplan.txt written
+[x] Tiered attach + hijack restore in ChromiumEngineAdapter
+[x] RunningBrowserProbe (+ wired into Chromium/Gecko detection)
+[x] Ephemeral-tab dead branch fixed
+[x] Download watcher hardened
+[x] Idle-close sweep wired (BrowserJourneyIdleMinutes)
+[x] Reconnect backoff wired (Base/Max)
+[x] Coordinator dedup + start debounce wired
+[x] AppConfig/.env.example/.env updated (all knobs)
+[x] dotnet build green (0 errors)
+[x] Code review passed
+[x] updateplan.txt statuses updated

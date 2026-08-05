@@ -16,17 +16,23 @@ public sealed class ChromiumEngineAdapter : Abstractions.IBrowserEngineAdapter
     private readonly IInstalledAppDetector _appDetector;
     private readonly ILogger _logger;
     private readonly bool _autoLaunch;
-    private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(5) };
-    private static readonly TimeSpan HijackCooldown = TimeSpan.FromMinutes(5);
+    private readonly TimeSpan _hijackCooldown;
     private readonly Dictionary<Guid, DateTime> _lastHijack = new();
+    /// <summary>Runtimes where the real-profile relaunch provably does NOT expose a debug port
+    /// (modern Chrome blocks the flag on the default profile). Once proven, never hijack again
+    /// this app run — a kill would lose the employee's browser for zero tracking gain.</summary>
+    private readonly HashSet<Guid> _realProfileBlocked = new();
+    private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(5) };
 
     public ChromiumEngineAdapter(
         IInstalledAppDetector appDetector,
         bool autoLaunch,
+        TimeSpan hijackCooldown,
         ILogger<ChromiumEngineAdapter> logger)
     {
         _appDetector = appDetector;
         _autoLaunch = autoLaunch;
+        _hijackCooldown = hijackCooldown;
         _logger = logger;
     }
 
@@ -63,6 +69,44 @@ public sealed class ChromiumEngineAdapter : Abstractions.IBrowserEngineAdapter
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Chromium detection failed for {App}", app.AppName);
+            }
+        }
+
+        // Running-process probe: browsers that are LIVE right now but missing from the
+        // installed-apps catalog (covers install → use → uninstall inside the ~15-min catalog
+        // scan window, and browsers whose catalog entry never got detected).
+        foreach (var hit in RunningBrowserProbe.Detect(BrowserEngine.Chromium))
+        {
+            if (result.Any(r => string.Equals(r.BinaryPath, hit.BinaryPath, StringComparison.OrdinalIgnoreCase)))
+                continue;
+            try
+            {
+                var runtime = new DetectedBrowserRuntime
+                {
+                    Engine = BrowserEngine.Chromium,
+                    BinaryName = hit.BinaryName,
+                    BinaryPath = hit.BinaryPath,
+                    DisplayName = hit.DisplayName,
+                    InstalledAppId = null,
+                    UserDataDir = ResolveUserDataDir(
+                        new Models.InstalledApplication
+                        {
+                            AppName = hit.DisplayName,
+                            BinaryName = hit.BinaryName,
+                            InstallPath = hit.BinaryPath,
+                        },
+                        hit.BinaryPath),
+                    Version = null,
+                };
+                runtime.Capabilities = ProbeCapabilities(runtime);
+                runtime.Profiles = DiscoverProfiles(runtime).ToList();
+                _logger.LogInformation(
+                    "Running-process probe detected browser {Display} at {Path}", hit.DisplayName, hit.BinaryPath);
+                result.Add(runtime);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Running-process probe failed for {Path}", hit.BinaryPath);
             }
         }
         return Task.FromResult<IReadOnlyList<DetectedBrowserRuntime>>(result);
@@ -114,107 +158,85 @@ public sealed class ChromiumEngineAdapter : Abstractions.IBrowserEngineAdapter
     public async Task<Abstractions.IBrowserConnection?> LaunchAndConnectAsync(
         DetectedBrowserRuntime runtime, int port, CancellationToken ct)
     {
-        // 1) Already debugging on this port?
-        if (await PortRespondsAsync(port, ct))
-            return await OpenConnectionAsync(runtime, port, ct);
-
-        // 2) Debugger active port file in the real profile dir?
+        // 0) The real profile is ALREADY running with a debugger (DevToolsActivePort present) →
+        //    attach directly, never touch it. Ideal state: a browser we relaunched previously,
+        //    or a browser the user/dev started with a debug flag.
         if (runtime.UserDataDir != null)
         {
             var activePortFile = Path.Combine(runtime.UserDataDir, "DevToolsActivePort");
-            if (File.Exists(activePortFile) && TryReadActivePort(activePortFile, out var activePort))
+            if (File.Exists(activePortFile) && TryReadActivePort(activePortFile, out var activePort)
+                && await PortRespondsAsync(activePort, ct))
             {
-                if (await PortRespondsAsync(activePort, ct))
-                {
-                    runtime.DebugPort = activePort;
-                    return await OpenConnectionAsync(runtime, activePort, ct);
-                }
+                runtime.DebugPort = activePort;
+                return await OpenConnectionAsync(runtime, activePort, ct);
             }
         }
 
-        // 2.5) Attach to an already-running debugger instance of this browser: one we
-        //      launched on our dedicated debug dir earlier, OR any chrome/chromium running
-        //      with --remote-debugging-port (whatever profile it used). Never launches.
-        if (!await PortRespondsAsync(port, ct))
+        var debugDir = DebugDirFor(runtime);
+        // Our own dedicated debug instances live under the tracker debug dir; they are never
+        // "the user's real browser" — never mistaken for it and never killed during a hijack.
+        var realRunning = BrowserProcessProbe.IsRunning(runtime, excludeCmdlineToken: debugDir);
+        var realName = BrowserProcessProbe.RealBinaryName(runtime);
+
+        // 1) The real browser already exposes a debug port (any chrome with the flag that is NOT
+        //    our dedicated instance) → attach; no kill needed, real browsing is tracked.
+        if (!string.IsNullOrEmpty(realName))
         {
-            var candidatePorts = new List<int>();
-            var debugDir = DebugDirFor(runtime);
-            if (debugDir != null)
-                candidatePorts.AddRange(
-                    BrowserProcessProbe.FindRemoteDebuggingPorts(
-                        debugDir.Replace("\\", "/", StringComparison.Ordinal)));
-            var realName = BrowserProcessProbe.RealBinaryName(runtime);
-            if (!string.IsNullOrEmpty(realName))
-                candidatePorts.AddRange(BrowserProcessProbe.FindRemoteDebuggingPorts(realName));
-
-            foreach (var orphanPort in candidatePorts.Distinct())
-            {
-                if (!await PortRespondsAsync(orphanPort, ct)) continue;
-                _logger.LogInformation(
-                    "Attached to running debug instance for {Runtime} on port {Port}",
-                    runtime.BinaryName, orphanPort);
-                runtime.DebugPort = orphanPort;
-                return await OpenConnectionAsync(runtime, orphanPort, ct);
-            }
+            var dedicatedPorts = debugDir == null
+                ? new HashSet<int>()
+                : BrowserProcessProbe.FindRemoteDebuggingPorts(
+                    debugDir.Replace("\\", "/", StringComparison.Ordinal)).ToHashSet();
+            var realDebugPorts = BrowserProcessProbe.FindRemoteDebuggingPorts(realName)
+                .Where(p => !dedicatedPorts.Contains(p));
+            if (await TryAttachFirstRespondingAsync(runtime, realDebugPorts, ct) is { } debugged)
+                return debugged;
         }
 
-        // 3) Not running → launch the real profile with the debug flag. Only when
-        //    auto-launch is enabled (default off): the tracker is attach-only, it never
-        //    opens a browser by itself.
+        // 2) The user's real browser IS running, but WITHOUT a debugger. A normally-launched
+        //    browser cannot be debugged retroactively — the ONLY way to track the user's real
+        //    browsing is to terminate it and relaunch the SAME real profile with the debug flag.
+        //    Permission for this is granted at install time. A cooldown prevents kill-loops.
+        if (_autoLaunch && realRunning)
+        {
+            if (await TryHijackRealProfileAsync(runtime, port, debugDir, ct) is { } hijacked)
+                return hijacked;
+            // Real-profile relaunch did not expose a port (modern Chrome blocks the flag on the
+            // default profile even with an explicit --user-data-dir) — fall through. The
+            // employee's real browser is left running untracked; the dedicated instance (step 5)
+            // still tracks browsing done in it.
+        }
+
+        // 3) Nothing at all running → launch the real profile with the flag. Works on Chrome <136;
+        //    on modern Chrome the port never opens and we clean up before falling back.
         if (_autoLaunch && !BrowserProcessProbe.IsRunning(runtime))
         {
-            if (TryLaunch(runtime, port, runtime.UserDataDir))
-            {
-                // The launched instance can still forward to an existing session (ignoring
-                // the debug flag). Give it a short window; if the port never opens, fall
-                // through to the hijack below instead of giving up.
-                if (await WaitForPortAsync(port, TimeSpan.FromSeconds(8), ct))
-                {
-                    runtime.DebugPort = port;
-                    return await OpenConnectionAsync(runtime, port, ct);
-                }
-            }
+            if (await TryLaunchRealProfileAsync(runtime, port, ct) is { } fresh)
+                return fresh;
         }
 
-        // 4) Running WITHOUT a debugger → the ONLY way to track the employee's real profile
-        //    is to terminate the normal instance and relaunch the SAME profile with the debug
-        //    flag (a normally-launched browser can't be debugged retroactively). Cooldown
-        //    prevents the 10s reconnect loop from killing the browser repeatedly.
-        if (_autoLaunch && !await PortRespondsAsync(port, ct))
+        // 4) A leftover debug instance of this browser (our dedicated dir, or any chrome with a
+        //    debug flag) → attach. Covers tracker restarts and recovery.
+        if (!realRunning)
         {
-            var now = DateTime.UtcNow;
-            if (!_lastHijack.TryGetValue(runtime.Id, out var last) || now - last > HijackCooldown)
-            {
-                _lastHijack[runtime.Id] = now;
-                if (BrowserProcessProbe.IsRunning(runtime))
-                {
-                    _logger.LogWarning(
-                        "{Runtime} is running without a debugger — relaunching it with remote "
-                        + "debugging on the real profile so its browsing is tracked.",
-                        runtime.BinaryName);
-                    BrowserProcessProbe.TerminateInstances(runtime);
-                    await Task.Delay(2000, ct);
-                    if (TryLaunch(runtime, port, runtime.UserDataDir))
-                    {
-                        if (await WaitForPortAsync(port, TimeSpan.FromSeconds(15), ct))
-                        {
-                            runtime.DebugPort = port;
-                            return await OpenConnectionAsync(runtime, port, ct);
-                        }
-                    }
-                }
-            }
+            var leftoverPorts = new List<int>();
+            if (debugDir != null)
+                leftoverPorts.AddRange(BrowserProcessProbe.FindRemoteDebuggingPorts(
+                    debugDir.Replace("\\", "/", StringComparison.Ordinal)));
+            if (!string.IsNullOrEmpty(realName))
+                leftoverPorts.AddRange(BrowserProcessProbe.FindRemoteDebuggingPorts(realName));
+            if (await TryAttachFirstRespondingAsync(runtime, leftoverPorts, ct) is { } leftover)
+                return leftover;
         }
 
-        // 4b) Fallback when the real profile can't be relaunched: a separate debug instance
-        //     on a dedicated profile. Auto-launch only.
+        // 5) Dedicated debug instance (separate profile) — works on every Chrome version. The
+        //    employee's real browser is left untouched. Last resort.
         if (_autoLaunch && !await PortRespondsAsync(port, ct))
         {
-            _logger.LogWarning(
-                "{Runtime} could not be relaunched on its real profile. Launching a separate "
-                + "debug instance (dedicated profile) as a fallback.", runtime.BinaryName);
-            var dedicatedDir = DebugDirFor(runtime);
-            if (TryLaunch(runtime, port, dedicatedDir))
+            _logger.LogInformation(
+                "Launching a dedicated debug instance for {Runtime} (separate profile) — " +
+                "browsing in this instance is tracked; the employee's real browser is left untouched.",
+                runtime.BinaryName);
+            if (TryLaunch(runtime, port, debugDir))
             {
                 if (await WaitForPortAsync(port, TimeSpan.FromSeconds(12), ct))
                 {
@@ -224,6 +246,90 @@ public sealed class ChromiumEngineAdapter : Abstractions.IBrowserEngineAdapter
             }
         }
         return null;
+    }
+
+    /// <summary>Kill the running real browser (preserving our dedicated instance) and relaunch the
+    /// SAME real profile with the debug flag. Returns a connection when the port opens. Once a
+    /// runtime proves un-relaunchable (modern Chrome), it is added to <see cref="_realProfileBlocked"/>
+    /// so we never kill the employee's browser again for zero tracking gain.</summary>
+    private async Task<Abstractions.IBrowserConnection?> TryHijackRealProfileAsync(
+        DetectedBrowserRuntime runtime, int port, string? debugDir, CancellationToken ct)
+    {
+        if (_realProfileBlocked.Contains(runtime.Id)) return null;
+
+        var now = DateTime.UtcNow;
+        if (_lastHijack.TryGetValue(runtime.Id, out var last) && now - last <= _hijackCooldown)
+            return null;
+        _lastHijack[runtime.Id] = now;
+
+        if (!BrowserProcessProbe.IsRunning(runtime, excludeCmdlineToken: debugDir)) return null;
+
+        _logger.LogWarning(
+            "{Runtime} is running without a debugger — relaunching it with remote debugging on " +
+            "its real profile so its browsing is tracked (permission granted at install). The " +
+            "browser closes and re-opens automatically; unsaved form data is lost once.",
+            runtime.BinaryName);
+        BrowserProcessProbe.TerminateInstances(runtime, preserveCmdlineToken: debugDir);
+        await WaitForExitAsync(runtime, debugDir, TimeSpan.FromSeconds(8), ct);
+        // On a failed relaunch the just-reopened browser IS the employee's browser (tabs
+        // restored) — never kill it a second time; the dedicated instance takes over tracking.
+        return await TryLaunchRealProfileAsync(runtime, port, ct, terminateStrayOnFailure: false);
+    }
+
+    /// <summary>Launch the browser on its REAL profile with the debug flag. On modern Chrome the
+    /// flag is ignored on the default profile — the port never opens. The runtime is then marked
+    /// <see cref="_realProfileBlocked"/> and (optionally) the stray we launched is cleaned up.
+    /// When <paramref name="terminateStrayOnFailure"/> is false the just-launched browser is left
+    /// running — it is the employee's browser and must not be killed twice.</summary>
+    private async Task<Abstractions.IBrowserConnection?> TryLaunchRealProfileAsync(
+        DetectedBrowserRuntime runtime, int port, CancellationToken ct, bool terminateStrayOnFailure = true)
+    {
+        if (!TryLaunch(runtime, port, runtime.UserDataDir)) return null;
+        if (await WaitForPortAsync(port, TimeSpan.FromSeconds(15), ct))
+        {
+            runtime.DebugPort = port;
+            return await OpenConnectionAsync(runtime, port, ct);
+        }
+        _realProfileBlocked.Add(runtime.Id);
+        _logger.LogInformation(
+            "{Runtime} real-profile launch did not expose a debug port (modern Chrome blocks " +
+            "--remote-debugging-port on the default profile) — the real profile is not " +
+            "relaunchable this run; falling back to the dedicated debug instance.",
+            runtime.BinaryName);
+        if (terminateStrayOnFailure)
+        {
+            BrowserProcessProbe.TerminateInstances(runtime, preserveCmdlineToken: DebugDirFor(runtime));
+            await Task.Delay(1000, ct);
+        }
+        return null;
+    }
+
+    /// <summary>Attach to the first candidate port that responds to the DevTools version probe.</summary>
+    private async Task<Abstractions.IBrowserConnection?> TryAttachFirstRespondingAsync(
+        DetectedBrowserRuntime runtime, IEnumerable<int> ports, CancellationToken ct)
+    {
+        foreach (var candidate in ports.Distinct())
+        {
+            if (!await PortRespondsAsync(candidate, ct)) continue;
+            _logger.LogInformation(
+                "Attached to running debug instance for {Runtime} on port {Port}",
+                runtime.BinaryName, candidate);
+            runtime.DebugPort = candidate;
+            return await OpenConnectionAsync(runtime, candidate, ct);
+        }
+        return null;
+    }
+
+    /// <summary>Wait (polling) until the real browser process is gone, ignoring our dedicated instance.</summary>
+    private static async Task WaitForExitAsync(
+        DetectedBrowserRuntime runtime, string? excludeToken, TimeSpan timeout, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (!BrowserProcessProbe.IsRunning(runtime, excludeCmdlineToken: excludeToken)) return;
+            await Task.Delay(250, ct);
+        }
     }
 
     private async Task<Abstractions.IBrowserConnection?> OpenConnectionAsync(
@@ -423,8 +529,10 @@ public sealed class ChromiumEngineAdapter : Abstractions.IBrowserEngineAdapter
             if (!string.IsNullOrEmpty(userDataDir))
                 Directory.CreateDirectory(userDataDir);
 
-            var args = new List<string>();
-            args.Add($"--remote-debugging-port={port}");
+            var args = new List<string>
+            {
+                $"--remote-debugging-port={port}",
+            };
             if (!string.IsNullOrEmpty(userDataDir))
                 args.Add($"--user-data-dir={Quote(userDataDir)}");
             args.Add("--no-first-run");
@@ -438,7 +546,8 @@ public sealed class ChromiumEngineAdapter : Abstractions.IBrowserEngineAdapter
                 CreateNoWindow = true,
             };
             Process.Start(psi);
-            _logger.LogInformation("Launched {Runtime} on port {Port}", runtime.BinaryName, port);
+            _logger.LogInformation("Launched {Runtime} on port {Port} (user-data-dir={Dir})",
+                runtime.BinaryName, port, userDataDir ?? "(default)");
             return true;
         }
         catch (Exception ex)

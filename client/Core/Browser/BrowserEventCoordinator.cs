@@ -12,14 +12,16 @@ namespace client.Core.Browser;
 public sealed class BrowserEventCoordinator
 {
     private readonly Func<Guid, DetectedBrowserRuntime?> _runtimeResolver;
+    private readonly int _dedupSeconds;
     private readonly HashSet<(Guid Runtime, Guid Tab, BrowserEventAction Action, string? Url, string? Title)> _recent = new();
     private DateTime _lastDedupSweep = DateTime.UtcNow;
 
     public event EventHandler<BrowserEvent>? CanonicalEvent;
 
-    public BrowserEventCoordinator(Func<Guid, DetectedBrowserRuntime?> runtimeResolver)
+    public BrowserEventCoordinator(Func<Guid, DetectedBrowserRuntime?> runtimeResolver, int dedupSeconds = 5)
     {
         _runtimeResolver = runtimeResolver;
+        _dedupSeconds = dedupSeconds > 0 ? dedupSeconds : 5;
     }
 
     public void Attach(IBrowserConnection connection)
@@ -41,7 +43,7 @@ public sealed class BrowserEventCoordinator
         if (canonical == null) return;
 
         var now = DateTime.UtcNow;
-        if ((now - _lastDedupSweep).TotalSeconds > 5)
+        if ((now - _lastDedupSweep).TotalSeconds > _dedupSeconds)
         {
             _recent.Clear();
             _lastDedupSweep = now;

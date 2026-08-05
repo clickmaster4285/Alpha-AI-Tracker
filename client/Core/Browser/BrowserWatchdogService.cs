@@ -11,16 +11,19 @@ public sealed class BrowserWatchdogService : BackgroundService
 {
     private readonly BrowserRuntimeManager _runtimeManager;
     private readonly BrowserConnectionManager _connectionManager;
+    private readonly BrowserJourneyEngine _journeyEngine;
     private readonly ILogger<BrowserWatchdogService> _logger;
     private int _tick;
 
     public BrowserWatchdogService(
         BrowserRuntimeManager runtimeManager,
         BrowserConnectionManager connectionManager,
+        BrowserJourneyEngine journeyEngine,
         ILogger<BrowserWatchdogService> logger)
     {
         _runtimeManager = runtimeManager;
         _connectionManager = connectionManager;
+        _journeyEngine = journeyEngine;
         _logger = logger;
     }
 
@@ -33,8 +36,14 @@ public sealed class BrowserWatchdogService : BackgroundService
                 _tick++;
                 await _runtimeManager.ScanProcessStateAsync(stoppingToken);
                 await _connectionManager.ReconnectIdleAsync(stoppingToken);
-                if (_tick % 30 == 0)
+                if (_tick % 30 == 0) // every ~1 minute
+                {
                     await _runtimeManager.RefreshAsync(stoppingToken);
+                    // Close journeys idle past BrowserJourneyIdleMinutes (default 15).
+                    await _journeyEngine.CloseIdleJourneysAsync(stoppingToken);
+                }
+                if (_tick % 300 == 0) // every ~10 minutes
+                    await _runtimeManager.GarbageCollectEphemeralAsync(stoppingToken);
             }
             catch (OperationCanceledException)
             {

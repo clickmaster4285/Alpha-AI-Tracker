@@ -16,16 +16,18 @@ public sealed class GeckoEngineAdapter : Abstractions.IBrowserEngineAdapter
     private readonly IInstalledAppDetector _appDetector;
     private readonly ILogger _logger;
     private readonly bool _autoLaunch;
-    private static readonly TimeSpan HijackCooldown = TimeSpan.FromMinutes(5);
+    private readonly TimeSpan _hijackCooldown;
     private readonly Dictionary<Guid, DateTime> _lastHijack = new();
 
     public GeckoEngineAdapter(
         IInstalledAppDetector appDetector,
         bool autoLaunch,
+        TimeSpan hijackCooldown,
         ILogger<GeckoEngineAdapter> logger)
     {
         _appDetector = appDetector;
         _autoLaunch = autoLaunch;
+        _hijackCooldown = hijackCooldown;
         _logger = logger;
     }
 
@@ -61,6 +63,37 @@ public sealed class GeckoEngineAdapter : Abstractions.IBrowserEngineAdapter
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Gecko detection failed for {App}", app.AppName);
+            }
+        }
+
+        // Running-process probe (same rationale as the Chromium adapter): a browser that is live
+        // right now but missing from the installed-apps catalog still gets a runtime identity so
+        // the hijack/attach path can track it immediately.
+        foreach (var hit in RunningBrowserProbe.Detect(BrowserEngine.Gecko))
+        {
+            if (result.Any(r => string.Equals(r.BinaryPath, hit.BinaryPath, StringComparison.OrdinalIgnoreCase)))
+                continue;
+            try
+            {
+                var runtime = new DetectedBrowserRuntime
+                {
+                    Engine = BrowserEngine.Gecko,
+                    BinaryName = hit.BinaryName,
+                    BinaryPath = hit.BinaryPath,
+                    DisplayName = hit.DisplayName,
+                    InstalledAppId = null,
+                    UserDataDir = ResolveProfileRoot(new Models.InstalledApplication { InstallPath = hit.BinaryPath }),
+                    Version = null,
+                };
+                runtime.Capabilities = ProbeCapabilities(runtime);
+                runtime.Profiles = DiscoverProfiles(runtime).ToList();
+                _logger.LogInformation(
+                    "Running-process probe detected browser {Display} at {Path}", hit.DisplayName, hit.BinaryPath);
+                result.Add(runtime);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Running-process probe failed for {Path}", hit.BinaryPath);
             }
         }
         return Task.FromResult<IReadOnlyList<DetectedBrowserRuntime>>(result);
@@ -165,7 +198,7 @@ public sealed class GeckoEngineAdapter : Abstractions.IBrowserEngineAdapter
         if (_autoLaunch && !await PortRespondsAsync(port, ct))
         {
             var now = DateTime.UtcNow;
-            if (!_lastHijack.TryGetValue(runtime.Id, out var last) || now - last > HijackCooldown)
+            if (!_lastHijack.TryGetValue(runtime.Id, out var last) || now - last > _hijackCooldown)
             {
                 _lastHijack[runtime.Id] = now;
                 if (BrowserProcessProbe.IsRunning(runtime))
