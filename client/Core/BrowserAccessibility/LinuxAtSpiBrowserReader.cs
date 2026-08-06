@@ -31,7 +31,7 @@ namespace client.Core.BrowserAccessibility;
 /// <see cref="BrowserHistoryReader"/> fallback resolves their URL later. The
 /// tracker never sees an a11y-invisible browser disappear again.
 /// </summary>
-public sealed partial class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
+public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
 {
     private readonly ILogger<LinuxAtSpiBrowserReader> _logger;
     private bool? _checked;
@@ -167,7 +167,7 @@ public sealed partial class LinuxAtSpiBrowserReader : IAccessibilityBrowserReade
                 WindowTitle = w.Title,
                 Url = BrowserAccessibilityHelpers.NormalizeUrl(w.Url),
                 UrlSource = "sessionstore",
-                IsIncognito = false,
+                IsIncognito = w.Incognito,
                 CapturedAt = now,
             });
         }
@@ -211,9 +211,9 @@ public sealed partial class LinuxAtSpiBrowserReader : IAccessibilityBrowserReade
                 5000);
             if (!string.IsNullOrWhiteSpace(raw) && !raw.Contains("Access denied", StringComparison.OrdinalIgnoreCase))
             {
-                var ids = ShellIdRegex().Matches(raw);
-                var pids = ShellPidRegex().Matches(raw);
-                var titles = ShellTitleRegex().Matches(raw);
+                var ids = ShellIdRegex.Matches(raw);
+                var pids = ShellPidRegex.Matches(raw);
+                var titles = ShellTitleRegex.Matches(raw);
                 var count = Math.Min(ids.Count, Math.Min(pids.Count, titles.Count));
                 for (var i = 0; i < count; i++)
                 {
@@ -235,13 +235,13 @@ public sealed partial class LinuxAtSpiBrowserReader : IAccessibilityBrowserReade
             var raw = Run("xprop", "-root -notype _NET_CLIENT_LIST", 2000);
             if (!string.IsNullOrWhiteSpace(raw))
             {
-                foreach (Match m in WindowIdRegex().Matches(raw))
+                foreach (Match m in WindowIdRegex.Matches(raw))
                 {
                     var wid = m.Value;
                     if (wid == "0x0") continue;
 
                     var pidRaw = Run("xprop", $"-id {wid} _NET_WM_PID", 2000);
-                    var pidMatch = PidRegex().Match(pidRaw ?? string.Empty);
+                    var pidMatch = PidRegex.Match(pidRaw ?? string.Empty);
                     if (!pidMatch.Success || !int.TryParse(pidMatch.Groups[1].Value, out var pid) || pid <= 0)
                         continue;
 
@@ -656,8 +656,12 @@ public sealed partial class LinuxAtSpiBrowserReader : IAccessibilityBrowserReade
                                 continue
                             windows = data.get('windows') or []
                             for i, w in enumerate(windows):
-                                if 'isPrivate' in w and w.get('isPrivate'):
-                                    continue  # private windows are never restored — skip
+                                # Private windows are normally excluded from sessionstore by
+                                # Firefox itself, but when they ARE present (some configs /
+                                # future versions) they must flow through: the C# tracker
+                                # gates their URL on ALPHA_BROWSER_CAPTURE_INCOGNITO, so this
+                                # source is never a silent privacy leak — it is config-driven.
+                                ispriv = bool(w.get('isPrivate'))
                                 tab = active_tab(w)
                                 if not tab:
                                     continue
@@ -675,7 +679,7 @@ public sealed partial class LinuxAtSpiBrowserReader : IAccessibilityBrowserReade
                                     'proc': 'firefox',
                                     'title': title,
                                     'url': url,
-                                    'incognito': False,
+                                    'incognito': ispriv,
                                 })
                             break  # first readable sessionstore wins
         except Exception:
@@ -730,7 +734,7 @@ public sealed partial class LinuxAtSpiBrowserReader : IAccessibilityBrowserReade
     private static string? ExtractXpropString(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return null;
-        var m = XpropNameRegex().Match(raw);
+        var m = XpropNameRegex.Match(raw);
         return m.Success ? m.Groups[1].Value : null;
     }
 
@@ -746,16 +750,13 @@ public sealed partial class LinuxAtSpiBrowserReader : IAccessibilityBrowserReade
                y.Contains(x, StringComparison.OrdinalIgnoreCase);
     }
 
-    [GeneratedRegex(@"'id':\s*<\s*'?([^'>,]+)'?>")]
-    private static partial Regex ShellIdRegex();
-    [GeneratedRegex(@"wm-pid'?:\s*<int32\s+(\d+)")]
-    private static partial Regex ShellPidRegex();
-    [GeneratedRegex(@"'title':\s*<\s*'([^']*)'")]
-    private static partial Regex ShellTitleRegex();
-    [GeneratedRegex(@"0x[0-9a-f]+", RegexOptions.IgnoreCase)]
-    private static partial Regex WindowIdRegex();
-    [GeneratedRegex(@"=\s*(\d+)")]
-    private static partial Regex PidRegex();
-    [GeneratedRegex(@"=\s*""(.+?)""")]
-    private static partial Regex XpropNameRegex();
+    // Static regexes — NOT source-generated, so this compiles in every toolchain
+    // (some IDEs/SDKs do not run the System.Text.RegularExpressions.Generator and
+    // would otherwise fail with CS8795 on the partial declarations).
+    private static readonly Regex ShellIdRegex = new(@"'id':\s*<\s*'?([^'>,]+)'?>");
+    private static readonly Regex ShellPidRegex = new(@"wm-pid'?:\s*<int32\s+(\d+)");
+    private static readonly Regex ShellTitleRegex = new(@"'title':\s*<\s*'([^']*)'");
+    private static readonly Regex WindowIdRegex = new(@"0x[0-9a-f]+", RegexOptions.IgnoreCase);
+    private static readonly Regex PidRegex = new(@"=\s*(\d+)");
+    private static readonly Regex XpropNameRegex = new(@"=\s*""(.+?)""");
 }

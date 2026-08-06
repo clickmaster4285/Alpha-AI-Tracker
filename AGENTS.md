@@ -3,6 +3,24 @@
 > **Last audited:** 2026-08-06
 > **Changelog:**
 >
+> - 2026-08-06: **snap Firefox private-window capture — surgical AppArmor AT-SPI fix.** Why private
+>   Firefox was invisible even after the journey overhaul: Ubuntu's snap Firefox AppArmor profile
+>   denies EVERY inbound D-Bus call from outside the sandbox — including the AT-SPI accessibility bus
+>   (`AppArmor policy prevents this sender... label="snap.firefox.firefox (enforce)"` verified live).
+>   And Firefox itself never writes private windows to sessionstore or places.sqlite, so no disk source
+>   exists. New `publish/firefox-a11y-apparmor.sh` (idempotent, `--undo` supported) loads a *surgical*
+>   copy of the snap profile adding ONE rule — `dbus (receive)` — that lets the AT-SPI bridge call INTO
+>   Firefox while the sandbox stays fully enforcing (verified `/sys/kernel/security/apparmor/profiles`
+>   shows `(enforce)`, NOT complain; peer-agnostic because the tracker's sender label can be
+>   `unconfined` OR `vscode (unconfined)` depending on how it's spawned). Installs a systemd oneshot
+>   (`alpha-ai-firefox-a11y.service`, enabled) that re-applies the override at boot and after
+>   `snap refresh firefox` (snapd regenerates the base profile). Firefox must be restarted once after
+>   applying (AppArmor mode is fixed at process exec). Verified end-to-end on this machine: the tracker
+>   now opens `PRIVATE — Mozilla Firefox Private Browsing` with `metadata_json {"source":"accessibility",
+>   "incognito":true,"processName":"firefox",...}` stored in `app_items` — private-window presence,
+>   title, and flag captured; the URL is still not exposed by Firefox itself on Linux (no location-bar
+>   node in the a11y tree, no sessionstore entry) — an extension would be the only source, which the
+>   project has rejected. Note: deb/non-snap Firefox needs no override (already AT-SPI reachable).
 > - 2026-08-06: **Browser-journey overhaul — all browsers incl. Firefox + incognito, duplication eliminated.**
 >   Root causes found in the live DB (52x duplicate `browser_tab` rows, 316 items written into already-
 >   closed sessions, sessions opening/closing every 5-13s): (1) window identity was the AT-SPI registry
