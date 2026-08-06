@@ -235,63 +235,7 @@ type AppSessionResponse struct {
 	SyncedAt        *time.Time `json:"syncedAt,omitempty"`
 }
 
-// ────────────────────────────────
-// PHASE 2: Browser Contexts
-// ────────────────────────────────
 
-type BrowserContextEntry struct {
-	ID                 string  `json:"id"`
-	AppSessionID       string  `json:"appSessionId"`
-	BrowserProfileName string  `json:"browserProfileName"`
-	TabID              string  `json:"tabId"`
-	OpenedAt           string  `json:"openedAt"`
-	ClosedAt           *string `json:"closedAt,omitempty"`
-}
-
-type SyncBrowserContextsRequest struct {
-	EmployeeID string               `json:"employeeId"`
-	Token      string               `json:"token"`
-	Entries    []BrowserContextEntry `json:"entries"`
-}
-
-type BrowserContextResponse struct {
-	ID                 string     `json:"id"`
-	EmployeeID         string     `json:"employeeId"`
-	AppSessionID       string     `json:"appSessionId"`
-	BrowserProfileName string     `json:"browserProfileName"`
-	TabID              string     `json:"tabId"`
-	OpenedAt           time.Time  `json:"openedAt"`
-	ClosedAt           *time.Time `json:"closedAt,omitempty"`
-	SyncedAt           *time.Time `json:"syncedAt,omitempty"`
-}
-
-// ────────────────────────────────
-// PHASE 2: File Explorer Contexts
-// ────────────────────────────────
-
-type FileExplorerContextEntry struct {
-	ID         string  `json:"id"`
-	AppSessionID string `json:"appSessionId"`
-	FolderPath string  `json:"folderPath"`
-	OpenedAt   string  `json:"openedAt"`
-	ClosedAt   *string `json:"closedAt,omitempty"`
-}
-
-type SyncFileExplorerContextsRequest struct {
-	EmployeeID string                    `json:"employeeId"`
-	Token      string                    `json:"token"`
-	Entries    []FileExplorerContextEntry `json:"entries"`
-}
-
-type FileExplorerContextResponse struct {
-	ID           string     `json:"id"`
-	EmployeeID   string     `json:"employeeId"`
-	AppSessionID string     `json:"appSessionId"`
-	FolderPath   string     `json:"folderPath"`
-	OpenedAt     time.Time  `json:"openedAt"`
-	ClosedAt     *time.Time `json:"closedAt,omitempty"`
-	SyncedAt     *time.Time `json:"syncedAt,omitempty"`
-}
 
 // ────────────────────────────────
 // App Items (replaces browser_contexts, file_explorer_contexts, urls, url_visits)
@@ -351,85 +295,8 @@ type AppItemResponse struct {
 	SyncedAt     *time.Time `json:"syncedAt,omitempty"`
 }
 
-// ────────────────────────────────
-// URLs
-// ────────────────────────────────
 
-type UrlEntry struct {
-	ID          string `json:"id"`
-	URL         string `json:"url"`
-	Domain      string `json:"domain"`
-	FirstSeenAt string `json:"firstSeenAt"`
-}
 
-type SyncUrlsRequest struct {
-	EmployeeID string    `json:"employeeId"`
-	Token      string    `json:"token"`
-	Entries    []UrlEntry `json:"entries"`
-}
-
-type UrlResponse struct {
-	ID          string    `json:"id"`
-	EmployeeID  string    `json:"employeeId"`
-	URL         string    `json:"url"`
-	Domain      string    `json:"domain"`
-	FirstSeenAt time.Time `json:"firstSeenAt"`
-	SyncedAt    *time.Time `json:"syncedAt,omitempty"`
-}
-
-// ────────────────────────────────
-// PHASE 2: URL Visits
-// ────────────────────────────────
-
-type UrlVisitEntry struct {
-	ID               string `json:"id"`
-	BrowserContextID string `json:"browserContextId"`
-	UrlID            string `json:"urlId"`
-	PathAndQuery     string `json:"pathAndQuery"`
-	PageTitle        string `json:"pageTitle"`
-	VisitedAt        string `json:"visitedAt"`
-}
-
-type SyncUrlVisitsRequest struct {
-	EmployeeID string         `json:"employeeId"`
-	Token      string         `json:"token"`
-	Entries    []UrlVisitEntry `json:"entries"`
-}
-
-type UrlVisitResponse struct {
-	ID               string    `json:"id"`
-	EmployeeID       string    `json:"employeeId"`
-	BrowserContextID string    `json:"browserContextId"`
-	UrlID            string    `json:"urlId"`
-	PathAndQuery     string    `json:"pathAndQuery"`
-	PageTitle        string    `json:"pageTitle"`
-	VisitedAt        time.Time `json:"visitedAt"`
-	SyncedAt         *time.Time `json:"syncedAt,omitempty"`
-}
-
-// ────────────────────────────────
-// Shell Commands
-// ────────────────────────────────
-
-type ShellCommandEntry struct {
-	ID               string `json:"id"`
-	MachineID        string `json:"machineId"`
-	Timestamp        string `json:"timestamp"`
-	ShellName        string `json:"shellName"`
-	ShellPid         string `json:"shellPid"`
-	Command          string `json:"command"`
-	WorkingDirectory string `json:"workingDirectory"`
-	ExitCode         string `json:"exitCode"`
-	UserName         string `json:"userName"`
-	Platform         string `json:"platform"`
-	SessionID        string `json:"sessionId"`
-}
-
-type SyncShellCommandsRequest struct {
-	EmployeeID string             `json:"employeeId"`
-	Token      string             `json:"token"`
-	Commands   []ShellCommandEntry `json:"commands"`
-}
 
 // ────────────────────────────────
 // PHASE 2: LIST RESPONSES

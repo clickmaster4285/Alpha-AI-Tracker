@@ -79,19 +79,3 @@ type SessionEvent struct {
 	CreatedAt  time.Time `json:"createdAt" db:"created_at"`
 }
 
-type ShellCommand struct {
-	ID                string     `json:"id" db:"id"`
-	EmployeeID        string     `json:"employeeId" db:"employee_id"`
-	MachineID         string     `json:"machineId" db:"machine_id"`
-	Timestamp         time.Time  `json:"timestamp" db:"timestamp"`
-	ShellName         string     `json:"shellName" db:"shell_name"`
-	ShellPid          string     `json:"shellPid" db:"shell_pid"`
-	Command           string     `json:"command" db:"command"`
-	WorkingDirectory  string     `json:"workingDirectory" db:"working_directory"`
-	ExitCode          string     `json:"exitCode" db:"exit_code"`
-	UserName          string     `json:"userName" db:"user_name"`
-	Platform          string     `json:"platform" db:"platform"`
-	SessionID         string     `json:"sessionId" db:"session_id"`
-	SyncedAt          *time.Time `json:"syncedAt,omitempty" db:"synced_at"`
-	CreatedAt         time.Time  `json:"createdAt" db:"created_at"`
-}

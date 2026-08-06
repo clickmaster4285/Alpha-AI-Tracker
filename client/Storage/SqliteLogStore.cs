@@ -383,12 +383,17 @@ public class SqliteLogStore : ILogStore, IDisposable
         try
         {
             var cmd = _connection.CreateCommand();
+            // AND/OR precedence fix: the app_name match must not escape the binary_name
+            // guard (a bare `OR app_name LIKE` returned junk rows, e.g. the auto-registered
+            // 'chrome' entry, before the real 'Google Chrome' row). Prefer browser rows and
+            // the shortest binary name (closest match) as a deterministic tiebreak.
             cmd.CommandText = @"
                 SELECT * FROM installed_applications
-                WHERE binary_name != ''
-                  AND (binary_name LIKE '%' || $name || '%'
-                       OR $name LIKE '%' || binary_name || '%')
-                  OR app_name LIKE '%' || $name || '%'
+                WHERE (binary_name != ''
+                       AND (binary_name LIKE '%' || $name || '%'
+                            OR $name LIKE '%' || binary_name || '%'))
+                   OR (binary_name != '' AND app_name LIKE '%' || $name || '%')
+                ORDER BY is_browser DESC, length(binary_name) ASC
                 LIMIT 1";
             cmd.Parameters.AddWithValue("$name", processName);
             await using var reader = await cmd.ExecuteReaderAsync(ct);

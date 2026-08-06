@@ -1,8 +1,32 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-08-03 (installer-parity rule + single-instance/tray fix)
+> **Last audited:** 2026-08-05 (Option B — accessibility-based browser journey)
 > **Changelog:**
 >
+> - 2026-08-05: **Option B — accessibility-tree browser journey (debugger pipeline DELETED).**
+>   Chrome 136+ real-profile debugging is closed by every mechanism (verified on this machine:
+>   same-path `--user-data-dir` fails headless + GUI; `RemoteDebuggingAllowed`/`DevToolsAvailability`
+>   policy fails too). With extensions ruled out, the entire debugger pipeline (`client/Core/Browser/*`
+>   — 16 files) was REMOVED and replaced by `client/Core/BrowserAccessibility/*`: the tracker reads the
+>   OS accessibility tree — the same tree screen readers use — so the employee's REAL browser journey
+>   is captured on every platform and every Chrome version, with no debugger, no extension, and no
+>   catalog dependency (install→use→uninstall-in-5-min browsers are captured; headless instances are
+>   skipped). Linux: python3+AT-SPI D-Bus probe (validated live on Chrome 151 — the omnibox ENTRY node
+>   `"Address and search bar"` exposes the exact URL/query; Name/Role are D-Bus properties, text via
+>   `org.a11y.atspi.Text`). Windows: UIA via `Interop.UIAutomationClient` (netstandard2.0, API verified
+>   by reflection). macOS: osascript/System Events (best-effort; Accessibility grant).
+>   `AccessibilityBrowserTracker` polls every `ALPHA_BROWSER_ACCESSIBILITY_POLL_SECONDS` (3), writes one
+>   `app_sessions` per window + `browser_tab`/`browser_navigation` `app_items` (exact URL + domain),
+>   closes vanished windows after 3 polls, idle-closes after `ALPHA_BROWSER_JOURNEY_IDLE_MINUTES` (15),
+>   closes gracefully on shutdown (no orphans), records Downloads as `browser_download` items, and gates
+>   incognito URLs behind `ALPHA_BROWSER_CAPTURE_INCOGNITO=false` (legal-safe default; incognito windows
+>   are still detected + flagged in metadata). Dead code removed: shell-command collectors (interface +
+>   3 impls + `ShellCommand` model), server dead DTOs (`BrowserContext*`, `FileExplorerContext*`, `Url*`,
+>   `UrlVisit*`, `ShellCommand*`), `publish/install-extensions.sh` + the `extensions/` bundling step.
+>   Fixed the `SqliteLogStore` fuzzy-match AND/OR precedence bug (a junk `chrome` row beat `Google Chrome`;
+>   now prefers `is_browser` rows + shortest binary). Env knobs are now a11y-only (`.env` + `.env.example`
+>   updated per installer parity). Verified: `dotnet build` 0 errors / 27 warnings, `go build`/`go vet`
+>   clean, and a live runtime test captured a real Chrome journey into SQLite (exact URL, graceful close).
 > - 2026-08-03: **Installer-Parity rule + single-instance/tray UX fix** — codified a MANDATORY rule (see §6 below): every feature or modification must ALSO be wired into the installer functionality, and verified in an installed build — `dotnet run` alone is NOT a valid release test, because installed builds ship the publish output plus only what the `publish/*` scripts bundle (extensions/, publish/*.sh, config.enc) and run from a root-owned dir. Client fix behind the rule: a second launch now restores the running window (`client/SingleInstance.cs` named-event signaling), the tray menu gains **Quit**, and tray-less desktops (no StatusNotifierWatcher — `client/Services/TrayAvailability.cs` D-Bus check) quit on window-close instead of stranding an invisible process.
 > - 2026-08-01: **Docs audit (AGENTS.md + client/server ARCHITECTURE.md)** — removed all stale `activity-logs/sync` and `shell-commands/sync` references (both endpoints/tables/code are deleted from the product). Fixed the mermaid diagram + cross-service contracts to show the real 7 sync endpoints. Server: migration inventory corrected to 001–016 (15 files), added `jobs/staleness_sweep.go`, `employee_installed_applications`/`employee_installed_packages` junctions, and all 12 Postgres tables; API surface now lists `GET /app-sessions` + `GET /app-items` and drops the removed `activity-logs` section. Client: corrected SQLite schema (11 tables incl. `storage_devices`, `permission_status`, `app_items`), documented the `MigrateSql` migration strategy, the real sync batch size (500), the file logger (`dotnetrunlog.txt`), `install-extensions.sh`, and flagged `IShellCommandCollector`/`ShellCommand` as dead code. Branch updated to `restructureClient`.
 > - 2026-07-31: **Cross-service payload + employee↔catalog dedup (migrations 013–016)** — tracking tables were washed out (backup at `server/bin/backup/alpha_ai_tracker_20260731_134750.dump`) and server + client landed together. 013 adds `installed_app_id`/`installed_package_id`/`grouped_by`/`cgroup_scope`/`context_label` to `app_sessions`; 014 adds `process_id` + 9 journey fields to `app_items`; 015/016 add company-global app/package catalogs (`app_fingerprint=desktop_id|binary_name`, `package_fingerprint=package_name|source_manager`) with junction tables `employee_installed_applications`/`employee_installed_packages` (per-install version/path/date + `first_seen_at`/`last_seen_at`/`is_active`; FKs → `employees(employee_id)` VARCHAR per convention). `SyncInstalledApps`/`SyncInstalledPackages` rewritten to upsert-catalog-then-link in one tx. Hourly `jobs/staleness_sweep.go` deactivates links idle > `LINK_STALE_DAYS=7`. Client: installed-apps mapper sends `binaryName`/`isBrowser`/`desktopId`/`categories`; app-sessions sends `groupedBy`/`cgroupScope`/`contextLabel`; app-items sends `processId` + 9 journey fields; apps conflict-update resets `is_synced=0`; packages dedup to `ON CONFLICT(package_name, source_manager)` + unique index (fixes 6,530 duplicate package rows from the old `ON CONFLICT(id)`). Smoke-tested: happy path, two-employee-same-app → 1 catalog + 2 links, malformed/partial payloads → 4xx/200 not 500.
@@ -124,8 +148,8 @@ flowchart LR
 
 ### Inconsistencies Found
 
-1. **Shell commands REMOVED (resolved)** — Shell command collection/sync removed from client and server. No endpoint, no table (`shell_commands` dropped by migration 007). Only dead-code leftovers remain: the `IShellCommandCollector` interface, 3 platform `ShellCommandCollector` impls, and the `ShellCommand` model on the client (unused, not registered in DI); the `ShellCommand` model + DTO types on the server.
-2. **Legacy child tables removed (resolved)** — `browser_contexts`, `file_explorer_contexts`, `urls`, `url_visits` tables and all Go/C# code replaced by single generic `app_items` table.
+1. **Shell commands REMOVED (resolved 2026-08-05)** — Shell command collection/sync removed from client and server. No endpoint, no table (`shell_commands` dropped by migration 007). All dead-code leftovers (`IShellCommandCollector`, 3 platform impls, `ShellCommand` model, server DTOs) were deleted 2026-08-05.
+2. **Legacy child tables removed (resolved)** — `browser_contexts`, `file_explorer_contexts`, `urls`, `url_visits` tables and all Go/C# code replaced by single generic `app_items` table. Remaining dead DTOs for those types deleted 2026-08-05.
 3. **`activity_logs` removed (resolved)** — The old `activity_logs` table (server Postgres + client SQLite) and all Go/C# code referencing it have been removed. Migration 006 drops the table with no rollback. Replaced by relational `app_sessions` + `app_items`; the web Logs/Comprehensive page now queries `GET /app-sessions`.
 4. **Field naming** — Client and server agree on `employeeId` (camelCase) for auth/sync payloads and camelCase field names throughout. **Consistent by convention, no validation schema enforces it.**
 5. **Catalog owner column** — `installed_applications.employee_id` / `installed_packages.employee_id` on the server are legacy "first uploader" markers; dedup is now fingerprint-based (`app_fingerprint`, `package_fingerprint`) with per-employee junction tables holding the real per-install metadata.
@@ -174,7 +198,7 @@ flowchart LR
 - **Hierarchy resolver**: node/bash → terminal → IDE via `parent_item_id` + OS process tree
 - **GUI-apps-only tracking**: only GUI apps with .desktop files (Linux), .app bundles (macOS), or Start Menu/Program Files entries (Windows) are tracked. CLI tools, shells, build tools, runtimes, and daemons are skipped entirely
 - **Wayland-native app tracking**: known GUI apps (VSCode, Chrome) tracked even without a window title — they don't appear in X11's `_NET_CLIENT_LIST` on Wayland
-- **Browser context**: `browser_tab` + `browser_navigation` items (URL from title / domain heuristic) via NativeMessageService + browser extension
+- **Browser journey (Option B — accessibility)**: `browser_tab` + `browser_navigation` + `browser_download` items with the EXACT active-tab URL + domain, read from the OS accessibility tree (AT-SPI / UIA / AX) — works on every browser and every Chrome version (136+ included), no debugger, no extension, no catalog dependency. Session per window, idle-close, graceful close, incognito gated. Linux reader validated live on Chrome 151.
 - **File explorer journey tracking**: 3 watchers (ATSPIEventWatcher, FileSystemEventWatcher, RecentFilesWatcher) → EventCoordinator (dedup/correlate/normalize) → JourneyEngine (resolve session, create AppItem rows with 9 journey fields)
 - **IObservableEventSource interface**: common contract for all watchers — IDE, Terminal, Office integrations plug in the same pattern
 - **Headless subprocess filtering (cross-platform)**: Chromium/Electron `--type=` flags detected via cmdline on Windows (PowerShell), macOS (`ps`), and Linux (`/proc/pid/cmdline`). Centralized `ChromiumSubprocessFlags` in `AppProcessClassifier`
@@ -267,7 +291,7 @@ flowchart LR
    sudo dpkg -i installers/alpha-ai-tracker_1.0.0_amd64.deb
    ```
 2. **New runtime assets** (icons, JSON, images, fonts) — bundled ONLY if copied by `build-installer.sh` (`bundle_into_publish`) or the platform builders (`build-deb.sh`, `build-dmg.sh`, `installer-windows.iss`). Add the copy step when you add the asset.
-3. **New files under `extensions/`** — ship automatically (bundled into every publish output). Keep new extension / native-host files inside `extensions/`.
+3. **New runtime assets** (embedded scripts, JSON, icons) — the accessibility probe is embedded as a C# string in `LinuxAtSpiBrowserReader` (no external file to bundle). Anything file-based must be added to `bundle_into_publish()` or the platform builders.
 4. **New scripts under `publish/`** — copied into every publish output automatically. Runtime-referenced scripts must live in `publish/` (or be added to the copy list).
 5. **New env vars / config** — must be added to `.env` BEFORE `encrypt-config.sh` runs; installers ship `config.enc` baked at build time. Dev reads `.env` directly — config that works in `dotnet run` is silently missing in the installer.
 6. **Path assumptions** — the installed app's working dir is root-owned / not user-writable. NEVER write files relative to cwd or the exe dir. Use `~/.config/alpha-ai-tracker/` (logs, machine-id) and `~/.local/share/alpha-ai-tracker/` (DB, sockets). `dotnet run` cannot catch this because the dev working dir is writable.
@@ -292,7 +316,7 @@ flowchart LR
 | **Default passwords**         | 🟠 Medium | `AlphaAI@2024!` is the compiled-in default. Easy to forget to change.                                                                                                          |
 | **No offline/retry strategy** | 🟢 Low    | Client retries sync every cycle but has no exponential backoff or dedup.                                                                                                         |
 | **No data-pruning job**       | 🟢 Low    | Server's only background job (`staleness_sweep.go`) deactivates stale catalog links but never deletes old app_sessions/app_items data.                                            |
-| **Dead shell-command code**   | 🟢 Low    | `IShellCommandCollector` + 3 platform impls + `ShellCommand` model on client; `ShellCommand`/`BrowserContext`/`Url*` DTOs on server. Harmless leftovers from the removal.         |
+| ~~Dead shell-command code~~ (resolved) | — | All shell-command and legacy browser-context DTOs/models deleted 2026-08-05 (client + server). |
 | **Horizontal scaling**        | 🟢 Low    | Server uses Redis for employee secrets (short TTL), so scaling is straightforward — but DB queries have no query analysis.                                                      |
 
 ---

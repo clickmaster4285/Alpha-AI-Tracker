@@ -194,20 +194,11 @@ if [ "$HAS_ERRORS" = true ] || [ -n "$SOURCE_NEWER" ]; then
   exit 1
 fi
 
-# ── Bundle the browser extension, native host, and install scripts into each
-#    publish output. Without this step the installed app cannot find extensions/
-#    or publish/install-extensions.sh, which is why `dotnet run` "is perfect"
-#    but the installer cannot track the browser journey.
-EXTENSIONS_DIR="$PROJECT_DIR/extensions"
+# ── Bundle the publish scripts (runtime helpers) into each publish output.
+#    Browser journey tracking is now accessibility-based (embedded in the binary —
+#    no extensions/, no native host, no install-extensions.sh to ship).
 bundle_into_publish() {
   local rid_dir="$1"
-  if [ -d "$EXTENSIONS_DIR" ]; then
-    mkdir -p "$rid_dir/extensions"
-    cp -r "$EXTENSIONS_DIR/." "$rid_dir/extensions/"
-    chmod +x "$rid_dir/extensions/native-host.py" 2>/dev/null || true
-    echo "  ✓ Bundled extensions/ into $rid_dir"
-  fi
-
   if [ -d "$PROJECT_DIR/publish" ]; then
     mkdir -p "$rid_dir/publish"
     cp "$PROJECT_DIR/publish"/*.sh "$rid_dir/publish/" 2>/dev/null || true

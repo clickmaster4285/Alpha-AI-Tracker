@@ -211,6 +211,13 @@ Share `installers/alpha-ai-tracker_1.0.0_amd64.deb` — double-click or:
 sudo dpkg -i alpha-ai-tracker_1.0.0_amd64.deb
 ```
 
+> **If the app is already installed** (Software Center opens but shows nothing), remove the old package first, then install the new one:
+>
+> ```bash
+> sudo dpkg -r alpha-ai-tracker
+> sudo dpkg -i alpha-ai-tracker_1.0.0_amd64.deb
+> ```
+
 ### macOS
 
 Share `installers/AlphaAITracker.dmg` — double-click, drag app to Applications folder.

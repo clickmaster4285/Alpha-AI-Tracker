@@ -200,7 +200,7 @@ public partial class MainViewModel : ViewModelBase
             _autoStart.EnableAutoStartForced();
 
             IsBrowserTracking = true;
-            BrowserTrackingStatus = "Active — browser journeys are captured automatically via the native debugger.";
+            BrowserTrackingStatus = "Active — browser journeys are captured automatically via the OS accessibility tree (no debugger, no extension).";
         }
         else
         {
@@ -299,8 +299,7 @@ public partial class MainViewModel : ViewModelBase
     /// Check for any missing OS-level permissions.
     /// Combines detection from:
     /// - InstalledAppDetector (dpkg-query, registry access, etc.)
-    /// - ShellCommandCollector (shell history file access)
-    /// - Direct OS permission checks (/proc access on Linux, etc.)
+    /// - Direct OS permission checks (/proc access on Linux, accessibility on macOS, etc.)
     /// </summary>
     private bool HasMissingPermissions()
     {

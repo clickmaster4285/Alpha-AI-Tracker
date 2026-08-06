@@ -5,26 +5,29 @@ Author: Copilot (drafted from AGENTS.md, client/ARCHITECTURE.md, aiplan.txt)
 
 Goal
 ------
-Status Summary (updated 2026-08-05 by FreeBuff plan — see freebuffplan.txt):
-- Executive summary & feasibility: completed
-- High-level recommended architecture: completed
-- BrowserEventCoordinator & Normalizers: completed
-- BrowserJourneyEngine: completed (ephemeral dead branch fixed; idle-close sweep added)
-- RuntimeStateStore & DebugPortManager: completed
-- Chromium CDP adapter: completed (real-profile hijack RESTORED w/ cooldown; tiered attach:
-  DevToolsActivePort → already-debugged real browser → hijack real profile → dedicated instance;
-  dedicated instance is never mistaken for the user's real browser)
-- Gecko RDP/BiDi adapter: completed (hijack cooldown now config-driven; running-process probe)
-- WebKit adapter: partialdone (unchanged — manual-setup-only by design)
-- Persist-after-threshold & ephemeral GC: completed
-- Download fallback (Downloads watcher): completed (gated, no orphan rows, case-insensitive dedup)
-- Running-process browser probe: completed (closes install→use→uninstall-in-5-min gap)
-- Reconnect backoff / start debounce / coordinator dedup knobs: completed (were dead, now wired)
-- Network-level fallbacks (pcap/SNI): notstarted
-- Installer permission bundling: partialdone (env knobs added to .env per parity rule; policy drop TBD)
-- DB migrations for browser_* tables in main schema: partialdone (3 of 5 tables; tabs/profiles in-memory)
+Status Summary (updated 2026-08-05 by FreeBuff — see freebuffplan.txt; PIVOTED to Option B):
+  Chrome 136+ real-profile debugging is CLOSED (verified: same-path --user-data-dir fails,
+  RemoteDebuggingAllowed policy fails). The whole debugger pipeline was therefore REMOVED
+  and replaced with accessibility-tree capture — the only no-extension, cross-platform way
+  to see the REAL browser journey on every Chrome version.
+- Accessibility browser readers (AT-SPI/UIA/AX): COMPLETED
+  - Linux AT-SPI reader validated LIVE on Chrome 151 (omnibox ENTRY node "Address and search bar"
+    yields the exact URL/query; python3+dbus embedded script, 8s timeout, per-window incognito)
+  - Windows UIA reader via Interop.UIAutomationClient (netstandard2.0; API verified by reflection)
+  - macOS reader via osascript (best-effort; Accessibility grant required)
+- AccessibilityBrowserTracker BackgroundService: COMPLETED (poll → session/tab/navigation items,
+  URL-change dedup, idle-close, missing-window close, graceful shutdown, downloads watcher,
+  incognito gating ALPHA_BROWSER_CAPTURE_INCOGNITO=false)
+- Debugger pipeline REMOVED: Core/Browser/* (16 files), shell-command dead code, server dead
+  DTOs (BrowserContext/FileExplorerContext/Url/UrlVisit/ShellCommand), publish/install-extensions.sh
+- SqliteLogStore fuzzy-match AND/OR precedence bug: FIXED (prefers is_browser rows)
+- Env knobs: a11y-only (TRACKING_ENABLED, ACCESSIBILITY_POLL_SECONDS, JOURNEY_IDLE_MINUTES,
+  CAPTURE_INCOGNITO) in .env + .env.example (installer parity)
+- Builds: dotnet build 0 errors/27 warnings; go build + go vet clean
+- Runtime test: real Chrome journey captured in SQLite (exact URL + domain), graceful close on exit
+- Network-level fallbacks (pcap/SNI): notstarted (documented, deferred)
 - Unit & integration tests: notstarted
-- Installed-build acceptance matrix: notstarted (must verify hijack on Chrome 151 w/ browser closed)
+- Installed-build acceptance matrix: PENDING (installer-parity rule — rebuild + install to verify)
 Track complete browser user journeys in real time (searches, navigations, downloads, tab lifecycle, incognito/private windows when possible) across major browsers and platforms without requiring a browser extension or manual per-browser setup by the user. The installer may request and obtain all required OS-level permissions (admin consent, accessibility, network sniffing, file-system access) during install — no extra runtime steps for end users.
 
 Executive summary & feasibility

@@ -6,9 +6,7 @@ using client;
 using client.Configuration;
 using client.Core;
 using client.Core.Abstractions;
-using client.Core.Browser;
-using client.Core.Browser.Abstractions;
-using client.Core.Browser.Engines;
+using client.Core.BrowserAccessibility;
 using client.Core.DesktopEventBus;
 using client.Services;
 using client.Services.Watchers;
@@ -118,7 +116,7 @@ builder.Services.AddSingleton<IInstalledAppDetector, InstalledAppDetector>();
 // Package Detector (cross-platform — npm, pip, apt, brew, etc.)
 builder.Services.AddSingleton<IPackageDetector, PackageDetector>();
 
-// Platform-specific services (IShellCommandCollector removed per user request)
+// Platform-specific services
 if (OperatingSystem.IsWindows())
 {
     builder.Services.AddSingleton<IActivityCollector>(
@@ -145,53 +143,14 @@ builder.Services.AddHostedService<BackgroundGuardService>();
 builder.Services.AddSingleton<LogCollectorService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<LogCollectorService>());
 
-// Browser Journey Engine (debugger-only: CDP / RDP+BiDi / WebKit inspector)
-// Chain (aiplan.txt §29): Runtime → Coordinator → JourneyEngine → Store
-var dbPath = ResolveDbPath(config.DbPath);
+// Browser Journey (Option B — accessibility-based: reads the OS accessibility tree.
+// No debugger, no extension, no browser catalog dependency; works on every browser
+// and every Chrome version, including install→use→uninstall-in-5-min scenarios.)
 if (config.BrowserTrackingEnabled)
 {
-    builder.Services.AddSingleton<BrowserRuntimeStateStore>();
-    builder.Services.AddSingleton<IBrowserRuntimeStore>(sp => sp.GetRequiredService<BrowserRuntimeStateStore>());
-    builder.Services.AddSingleton<BrowserEventCoordinator>(sp => new BrowserEventCoordinator(
-        id => sp.GetRequiredService<BrowserRuntimeManager>().Lookup(id),
-        config.BrowserCoordinatorDedupSeconds));
-    builder.Services.AddSingleton<BrowserConnectionManager>();
-    builder.Services.AddSingleton<DebugPortManager>(sp => new DebugPortManager(
-        config.BrowserDebugPortStart, sp.GetRequiredService<IBrowserRuntimeStore>()));
-    builder.Services.AddSingleton<BrowserRuntimeManager>(sp =>
-    {
-        var cfg = sp.GetRequiredService<AppConfig>();
-        var manager = new BrowserRuntimeManager(
-            cfg,
-            new IBrowserEngineAdapter[]
-            {
-                new ChromiumEngineAdapter(sp.GetRequiredService<IInstalledAppDetector>(),
-                    cfg.BrowserAutoLaunch,
-                    TimeSpan.FromMinutes(cfg.BrowserHijackCooldownMinutes),
-                    sp.GetRequiredService<ILogger<ChromiumEngineAdapter>>()),
-                new GeckoEngineAdapter(sp.GetRequiredService<IInstalledAppDetector>(),
-                    cfg.BrowserAutoLaunch,
-                    TimeSpan.FromMinutes(cfg.BrowserHijackCooldownMinutes),
-                    sp.GetRequiredService<ILogger<GeckoEngineAdapter>>()),
-                new WebKitEngineAdapter(sp.GetRequiredService<IInstalledAppDetector>(),
-                    sp.GetRequiredService<ILogger<WebKitEngineAdapter>>()),
-            },
-            sp.GetRequiredService<IBrowserRuntimeStore>(),
-            sp.GetRequiredService<BrowserEventCoordinator>(),
-            sp.GetRequiredService<BrowserConnectionManager>(),
-            sp.GetRequiredService<DebugPortManager>(),
-            sp.GetRequiredService<ILogger<BrowserRuntimeManager>>());
-        return manager;
-    });
-    builder.Services.AddSingleton<BrowserJourneyEngine>();
-    builder.Services.AddHostedService(sp => new BrowserRuntimeHostedService(
-        sp.GetRequiredService<BrowserRuntimeManager>(),
-        sp.GetRequiredService<BrowserJourneyEngine>(),
-        sp.GetRequiredService<BrowserEventCoordinator>(),
-        sp.GetRequiredService<BrowserRuntimeStateStore>(),
-        dbPath,
-        sp.GetRequiredService<ILogger<BrowserRuntimeHostedService>>()));
-    builder.Services.AddHostedService<BrowserWatchdogService>();
+    builder.Services.AddSingleton<IAccessibilityBrowserReader>(sp =>
+        AccessibilityBrowserReaderFactory.Create(sp.GetRequiredService<ILoggerFactory>()));
+    builder.Services.AddHostedService<AccessibilityBrowserTracker>();
 }
 
 // Desktop Event Bus (File Explorer tracking via AT-SPI + FileSystemWatcher)

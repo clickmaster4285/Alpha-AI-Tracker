@@ -165,17 +165,76 @@ FINAL VERDICT (verified 2026-08-05 on Chrome 151):
     flag-honoring Chromium builds only.
   - Chrome 136+ real browsing is captured ONLY via the extension path (b).
 
+═ PIVOT — OPTION B: ACCESSIBILITY-TREE BROWSER JOURNEY (SHIPPED 2026-08-05) ═
+--------------------------------------------------------------------------
+The user chose Option B (no extension, no debugger): read the OS accessibility
+tree — the SAME tree screen readers use — to see the employee's REAL browser
+windows on every platform and every Chrome version, including the install→use→
+uninstall-in-5-minutes and never-restarts-for-a-week scenarios.
+
+EMPIRICAL VALIDATION on this machine (Chrome 151, live window):
+  - Browser windows are AT-SPI FRAME(23)/WINDOW(69) nodes under the app root.
+  - The omnibox is an ENTRY(79) node named "Address and search bar" whose Text
+    is the EXACT current URL/query — captured live:
+      "google.com/search?q=distorable+mean&sca_esv=..." (full query in the URL)
+  - Page title = FRAME Name; PAGE_TAB nodes = tabs. Headless instances skipped.
+  - AT-SPI2 D-Bus quirk: Name/Role are Properties.Get, GetChildren is a method,
+    text comes from org.a11y.atspi.Text.GetText. python3-dbus is present on
+    GNOME desktops (falls back gracefully when absent).
+
+WHAT WAS SHIPPED (client/Core/BrowserAccessibility/):
+  - IAccessibilityBrowserReader + AccessibilitySnapshot (window key, pid,
+    process name, title, normalized URL, incognito flag).
+  - LinuxAtSpiBrowserReader — python3 + AT-SPI probe (embedded script, no extra
+    files → installer parity), JSON output, 8s subprocess timeout, URL
+    normalization (omnibox shows no scheme → prepend https://), per-window
+    incognito detection (one incognito window never flags its siblings).
+  - WindowsUiaBrowserReader — UIA via Interop.UIAutomationClient (netstandard2.0
+    package; verified API surface by reflection) — "Address and search bar"
+    edit's ValuePattern = exact URL.
+  - MacOsAccessibilityBrowserReader — osascript/System Events (title always;
+    address-bar value best-effort; requires the Accessibility grant).
+  - AccessibilityBrowserTracker (BackgroundService) — polls every N s
+    (ALPHA_BROWSER_ACCESSIBILITY_POLL_SECONDS=3), one app_session per window +
+    browser_tab root item + browser_navigation items on URL change, idle-close
+    after ALPHA_BROWSER_JOURNEY_IDLE_MINUTES=15, missing-window close after 3
+    polls, graceful close on shutdown (no orphans), incognito URL capture gated
+    by ALPHA_BROWSER_CAPTURE_INCOGNITO=false (legal-safe default), download
+    watcher (browser_download items) attached to the most recent session.
+  - Also fixed: SqliteLogStore fuzzy-match AND/OR precedence bug (was returning
+    the junk 'chrome' row instead of 'Google Chrome'; now prefers is_browser
+    rows + shortest binary).
+
+REMOVED AS DEAD (per user request "remove dead code, unwanted code, db etc."):
+  - client/Core/Browser/* (16 files — the entire debugger pipeline: adapters,
+    CDP/RDP sessions, runtime manager/store, journey engine, watchdog, probe).
+  - client shell-command dead code: IShellCommandCollector, 3 platform
+    ShellCommandCollectors, ShellCommand model.
+  - client/publish/install-extensions.sh + the extensions/ bundling step in
+    build-installer.sh (no extensions/ dir ships anymore).
+  - server dead DTOs: BrowserContext*, FileExplorerContext*, Url*, UrlVisit*,
+    ShellCommand* (+ the ShellCommand model). No endpoints referenced them.
+  - AppConfig/.env/.env.example: all debugger knobs removed; 4 a11y knobs added.
+
+VERIFIED: dotnet build 0 errors / 27 warnings; go build + go vet clean;
+live runtime test captured a real Chrome journey into SQLite (session +
+browser_tab with the exact URL, graceful close on exit).
+
 STATUS (updated as work lands)
 ------------------------------
 [x] freebuffplan.txt written
-[x] Tiered attach + hijack restore in ChromiumEngineAdapter
-[x] RunningBrowserProbe (+ wired into Chromium/Gecko detection)
-[x] Ephemeral-tab dead branch fixed
-[x] Download watcher hardened
-[x] Idle-close sweep wired (BrowserJourneyIdleMinutes)
-[x] Reconnect backoff wired (Base/Max)
-[x] Coordinator dedup + start debounce wired
-[x] AppConfig/.env.example/.env updated (all knobs)
-[x] dotnet build green (0 errors)
-[x] Code review passed
+[x] Debugger pipeline (Core/Browser/*) REMOVED — replaced by Option B
+[x] BrowserAccessibility namespace (reader interface + 3 platform readers + factory)
+[x] AccessibilityBrowserTracker BackgroundService (poll/dedup/open/update/close/idle/downloads)
+[x] Linux AT-SPI reader validated live on Chrome 151 (exact URL from omnibox)
+[x] Windows UIA reader (Interop.UIAutomationClient, API verified by reflection)
+[x] macOS reader (osascript, best-effort, docs state the Accessibility grant)
+[x] Shell-command dead code removed (client + server)
+[x] Server dead DTOs removed
+[x] publish/install-extensions.sh + extensions bundling removed
+[x] SqliteLogStore fuzzy-match precedence bug fixed
+[x] AppConfig/.env.example/.env updated (a11y knobs only)
+[x] dotnet build green (0 errors), go build/vet clean
+[x] Code review issues fixed (incognito per-window, download sequence, shutdown hardening)
+[x] Runtime-tested: real Chrome journey captured in SQLite, graceful close on exit
 [x] updateplan.txt statuses updated

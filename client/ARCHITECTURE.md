@@ -1,7 +1,28 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-08-03 (installer-parity rule + single-instance/tray fix)  
+> **Last audited:** 2026-08-05 (Option B — accessibility-based browser journey)  
 > **Changelog:** 
+> - 2026-08-05: **Option B — accessibility-tree browser journey (debugger pipeline removed).**
+>   Chrome 136+ cannot be debugged on its real profile (verified: same-path `--user-data-dir` and
+>   `RemoteDebuggingAllowed` policy both fail) and extensions were ruled out, so the entire
+>   debugger pipeline (`Core/Browser/*` — 16 files: adapters, CDP/RDP sessions, runtime
+>   manager/store, journey engine, watchdog) was DELETED and replaced with a new
+>   `Core/BrowserAccessibility/` namespace that reads the OS accessibility tree — the same tree
+>   screen readers use — to capture the REAL browser journey on every platform and every Chrome
+>   version, with no debugger, no extension, and no browser-catalog dependency (an installed→
+>   used→uninstalled-in-5-min browser is captured). Linux: python3+AT-SPI probe (empirically
+>   validated on Chrome 151 — the omnibox ENTRY node "Address and search bar" exposes the exact
+>   URL/query). Windows: UIA via `Interop.UIAutomationClient` (netstandard2.0, API verified by
+>   reflection). macOS: osascript/System Events (best-effort; Accessibility grant required).
+>   `AccessibilityBrowserTracker` polls every `ALPHA_BROWSER_ACCESSIBILITY_POLL_SECONDS` (3),
+>   writes one `app_sessions` per window + `browser_tab`/`browser_navigation` `app_items`,
+>   idle-closes after `ALPHA_BROWSER_JOURNEY_IDLE_MINUTES` (15), closes vanished windows after 3
+>   polls, closes gracefully on shutdown, watches Downloads for `browser_download` items, and
+>   gates incognito URLs behind `ALPHA_BROWSER_CAPTURE_INCOGNITO=false`. Dead code removed:
+>   shell-command collectors (interface + 3 impls + model), `publish/install-extensions.sh`,
+>   and the `extensions/` bundling step. Also fixed the `SqliteLogStore` fuzzy-match AND/OR
+>   precedence bug (junk `chrome` row beat `Google Chrome`; now prefers `is_browser` rows).
+>   Env knobs are now a11y-only (installer parity: `.env` + `.env.example` updated).
 > - 2026-08-03: **Single-instance + tray UX fix; Installer-Parity rule** — a second launch now restores the running window (`SingleInstance.cs` named-event signaling), the tray menu gains **Quit**, and on tray-less desktops (no StatusNotifierWatcher — `Services/TrayAvailability.cs` D-Bus check) closing the window exits instead of stranding an invisible process. Added the mandatory **Build-Parity Rule** (§8): every feature/modification must also be wired into the installer packaging and verified from an installed build — `dotnet run` is not a valid release test.
 > - 2026-08-01: **Docs audit** — removed stale `activity_logs` / `shell_commands` schema + sync references (both gone from the product), corrected sync endpoint table (7 endpoints, batch 500), documented the `MigrateSql` migration strategy, added `storage_devices`/`permission_status`/`app_items` tables, noted `IShellCommandCollector`/`ShellCommand` as dead code, added `FileLoggerProvider` (dotnetrunlog.txt), added `install-extensions.sh`, and cleaned up the completion % to ~85%.
 > - 2026-07-31: **Cross-service payload sync + local catalog dedup** — installed-apps mapper now sends `binaryName`/`isBrowser`/`desktopId`/`categories`; app-sessions sends `groupedBy`/`cgroupScope`/`contextLabel`; app-items sends `processId` + all 9 journey fields. `installed_applications` conflict-update resets `is_synced = 0` so re-detected apps re-sync (drives server `last_seen_at` freshness). `installed_packages` switches to `ON CONFLICT(package_name, source_manager)` with a dedup block (window fn keeps newest per fingerprint) + `CREATE UNIQUE INDEX IF NOT EXISTS idx_installed_packages_fingerprint` in `MigrateSql` — fixes the 6,530-row duplicate package bloat caused by `ON CONFLICT(id)` never conflicting.
@@ -78,6 +99,7 @@
 | **DI/Hosting** | Microsoft.Extensions.Hosting | 10.0.10 |
 | **HTTP Client** | System.Net.Http (built-in) | — |
 | **D-Bus** | Tmds.DBus.Protocol | 0.94.2 |
+| **UIA (Windows reader)** | Interop.UIAutomationClient | 10.19041.0 |
 | **Diagnostics** | AvaloniaUI.DiagnosticsSupport | 2.2.3 (Debug only) |
 
 ### Notable Omissions
@@ -111,8 +133,16 @@ client/
 │   │   ├── IActivityCollector.cs       # Single method: CollectAsync → ActivityLog[]
 │   │   ├── ILogStore.cs                # 40+ methods: store/retrieve-unsent/mark-sent for 8 tables + lookup + journey + close paths
 │   │   ├── IInstalledAppDetector.cs    # GUI/desktop app detection + permission status
-│   │   ├── IPackageDetector.cs         # CLI tool/runtime/library detection from package managers
-│   │   └── IShellCommandCollector.cs   # ⚠️ DEAD CODE — interface + 3 platform impls still exist, NOT registered in DI
+│   │   └── IPackageDetector.cs         # CLI tool/runtime/library detection from package managers
+│   ├── BrowserAccessibility/
+│   │   ├── IAccessibilityBrowserReader.cs   # Browser-window snapshot contract (platform readers)
+│   │   ├── AccessibilitySnapshot.cs         # window key, pid, process, title, normalized URL, incognito flag
+│   │   ├── LinuxAtSpiBrowserReader.cs       # python3 + AT-SPI D-Bus probe (embedded script) — validated on Chrome 151
+│   │   ├── WindowsUiaBrowserReader.cs       # UIA via Interop.UIAutomationClient (address bar ValuePattern)
+│   │   ├── MacOsAccessibilityBrowserReader.cs # osascript/System Events (Accessibility grant required)
+│   │   ├── AccessibilityBrowserReaderFactory.cs # platform picker
+│   │   ├── AccessibilityBrowserTracker.cs   # BackgroundService: poll → sessions/items → idle-close → downloads
+│   │   └── BrowserAccessibilityHelpers.cs   # URL normalization, domain extraction, incognito hints
 │   ├── DesktopEventBus/
 │   │   ├── IObservableEventSource.cs   # Common interface for all watchers (atspi, filesystem, recentfiles)
 │   │   ├── RawDesktopEvent.cs          # Raw OS-level event from watchers
@@ -126,8 +156,7 @@ client/
 │   │   ├── AppSession.cs               # AppSession + AppItem (self-referencing, url/domain + 9 journey fields)
 │   │   ├── DeviceHardwareInfo.cs       # DeviceHardwareInfo, InstalledApplication, InstalledPackage, NetworkInfo, SessionEvent, StorageDevice
 │   │   ├── EmployeeInfo.cs             # Employee login info (persisted in SQLite)
-│   │   ├── SessionInfo.cs              # Static session ID (generated once per app launch)
-│   │   └── ShellCommand.cs             # ⚠️ DEAD CODE — model still exists, no table, no sync
+│   │   └── SessionInfo.cs              # Static session ID (generated once per app launch)
 │   ├── CollectionExtensions.cs         # Small LINQ-style helpers used across collection code
 │   ├── EncryptedConfigService.cs       # AES-256-GCM encryption with transport key + machine-derived key
 │   ├── CgroupResolver.cs               # Linux /proc/<pid>/cgroup → systemd app-*.scope (session dedup key; null elsewhere)
@@ -145,19 +174,14 @@ client/
 │
 ├── Platform/
 │   ├── Windows/
-│   │   ├── ProcessCollector.cs          # User32.dll-based: EnumWindows, GetForegroundWindow, CPU via TotalProcessorTime
-│   │   └── ShellCommandCollector.cs     # ⚠️ DEAD CODE (not registered in DI)
+│   │   └── ProcessCollector.cs          # User32.dll-based: EnumWindows, GetForegroundWindow, CPU via TotalProcessorTime
 │   ├── MacOS/
-│   │   ├── ProcessCollector.cs          # osascript-based foreground window detection. ⚠️ No CPU measurement, no all-window-enum
-│   │   └── ShellCommandCollector.cs     # ⚠️ DEAD CODE (not registered in DI)
+│   │   └── ProcessCollector.cs          # osascript-based foreground window detection. ⚠️ No CPU measurement, no all-window-enum
 │   └── Linux/
-│       ├── ProcessCollector.cs          # Multi-strategy: xprop, xdotool, gdbus (atspi/portal/shell), Python AT-SPI script
-│       └── ShellCommandCollector.cs     # ⚠️ DEAD CODE (not registered in DI)
+│       └── ProcessCollector.cs          # Multi-strategy: xprop, xdotool, gdbus (atspi/portal/shell), Python AT-SPI script
 │
 ├── Services/
 │   ├── LogCollectorService.cs           # BackgroundService: collect → resolve → store app_sessions → sync → heartbeat cycle (30s loop)
-│   ├── NativeMessageService.cs          # BackgroundService: Unix socket listener for browser navigation events (Native Messaging bridge)
-│   ├── BrowserExtensionService.cs       # Browser detection + extension install (two-strategy: --load-extension / profile injection)
 │   ├── BackgroundGuardService.cs        # Watchdog: re-installs auto-start/systemd if removed (60s check)
 │   ├── AutoStartService.cs              # Platform-specific auto-start: Run key, .desktop, launchd plist
 │   ├── DesktopEventService.cs           # BackgroundService: orchestrator — starts watchers, wires EventCoordinator → JourneyEngine
@@ -188,12 +212,6 @@ client/
 ├── Styles/
 │   └── AppTheme.xaml                    # Dark theme color definitions, brushes, radii, fonts, button styles
 │
-├── extensions/
-│   ├── chrome/background.js + manifest.json  # Chrome MV3 extension (tab/URL capture)
-│   ├── firefox/background.js + manifest.json # Firefox MV3 extension
-│   ├── native-host.py                    # Native Messaging stdio bridge (extension ↔ tracker socket)
-│   └── com.alphai.tracker.json          # Native Messaging host manifest
-│
 └── publish/
     ├── build-installer.sh               # Cross-platform installer builder
     ├── encrypt-config.sh                # Config encryption script
@@ -201,8 +219,7 @@ client/
     ├── release.sh                       # Release workflow script
     ├── build-deb.sh                     # Linux .deb builder (prerm kills running instances)
     ├── build-dmg.sh                     # macOS .dmg builder
-    ├── install-extensions.sh            # Installs browser extension + native messaging host
-    └── {linux,macos,windows}/           # Pre-published platform builds (client + deps + extensions)
+    └── {linux,macos,windows}/           # Pre-published platform builds (client + deps)
 ```
 
 ---
@@ -243,9 +260,9 @@ Microsoft.Extensions.Hosting (`Host.CreateApplicationBuilder`). All services reg
 
 | Lifetime | Services |
 |---|---|
-| **Singleton** | `AppConfig`, `ILogStore`, `HttpClient`, `IInstalledAppDetector`, `IPackageDetector`, `IActivityCollector`, `AutoStartService`, `LogCollectorService`, `NativeMessageService`, `BrowserExtensionService`, `EventCoordinator`, `JourneyEngine`, `ATSPIEventWatcher`, `FileSystemEventWatcher`, `RecentFilesWatcher` |
+| **Singleton** | `AppConfig`, `ILogStore`, `HttpClient`, `IInstalledAppDetector`, `IPackageDetector`, `IActivityCollector`, `AutoStartService`, `LogCollectorService`, `IAccessibilityBrowserReader` (platform reader), `EventCoordinator`, `JourneyEngine`, `ATSPIEventWatcher`, `FileSystemEventWatcher`, `RecentFilesWatcher` |
 | **Transient** | `MainViewModel` |
-| **Hosted** | `BackgroundGuardService`, `LogCollectorService`, `NativeMessageService`, `DesktopEventService` |
+| **Hosted** | `BackgroundGuardService`, `LogCollectorService`, `AccessibilityBrowserTracker`, `DesktopEventService` |
 
 ViewModels are resolved from DI when the window is created (`App.axaml.cs` uses `ServiceProvider.GetRequiredService<MainViewModel>()`).
 
@@ -463,6 +480,21 @@ On startup it also runs, in order:
 - `CleanupNonGuiAppEntriesAsync` — removes non-GUI `installed_applications` entries (sh, snap) auto-registered before the GUI gate
 - Immediate hardware + network collection
 
+### Browser Journey (Option B — accessibility tree)
+
+`AccessibilityBrowserTracker` is an independent `BackgroundService` that does NOT wait for login and does NOT depend on the installed-apps catalog:
+
+1. Every `ALPHA_BROWSER_ACCESSIBILITY_POLL_SECONDS` (default 3) it calls `IAccessibilityBrowserReader.ReadAsync()` — a short platform probe that returns the currently-visible browser windows (`AccessibilitySnapshot`: window key, pid, process, title, normalized address-bar URL, incognito flag).
+2. **Linux** — embedded python3 + AT-SPI D-Bus script: FRAME/WINDOW nodes → the `ENTRY` node named `"Address and search bar"` (the omnibox) whose `Text` is the exact URL/query (scheme-less — the reader prepends `https://`); page title = FRAME `Name`. Validated live on Chrome 151.
+3. **Windows** — UIA via `Interop.UIAutomationClient`: top-level Window elements → Edit elements; the `"Address and search bar"` edit's `ValuePattern.CurrentValue` is the URL.
+4. **macOS** — osascript/System Events: window titles + best-effort address-bar value (requires the Accessibility permission granted at install).
+5. For each window: first sight → new `app_sessions` row + `browser_tab` root `app_items` row (`url`/`domain`/`journey_id`); address-bar URL change → `browser_navigation` child item (`previous_path` → `current_path`); title-only change → root item refresh.
+6. A window absent for 3 consecutive polls is closed; a window with no URL/title change for `ALPHA_BROWSER_JOURNEY_IDLE_MINUTES` (15) is idle-closed; shutdown closes everything gracefully via `CloseSessionsAndAppItemsAsync` (no orphans).
+7. Downloads in `~/Downloads` are appended to the most recent browser session as `browser_download` items.
+8. Incognito windows are detected (title/cmdline) and flagged in metadata; their URLs are stored only when `ALPHA_BROWSER_CAPTURE_INCOGNITO=true` (default off — legal-safe; private browsing is not silently recorded).
+
+This replaces the debugger pipeline entirely — it works on every Chrome version (incl. 136+), every browser, and even a browser installed → used → uninstalled within minutes (nothing to detect; it reads the screen).
+
 ### Collection Cycle (every 30s)
 
 ```
@@ -573,7 +605,6 @@ On startup it also runs, in order:
 | `build-deb.sh` | Linux: creates `.deb` package with prerm script to kill running instances |
 | `build-dmg.sh` | macOS: creates `.dmg` disk image |
 | `installer-windows.iss` | Windows: Inno Setup script for `.exe` installer (auto-kills running processes) |
-| `install-extensions.sh` | Installs the browser extension + native messaging host manifest |
 | `release.sh` | GitHub release workflow script |
 | `encrypt-config.sh` | Encrypts `.env` → `config.enc` for distribution |
 
@@ -620,7 +651,7 @@ Checklist:
 | **No storage quota** | 🟢 Low | SQLite grows unbounded (no periodic deletion of old synced data — only the `permission_status` 24h prune and boot-time cleanup passes exist). Could fill disk on a heavily used machine. |
 | **No retry backoff** | 🟢 Low | Retries sync every ~5 min regardless of failure count. No exponential backoff. |
 | **Single employee per device** | 🟢 Low | Only one employee can be logged in at a time. Logging in as a different employee wipes the previous session. |
-| **Dead shell-command code** | 🟢 Low | `IShellCommandCollector`, 3 platform `ShellCommandCollector` impls, and `ShellCommand` model still exist but are unused (not registered in DI). Safe to delete. |
+| **Browser journey = active tab only** | 🟢 Low | The accessibility tree shows the ACTIVE tab's URL (address bar). Background tabs are not captured (Chrome does not expose them to AT-SPI the same way). Window-level journey is exact; per-tab parallelism is not. |
 
 ---
 
@@ -634,8 +665,9 @@ Checklist:
 6. **Add periodic data cleanup** — delete old synced rows (only `permission_status` is pruned today)
 7. **Add offline retry with backoff** — exponential backoff on sync failures to reduce server load
 8. **Consider auto-update** — integrate Velopack or Squirrel.Windows for silent updates
-9. **Remove dead shell-command code** — delete `IShellCommandCollector`, the 3 `ShellCommandCollector` impls, and the `ShellCommand` model
+9. ~~**Remove dead shell-command code** — `IShellCommandCollector`, 3 impls, `ShellCommand` model deleted (2026-08-05)~~ ✅ DONE
 10. ~~**Add process ancestry tracking** — persist parent PID chain from `ParentProcessResolver` into `AppItem`~~ ✅ DONE
-11. ~~**Browser extension for full URL capture** — MV3 extension + native messaging (chrome + firefox) implemented, URLs/domains stored on `app_items`~~ ✅ DONE
+11. ~~**Browser journey via debugger/extension** — REPLACED (2026-08-05) by Option B: accessibility-tree capture (`Core/BrowserAccessibility`), validated on Chrome 151 — works on Chrome 136+, no extension, no debugger~~ ✅ DONE
 12. ~~**AT-SPI for Wayland window enumeration** — File Explorer journey tracking (3 watchers + EventCoordinator + JourneyEngine)~~ ✅ DONE
 13. ~~**File manager via `xdg-open` hook or inotify** — RecentFilesWatcher + FileSystemEventWatcher + ATSPIEventWatcher~~ ✅ DONE
+14. **Installed-build acceptance** — rebuild the installer (installer-parity rule) and verify the a11y journey from the installed build
