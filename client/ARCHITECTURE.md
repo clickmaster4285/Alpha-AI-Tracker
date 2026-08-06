@@ -1,7 +1,25 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-08-05 (Option B — accessibility-based browser journey)  
+> **Last audited:** 2026-08-06 (Option B + profile-History URL fallback)  
 > **Changelog:** 
+> - 2026-08-06: **Hybrid URL fallback — browser profile History reader (no restart, all browsers).**
+>   Chrome 136+ on Linux never exposes the omnibox URL via AT-SPI unless launched with
+>   `--force-renderer-accessibility` (restart = rejected by the product). NEW
+>   `Core/BrowserAccessibility/BrowserHistoryReader.cs` reads the browser's own profile database —
+>   Chromium-family `History` (Chrome/Edge/Brave/Opera/Vivaldi) and Firefox `places.sqlite` — while
+>   the browser RUNS: DB + `-wal`/`-shm`/`-journal` sidecars are copied to a temp dir and opened
+>   read-only (a torn snapshot is swallowed and retried next poll), change signatures throttle
+>   re-reads, and resolution is STRICTLY title-match (no newest-visit fallback → no cross-window
+>   misattribution). Generic `~/.config`/`~/.mozilla` scans (plus Windows/macOS roots) discover
+>   brand-new browser profiles (install→use→uninstall-in-5-min journeys captured while alive).
+>   Wired into `AccessibilityBrowserTracker.EnrichUrlsFromHistoryAsync` (fills empty URLs before tab
+>   logic; URL-less title changes don't rotate tabs until history catches up); URLs tagged
+>   `metadata_json.source="history"` vs `"a11y"` via new `AccessibilitySnapshot.UrlSource`; shared
+>   `StripBrowserSuffix` helper added. Config: `ALPHA_BROWSER_HISTORY_ENABLED=true` (default),
+>   `ALPHA_BROWSER_HISTORY_POLL_SECONDS=10`; `.env.example` + `--print-config` updated. Verified live
+>   on Linux: running Chrome 151, snap Firefox (AppArmor blocks D-Bus, not file reads), a fresh
+>   brand-new profile, and an end-to-end tracker run (title + full URL + domain + `source=history`
+>   in `app_items`).
 > - 2026-08-05: **Option B — accessibility-tree browser journey (debugger pipeline removed).**
 >   Chrome 136+ cannot be debugged on its real profile (verified: same-path `--user-data-dir` and
 >   `RemoteDebuggingAllowed` policy both fail) and extensions were ruled out, so the entire
@@ -136,13 +154,14 @@ client/
 │   │   └── IPackageDetector.cs         # CLI tool/runtime/library detection from package managers
 │   ├── BrowserAccessibility/
 │   │   ├── IAccessibilityBrowserReader.cs   # Browser-window snapshot contract (platform readers)
-│   │   ├── AccessibilitySnapshot.cs         # window key, pid, process, title, normalized URL, incognito flag
+│   │   ├── AccessibilitySnapshot.cs         # window key, pid, process, title, normalized URL, UrlSource, incognito flag
 │   │   ├── LinuxAtSpiBrowserReader.cs       # python3 + AT-SPI D-Bus probe (embedded script) — validated on Chrome 151
 │   │   ├── WindowsUiaBrowserReader.cs       # UIA via Interop.UIAutomationClient (address bar ValuePattern)
 │   │   ├── MacOsAccessibilityBrowserReader.cs # osascript/System Events (Accessibility grant required)
 │   │   ├── AccessibilityBrowserReaderFactory.cs # platform picker
-│   │   ├── AccessibilityBrowserTracker.cs   # BackgroundService: poll → sessions/items → idle-close → downloads
-│   │   └── BrowserAccessibilityHelpers.cs   # URL normalization, domain extraction, incognito hints
+│   │   ├── BrowserHistoryReader.cs          # NEW: reads browser profile History/places.sqlite (safe copy+WAL) while running — title-match URL fallback, brand-new-profile discovery
+│   │   ├── AccessibilityBrowserTracker.cs   # BackgroundService: poll → history enrichment → sessions/items → idle-close → downloads
+│   │   └── BrowserAccessibilityHelpers.cs   # URL normalization, domain extraction, StripBrowserSuffix, incognito hints
 │   ├── DesktopEventBus/
 │   │   ├── IObservableEventSource.cs   # Common interface for all watchers (atspi, filesystem, recentfiles)
 │   │   ├── RawDesktopEvent.cs          # Raw OS-level event from watchers
@@ -488,12 +507,13 @@ On startup it also runs, in order:
 2. **Linux** — embedded python3 + AT-SPI D-Bus script: FRAME/WINDOW nodes → the `ENTRY` node named `"Address and search bar"` (the omnibox) whose `Text` is the exact URL/query (scheme-less — the reader prepends `https://`); page title = FRAME `Name`. Validated live on Chrome 151.
 3. **Windows** — UIA via `Interop.UIAutomationClient`: top-level Window elements → Edit elements; the `"Address and search bar"` edit's `ValuePattern.CurrentValue` is the URL.
 4. **macOS** — osascript/System Events: window titles + best-effort address-bar value (requires the Accessibility permission granted at install).
-5. For each window: first sight → new `app_sessions` row + `browser_tab` root `app_items` row (`url`/`domain`/`journey_id`); address-bar URL change → `browser_navigation` child item (`previous_path` → `current_path`); title-only change → root item refresh.
-6. A window absent for 3 consecutive polls is closed; a window with no URL/title change for `ALPHA_BROWSER_JOURNEY_IDLE_MINUTES` (15) is idle-closed; shutdown closes everything gracefully via `CloseSessionsAndAppItemsAsync` (no orphans).
-7. Downloads in `~/Downloads` are appended to the most recent browser session as `browser_download` items.
-8. Incognito windows are detected (title/cmdline) and flagged in metadata; their URLs are stored only when `ALPHA_BROWSER_CAPTURE_INCOGNITO=true` (default off — legal-safe; private browsing is not silently recorded).
+5. **URL fallback — `BrowserHistoryReader`** (new, `ALPHA_BROWSER_HISTORY_ENABLED`, default on): after `ReadAsync`, `EnrichUrlsFromHistoryAsync` fills any snapshot whose a11y URL is empty by matching the window title against the browser's own profile history database — Chromium `History` (Chrome/Edge/Brave/Opera/Vivaldi) and Firefox `places.sqlite`. Read while the browser runs via temp copy of DB + `-wal`/`-shm`/`-journal` sidecars (read-only; torn snapshots retried next poll), throttled by change signatures (`ALPHA_BROWSER_HISTORY_POLL_SECONDS`, default 10). Resolution is STRICTLY title-match — no unconditional newest-visit fallback, so multiple open windows never receive a misattributed URL. Generic scans of `~/.config`/`~/.mozilla` (plus Windows/macOS profile roots) discover brand-new browsers, so install→use→uninstall-in-5-min journeys are captured while the browser is alive. URLs recovered this way are tagged `metadata_json.source="history"` (vs `"a11y"`).
+6. For each window: first sight → new `app_sessions` row + `browser_tab` root `app_items` row (`url`/`domain`/`journey_id`); URL change → `browser_navigation` child item (`previous_path` → `current_path`); title-only change → root item refresh (URL-less titles don't rotate until history catches up).
+7. A window absent for 3 consecutive polls is closed; a window with no URL/title change for `ALPHA_BROWSER_JOURNEY_IDLE_MINUTES` (15) is idle-closed; shutdown closes everything gracefully via `CloseSessionsAndAppItemsAsync` (no orphans).
+8. Downloads in `~/Downloads` are appended to the most recent browser session as `browser_download` items.
+9. Incognito windows are detected (title/cmdline) and flagged in metadata; their URLs are stored only when `ALPHA_BROWSER_CAPTURE_INCOGNITO=true` (default off — legal-safe; private browsing is not silently recorded; private visits are also absent from the profile History DB).
 
-This replaces the debugger pipeline entirely — it works on every Chrome version (incl. 136+), every browser, and even a browser installed → used → uninstalled within minutes (nothing to detect; it reads the screen).
+This replaces the debugger pipeline entirely — it works on every Chrome version (incl. 136+), every browser (a11y URL where exposed, profile History fallback everywhere else — Chrome 136+ on Linux, snap Firefox), and even a browser installed → used → uninstalled within minutes (nothing to detect; it reads the screen + the profile diary).
 
 ### Collection Cycle (every 30s)
 
@@ -651,7 +671,7 @@ Checklist:
 | **No storage quota** | 🟢 Low | SQLite grows unbounded (no periodic deletion of old synced data — only the `permission_status` 24h prune and boot-time cleanup passes exist). Could fill disk on a heavily used machine. |
 | **No retry backoff** | 🟢 Low | Retries sync every ~5 min regardless of failure count. No exponential backoff. |
 | **Single employee per device** | 🟢 Low | Only one employee can be logged in at a time. Logging in as a different employee wipes the previous session. |
-| **Browser journey = active tab only** | 🟢 Low | The accessibility tree shows the ACTIVE tab's URL (address bar). Background tabs are not captured (Chrome does not expose them to AT-SPI the same way). Window-level journey is exact; per-tab parallelism is not. |
+| **Browser journey = active tab only** | 🟢 Low | The accessibility tree + profile-History fallback cover the ACTIVE tab's URL. Background tabs are not captured (Chrome does not expose them to AT-SPI, and history title-match is window-title based). Window-level journey is exact; per-tab parallelism is not. |
 
 ---
 

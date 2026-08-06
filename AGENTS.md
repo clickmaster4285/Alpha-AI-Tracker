@@ -3,6 +3,27 @@
 > **Last audited:** 2026-08-06
 > **Changelog:**
 >
+> - 2026-08-06: **Hybrid URL fallback — browser profile History reader (no restart, all browsers).**
+>   Chrome 136+ (verified on Chrome 151) ignores every AT-SPI enablement switch on Linux, so a11y
+>   gave titles but empty URLs unless the browser was relaunched with `--force-renderer-accessibility`
+>   (restart = rejected). NEW `Core/BrowserAccessibility/BrowserHistoryReader.cs` reads each browser's
+>   own profile history database — Chromium-family `History` (Chrome/Edge/Brave/Opera/Vivaldi/
+>   Chromium) and Firefox `places.sqlite` — WHILE the browser runs: DB + `-wal`/`-shm`/`-journal`
+>   sidecars copied to a temp dir and opened read-only (torn snapshots can't corrupt anything;
+>   failures are swallowed and retried next poll), change signatures throttle re-reads, and URL
+>   resolution is STRICTLY title-match (no unconditional newest-visit fallback — multi-window setups
+>   never get a misattributed URL). Generic scans of `~/.config` and `~/.mozilla` (plus per-platform
+>   roots on Windows/macOS) catch brand-new browsers — install→use→uninstall-in-5-min journeys are
+>   captured before the uninstaller deletes the diary. Verified live on this machine: running Chrome
+>   151 (`Web analytics - Wikipedia` → exact URL), snap Firefox (AppArmor blocks D-Bus but NOT file
+>   reads → URL recovered from `places.sqlite`), a fresh brand-new profile, and a full tracker run
+>   (DB rows show title + full URL + domain with `metadata_json.source="history"`).
+>   `AccessibilityBrowserTracker.EnrichUrlsFromHistoryAsync` fills empty URLs before the tab logic;
+>   URL-less title changes no longer rotate tabs until history catches up (kills the spurious
+>   empty-URL rotation). New `AccessibilitySnapshot.UrlSource` (`a11y`|`history`), shared
+>   `StripBrowserSuffix` helper, config knobs `ALPHA_BROWSER_HISTORY_ENABLED` (default true) +
+>   `ALPHA_BROWSER_HISTORY_POLL_SECONDS` (default 10); `.env.example` + `--print-config` updated.
+>   Pure code — no installer asset changes (config flows through the existing `config.enc` pipeline).
 > - 2026-08-06: **Per-page browser_tab records (no more title overwrite)** — `AccessibilityBrowserTracker`
 >   used to UPDATE the single `browser_tab` root item in place on every navigation (ON CONFLICT DO
 >   UPDATE replaces `title`), so "YouTube - Google Chrome" silently became the video page. Now each
@@ -10,8 +31,8 @@
 >   `is_synced=0` so the server learns the close even for already-synced rows — and OPENS a fresh
 >   `browser_tab` record; `browser_navigation` children still record transitions. Title-only changes
 >   rotate only after a ~10s stability window (badge/timer flicker is filtered); real URL changes
->   rotate immediately. Known env gap (Linux/Chrome): URLs stay empty on machines where Chrome 136+
->   doesn't populate its AT-SPI subtree (no assistive-tech client active) — titles are still captured.
+>   rotate immediately. The Linux/Chrome empty-URL gap is RESOLVED below (2026-08-06 history-reader
+>   fallback fills URLs from the browser's own profile History DB while it runs — no restart).
 > - 2026-08-06: **Crash-loop fix: duplicate-PID open sessions in `SessionHierarchyResolver`** — the
 >   accessibility browser tracker writes one `app_sessions` per browser window (ProcessId = browser main
 >   pid) while the process collector writes its own session for the same browser process, so two open

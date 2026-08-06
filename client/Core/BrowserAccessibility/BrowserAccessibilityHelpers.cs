@@ -69,6 +69,25 @@ public static class BrowserAccessibilityHelpers
         return string.Empty;
     }
 
+    /// <summary>
+    /// Strip the browser suffix from a window title ("YouTube - Google Chrome" → "YouTube").
+    /// Used both for display names and for matching a window title against history titles.
+    /// </summary>
+    public static string StripBrowserSuffix(string title)
+    {
+        if (string.IsNullOrWhiteSpace(title)) return "Browser";
+        foreach (var marker in new[]
+                 {
+                     " - Google Chrome", " - Mozilla Firefox", " - Microsoft Edge",
+                     " - Brave", " - Opera", " - Vivaldi", " - Chromium",
+                 })
+        {
+            var idx = title.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (idx > 0) return title[..idx].Trim();
+        }
+        return title.Trim();
+    }
+
     /// <summary>Heuristic incognito detection from window title text.</summary>
     public static bool TitleSuggestsIncognito(string title) =>
         title.Contains("incognito", StringComparison.OrdinalIgnoreCase) ||

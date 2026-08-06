@@ -18,6 +18,12 @@ public class AppConfig
     public int BrowserJourneyIdleMinutes { get; init; } = 15;    // close journeys after this many idle minutes
     public bool BrowserCaptureIncognito { get; init; } = false;  // store incognito URLs (legal review required; default off)
 
+    // Browser journey URL fallback — reads the browser's OWN profile history DB when the
+    // a11y tree cannot expose the omnibox URL (Linux Chrome 136+ / snap Firefox). Works
+    // while the browser runs; no restart, no flag, no extension.
+    public bool BrowserHistoryEnabled { get; init; } = true;
+    public int BrowserHistoryPollSec { get; init; } = 10;        // how often history DBs are re-scanned/re-read
+
     public static AppConfig FromEnv()
     {
         return new AppConfig
@@ -33,6 +39,8 @@ public class AppConfig
             BrowserAccessibilityPollSec = int.TryParse(GetEnv("ALPHA_BROWSER_ACCESSIBILITY_POLL_SECONDS"), out var poll) ? poll : 3,
             BrowserJourneyIdleMinutes = int.TryParse(GetEnv("ALPHA_BROWSER_JOURNEY_IDLE_MINUTES"), out var idle) ? idle : 15,
             BrowserCaptureIncognito = GetEnv("ALPHA_BROWSER_CAPTURE_INCOGNITO") is ("1" or "true" or "True"),
+            BrowserHistoryEnabled = GetEnv("ALPHA_BROWSER_HISTORY_ENABLED") is not ("0" or "false" or "False"),
+            BrowserHistoryPollSec = int.TryParse(GetEnv("ALPHA_BROWSER_HISTORY_POLL_SECONDS"), out var histPoll) ? histPoll : 10,
         };
     }
 

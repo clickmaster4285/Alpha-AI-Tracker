@@ -26,6 +26,7 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
 {
     private readonly AppConfig _config;
     private readonly IAccessibilityBrowserReader _reader;
+    private readonly BrowserHistoryReader? _history;
     private readonly ILogStore _store;
     private readonly ILogger<AccessibilityBrowserTracker> _logger;
 
@@ -65,10 +66,12 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
         AppConfig config,
         IAccessibilityBrowserReader reader,
         ILogStore store,
-        ILogger<AccessibilityBrowserTracker> logger)
+        ILogger<AccessibilityBrowserTracker> logger,
+        BrowserHistoryReader? history = null)
     {
         _config = config;
         _reader = reader;
+        _history = history;
         _store = store;
         _logger = logger;
     }
@@ -137,6 +140,7 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
             await RefreshEmployeeInfoAsync(ct);
 
         var snapshots = await _reader.ReadAsync(ct);
+        snapshots = await EnrichUrlsFromHistoryAsync(snapshots, ct);
 
         var present = new HashSet<string>();
         foreach (var snap in snapshots)
@@ -246,7 +250,7 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
             Id = sessionId,
             ProcessName = snap.ProcessName,
             AppDisplayName = string.IsNullOrWhiteSpace(displayName)
-                ? StripBrowserSuffix(snap.WindowTitle)
+                ? BrowserAccessibilityHelpers.StripBrowserSuffix(snap.WindowTitle)
                 : displayName,
             StartedAt = now,
             MachineId = _config.ClientId,
@@ -315,11 +319,17 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
         // journey. A real URL change (true navigation) rotates immediately. LastTitle is
         // NOT advanced during the hold, so the next poll still sees the pending change and
         // the video page is never silently merged into the previous page's record.
-        if (titleChanged && !urlChanged)
+        //
+        // History-lag case: the title already changed but the history-DB fallback has not
+        // flushed the new URL yet (enrichment returned empty). Treat it like a pending
+        // change too — rotate on the FIRST poll that carries the resolved URL instead of
+        // writing a spurious empty-URL tab record now.
+        var historyLag = string.IsNullOrEmpty(url) && !string.IsNullOrEmpty(tw.LastUrl);
+        if (titleChanged && (!urlChanged || historyLag))
         {
             var stable = string.Equals(snap.WindowTitle, tw.PendingTitle, StringComparison.Ordinal)
                          && now - tw.PendingSinceUtc >= MinTabRotationInterval;
-            if (!stable)
+            if (!stable || historyLag)
             {
                 if (!string.Equals(snap.WindowTitle, tw.PendingTitle, StringComparison.Ordinal))
                 {
@@ -455,25 +465,84 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
         return snap.Url ?? string.Empty;
     }
 
+    /// <summary>
+    /// Hybrid URL recovery: when the OS accessibility tree cannot expose the omnibox URL
+    /// (Linux Chrome 136+ built without --force-renderer-accessibility; snap Firefox is
+    /// AppArmor-blocked), fall back to the browser's OWN profile history database — read
+    /// while the browser is running, no restart needed. Windows/macOS readers usually
+    /// already return the URL, so the history path only fills the empty gaps.
+    /// </summary>
+    private async Task<IReadOnlyList<AccessibilitySnapshot>> EnrichUrlsFromHistoryAsync(
+        IReadOnlyList<AccessibilitySnapshot> snapshots, CancellationToken ct)
+    {
+        if (_history is null || !_config.BrowserHistoryEnabled)
+            return snapshots;
+
+        // Fast path: every snapshot already has a URL (Windows/macOS readers) — nothing to do.
+        if (snapshots.All(s => !string.IsNullOrWhiteSpace(s.Url)))
+            return snapshots;
+
+        _history.Refresh();
+
+        var result = new List<AccessibilitySnapshot>(snapshots.Count);
+        foreach (var snap in snapshots)
+        {
+            if (!string.IsNullOrWhiteSpace(snap.Url))
+            {
+                result.Add(snap);
+                continue;
+            }
+
+            try
+            {
+                var visit = _history.TryResolveUrl(snap.ProcessName, snap.WindowTitle, snap.CapturedAt);
+                if (visit is null || string.IsNullOrWhiteSpace(visit.Url))
+                {
+                    result.Add(snap);
+                    continue;
+                }
+
+                var url = BrowserAccessibilityHelpers.NormalizeUrl(visit.Url);
+                if (string.IsNullOrWhiteSpace(url))
+                {
+                    result.Add(snap);
+                    continue;
+                }
+
+                result.Add(new AccessibilitySnapshot
+                {
+                    WindowKey = snap.WindowKey,
+                    ProcessId = snap.ProcessId,
+                    ProcessName = snap.ProcessName,
+                    WindowTitle = snap.WindowTitle,
+                    Url = url,
+                    UrlSource = "history",
+                    IsIncognito = snap.IsIncognito,
+                    CapturedAt = snap.CapturedAt,
+                });
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogTrace(ex, "History URL enrichment failed for {Title}", snap.WindowTitle);
+                result.Add(snap);
+            }
+        }
+        return result;
+    }
+
     private string BuildMetadata(AccessibilitySnapshot snap, string windowKey) =>
         JsonSerializer.Serialize(new Dictionary<string, object?>
         {
-            ["source"] = "accessibility",
+            ["source"] = snap.UrlSource,
             ["windowKey"] = windowKey,
             ["incognito"] = snap.IsIncognito,
             ["processName"] = snap.ProcessName,
             ["capturedAt"] = snap.CapturedAt.ToString("O"),
         });
-
-    private static string StripBrowserSuffix(string title)
-    {
-        foreach (var marker in new[] { " - Google Chrome", " - Mozilla Firefox", " - Microsoft Edge", " - Brave", " - Opera", " - Vivaldi" })
-        {
-            var idx = title.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-            if (idx > 0) return title[..idx].Trim();
-        }
-        return string.IsNullOrWhiteSpace(title) ? "Browser" : title;
-    }
 
     private async Task RefreshEmployeeInfoAsync(CancellationToken ct)
     {

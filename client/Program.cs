@@ -46,6 +46,8 @@ if (args.Contains("--print-config"))
     Console.WriteLine($"BrowserAccessibilityPollSec={cfg.BrowserAccessibilityPollSec}");
     Console.WriteLine($"BrowserJourneyIdleMinutes={cfg.BrowserJourneyIdleMinutes}");
     Console.WriteLine($"BrowserCaptureIncognito={cfg.BrowserCaptureIncognito}");
+    Console.WriteLine($"BrowserHistoryEnabled={cfg.BrowserHistoryEnabled}");
+    Console.WriteLine($"BrowserHistoryPollSec={cfg.BrowserHistoryPollSec}");
     Console.WriteLine($"DbPath={cfg.DbPath}");
     Console.WriteLine($"ApiKeySet={!string.IsNullOrEmpty(cfg.ApiKey)}");
     return;
@@ -168,6 +170,10 @@ if (config.BrowserTrackingEnabled)
 {
     builder.Services.AddSingleton<IAccessibilityBrowserReader>(sp =>
         AccessibilityBrowserReaderFactory.Create(sp.GetRequiredService<ILoggerFactory>()));
+    // Hybrid URL fallback: reads the browser's own profile history DB when the a11y
+    // tree cannot expose the omnibox (Linux Chrome 136+ / snap Firefox). No restart,
+    // no flag, no extension; works on all platforms and browsers incl. brand-new ones.
+    builder.Services.AddSingleton<BrowserHistoryReader>();
     builder.Services.AddHostedService<AccessibilityBrowserTracker>();
 }
 

@@ -24,5 +24,12 @@ public sealed class AccessibilitySnapshot
     /// <summary>True when the window is an incognito/private window (heuristic).</summary>
     public bool IsIncognito { get; init; }
 
+    /// <summary>
+    /// Where the URL came from: "accessibility" (address-bar tree) or "history"
+    /// (browser profile history DB fallback — used when the a11y tree cannot expose
+    /// the omnibox, e.g. Linux Chrome 136+ / snap Firefox).
+    /// </summary>
+    public string UrlSource { get; init; } = "accessibility";
+
     public DateTime CapturedAt { get; init; } = DateTime.UtcNow;
 }
