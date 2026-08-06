@@ -3,6 +3,15 @@
 > **Last audited:** 2026-08-06
 > **Changelog:**
 >
+> - 2026-08-06: **Per-page browser_tab records (no more title overwrite)** — `AccessibilityBrowserTracker`
+>   used to UPDATE the single `browser_tab` root item in place on every navigation (ON CONFLICT DO
+>   UPDATE replaces `title`), so "YouTube - Google Chrome" silently became the video page. Now each
+>   page visit CLOSES the previous tab root — via a dedicated `CloseAppItemAsync` that also resets
+>   `is_synced=0` so the server learns the close even for already-synced rows — and OPENS a fresh
+>   `browser_tab` record; `browser_navigation` children still record transitions. Title-only changes
+>   rotate only after a ~10s stability window (badge/timer flicker is filtered); real URL changes
+>   rotate immediately. Known env gap (Linux/Chrome): URLs stay empty on machines where Chrome 136+
+>   doesn't populate its AT-SPI subtree (no assistive-tech client active) — titles are still captured.
 > - 2026-08-06: **Crash-loop fix: duplicate-PID open sessions in `SessionHierarchyResolver`** — the
 >   accessibility browser tracker writes one `app_sessions` per browser window (ProcessId = browser main
 >   pid) while the process collector writes its own session for the same browser process, so two open

@@ -1052,6 +1052,24 @@ public class SqliteLogStore : ILogStore, IDisposable
         }
     }
 
+    public async Task CloseAppItemAsync(string itemId, DateTime closedAt, CancellationToken ct)
+    {
+        if (_connection == null || string.IsNullOrWhiteSpace(itemId)) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "UPDATE app_items SET closed_at = $closed_at, is_synced = 0 WHERE id = $id";
+            cmd.Parameters.AddWithValue("$id", itemId);
+            cmd.Parameters.AddWithValue("$closed_at", closedAt.ToString("O"));
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
     public async Task CloseAppItemsBySessionIdsAsync(IReadOnlyList<string> sessionIds, DateTime closedAt, CancellationToken ct)
     {
         if (_connection == null || sessionIds.Count == 0) return;

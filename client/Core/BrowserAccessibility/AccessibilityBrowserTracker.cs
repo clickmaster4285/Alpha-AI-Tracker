@@ -32,17 +32,25 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
     private sealed class TrackedWindow
     {
         public required string SessionId { get; init; }
-        public required string RootItemId { get; init; }
+        // Mutable: each page navigation closes the current browser_tab root and opens
+        // a new one, so the tracker must re-point at the latest root item.
+        public string RootItemId { get; set; } = string.Empty;
         public required string JourneyId { get; init; }
         public required int ProcessId { get; init; }
         public string? LastUrl { get; set; }
         public string LastTitle { get; set; } = string.Empty;
         public bool IsIncognito { get; set; }
         public DateTime LastActivity { get; set; } = DateTime.UtcNow;
+        /// <summary>Title seen only briefly (badge/timer flicker) — rotated only once stable.</summary>
+        public string? PendingTitle { get; set; }
+        public DateTime PendingSinceUtc { get; set; }
         public DateTime? LastSeen { get; set; }
     }
 
     private const int MissingPollsToClose = 3;
+    /// <summary>Minimum dwell before a title-only change rotates the browser_tab record
+    /// (badges/timers/player-state titles change often and would fragment the journey).</summary>
+    private static readonly TimeSpan MinTabRotationInterval = TimeSpan.FromSeconds(10);
 
     private readonly Dictionary<string, TrackedWindow> _tracked = new();
     private readonly List<FileSystemWatcher> _downloadWatchers = new();
@@ -302,26 +310,77 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
 
         var now = snap.CapturedAt;
 
-        // Refresh the root browser_tab item (title / URL / domain / currentPath).
+        // Title-only change: wait for the title to persist ~MinTabRotationInterval before
+        // rotating the tab record, so badge/timer/player-state flicker never fragments the
+        // journey. A real URL change (true navigation) rotates immediately. LastTitle is
+        // NOT advanced during the hold, so the next poll still sees the pending change and
+        // the video page is never silently merged into the previous page's record.
+        if (titleChanged && !urlChanged)
+        {
+            var stable = string.Equals(snap.WindowTitle, tw.PendingTitle, StringComparison.Ordinal)
+                         && now - tw.PendingSinceUtc >= MinTabRotationInterval;
+            if (!stable)
+            {
+                if (!string.Equals(snap.WindowTitle, tw.PendingTitle, StringComparison.Ordinal))
+                {
+                    tw.PendingTitle = snap.WindowTitle;
+                    tw.PendingSinceUtc = now;
+                }
+                tw.LastActivity = now;
+                return;
+            }
+        }
+
+        var newTitle = string.IsNullOrWhiteSpace(snap.WindowTitle) ? tw.LastTitle : snap.WindowTitle;
+        // Accurate page-start time: for a title-only rotation this is when the new title
+        // FIRST appeared (not when the 10s stability window elapsed).
+        var openedAt = titleChanged && !urlChanged ? tw.PendingSinceUtc : now;
+
+        // A persisted blank/unchanged title (transient load state) is not a new page —
+        // don't rotate a duplicate-looking record.
+        if (!urlChanged && string.Equals(newTitle, tw.LastTitle, StringComparison.Ordinal))
+        {
+            tw.PendingTitle = null;
+            tw.PendingSinceUtc = now;
+            tw.LastActivity = now;
+            return;
+        }
+
+        // Each page visit gets its OWN browser_tab record — never overwrite the previous
+        // page's title in place (that made "YouTube - Google Chrome" silently become the
+        // video page). Close the current tab root keeping its ORIGINAL title/url/metadata
+        // intact, then open a fresh root for the new page. The window session itself stays
+        // open across navigations; browser_navigation children still record transitions.
+        var newRootId = Guid.NewGuid().ToString("N");
+
+        _logger.LogDebug("Browser tab rotated: '{From}' → '{To}' (urlChanged={UrlChanged})",
+            tw.LastTitle, newTitle, urlChanged);
+
+        // Dedicated close (sets is_synced = 0): a bare upsert would NOT reset is_synced,
+        // so if the tab row was already synced the server would never learn it closed.
+        // closed_at = the new page's opened_at for clean record continuity.
+        await _store.CloseAppItemAsync(tw.RootItemId, openedAt, ct);
+
         await _store.StoreAppItemsAsync(new[]
         {
             new AppItem
             {
-                Id = tw.RootItemId,
+                Id = newRootId,
                 AppSessionId = tw.SessionId,
                 ItemType = "browser_tab",
-                Title = string.IsNullOrWhiteSpace(snap.WindowTitle) ? tw.LastTitle : snap.WindowTitle,
-                Identifier = tw.RootItemId,
+                Title = newTitle,
+                Identifier = newRootId,
                 Url = url,
                 Domain = BrowserAccessibilityHelpers.ExtractDomain(url),
-                OpenedAt = tw.LastActivity,
+                OpenedAt = openedAt,
+                ProcessId = tw.ProcessId,
                 ObjectType = "Tab",
-                Action = "update",
+                Action = "open",
                 JourneyId = tw.JourneyId,
                 Sequence = 1,
                 CurrentPath = url,
                 WindowId = BrowserAccessibilityHelpers.StableInt32(tw.SessionId),
-                MetadataJson = BuildMetadata(snap, tw.RootItemId),
+                MetadataJson = BuildMetadata(snap, newRootId),
             }
         }, ct);
 
@@ -336,7 +395,7 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
                 new AppItem
                 {
                     AppSessionId = tw.SessionId,
-                    ParentItemId = tw.RootItemId,
+                    ParentItemId = newRootId,
                     ItemType = "browser_navigation",
                     Title = snap.WindowTitle,
                     Identifier = url,
@@ -348,16 +407,19 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
                     Action = "navigate",
                     JourneyId = tw.JourneyId,
                     Sequence = sequence,
-                    PreviousPath = tw.LastUrl,
+                    PreviousPath = tw.LastUrl ?? string.Empty,
                     CurrentPath = url,
                     WindowId = BrowserAccessibilityHelpers.StableInt32(tw.SessionId),
-                    MetadataJson = BuildMetadata(snap, tw.RootItemId),
+                    MetadataJson = BuildMetadata(snap, newRootId),
                 }
             }, ct);
 
             _logger.LogDebug("Browser navigation: {From} → {To}", tw.LastUrl, url);
         }
 
+        tw.RootItemId = newRootId;
+        tw.PendingTitle = null;
+        tw.PendingSinceUtc = now;
         tw.LastUrl = url;
         tw.LastTitle = snap.WindowTitle;
         tw.LastActivity = now;
