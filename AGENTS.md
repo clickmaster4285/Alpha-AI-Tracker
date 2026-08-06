@@ -3,6 +3,21 @@
 > **Last audited:** 2026-08-06
 > **Changelog:**
 >
+> - 2026-08-06: **Browser-journey overhaul — all browsers incl. Firefox + incognito, duplication eliminated.**
+>   Root causes found in the live DB (52x duplicate `browser_tab` rows, 316 items written into already-
+>   closed sessions, sessions opening/closing every 5-13s): (1) window identity was the AT-SPI registry
+>   path, which churns on navigation, and the PID-based re-key **stole** one window's session for another
+>   when 2+ windows shared one PID (Chrome/Edge/Firefox all do); (2) snap Firefox is AppArmor-blocked from
+>   AT-SPI entirely, so it was never captured. Fixes: `LinuxAtSpiBrowserReader` rewritten to merge THREE
+>   sources — AT-SPI (Chrome & co.), **Firefox sessionstore** (`recovery.jsonlz4`/`sessionstore.jsonlz4`,
+>   decompressed by an embedded pure-python LZ4 block decoder — no external module, no installer asset;
+>   gives exact per-tab URLs that survive the snap sandbox), and the **WM window list** (xprop + GNOME Shell
+>   introspect) for stable window ids. `AccessibilityBrowserTracker.ResolveWindowKey` now re-keys by
+>   page-title match (multi-window) or single-window count guard (macOS/wayland navigation) — stealing is
+>   impossible; missing-window grace raised 3→5 polls. `ALPHA_BROWSER_CAPTURE_INCOGNITO=true` (was false).
+>   Main `LogCollectorService` skips browsers when browser tracking is enabled (no more double sessions per
+>   window; hints-based skip covers the post-wipe window before the catalog scan). DB wiped keeping login.
+>   Verified live: 3 Chrome windows (incognito flagged) + 2 snap-Firefox windows with exact URLs.
 > - 2026-08-06: **Hybrid URL fallback — browser profile History reader (no restart, all browsers).**
 >   Chrome 136+ (verified on Chrome 151) ignores every AT-SPI enablement switch on Linux, so a11y
 >   gave titles but empty URLs unless the browser was relaunched with `--force-renderer-accessibility`

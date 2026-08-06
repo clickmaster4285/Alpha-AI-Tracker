@@ -48,13 +48,22 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
         public DateTime? LastSeen { get; set; }
     }
 
-    private const int MissingPollsToClose = 3;
+    // A browser window can be transiently absent from the a11y tree / sessionstore for
+    // a few polls (Chrome rebuilds its accessible tree on navigation; Firefox sessionstore
+    // is written every ~15s). Give it 5 polls (~15s) before declaring it closed, so a
+    // transient miss can never churn the session (the old 3-poll grace caused windows to
+    // close and reopen, which together with the PID re-key produced the duplicate rows).
+    private const int MissingPollsToClose = 5;
     /// <summary>Minimum dwell before a title-only change rotates the browser_tab record
     /// (badges/timers/player-state titles change often and would fragment the journey).</summary>
     private static readonly TimeSpan MinTabRotationInterval = TimeSpan.FromSeconds(10);
 
     private readonly Dictionary<string, TrackedWindow> _tracked = new();
     private readonly List<FileSystemWatcher> _downloadWatchers = new();
+    // Per-PID window counts from the previous poll — used to distinguish a navigation
+    // of the only window (re-key) from a second window returning after a transient
+    // absence (fresh session), which is what prevented window-stealing before.
+    private IReadOnlyDictionary<int, int> _lastPollPidCounts = new Dictionary<int, int>();
     private readonly SemaphoreSlim _gate = new(1, 1);
     private volatile bool _stopping;
 
@@ -142,6 +151,11 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
         var snapshots = await _reader.ReadAsync(ct);
         snapshots = await EnrichUrlsFromHistoryAsync(snapshots, ct);
 
+        var pidCounts = snapshots
+            .Where(s => s.ProcessId > 0)
+            .GroupBy(s => s.ProcessId)
+            .ToDictionary(g => g.Key, g => g.Count());
+
         var present = new HashSet<string>();
         foreach (var snap in snapshots)
         {
@@ -155,7 +169,7 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
         {
             foreach (var snap in snapshots)
             {
-                var key = ResolveWindowKey(snap);
+                var key = ResolveWindowKey(snap, pidCounts, _lastPollPidCounts);
                 if (!_tracked.TryGetValue(key, out var tw))
                 {
                     await OpenWindowAsync(key, snap, ct);
@@ -193,6 +207,8 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
             }
 
             await _store.SetStatusAsync("browser_tracking_method", "accessibility", ct);
+
+            _lastPollPidCounts = pidCounts;
         }
         finally
         {
@@ -201,28 +217,68 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
     }
 
     /// <summary>
-    /// macOS exposes no stable window id — when a brand-new key arrives whose pid matches
-    /// exactly one tracked window, treat it as the same window (key churn) instead of
-    /// opening a duplicate session.
+    /// Window-identity resolution. Browser windows do NOT expose a stable id everywhere:
+    /// the AT-SPI registry path churns on navigation, macOS has no window id at all, and
+    /// Firefox sessionstore window indices can shift. When a brand-new key arrives we try
+    /// to prove it is an EXISTING window before opening a new session:
+    ///   1. single tracked window with the same PID AND a matching page title → key churn;
+    ///   2. multiple windows share the PID (Chrome/Edge/Firefox all do) → re-key ONLY when
+    ///      the stripped page title matches, so one window can never steal another's session
+    ///      (the old "exactly one match" rule let a second window hijack the first one's
+    ///      session and alternate titles every poll — the source of the duplicate rows).
+    ///   3. the incoming window is title-less (transient tree) → attach to the ONLY
+    ///      same-pid tracked window; otherwise treat as a genuinely new window.
     /// </summary>
-    private string ResolveWindowKey(AccessibilitySnapshot snap)
+    private string ResolveWindowKey(
+        AccessibilitySnapshot snap,
+        IReadOnlyDictionary<int, int> pidCounts,
+        IReadOnlyDictionary<int, int> lastPidCounts)
     {
         if (_tracked.ContainsKey(snap.WindowKey)) return snap.WindowKey;
+        if (snap.ProcessId <= 0) return snap.WindowKey;
 
-        if (snap.ProcessId > 0)
+        var samePid = _tracked.Where(kv => kv.Value.ProcessId == snap.ProcessId).ToList();
+        if (samePid.Count == 0) return snap.WindowKey;
+
+        var incoming = BrowserAccessibilityHelpers.StripBrowserSuffix(snap.WindowTitle).Trim();
+
+        // Exact page-title match — identity is proven by (pid, page). Works for the
+        // multi-window case (Chrome/Edge/Firefox share one PID) when a key churns
+        // without a navigation.
+        foreach (var kv in samePid)
         {
-            var matches = _tracked.Where(kv => kv.Value.ProcessId == snap.ProcessId).ToList();
-            if (matches.Count == 1)
-            {
-                var oldKey = matches[0].Key;
-                var tw = matches[0].Value;
-                _tracked.Remove(oldKey);
-                _tracked[snap.WindowKey] = tw;
-                _logger.LogTrace("Re-keyed window {Old} → {New} (pid {Pid})", oldKey, snap.WindowKey, snap.ProcessId);
-                return snap.WindowKey;
-            }
+            var tracked = BrowserAccessibilityHelpers.StripBrowserSuffix(kv.Value.LastTitle).Trim();
+            if (tracked.Length > 0 && string.Equals(tracked, incoming, StringComparison.OrdinalIgnoreCase))
+                return ReKey(kv, snap.WindowKey, snap.ProcessId);
         }
+
+        // Title-less snapshot (transient tree state) with a single tracked window:
+        // safest assumption is key churn of that same window.
+        if (incoming.Length == 0 && samePid.Count == 1)
+            return ReKey(samePid[0], snap.WindowKey, snap.ProcessId);
+
+        // A single tracked window whose window-count did NOT change between polls: a
+        // changed title is a NAVIGATION of that same window (macOS exposes no stable
+        // window id at all, so its key churns every poll; a single-window Chrome on
+        // Wayland can too). Re-key so navigation never fragments the session. The count
+        // guard is what prevents one window from STEALING another's session: when a
+        // second window returns after a transient absence the count jumps 1→2 and the
+        // guard fails, so a fresh session is opened instead of hijacking the first one.
+        if (samePid.Count == 1 &&
+            lastPidCounts.TryGetValue(snap.ProcessId, out var lastCount) && lastCount == 1 &&
+            pidCounts.TryGetValue(snap.ProcessId, out var curCount) && curCount == 1)
+            return ReKey(samePid[0], snap.WindowKey, snap.ProcessId);
+
         return snap.WindowKey;
+    }
+
+    private string ReKey(KeyValuePair<string, TrackedWindow> kv, string newKey, int pid)
+    {
+        var tw = kv.Value;
+        _tracked.Remove(kv.Key);
+        _tracked[newKey] = tw;
+        _logger.LogTrace("Re-keyed window {Old} → {New} (pid {Pid})", kv.Key, newKey, pid);
+        return newKey;
     }
 
     private async Task OpenWindowAsync(string key, AccessibilitySnapshot snap, CancellationToken ct)

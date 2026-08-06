@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using client.Configuration;
 using client.Core;
 using client.Core.Abstractions;
+using client.Core.BrowserAccessibility;
 using client.Core.Models;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -280,6 +281,23 @@ public class LogCollectorService : BackgroundService
                             log.ProcessName, log.WindowTitle, stoppingToken);
 
                         if (!isKnown) continue;
+
+                        // Browsers are owned by the accessibility browser tracker, which
+                        // captures the full journey (per-window sessions, tab rotations,
+                        // navigations, downloads, incognito) with per-window identity.
+                        // Skipping them here prevents one browser window from producing
+                        // TWO parallel sessions (main loop + tracker) and their duplicated
+                        // items. When browser tracking is disabled, the main loop still
+                        // tracks browsers as plain GUI apps (fallback).
+                        //
+                        // The hints check covers the window right after a DB wipe, before
+                        // the installed-app scan has marked the browser rows is_browser=1
+                        // (auto-registered entries start with IsBrowser=false).
+                        if (_config.BrowserTrackingEnabled &&
+                            (isBrowser ||
+                             BrowserAccessibilityHelpers.IsBrowserProcess(
+                                 AppProcessClassifier.ExtractBaseProcessName(log.ProcessName))))
+                            continue;
 
                         // N3: resolve the systemd cgroup scope ONCE per log, then thread it
                         // through the tuple so every BuildSessionKey call site derives the
