@@ -705,7 +705,7 @@ public partial class MainViewModel : ViewModelBase
     }
 
     [RelayCommand]
-    private void ShowManualInstallCommand()
+    private void ShowManualInstall()
     {
         var missingDeps = GetMissingLinuxDependencies();
         if (missingDeps.Count > 0)

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Text;
 using Microsoft.Extensions.Logging;
 
@@ -162,6 +163,7 @@ public class AutoStartService
         return false;
     }
 
+    [SupportedOSPlatform("windows")]
     private bool EnableWindowsAutoStart()
     {
         try
@@ -183,6 +185,7 @@ public class AutoStartService
         }
     }
 
+    [SupportedOSPlatform("windows")]
     private bool DisableWindowsAutoStart()
     {
         try

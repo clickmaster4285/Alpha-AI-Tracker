@@ -1,3 +1,4 @@
+using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -214,7 +215,7 @@ public static class EncryptedConfigService
             return id;
 
         // 2. Fallback: try persisted .machine-id
-        return GetPersistedMachineId();
+        return GetPersistedMachineId() ?? string.Empty;
     }
 
     /// <summary>
@@ -292,6 +293,7 @@ public static class EncryptedConfigService
         return string.Empty;
     }
 
+    [SupportedOSPlatform("windows")]
     private static string GetWindowsMachineGuid()
     {
         try

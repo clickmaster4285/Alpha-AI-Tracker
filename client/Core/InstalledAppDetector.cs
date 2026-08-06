@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.Versioning;
 using System.Text.RegularExpressions;
 using client.Core.Models;
 
@@ -376,6 +377,7 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
         return string.IsNullOrWhiteSpace(binary) ? null : binary;
     }
 
+    [SupportedOSPlatform("windows")]
     private void DetectInstalledWindows()
     {
         try

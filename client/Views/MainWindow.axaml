@@ -56,13 +56,11 @@
 
                     <TextBlock Text="Employee ID" FontSize="12"
                                Foreground="{StaticResource MutedFgBrush}"/>
-                    <TextBox Text="{Binding EmployeeId}" PlaceholderText="e.g. EMP-10001"
-                             Watermark="e.g. EMP-10001"/>
+                    <TextBox Text="{Binding EmployeeId}" PlaceholderText="e.g. EMP-10001"/>
 
                     <TextBlock Text="Secret Key" FontSize="12"
                                Foreground="{StaticResource MutedFgBrush}"/>
-                    <TextBox Text="{Binding SecretKey}" PlaceholderText="Enter your secret key"
-                             Watermark="Enter your secret key"/>
+                    <TextBox Text="{Binding SecretKey}" PlaceholderText="Enter your secret key"/>
 
                     <!-- Error / status message -->
                     <TextBlock Text="{Binding StatusMessage}"
@@ -235,7 +233,7 @@
                             </StackPanel>
                         </Border>
 
-                        <!-- ── Browser Journey Tracking (debugger-based, automatic) ── -->
+                        <!-- ── Browser Journey Tracking (accessibility-based, automatic) ── -->
                         <Border Classes="fade-in" IsVisible="{Binding IsBrowserTracking}">
                             <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center"
                                         MaxWidth="360" Spacing="12" Margin="0,8,0,0">
@@ -249,7 +247,7 @@
                                 <TextBlock Text="Browser Journey Tracking" FontSize="20" FontWeight="Bold"
                                            Foreground="{StaticResource FgBrush}"
                                            HorizontalAlignment="Center"/>
-                                <TextBlock Text="Browser activity is captured automatically via the native debugger (CDP / Firefox Remote Debugging). No extension or manual setup required."
+                                <TextBlock Text="Browser activity is captured automatically via the OS accessibility tree (AT-SPI / UIA / macOS Accessibility). No debugger, no extension, and no manual setup required."
                                            FontSize="13" Foreground="{StaticResource MutedFgBrush}"
                                            TextWrapping="Wrap" HorizontalAlignment="Center"
                                            TextAlignment="Center"/>
