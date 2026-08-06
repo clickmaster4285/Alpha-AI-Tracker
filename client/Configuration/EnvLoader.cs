@@ -69,8 +69,12 @@ public static class EnvLoader
     ///     2. Next to the binary: {AppDir}/config.enc (install-time placement)
     ///     3. Plaintext .env (development fallback only)
     ///
-    /// If config.enc is found next to the binary but not in user config,
-    /// it is automatically copied to user config on first launch.
+    /// Upgrade propagation: every installer bakes the current .env → config.enc at
+    /// build time. If the copy next to the binary contains DIFFERENT values than the
+    /// user-config copy, the freshly shipped copy REPLACES the (possibly stale,
+    /// machine-key-encrypted) user copy before loading. This is what makes a rebuilt
+    /// installer actually take effect on a machine that already ran an older build —
+    /// otherwise the old user copy would shadow every future config forever.
     /// </summary>
     public static void Load(string? customPath = null)
     {
@@ -101,16 +105,63 @@ public static class EnvLoader
         }
 
         // ─── Phase 3: Installed / production config.enc ───
+        // The user-config copy is the primary location, but it must NEVER shadow a
+        // config freshly shipped with this build. If the copy next to the binary
+        // holds different values than the user copy, the shipped config wins — this
+        // is the fix for "installed app still uses the old server URL / API key"
+        // after rebuilding the installer (dotnet run reads .env so it always looked
+        // fresh, while the installed build kept loading the old machine-key copy).
+        var appDir = AppDomain.CurrentDomain.BaseDirectory;
+        var appConfigEnc = Path.Combine(appDir, "config.enc");
+
+        if (File.Exists(appConfigEnc) && File.Exists(UserConfigPath)
+            && ShippedConfigDiffers(appConfigEnc, UserConfigPath))
+        {
+            // A new config was baked into this build — replace the stale user copy.
+            // If the user dir is not writable (rare; it was just created above), load
+            // the shipped copy directly instead — it sits next to the binary and is
+            // readable even in root-owned install dirs (/usr/share/…, Program Files).
+            try
+            {
+                File.Copy(appConfigEnc, UserConfigPath, overwrite: true);
+                System.Console.WriteLine(
+                    "[EnvLoader] Replaced stale user config.enc with the freshly shipped one");
+                LoadFromEncrypted(UserConfigPath);
+                return;
+            }
+            catch
+            {
+                LoadFromEncrypted(appConfigEnc);
+                return;
+            }
+        }
+
         // Try user config directory first (user-writable, primary location)
         if (File.Exists(UserConfigPath))
         {
-            LoadFromEncrypted(UserConfigPath);
-            return;
+            try
+            {
+                LoadFromEncrypted(UserConfigPath);
+                return;
+            }
+            catch (CryptographicException)
+            {
+                // User copy is corrupt / undecryptable — self-heal from the shipped
+                // copy rather than crashing the app.
+                if (File.Exists(appConfigEnc))
+                {
+                    try { File.Copy(appConfigEnc, UserConfigPath, overwrite: true); } catch { }
+                    if (File.Exists(UserConfigPath))
+                    {
+                        LoadFromEncrypted(UserConfigPath);
+                        return;
+                    }
+                }
+                throw;
+            }
         }
 
         // Fallback: check next to the binary (install-time placement)
-        var appDir = AppDomain.CurrentDomain.BaseDirectory;
-        var appConfigEnc = Path.Combine(appDir, "config.enc");
         if (File.Exists(appConfigEnc))
         {
             // First launch on this machine: copy from app dir to user config
@@ -149,6 +200,34 @@ public static class EnvLoader
         var dir = AppDomain.CurrentDomain.BaseDirectory;
         return dir.Contains($"bin{Path.DirectorySeparatorChar}Debug", StringComparison.OrdinalIgnoreCase)
             || dir.Contains($"bin{Path.DirectorySeparatorChar}Release", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// True when the config.enc shipped next to the binary decrypts to different
+    /// values than the user-config copy — i.e. an updated build was installed and
+    /// its freshly baked config has not reached the user config dir yet.
+    /// Comparison is on decrypted CONTENT (not mtime), so machine clocks and the
+    /// machine-key re-encryption of the user copy can never cause a false positive.
+    /// </summary>
+    private static bool ShippedConfigDiffers(string shippedPath, string userPath)
+    {
+        try
+        {
+            var shipped = EncryptedConfigService.DecryptWithFallback(File.ReadAllBytes(shippedPath));
+            var user = EncryptedConfigService.DecryptWithFallback(File.ReadAllBytes(userPath));
+            return !string.Equals(shipped.plaintext, user.plaintext, StringComparison.Ordinal);
+        }
+        catch (Exception ex)
+        {
+            // Any decrypt failure (corrupt file, key mismatch) — don't clobber the
+            // user copy on a guess; keep the previous behavior, but make the problem
+            // diagnosable (e.g. a bad build artifact would otherwise silently keep
+            // the old config forever).
+            System.Console.Error.WriteLine(
+                $"[EnvLoader] Warning: could not compare shipped config.enc ({shippedPath}) " +
+                $"with user copy ({userPath}): {ex.Message}");
+            return false;
+        }
     }
 
     /// <summary>

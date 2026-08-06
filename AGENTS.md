@@ -1,8 +1,17 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-08-05 (Option B — accessibility-based browser journey)
+> **Last audited:** 2026-08-06
 > **Changelog:**
 >
+> - 2026-08-06: **Installer config refresh fix (stale `config.enc` shadowing)** — installed builds load
+>   `~/.config/alpha-ai-tracker/config.enc` (the machine-key copy) BEFORE the freshly baked `config.enc`
+>   next to the binary, and previously never refreshed it — so rebuilding the installer with a changed
+>   `.env` (e.g. a new server IP) had no effect on machines that already ran once. `dotnet run` always
+>   looked fine because it reads the plaintext `.env`. `EnvLoader.Load()` now compares the DECRYPTED
+>   content of the shipped copy vs the user copy and replaces the user copy when they differ (then
+>   re-migrates to the machine key); corrupt user copies self-heal from the shipped copy; non-writable
+>   user dirs load the shipped copy directly. Added `--print-config` headless CLI to print which config
+>   an installed build resolves (e.g. `client/publish/linux/client --print-config`).
 > - 2026-08-05: **Option B — accessibility-tree browser journey (debugger pipeline DELETED).**
 >   Chrome 136+ real-profile debugging is closed by every mechanism (verified on this machine:
 >   same-path `--user-data-dir` fails headless + GUI; `RemoteDebuggingAllowed`/`DevToolsAvailability`
@@ -293,7 +302,7 @@ flowchart LR
 2. **New runtime assets** (icons, JSON, images, fonts) — bundled ONLY if copied by `build-installer.sh` (`bundle_into_publish`) or the platform builders (`build-deb.sh`, `build-dmg.sh`, `installer-windows.iss`). Add the copy step when you add the asset.
 3. **New runtime assets** (embedded scripts, JSON, icons) — the accessibility probe is embedded as a C# string in `LinuxAtSpiBrowserReader` (no external file to bundle). Anything file-based must be added to `bundle_into_publish()` or the platform builders.
 4. **New scripts under `publish/`** — copied into every publish output automatically. Runtime-referenced scripts must live in `publish/` (or be added to the copy list).
-5. **New env vars / config** — must be added to `.env` BEFORE `encrypt-config.sh` runs; installers ship `config.enc` baked at build time. Dev reads `.env` directly — config that works in `dotnet run` is silently missing in the installer.
+5. **New env vars / config** — must be added to `.env` BEFORE `encrypt-config.sh` runs; installers ship `config.enc` baked at build time. Dev reads `.env` directly — config that works in `dotnet run` is silently missing in the installer. Config changes now auto-propagate: `EnvLoader` replaces a stale user-config copy (`~/.config/alpha-ai-tracker/config.enc`) with the freshly shipped one on next launch when the decrypted contents differ.
 6. **Path assumptions** — the installed app's working dir is root-owned / not user-writable. NEVER write files relative to cwd or the exe dir. Use `~/.config/alpha-ai-tracker/` (logs, machine-id) and `~/.local/share/alpha-ai-tracker/` (DB, sockets). `dotnet run` cannot catch this because the dev working dir is writable.
 7. **Packaging edits apply to ALL platforms** — when changing build scripts, update `build-installer.sh`, `build-deb.sh`, `build-dmg.sh`, and `installer-windows.iss` consistently.
 8. **Stale-binary guard** — `build-installer.sh` aborts if any source file is newer than the published `client.dll`; fix with `dotnet clean && bash publish/build-installer.sh`. This guard covers compiled code only — items 2–6 are the developer's responsibility.

@@ -33,6 +33,24 @@ if (args.Contains("--encrypt-config"))
     return;
 }
 
+// Headless diagnostic: load config exactly like a normal launch, then print the
+// resolved values. Use this to verify which server URL / settings an INSTALLED
+// build actually uses (plain `dotnet run` always reads .env, so it can't show
+// what config.enc will load). EnvLoader prints the config source it picked, too.
+if (args.Contains("--print-config"))
+{
+    EnvLoader.Load();
+    var cfg = AppConfig.FromEnv();
+    Console.WriteLine($"ServerUrl={cfg.ServerUrl}");
+    Console.WriteLine($"BrowserTrackingEnabled={cfg.BrowserTrackingEnabled}");
+    Console.WriteLine($"BrowserAccessibilityPollSec={cfg.BrowserAccessibilityPollSec}");
+    Console.WriteLine($"BrowserJourneyIdleMinutes={cfg.BrowserJourneyIdleMinutes}");
+    Console.WriteLine($"BrowserCaptureIncognito={cfg.BrowserCaptureIncognito}");
+    Console.WriteLine($"DbPath={cfg.DbPath}");
+    Console.WriteLine($"ApiKeySet={!string.IsNullOrEmpty(cfg.ApiKey)}");
+    return;
+}
+
 EnvLoader.Load();
 
 var isBackground = args.Contains("--background");
