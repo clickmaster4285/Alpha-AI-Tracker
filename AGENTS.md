@@ -3,6 +3,12 @@
 > **Last audited:** 2026-08-06
 > **Changelog:**
 >
+> - 2026-08-06: **Crash-loop fix: duplicate-PID open sessions in `SessionHierarchyResolver`** — the
+>   accessibility browser tracker writes one `app_sessions` per browser window (ProcessId = browser main
+>   pid) while the process collector writes its own session for the same browser process, so two open
+>   sessions can share one `process_id`. The resolver's `existingOpen.ToDictionary(r => r.ProcessId)`
+>   threw `ArgumentException` on every collection cycle and killed the whole tracking loop whenever a
+>   browser was open. Now dedupes per PID (keeps the earliest record, logs a warning).
 > - 2026-08-06: **Installer config refresh fix (stale `config.enc` shadowing)** — installed builds load
 >   `~/.config/alpha-ai-tracker/config.enc` (the machine-key copy) BEFORE the freshly baked `config.enc`
 >   next to the binary, and previously never refreshed it — so rebuilding the installer with a changed

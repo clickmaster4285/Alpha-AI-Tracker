@@ -36,8 +36,33 @@ public sealed class SessionHierarchyResolver
         ILogger? logger = null)
     {
         _processTree = processTree;
-        _openByPid = existingOpen.ToDictionary(r => r.ProcessId);
         _logger = logger;
+
+        // More than one open session can legitimately share a process_id: the
+        // accessibility browser tracker writes one app_sessions per browser window
+        // (ProcessId = the browser's main pid) while the process collector writes its
+        // own session for that same browser process. A plain ToDictionary would throw
+        // "An item with the same key has already been added" on every collection cycle
+        // (which killed the entire tracking loop) — dedupe by keeping the earliest
+        // record per PID. These records are only consulted for parent-session lookups,
+        // so either copy is equivalent.
+        var duplicates = existingOpen
+            .GroupBy(r => r.ProcessId)
+            .Where(g => g.Count() > 1)
+            .ToList();
+        if (duplicates.Count > 0)
+        {
+            // Debug, not Warning: this is expected whenever both systems track the same
+            // browser process, and it no longer indicates a problem — a warning here
+            // would spam the log every 30s collection cycle.
+            logger?.LogDebug(
+                "SessionHierarchyResolver: {DuplicateCount} process_id(s) have multiple open sessions " +
+                "(browser accessibility tracker + process collector overlap) — keeping the earliest per PID: {Pids}",
+                duplicates.Count, string.Join(", ", duplicates.Select(g => g.Key)));
+        }
+        _openByPid = existingOpen
+            .GroupBy(r => r.ProcessId)
+            .ToDictionary(g => g.Key, g => g.First());
     }
 
     public void Register(OpenSessionRecord record) => _openByPid[record.ProcessId] = record;
