@@ -472,6 +472,55 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                             stack.append((k, depth + 1))
                     return addr or fallback
 
+                def find_doc_url(win, win_title):
+                    # AT-SPI Document interface: the DOCUMENT_WEB node (role 95) exposes
+                    # the page's EXACT URL via the DocURL attribute — including in
+                    # private/incognito windows, where no other source (omnibox,
+                    # sessionstore, profile history) has the URL. Firefox builds this
+                    # tree whenever AT-SPI is reachable (the AppArmor override makes
+                    # snap Firefox reachable). Chrome needs --force-renderer-accessibility
+                    # and returns nothing here when it does not build the tree.
+                    best = ''
+                    page = (win_title or '').lower()
+                    stack = [(win, 0)]
+                    seen = set()
+                    budget = 800
+                    while stack and budget > 0:
+                        obj, depth = stack.pop()
+                        budget -= 1
+                        if depth > 12:
+                            continue
+                        try:
+                            kids = obj.GetChildren(dbus_interface=A11Y)
+                        except Exception:
+                            continue
+                        for kb, kp in kids:
+                            pk = str(kb) + str(kp)
+                            if pk in seen:
+                                continue
+                            seen.add(pk)
+                            try:
+                                k = bus.get_object(str(kb), str(kp))
+                                krole = int(k.GetRole(dbus_interface=A11Y))
+                                kname = str(getp(k, 'Name') or '')
+                            except Exception:
+                                continue
+                            if krole == 95:  # DOCUMENT_WEB
+                                try:
+                                    u = str(k.GetAttributeValue('DocURL', dbus_interface='org.a11y.atspi.Document') or '')
+                                except Exception:
+                                    u = ''
+                                if u and u.startswith('http'):
+                                    if not best:
+                                        best = u
+                                    # Prefer the doc matching this window's page title
+                                    # (multi-document windows / iframes stay unconfused).
+                                    if kname and page and (kname.lower() in page or page in kname.lower()):
+                                        return u
+                                continue
+                            stack.append((k, depth + 1))
+                    return best
+
                 registry = bus.get_object('org.a11y.atspi.Registry', '/org/a11y/atspi/accessible/root')
                 children = registry.GetChildren(dbus_interface=A11Y)
                 dbus_obj = bus.get_object('org.freedesktop.DBus', '/org/freedesktop/DBus')
@@ -512,6 +561,8 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                         if any(s in wname.lower() for s in ('incognito', 'inprivate', 'private browsing')):
                             win_incognito = True
                         url = find_address_bar(w)
+                        if not url:
+                            url = find_doc_url(w, wname)
                         results.append({
                             'src': 'a11y',
                             'key': name + '|' + str(win_path),
