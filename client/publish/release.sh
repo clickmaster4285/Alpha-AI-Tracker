@@ -13,6 +13,10 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 INSTALLER_DIR="$PROJECT_DIR/installers"
 VERSION="${1:-v$(cat "$PROJECT_DIR/VERSION")}"
 
+# Load app identifiers from single source of truth
+# shellcheck disable=SC1090
+source "$PROJECT_DIR/APP_IDENTIFIERS"
+
 # Load REPO and ALPHA_SERVER_URL from .env if not set in environment
 if [ -z "${REPO:-}" ] || [ -z "${ALPHA_SERVER_URL:-}" ]; then
   if [ -f "$PROJECT_DIR/.env" ]; then
@@ -27,7 +31,7 @@ fi
 REPO="${REPO:-clickmaster4285/Alpha-AI-Tracker}"
 export ALPHA_SERVER_URL
 echo "=========================================="
-echo " Alpha AI Tracker — Release $VERSION"
+echo " $DISPLAY_NAME — Release $VERSION"
 echo "=========================================="
 
 # ── Check prerequisites ──
@@ -79,7 +83,7 @@ echo ""
 echo "[4/5] Creating GitHub release..."
 RELEASE_NOTES=$(mktemp)
 cat > "$RELEASE_NOTES" << EOF
-# Alpha AI Tracker $VERSION
+# $DISPLAY_NAME $VERSION
 
 ## Installers
 
@@ -87,9 +91,9 @@ Download the appropriate installer for your platform:
 
 | Platform | File |
 |----------|------|
-| Windows  | \`AlphaAITracker-Setup-$VERSION.exe\` |
-| Linux    | \`alpha-ai-tracker_${VERSION#v}_amd64.deb\` |
-| macOS    | \`AlphaAITracker.dmg\` |
+| Windows  | \`$WINDOWS_INSTALLER_NAME-Setup-$VERSION.exe\` |
+| Linux    | \`$PACKAGE_NAME_${VERSION#v}_amd64.deb\` |
+| macOS    | \`$MACOS_BUNDLE_NAME.dmg\` |
 
 See [client/build.md](./client/build.md) for installation instructions.
 EOF
@@ -111,7 +115,7 @@ done
 echo "  Uploading ${#INSTALLER_FILES[@]} installer(s)..."
 gh release create "$VERSION" \
   --repo "$REPO" \
-  --title "Alpha AI Tracker $VERSION" \
+  --title "$DISPLAY_NAME $VERSION" \
   --notes-file "$RELEASE_NOTES" \
   "${INSTALLER_FILES[@]}" 2>&1 || {
   echo ""

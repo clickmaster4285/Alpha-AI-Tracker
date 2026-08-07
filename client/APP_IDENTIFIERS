@@ -1,0 +1,38 @@
+# Package/App Identifiers - Single Source of Truth
+# This file centralizes all app identifiers used across build scripts, installers, and platform-specific configs.
+
+# Linux package name (used in .deb package, systemd service, binary name)
+PACKAGE_NAME="alpha-ai-tracker1"
+
+# Human-readable display name (used in installers, desktop entries, app bundles)
+DISPLAY_NAME="Alpha AI Tracker1"
+
+# macOS bundle identifier (reverse domain notation)
+BUNDLE_ID="com.alphaai1.tracker1"
+
+# Executable name (binary name without extension)
+EXECUTABLE_NAME="client1"
+
+# Publisher/Author name
+PUBLISHER="Alpha AI1"
+
+# App mutex/class identifier (Windows, single-instance detection)
+APP_MUTEX="AlphaAITracker1"
+
+# Windows installer base filename (without version/extension)
+WINDOWS_INSTALLER_NAME="AlphaAITracker1"
+
+# Linux .deb package filename base (without version/arch)
+DEB_PACKAGE_NAME="alpha-ai-tracker1"
+
+# macOS app bundle name (without .app extension)
+MACOS_BUNDLE_NAME="Alpha AI Tracker1"
+
+# Application URL (used in installers)
+APP_URL="https://alpha-ai-tracker.example.com"
+
+# Desktop file categories (Linux .desktop file)
+DESKTOP_CATEGORIES="Office;Productivity;"
+
+# Startup WM Class (Linux window manager class)
+WM_CLASS="AlphaAITracker"
