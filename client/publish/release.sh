@@ -11,7 +11,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 INSTALLER_DIR="$PROJECT_DIR/installers"
-VERSION="${1:-v1.0.0}"
+VERSION="${1:-v$(cat "$PROJECT_DIR/VERSION")}"
 
 # Load REPO and ALPHA_SERVER_URL from .env if not set in environment
 if [ -z "${REPO:-}" ] || [ -z "${ALPHA_SERVER_URL:-}" ]; then

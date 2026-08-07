@@ -8,6 +8,19 @@
     <DefaultServerUrl Condition="'$(DefaultServerUrl)'==''">http://localhost:8080</DefaultServerUrl>
   </PropertyGroup>
 
+  <!-- Read version from VERSION file (single source of truth) -->
+  <Target Name="ReadVersionFromFile" BeforeTargets="BeforeBuild">
+    <ReadLinesFromFile File="$(MSBuildProjectDirectory)/VERSION">
+      <Output TaskParameter="Lines" PropertyName="VersionFromFile" />
+    </ReadLinesFromFile>
+    <PropertyGroup>
+      <Version>$(VersionFromFile)</Version>
+      <AssemblyVersion>$(VersionFromFile).0</AssemblyVersion>
+      <FileVersion>$(VersionFromFile).0</FileVersion>
+      <InformationalVersion>$(VersionFromFile)</InformationalVersion>
+    </PropertyGroup>
+  </Target>
+
   <ItemGroup>
     <AvaloniaResource Include="Assets\**" />
     <AvaloniaResource Include="Styles\**" />

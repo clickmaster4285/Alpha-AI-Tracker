@@ -8,6 +8,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 APP_NAME="Alpha AI Tracker"
 APP_BUNDLE="/tmp/${APP_NAME}.app"
 INSTALLER_DIR="$PROJECT_DIR/installers"
+VERSION="$(cat "$PROJECT_DIR/VERSION")"
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
@@ -39,9 +40,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << EOF
   <key>CFBundleName</key>
   <string>${APP_NAME}</string>
   <key>CFBundleVersion</key>
-  <string>1.0.0</string>
+  <string>$VERSION</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.0.0</string>
+  <string>$VERSION</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>LSMinimumSystemVersion</key>

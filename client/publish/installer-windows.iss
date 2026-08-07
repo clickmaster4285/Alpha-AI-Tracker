@@ -3,13 +3,17 @@
 ; Requires Inno Setup 6+ (https://jrsoftware.org/isinfo.php)
 
 #define MyAppName "Alpha AI Tracker"
-#define MyAppVersion "1.0.0"
 #define MyAppPublisher "Alpha AI"
 #define MyAppURL "https://alpha-ai-tracker.example.com"
 #define MyAppExeName "client.exe"
 #define MyAppAssocName MyAppName + " File"
 #define MyAppAssocExt ".myp"
 #define MyAppAssocKey StringChange(MyAppAssocName, " ", "") + MyAppAssocExt
+
+; Read version from VERSION file (single source of truth)
+#define VERSION_FILE FileOpen("..\\VERSION")
+#define MyAppVersion FileRead(VERSION_FILE)
+#undef VERSION_FILE
 
 [Setup]
 AppId={{B0A0A0A0-1A2B-3C4D-5E6F-7A8B9C0D1E2F}

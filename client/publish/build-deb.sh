@@ -6,7 +6,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 APP_NAME="alpha-ai-tracker"
-VERSION="1.0.0"
+VERSION="$(cat "$PROJECT_DIR/VERSION")"
 ARCH="amd64"
 INSTALLER_DIR="$PROJECT_DIR/installers"
 PKG_ROOT="/tmp/${APP_NAME}_deb"
