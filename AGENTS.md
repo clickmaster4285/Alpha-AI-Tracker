@@ -3,6 +3,11 @@
 > **Last audited:** 2026-08-07
 > **Changelog:**
 >
+> - 2026-08-07: **Client docs re-audited & rewritten** — `client/ARCHITECTURE.md` fully re-verified against
+>   source; stale references corrected (`TrayAvailability.cs`/`SingleInstance.cs` no longer exist,
+>   tray menu is Show/Hide only, `extensions/` + native-messaging pipeline fully removed, permission
+>   wizard is 4 steps on Linux / 3 elsewhere and always re-validates reality, sync order is
+>   app-sessions BEFORE app-items, headless `--background` service mode documented). No code changed.
 > - 2026-08-07: **Private/incognito window URLs captured — Firefox via AT-SPI `DocURL`, Chrome needs one launch flag.**
 >   Live-DB root-causing showed private journeys rotated only when the profile-History fallback happened to match a URL;
 >   when it didn't (private visits, direct-opened sites) rotation froze and URLs stayed empty. Three fixes landed together:
@@ -335,6 +340,8 @@ flowchart LR
 - Background guard watchdog
 - Tray icon (minimize to tray on close)
 - Windows power management (prevents sleep)
+- **Headless `--background` service mode** — runs the tracking services with no Avalonia/X11 UI (systemd); skips GUI init so the installed service can't crash on Wayland `XAUTHORITY`
+- **Single-instance activation** — a second user launch signals the running instance (named pipe `alpha-ai-tracker-activation`) to raise its window; `--background`/`--minimized` relaunches exit quietly
 
 **What's missing:**
 

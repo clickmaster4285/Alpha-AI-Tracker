@@ -1,83 +1,52 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-08-06 (Option B + profile-History URL fallback)  
-> **Changelog:** 
-> - 2026-08-06: **Hybrid URL fallback — browser profile History reader (no restart, all browsers).**
->   Chrome 136+ on Linux never exposes the omnibox URL via AT-SPI unless launched with
->   `--force-renderer-accessibility` (restart = rejected by the product). NEW
->   `Core/BrowserAccessibility/BrowserHistoryReader.cs` reads the browser's own profile database —
->   Chromium-family `History` (Chrome/Edge/Brave/Opera/Vivaldi) and Firefox `places.sqlite` — while
->   the browser RUNS: DB + `-wal`/`-shm`/`-journal` sidecars are copied to a temp dir and opened
->   read-only (a torn snapshot is swallowed and retried next poll), change signatures throttle
->   re-reads, and resolution is STRICTLY title-match (no newest-visit fallback → no cross-window
->   misattribution). Generic `~/.config`/`~/.mozilla` scans (plus Windows/macOS roots) discover
->   brand-new browser profiles (install→use→uninstall-in-5-min journeys captured while alive).
->   Wired into `AccessibilityBrowserTracker.EnrichUrlsFromHistoryAsync` (fills empty URLs before tab
->   logic; URL-less title changes don't rotate tabs until history catches up); URLs tagged
->   `metadata_json.source="history"` vs `"a11y"` via new `AccessibilitySnapshot.UrlSource`; shared
->   `StripBrowserSuffix` helper added. Config: `ALPHA_BROWSER_HISTORY_ENABLED=true` (default),
->   `ALPHA_BROWSER_HISTORY_POLL_SECONDS=10`; `.env.example` + `--print-config` updated. Verified live
->   on Linux: running Chrome 151, snap Firefox (AppArmor blocks D-Bus, not file reads), a fresh
->   brand-new profile, and an end-to-end tracker run (title + full URL + domain + `source=history`
->   in `app_items`).
-> - 2026-08-05: **Option B — accessibility-tree browser journey (debugger pipeline removed).**
->   Chrome 136+ cannot be debugged on its real profile (verified: same-path `--user-data-dir` and
->   `RemoteDebuggingAllowed` policy both fail) and extensions were ruled out, so the entire
->   debugger pipeline (`Core/Browser/*` — 16 files: adapters, CDP/RDP sessions, runtime
->   manager/store, journey engine, watchdog) was DELETED and replaced with a new
->   `Core/BrowserAccessibility/` namespace that reads the OS accessibility tree — the same tree
->   screen readers use — to capture the REAL browser journey on every platform and every Chrome
->   version, with no debugger, no extension, and no browser-catalog dependency (an installed→
->   used→uninstalled-in-5-min browser is captured). Linux: python3+AT-SPI probe (empirically
->   validated on Chrome 151 — the omnibox ENTRY node "Address and search bar" exposes the exact
->   URL/query). Windows: UIA via `Interop.UIAutomationClient` (netstandard2.0, API verified by
->   reflection). macOS: osascript/System Events (best-effort; Accessibility grant required).
->   `AccessibilityBrowserTracker` polls every `ALPHA_BROWSER_ACCESSIBILITY_POLL_SECONDS` (3),
->   writes one `app_sessions` per window + `browser_tab`/`browser_navigation` `app_items`,
->   idle-closes after `ALPHA_BROWSER_JOURNEY_IDLE_MINUTES` (15), closes vanished windows after 3
->   polls, closes gracefully on shutdown, watches Downloads for `browser_download` items, and
->   gates incognito URLs behind `ALPHA_BROWSER_CAPTURE_INCOGNITO=false`. Dead code removed:
->   shell-command collectors (interface + 3 impls + model), `publish/install-extensions.sh`,
->   and the `extensions/` bundling step. Also fixed the `SqliteLogStore` fuzzy-match AND/OR
->   precedence bug (junk `chrome` row beat `Google Chrome`; now prefers `is_browser` rows).
->   Env knobs are now a11y-only (installer parity: `.env` + `.env.example` updated).
-> - 2026-08-03: **Single-instance + tray UX fix; Installer-Parity rule** — a second launch now restores the running window (`SingleInstance.cs` named-event signaling), the tray menu gains **Quit**, and on tray-less desktops (no StatusNotifierWatcher — `Services/TrayAvailability.cs` D-Bus check) closing the window exits instead of stranding an invisible process. Added the mandatory **Build-Parity Rule** (§8): every feature/modification must also be wired into the installer packaging and verified from an installed build — `dotnet run` is not a valid release test.
-> - 2026-08-01: **Docs audit** — removed stale `activity_logs` / `shell_commands` schema + sync references (both gone from the product), corrected sync endpoint table (7 endpoints, batch 500), documented the `MigrateSql` migration strategy, added `storage_devices`/`permission_status`/`app_items` tables, noted `IShellCommandCollector`/`ShellCommand` as dead code, added `FileLoggerProvider` (dotnetrunlog.txt), added `install-extensions.sh`, and cleaned up the completion % to ~85%.
-> - 2026-07-31: **Cross-service payload sync + local catalog dedup** — installed-apps mapper now sends `binaryName`/`isBrowser`/`desktopId`/`categories`; app-sessions sends `groupedBy`/`cgroupScope`/`contextLabel`; app-items sends `processId` + all 9 journey fields. `installed_applications` conflict-update resets `is_synced = 0` so re-detected apps re-sync (drives server `last_seen_at` freshness). `installed_packages` switches to `ON CONFLICT(package_name, source_manager)` with a dedup block (window fn keeps newest per fingerprint) + `CREATE UNIQUE INDEX IF NOT EXISTS idx_installed_packages_fingerprint` in `MigrateSql` — fixes the 6,530-row duplicate package bloat caused by `ON CONFLICT(id)` never conflicting.
-> - 2026-07-31: **cgroup-based session dedup (multi-process GUI apps → one session)** — `CgroupResolver.cs` (new) reads `/proc/<pid>/cgroup` and extracts the systemd transient scope (`app-gnome-code-*.scope`); every subprocess of one logical window shares it, so `BuildSessionKey` became scope-aware: `scope|{scope}|{installedAppId}|{machine}|{session}` for scoped processes, unchanged PID key as fallback. Scope resolved once per process and threaded through the `resolvedLogs` tuple — all 6 `BuildSessionKey` call sites consistent. Boot hydration recomputes scope live (`OpenSessionRecord.InstalledAppId` added to both open-session queries). `SessionLabelResolver.cs` (new) labels sessions (VS Code workspace folder via argv + PPID fallback, Chrome `--profile-directory`) into `context_label`. New `grouped_by`/`cgroup_scope`/`context_label` columns on `app_sessions` via `MigrateSql` ALTERs (client-only; server sync later). `gnome-control-center-search-provider` → `NonAppProcesses`.
-> - 2026-07-31: **Atomic cascade-close** — new composite `CloseSessionsAndAppItemsAsync()` acquires the connection gate once, closes sessions + their open `app_items` in ONE transaction. Wired into all 4 close paths (main loop — which was missing the item-close entirely —, crash recovery, garbage cleanup, non-GUI cleanup). Fixes 11 orphaned open items on closed sessions. Per-tab closes in `NativeMessageService`/`JourneyEngine` still use `CloseAppItemsBySessionIdsAsync`.
-> - 2026-07-31: **Terminal classification + PPID walk logging** — `TerminalEmulators` expanded (`gnome-terminal-server`, `foot`); `SessionHierarchyResolver` takes optional `ILogger` and logs `ResolveParent` walks at Debug.
-> - 2026-07-30: **Software classification pipeline** — Added `SoftwareCategoryResolver.cs` (metadata-driven category resolution: `.desktop Categories` → Browser/IDE/FileManager/Application, macOS bundle ID fallback), `SoftwareClassifier.cs` (joint dedup pipeline: GUI apps win over matching package entries), `SoftwareIdentityResolver.cs` (SHA-256 stable identity for cross-source dedup across InstalledAppDetector vs PackageDetector). Refactored `AppProcessClassifier.cs`: renamed `FileManagerProcesses`/`IdeProcesses` → `FileManagerFallbacks`/`IdeFallbacks`, added `ResolveCategory()` and new `ResolveRootItemType()` overload with `categories`/`desktopId` params. Upgraded `InstalledAppDetector.cs`: Linux `.desktop` scanning now follows `$XDG_DATA_DIRS` (covers snap `/var/lib/snapd/desktop/applications/` and flatpak exports), macOS `IsMacOSBrowserApp()` → `InspectMacOSBundle()` returning `CFBundleIdentifier` + browser flag, added `ExtractPlistString()` helper, browser detection via `Categories=WebBrowser` (Linux) / `URLAssociations` http/https (Windows) / `CFBundleURLSchemes` http+https (macOS). Added server migration 012 (`desktop_id`, `categories`, `is_browser` columns).
-> - 2026-07-30: **File logger** — Added `FileLoggerProvider.cs` for `dotnetrunlog.txt` output, registered in `Program.cs`.
-> - 2026-07-30: **GUI-apps-only tracking gate** — New rule: only processes resolving to `installed_applications` or detected as GUI apps (has .desktop file / .app bundle / Start Menu) are tracked. Removed shell-always-tracked, build-tool auto-registration, runtime auto-registration, package fallback tracking from `ResolveAppInfoInner`. Added `IsGuiApplication()` to `IInstalledAppDetector`/`InstalledAppDetector` with `CheckGuiPath()`. Simplified main loop filter, removed `_knownPackageNames`, `CloseStalePackageSessionsAsync`. Renamed `AutoDetectInstalledApp` → `AutoDetectInstalledGuiApp`.
-> - 2026-07-30: **Fixed NativeMessageService app_display_name GUID bug** — `_browserAppCache` now stores `(id, displayName)` tuple instead of raw GUID. `ResolveBrowserAppIdAsync` → `ResolveBrowserAppAsync` returning both ID and name. Caller uses display name for `AppDisplayName`.
-> - 2026-07-30: **Cross-platform headless subprocess filter** — Added `GetProcessCommandLine()` (PowerShell on Windows, `ps -o command=` on macOS). Centralized `ChromiumSubprocessFlags` + `IsHeadlessSubprocess()` in `AppProcessClassifier`. Linux `IsChromeSubprocess()` → `ReadProcessCmdline()`. Startup cleanup closes old `--type=` rows.
-> - 2026-07-30: **Dynamic browser suffix stripping** — Removed 12-entry hardcoded `BrowserSuffixes` array from `ActivityContextParser`. Strips suffix dynamically from `installed_applications.app_name`. No generic regex fallback.
-> - 2026-07-30: **SemaphoreSlim concurrency gate** — `SemaphoreSlim(1,1)` guarding all `SqliteLogStore` public methods. Private ungated helpers avoid reentrancy deadlock. `PRAGMA busy_timeout = 5000;`. `GatedTransaction` wrapper + gate-leak fix.
-> - 2026-07-30: **FileSystemEventWatcher exclusion list** — Excluded Waydroid, Flatpak, Snap, cache, trash, containers, Steam dirs. Removed `UserProfile` from `WatchDirectories`. Per-process resilience via inner try/catch.
-> - 2026-07-29: **Fixed GNOME daemon contamination via Xwayland empty `binary_name`** — Xwayland `.desktop` file has no `Exec=` line, so `InstalledAppDetector` stored it with `binary_name=""`. The fuzzy-match SQL (`$name LIKE '%' || binary_name || '%'`) became `$name LIKE '%%'` — matching **every** process. Fixed by: (1) `AND binary_name != ''` in fuzzy SQL; (2) `NonAppProcesses` expanded with 16 GNOME daemons + added `NonAppProcessPrefixes` array (`gvfsd-`, `gsd-`, `goa-`, `evolution-`, `ibus-`, `at-spi2-`, `gnome-shell-`, `tracker-`, `gdm`, `mutter-`); (3) `KernelNamePrefixes` in `ProcessFilter.cs` for first-stage filter; (4) `NoDisplay=true` + `Type!=Application` gate in `AddAppFromDesktopFile`. DB cleaned: orphaned sessions closed, Xwayland entry patched with `binary_name='Xwayland'`.
-> - 2026-07-29: **Added File Explorer journey tracking** — Full event-driven desktop event bus for file manager operations (Nautilus, Dolphin, Thunar, Nemo, etc.). Three watchers: `ATSPIEventWatcher` (Tmds.DBus.Protocol → AT-SPI focus/window events + `/proc/cwd`), `FileSystemEventWatcher` (FileSystemWatcher on 7 user directories), `RecentFilesWatcher` (XBEL monitor at `~/.local/share/recently-used.xbel`). `EventCoordinator` deduplicates (3s), correlates (500ms), normalizes raw→business events. `JourneyEngine` resolves `AppSession`, creates `AppItem` rows with 9 journey fields (`object_type`, `action`, `journey_id`, `sequence`, `previous_path`, `current_path`, `window_id`, `tab_id`, `metadata_json`). `IObservableEventSource` interface for all watchers. Coexistence: `item_type` preserved; browser pipeline untouched. NuGet: `Tmds.DBus.Protocol` v0.94.2.
-> - 2026-07-28: **Added browser extension journey tracking** — Chrome MV3 extension + NativeMessageService + native-host.py pipeline captures real-time browser navigation (URLs, tabs, titles). Stored as `browser_tab`/`browser_navigation` in `app_items` with `url`/`domain` fields.
-> - 2026-07-28: **Added `NativeMessageService`** — BackgroundService listening on Unix socket for browser events. `_tabSessionCache` maps browser:tabId→AppSession. Handles tab create/update/activate/close events.
-> - 2026-07-28: **Added `BrowserExtensionService`** — Browser detection + two-strategy extension install (--load-extension → profile injection). Async-safe. Extension detection via NativeMessageService socket-level heartbeat.
-> - 2026-07-28: **Added `url`/`domain` columns to `app_items`** schema + server DTOs.
-> - 2026-07-28: **Fixed `InstallNativeHostManuallyAsync`** — computes extension ID into `allowed_origins`.
-> - 2026-07-28: **Fixed extension active detection** — replaced socket-based `fuser` with process-based `pgrep native-host.py + pgrep chrome`, then replaced again with socket-level heartbeat for precision.
-> - 2026-07-28: **Removed `--enable-automation`** from Chrome launch to silence GCM noise.
-> - 2026-07-28: **Added crash-safe session ended_at tracking** — heartbeat persisted every cycle (`last_heartbeat_at` in `app_status`), `ReconcileStaleSessionsOnBootAsync()` called on startup detects stale heartbeats and closes orphaned sessions with the last heartbeat time as approximate crash time. Includes cross-platform `GetSystemUptime()` for diagnostic logging. Handles poweroff, process crash, and fast restart.
-> - 2026-07-27: Added `ActivityContextParser`, `AppProcessClassifier`, `SessionHierarchyResolver` for browser URL / file path / process-tree hierarchy.
-> - 2026-07-27: Sessions keyed by PID; `process_id` persisted on `app_sessions` and `app_items`.
-> - 2026-07-27: Added `binary_name` column to `installed_applications` for process→display-name resolution.
-> - 2026-07-27: Added `installed_app_id` / `installed_package_id` FK columns to `app_sessions`.
-> - 2026-07-27: Replaced in-memory `IsInstalledApp()` filter with SQLite-backed `ResolveAppInfo()` + auto-detect.
-> - 2026-07-27: Fixed Linux ProcessCollector `resolvedTitle ??= name` bug (was giving every process a fake title, bypassing window-title filters).
-> - 2026-07-27: Added process-tree-based parent-child tracking for terminal shells inside IDE/terminal-emulator sessions.
-> - 2026-07-27: Added `waydroid` / `gnome-software` to `NonAppProcesses` blocklist.
-> - 2026-07-27: **Added `BuildToolProcesses` set** (`make`, `go`, `npm`, `npx`, `cargo`, `pip`, `tsc`, etc.) — build tools were auto-registered as `installed_packages` (category=`tool`) and tracked without a window title. *(Reversed 2026-07-30 by the GUI-apps-only gate — build tools are now skipped entirely.)*
-> - 2026-07-27: **Fixed process filter** — known-app processes (`appId != null`) and build tools are now tracked even without a window title. Previously, Wayland-native apps (VSCode, Chrome, Nautilus) were silently dropped because they don't appear in X11 window list.
-> - 2026-07-27: **Broadened `AutoDetectInstalledApp`** — now accepts `/home/*` and `/media/*` paths as valid install locations (covers project-local compiled binaries like `./bin/alpha-ai-server`).
-> - 2026-07-27: **Fixed file manager path resolution** — `ParseFileManagerContext` now resolves folder display names to absolute paths by searching `~/`, `~/Documents`, `~/Desktop`, `/media/<user>/`, etc.
-> - 2026-07-27: **Fixed `SessionHierarchyResolver`** — `ResolveParent` now walks through build tools and runtime packages as intermediate PPID steps; `ShouldLinkTo` now accepts build tools as children of IDEs and terminals.
+> **Last audited:** 2026-08-07 (full re-audit against source — every section below was verified by reading the current code)
+> **Changelog:**
+> - 2026-08-07: **Docs re-audit & rewrite.** Re-verified every claim against source. Corrected stale
+>   references: `TrayAvailability.cs` and `SingleInstance.cs` do not exist (`SingleInstanceService.cs`
+>   does); the tray menu has **Show / Hide only (no Quit item)**; `extensions/`, `native-host.py`,
+>   `NativeMessageService`, `BrowserExtensionService` and `install-extensions.sh` are gone from the
+>   product; the permission wizard is now **4 steps on Linux / 3 elsewhere** (Auto-Start → Background
+>   Guard → [Linux-only] Dependencies → Other Permissions) and always re-validates the real condition.
+>   Documented the current 11-table schema, the joint software classifier, the sync ordering
+>   (app-sessions BEFORE app-items), the headless `--background` service mode, and the exact env keys.
+> - 2026-08-07: **Private/incognito window URLs captured.** (1) `AccessibilityBrowserTracker` rotates on
+>   title change after a bounded ~25s `historyLag` timeout even with no URL (was: held forever waiting
+>   for history — private windows froze rotation). (2) `LogCollectorService` no longer closes browser
+>   sessions owned by the accessibility tracker (browser-owned sessions excluded from the close phase —
+>   they were being silently closed 4–40s after opening). (3) Linux URL sources: **Firefox** builds its
+>   full AT-SPI tree on demand, so `LinuxAtSpiBrowserReader` reads the `DOCUMENT_WEB` (role 95) node's
+>   `DocURL` attribute — the EXACT private-window URL; **Chrome 136+** only builds the tree when launched
+>   with `--force-renderer-accessibility` (the tracker ships a user-level `google-chrome.desktop` that
+>   carries the flag on every Exec line). Verified end-to-end in the INSTALLED build.
+> - 2026-08-07: **Killed the `dpkg-query: no packages found matching ${Version}` startup noise** — the
+>   `-f` format string is now double-quoted so `\t`/`\n` escapes reach dpkg-query as ONE argument, and
+>   stderr is drained.
+> - 2026-08-07: **Quiet terminal** — per-event browser-journey logs demoted to Debug (visible with
+>   `ALPHA_LOG_LEVEL=debug`); startup banner stays at Information.
+> - 2026-08-07: **Headless `--background` service mode** — `Program.cs` no longer initializes the
+>   Avalonia/X11 UI in background mode (the installed systemd unit had hardcoded a stale
+>   `XAUTHORITY=~/.Xauthority`; the real Xwayland auth is `/run/user/<uid>/.mutter-Xwaylandauth.*`), so
+>   the installed service stays active instead of dying at startup.
+> - 2026-08-06: **Hybrid URL fallback — browser profile History reader** (`BrowserHistoryReader.cs`).
+>   Reads Chromium `History` / Firefox `places.sqlite` while the browser runs (safe copy + `-wal`/`-shm`/
+>   `-journal` sidecars, read-only, signature-throttled); resolution is STRICTLY title-match; generic
+>   profile discovery catches brand-new browsers. Tags `metadata_json.source="history"` vs `"a11y"`.
+> - 2026-08-05: **Option B — accessibility-tree browser journey** (the debugger pipeline `Core/Browser/*`
+>   — 16 files — was DELETED). New `Core/BrowserAccessibility/` reads the OS accessibility tree (AT-SPI
+>   / UIA / AX) — no debugger, no extension, no browser-catalog dependency. `AccessibilityBrowserTracker`
+>   polls every `ALPHA_BROWSER_ACCESSIBILITY_POLL_SECONDS` (3), one `app_sessions` per window +
+>   `browser_tab`/`browser_navigation`/`browser_download` `app_items`, idle-close, graceful shutdown,
+>   incognito gated by `ALPHA_BROWSER_CAPTURE_INCOGNITO` (default off). Dead code removed: shell-command
+>   collectors, `publish/install-extensions.sh`, the `extensions/` bundling step.
+> - 2026-08-03: **Single-instance + tray UX; Installer-Parity rule** — second launch restores the running
+>   window via `SingleInstanceService` named-pipe signalling; `--background` runs headless for systemd.
+>   Added the mandatory **Build-Parity Rule** (§15): `dotnet run` is not a valid release test.
+> - 2026-08-01 … 2026-07-27: See prior entries below (kept for history — all still accurate).
+>   Notable: GUI-apps-only tracking gate (07-30), cgroup-based session dedup (07-31), software
+>   classification pipeline (07-30), file-explorer journey (07-29), atomic cascade-close (07-31),
+>   crash-safe session ended_at tracking (07-28), SQLite concurrency gate (07-30), GNOME-daemon
+>   contamination fix (07-29).
 > **Service completion (honest):** ~85%
 
 ---
@@ -85,20 +54,21 @@
 ## 1. Responsibility & Scope
 
 **Owns:**
-- Collecting process activity data (window titles, CPU%, memory) from employee machines
-- Identifying installed (non-kernel, non-system) applications via platform heuristics
-- Storing collected data locally in SQLite before syncing
-- Syncing data to the central server via REST APIs
-- Managing employee login/logout lifecycle (JWT-based)
-- Ensuring the app stays running (auto-start + background guard)
-- Providing a UI for login flow and permission setup
+- Collecting process activity (window titles, CPU%, memory) from employee machines via per-platform collectors
+- Capturing the **browser journey** from the OS accessibility tree (exact active-tab URL + title) + profile-history fallback
+- Capturing the **file-explorer journey** via an event-driven desktop event bus (AT-SPI + FileSystemWatcher + XBEL)
+- Building a **software inventory** (GUI apps in `installed_applications`, CLI tools/runtimes/libraries in `installed_packages`)
+- Collecting **system info** (device hardware incl. storage/GPU, network info, session events, permission status)
+- Storing everything locally in SQLite before batched sync to the central server
+- Managing the employee login/logout lifecycle (JWT in request body) and the post-login **permission wizard**
+- Keeping the app alive (auto-start + background-guard watchdog), single-instance signalling, tray, headless systemd mode
 
 **Does NOT own:**
-- Any business logic about what constitutes "productive" vs "unproductive" activity
-- User management, department hierarchy, or admin functionality
-- Data persistence beyond local buffering (server is source of truth)
+- Any business logic about "productive" vs "unproductive" activity
+- User/department/admin management (server + web)
+- Data persistence beyond local buffering (server is the source of truth)
 - Any web-facing display or analytics
-- Shell/terminal command history collection (**removed** — no longer collected or synced)
+- Shell/terminal **command history** collection — removed; shells themselves are only tracked as *children* of terminals/IDEs
 
 ---
 
@@ -106,588 +76,500 @@
 
 | Component | Technology | Version |
 |---|---|---|
-| **Language** | C# (.NET) | net10.0 |
+| **Language / TFM** | C# (.NET) | net10.0 |
 | **UI Framework** | Avalonia | 12.1.0 |
-| **Desktop** | Avalonia.Desktop | 12.1.0 |
-| **Theme** | Avalonia.Themes.Fluent | 12.1.0 |
-| **Fonts** | Avalonia.Fonts.Inter | 12.1.0 |
+| **Desktop / Theme / Fonts** | Avalonia.Desktop / Avalonia.Themes.Fluent / Avalonia.Fonts.Inter | 12.1.0 |
 | **MVVM Toolkit** | CommunityToolkit.Mvvm | 8.4.2 |
 | **SQLite Driver** | Microsoft.Data.Sqlite | 10.0.10 |
 | **SQLite Bundle** | SQLitePCLRaw.bundle_e_sqlite3 | 2.1.12 |
 | **DI/Hosting** | Microsoft.Extensions.Hosting | 10.0.10 |
-| **HTTP Client** | System.Net.Http (built-in) | — |
+| **Registry (Windows)** | Microsoft.Win32.Registry | 5.0.0 (windows only) |
 | **D-Bus** | Tmds.DBus.Protocol | 0.94.2 |
 | **UIA (Windows reader)** | Interop.UIAutomationClient | 10.19041.0 |
 | **Diagnostics** | AvaloniaUI.DiagnosticsSupport | 2.2.3 (Debug only) |
+| **HTTP Client** | System.Net.Http (built-in) | — |
 
 ### Notable Omissions
 
-- **No ORM** — raw SQL via `SqliteCommand` and parameterized queries
-- **No test framework** — no xUnit, NUnit, or any test project
-- **No structured logging framework beyond ILogger** — console (dev) + `FileLoggerProvider` → `dotnetrunlog.txt`
-- **No auto-updater library** — no Squirrel, Velopack, or similar
+- **No ORM** — raw parameterized SQL via `SqliteCommand`
+- **No test framework** — no test project at all
+- **No structured logging beyond ILogger** — console (dev) + `FileLoggerProvider` → `dotnetrunlog.txt`
+- **No auto-updater library** — releases are manual (GitHub + installers)
 
 ---
 
-## 3. Project Structure
+## 3. Project Structure (verified against source)
 
 ```
 client/
-├── Program.cs                          # Entry point. DI setup, CLI modes (--encrypt-config, --background), mutex
-├── App.axaml / App.axaml.cs            # Avalonia app lifecycle, tray icon, window close interception (hide vs shutdown)
-├── SingleInstance.cs                   # Named-event signaling — a 2nd launch restores the running instance's window
-├── app.manifest                        # Windows compatibility manifest
-├── ViewLocator.cs                      # ViewModel → View resolution via reflection
-├── client.csproj                       # Project file with NuGet references
-├── appsettings.json                    # Logging config (not heavily used)
-├── .env.example                        # Template for environment config
+├── Program.cs                      # Entry point. CLI modes (--encrypt-config, --print-config,
+│                                   #   --background, --minimized), mutex + single-instance pipe,
+│                                   #   DI container, log/db path resolution
+├── App.axaml / App.axaml.cs        # Avalonia app, tray icon (Show/Hide), window-close hides to tray,
+│                                   #   single-instance SHOW handling, DI-resolved MainViewModel
+├── SingleInstanceService.cs        # (in Core/) named-pipe signalling ("alpha-ai-tracker-activation")
+├── app.manifest                    # Windows compatibility manifest
+├── ViewLocator.cs                  # ViewModel → View resolution (reflection, simple replacement)
+├── client.csproj                   # net10.0, Avalonia 12.1.0, DefaultServerUrl AssemblyMetadata
+├── appsettings.json                # Logging config (largely unused — level comes from ALPHA_LOG_LEVEL)
+├── .env / .env.example             # Dev plaintext config template (REPO key is NOT read by client)
 │
 ├── Configuration/
-│   ├── AppConfig.cs                    # Reads env vars (ALPHA_CLIENT_ID, ALPHA_SERVER_URL, ALPHA_DB_PATH, etc.)
-│   └── EnvLoader.cs                    # Multi-source config loading: config.enc (encrypted) → .env (plaintext dev fallback)
+│   ├── AppConfig.cs                # Reads all ALPHA_* env vars into typed config (see §14)
+│   └── EnvLoader.cs                # Multi-source config loading: dev .env vs installed config.enc,
+│                                   #   shipped-config propagation, machine-key migration, secure wipe
 │
 ├── Core/
 │   ├── Abstractions/
-│   │   ├── IActivityCollector.cs       # Single method: CollectAsync → ActivityLog[]
-│   │   ├── ILogStore.cs                # 40+ methods: store/retrieve-unsent/mark-sent for 8 tables + lookup + journey + close paths
-│   │   ├── IInstalledAppDetector.cs    # GUI/desktop app detection + permission status
-│   │   └── IPackageDetector.cs         # CLI tool/runtime/library detection from package managers
-│   ├── BrowserAccessibility/
-│   │   ├── IAccessibilityBrowserReader.cs   # Browser-window snapshot contract (platform readers)
-│   │   ├── AccessibilitySnapshot.cs         # window key, pid, process, title, normalized URL, UrlSource, incognito flag
-│   │   ├── LinuxAtSpiBrowserReader.cs       # python3 + AT-SPI D-Bus probe (embedded script) — validated on Chrome 151
-│   │   ├── WindowsUiaBrowserReader.cs       # UIA via Interop.UIAutomationClient (address bar ValuePattern)
+│   │   ├── IActivityCollector.cs   # CollectAsync() → ActivityLog[]
+│   │   ├── ILogStore.cs            # ~40 methods: store/unsent/mark-sent × 8 tables + lookups + journey + close paths
+│   │   ├── IInstalledAppDetector.cs# GUI app detection + MissingPermissions / grant instructions
+│   │   └── IPackageDetector.cs     # CLI tool/runtime/library detection from package managers
+│   ├── BrowserAccessibility/       # ⭐ Browser journey (Option B)
+│   │   ├── IAccessibilityBrowserReader.cs   # snapshot contract (Platform, IsAvailable, ReadAsync)
+│   │   ├── AccessibilitySnapshot.cs         # windowKey, pid, process, title, Url, UrlSource, incognito
+│   │   ├── LinuxAtSpiBrowserReader.cs       # ONE embedded python3 probe: AT-SPI + Firefox sessionstore (mozLz4) + WM window list
+│   │   ├── WindowsUiaBrowserReader.cs       # UIA via Interop.UIAutomationClient
 │   │   ├── MacOsAccessibilityBrowserReader.cs # osascript/System Events (Accessibility grant required)
 │   │   ├── AccessibilityBrowserReaderFactory.cs # platform picker
-│   │   ├── BrowserHistoryReader.cs          # NEW: reads browser profile History/places.sqlite (safe copy+WAL) while running — title-match URL fallback, brand-new-profile discovery
-│   │   ├── AccessibilityBrowserTracker.cs   # BackgroundService: poll → history enrichment → sessions/items → idle-close → downloads
-│   │   └── BrowserAccessibilityHelpers.cs   # URL normalization, domain extraction, StripBrowserSuffix, incognito hints
-│   ├── DesktopEventBus/
-│   │   ├── IObservableEventSource.cs   # Common interface for all watchers (atspi, filesystem, recentfiles)
-│   │   ├── RawDesktopEvent.cs          # Raw OS-level event from watchers
-│   │   ├── DesktopEvent.cs             # Normalized business-level event (after coordinator processing)
-│   │   ├── DesktopEventValidator.cs    # Static validation: file manager detection, path validity, process filtering
-│   │   ├── EventCoordinator.cs         # Subscribes watchers → dedup (3s) + correlate (500ms) + normalize raw→business events
-│   │   ├── JourneyEngine.cs            # Receives DesktopEvent → resolve AppSession → create AppItem rows with journey fields
-│   │   └── JourneyRecord.cs            # In-memory journey state (per window/tab session)
-│   ├── Models/
-│   │   ├── ActivityLog.cs              # Intermediate collection DTO (used by IActivityCollector, not persisted)
-│   │   ├── AppSession.cs               # AppSession + AppItem (self-referencing, url/domain + 9 journey fields)
-│   │   ├── DeviceHardwareInfo.cs       # DeviceHardwareInfo, InstalledApplication, InstalledPackage, NetworkInfo, SessionEvent, StorageDevice
-│   │   ├── EmployeeInfo.cs             # Employee login info (persisted in SQLite)
-│   │   └── SessionInfo.cs              # Static session ID (generated once per app launch)
-│   ├── CollectionExtensions.cs         # Small LINQ-style helpers used across collection code
-│   ├── EncryptedConfigService.cs       # AES-256-GCM encryption with transport key + machine-derived key
-│   ├── CgroupResolver.cs               # Linux /proc/<pid>/cgroup → systemd app-*.scope (session dedup key; null elsewhere)
-│   ├── SessionLabelResolver.cs         # Session context_label: VS Code workspace folder / Chrome --profile-directory
-│   ├── InstalledAppDetector.cs         # Cross-platform installed app detection (desktop files, registry, .app bundles) — GUI only
-│   ├── PackageDetector.cs              # Cross-platform installed package detection (npm, pip, apt, brew, choco, winget, scoop, etc.)
-│   ├── SoftwareCategoryResolver.cs     # Metadata-driven category resolution (.desktop Categories / macOS bundle ID)
-│   ├── SoftwareClassifier.cs           # Joint dedup pipeline — GUI apps win over matching package entries
-│   ├── SoftwareIdentityResolver.cs     # SHA-256 stable identity for cross-source dedup
-│   ├── ProcessFilter.cs                # Filters kernel/system processes from collection
-│   ├── ParentProcessResolver.cs        # Resolves window titles from parent processes (e.g., terminal → shell)
-│   ├── AppProcessClassifier.cs         # Browser/file-manager/IDE/shell/runtime classification + item_type + headless-subprocess filter
-│   ├── ActivityContextParser.cs        # URL + file path extraction from window titles
-│   └── SessionHierarchyResolver.cs     # PID-tree parent linking (node→terminal→IDE)
+│   │   ├── BrowserHistoryReader.cs          # profile History/places.sqlite URL fallback (copy+WAL, title-match)
+│   │   ├── AccessibilityBrowserTracker.cs   # BackgroundService: poll → enrich → sessions/items → idle/vanished close → downloads
+│   │   └── BrowserAccessibilityHelpers.cs   # browser hints, NormalizeUrl, ExtractDomain, StripBrowserSuffix, StableInt32
+│   ├── DesktopEventBus/            # ⭐ File-explorer journey
+│   │   ├── IObservableEventSource.cs   # common watcher contract (SourceName, IsActive, EventRaised, Start/Stop)
+│   │   ├── RawDesktopEvent.cs          # raw OS-level event from a watcher
+│   │   ├── DesktopEvent.cs             # normalized business event (after coordinator)
+│   │   ├── DesktopEventValidator.cs    # file-manager detection, ignored-process prefixes, path validity
+│   │   ├── EventCoordinator.cs         # dedup (3s) + correlate (500ms) + journey records + normalize
+│   │   ├── JourneyEngine.cs            # resolve/create AppSession → file_manager_tab root + fm_* items (9 journey fields)
+│   │   └── JourneyRecord.cs            # in-memory journey state
+│   ├── Models/                     # ActivityLog, AppSession/AppItem (journey fields), DeviceHardwareInfo,
+│   │                               #   InstalledApplication, InstalledPackage, NetworkInfo, StorageDevice,
+│   │                               #   SessionEvent, EmployeeInfo, SessionInfo (static per-launch GUID)
+│   ├── EncryptedConfigService.cs   # AES-256-GCM: transport key → machine-derived key; fallback .machine-id
+│   ├── CgroupResolver.cs           # /proc/<pid>/cgroup → systemd app-*.scope (session dedup key)
+│   ├── SessionLabelResolver.cs     # context_label: VS Code workspace folder / Chrome --profile-directory
+│   ├── InstalledAppDetector.cs     # GUI apps: .desktop (XDG), registry/Start Menu (Win), .app bundles (mac)
+│   ├── PackageDetector.cs          # npm, pip, dpkg/apt, snap, flatpak, brew, macports, choco, winget, scoop
+│   ├── SoftwareCategoryResolver.cs # canonical categories from .desktop Categories / bundle id
+│   ├── SoftwareClassifier.cs       # joint dedup pipeline — GUI apps win over matching package entries
+│   ├── SoftwareIdentityResolver.cs # SHA-256 stable identity for cross-source dedup
+│   ├── ProcessFilter.cs            # kernel/system process filtering (names, prefixes, session, window, age)
+│   ├── ParentProcessResolver.cs    # PPID tree, window-title resolution, cmdline, browser profile extraction
+│   ├── AppProcessClassifier.cs     # category + root item_type resolution, headless --type= filter
+│   ├── ActivityContextParser.cs    # URL/path/title parsing, dynamic browser-suffix stripping
+│   └── SessionHierarchyResolver.cs # PID-tree parent linking (node → terminal → IDE)
 │
 ├── Platform/
-│   ├── Windows/
-│   │   └── ProcessCollector.cs          # User32.dll-based: EnumWindows, GetForegroundWindow, CPU via TotalProcessorTime
-│   ├── MacOS/
-│   │   └── ProcessCollector.cs          # osascript-based foreground window detection. ⚠️ No CPU measurement, no all-window-enum
-│   └── Linux/
-│       └── ProcessCollector.cs          # Multi-strategy: xprop, xdotool, gdbus (atspi/portal/shell), Python AT-SPI script
+│   ├── Windows/ProcessCollector.cs # User32 EnumWindows (all titles), GetForegroundWindow, CPU 2-sample, PS cmdline
+│   ├── MacOS/ProcessCollector.cs   # osascript foreground only. ⚠️ No CPU measurement
+│   └── Linux/ProcessCollector.cs   # multi-strategy foreground + GNOME Shell Introspect / xprop window lists
 │
 ├── Services/
-│   ├── LogCollectorService.cs           # BackgroundService: collect → resolve → store app_sessions → sync → heartbeat cycle (30s loop)
-│   ├── BackgroundGuardService.cs        # Watchdog: re-installs auto-start/systemd if removed (60s check)
-│   ├── AutoStartService.cs              # Platform-specific auto-start: Run key, .desktop, launchd plist
-│   ├── DesktopEventService.cs           # BackgroundService: orchestrator — starts watchers, wires EventCoordinator → JourneyEngine
-│   ├── FileLoggerProvider.cs            # ILogger provider writing to dotnetrunlog.txt
-│   ├── TrayAvailability.cs              # D-Bus StatusNotifierWatcher detection — does this desktop show a tray icon?
+│   ├── LogCollectorService.cs      # ⭐ main BackgroundService: collect → resolve → sessions/items → sync → heartbeat
+│   ├── DesktopEventService.cs      # ⭐ orchestrates file-explorer watchers → coordinator → JourneyEngine
+│   ├── BackgroundGuardService.cs   # watchdog: re-installs auto-start/systemd unit if removed (60s)
+│   ├── AutoStartService.cs         # Run key / ~/.config/autostart .desktop / launchd plist
+│   ├── FileLoggerProvider.cs       # dotnetrunlog.txt (defensive path fallback, null sink last)
 │   └── Watchers/
-│       ├── ATSPIEventWatcher.cs         # Linux AT-SPI via Tmds.DBus.Protocol — focus/window events + /proc/cwd for file manager paths
-│       ├── FileSystemEventWatcher.cs    # FileSystemWatcher on 7 user directories — create/delete/rename/modify enrichment
-│       └── RecentFilesWatcher.cs        # XBEL monitor at ~/.local/share/recently-used.xbel — recent-file-opens evidence
+│       ├── ATSPIEventWatcher.cs    # Tmds.DBus.Protocol → AT-SPI focus:/window: events + /proc/cwd path
+│       ├── FileSystemEventWatcher.cs # FileSystemWatcher on 6 user dirs (exclusion list, debounce)
+│       └── RecentFilesWatcher.cs   # XBEL monitor (~/.local/share/recently-used.xbel)
 │
 ├── Storage/
-│   ├── DatabaseSchema.cs                # Raw SQL: CREATE TABLE for 11 tables + MigrateSql idempotent ALTERs + insert/mark-sent statements
-│   └── SqliteLogStore.cs                # ILogStore implementation using Microsoft.Data.Sqlite (50+ methods, SemaphoreSlim gate)
+│   ├── DatabaseSchema.cs           # CreateTableSql (11 tables) + MigrateSql (idempotent ALTERs + dedup) + insert SQL
+│   └── SqliteLogStore.cs           # ILogStore impl: SemaphoreSlim(1,1) gate, PRAGMA busy_timeout, atomic cascade-close
 │
-├── ViewModels/
-│   ├── ViewModelBase.cs                 # Base class (extends ObservableObject from CommunityToolkit.Mvvm)
-│   └── MainViewModel.cs                 # Login state, employee info, permission steps (4-step wizard), commands
-│
-├── Views/
-│   ├── MainWindow.axaml                  # XAML layout: login form → permission wizard → employee profile
-│   └── MainWindow.axaml.cs              # Code-behind (minimal — just InitializeComponent)
-│
-├── Converters/
-│   ├── BoolInvertConverter.cs           # !bool for visibility bindings
-│   ├── StringNotEmptyConverter.cs       # string → bool (show when not empty)
-│   └── LoadingToTextConverter.cs        # bool → "Authenticating..." or "Login"
-│
-├── Styles/
-│   └── AppTheme.xaml                    # Dark theme color definitions, brushes, radii, fonts, button styles
-│
-└── publish/
-    ├── build-installer.sh               # Cross-platform installer builder
-    ├── encrypt-config.sh                # Config encryption script
-    ├── installer-windows.iss            # Inno Setup script (auto-kills running instances)
-    ├── release.sh                       # Release workflow script
-    ├── build-deb.sh                     # Linux .deb builder (prerm kills running instances)
-    ├── build-dmg.sh                     # macOS .dmg builder
-    └── {linux,macos,windows}/           # Pre-published platform builds (client + deps)
+├── ViewModels/                     # ViewModelBase (ObservableObject) + MainViewModel (login, 4-step wizard, profile)
+├── Views/MainWindow.axaml(.cs)     # login → wizard steps → profile; browser-journey info card; dark theme
+├── Converters/                     # BoolInvert, StringNotEmpty, LoadingToText
+├── Styles/AppTheme.xaml            # dark theme resources
+├── Assets/                         # avalonia-logo.ico, icon.png
+└── publish/                        # build-installer.sh, encrypt-config.sh, firefox-a11y-apparmor.sh,
+                                    #   release.sh, build-deb.sh, build-dmg.sh, installer-windows.iss
 ```
 
 ---
 
-## 4. MVVM Layering
+## 4. MVVM Layering & DI
 
-### Views → ViewModels → Models → Services
+### Layers
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Views (XAML)                                            │
-│  MainWindow.axaml — Login, Permission Steps, Profile     │
-│  Binds to MainViewModel via {Binding ...}                │
-├─────────────────────────────────────────────────────────┤
-│  ViewModels                                              │
-│  MainViewModel (CommunityToolkit.Mvvm)                    │
-│  - [ObservableProperty] for all bindable state            │
-│  - [RelayCommand] for Login/Logout/GrantPermission       │
-│  - Injected: AppConfig, ILogStore, HttpClient, etc.      │
-├─────────────────────────────────────────────────────────┤
-│  Models (plain data objects)                              │
-│  ActivityLog, AppSession, AppItem, DeviceHardwareInfo,    │
-│  InstalledApplication, InstalledPackage, NetworkInfo,     │
-│  SessionEvent, StorageDevice, EmployeeInfo, SessionInfo   │
-├─────────────────────────────────────────────────────────┤
-│  Services / Infrastructure                                │
-│  LogCollectorService (BackgroundService)                  │
-│  BackgroundGuardService (BackgroundService)               │
-│  AutoStartService (singleton)                             │
-│  SqliteLogStore (ILogStore implementation)                │
-│  Platform collectors (IActivityCollector impls)           │
-└─────────────────────────────────────────────────────────┘
+Views (XAML) ──► ViewModels (MainViewModel) ──► Models (plain DTOs) ──► Services / Infrastructure
+   MainWindow       [ObservableProperty] state       ActivityLog, AppSession,        LogCollectorService
+   (login/steps/     [RelayCommand] Login/Logout/     AppItem, DeviceHardwareInfo,    DesktopEventService
+    profile)         GrantCurrentStepPermission       InstalledApplication,           AccessibilityBrowserTracker
+                                                     InstalledPackage, NetworkInfo,   SqliteLogStore
+                                                     SessionEvent, StorageDevice,     platform collectors
 ```
 
-### DI Container
-
-Microsoft.Extensions.Hosting (`Host.CreateApplicationBuilder`). All services registered in `Program.cs`:
+### DI Container (`Program.cs`, `Host.CreateApplicationBuilder`)
 
 | Lifetime | Services |
 |---|---|
-| **Singleton** | `AppConfig`, `ILogStore`, `HttpClient`, `IInstalledAppDetector`, `IPackageDetector`, `IActivityCollector`, `AutoStartService`, `LogCollectorService`, `IAccessibilityBrowserReader` (platform reader), `EventCoordinator`, `JourneyEngine`, `ATSPIEventWatcher`, `FileSystemEventWatcher`, `RecentFilesWatcher` |
+| **Singleton** | `AppConfig`, `ILogStore` (SqliteLogStore), `HttpClient` (30s timeout), `IInstalledAppDetector`, `IPackageDetector`, `IActivityCollector` (per-platform), `AutoStartService`, `LogCollectorService`, `EventCoordinator`, `JourneyEngine`, `ATSPIEventWatcher`, `FileSystemEventWatcher`, `RecentFilesWatcher` |
+| **Singleton (conditional)** | `IAccessibilityBrowserReader` (platform reader) + `BrowserHistoryReader` — only when `ALPHA_BROWSER_TRACKING_ENABLED` |
+| **Hosted** | `BackgroundGuardService`, `LogCollectorService`, `DesktopEventService`, `AccessibilityBrowserTracker` (conditional) |
 | **Transient** | `MainViewModel` |
-| **Hosted** | `BackgroundGuardService`, `LogCollectorService`, `AccessibilityBrowserTracker`, `DesktopEventService` |
 
-ViewModels are resolved from DI when the window is created (`App.axaml.cs` uses `ServiceProvider.GetRequiredService<MainViewModel>()`).
+`App.ServiceProvider = host.Services` is set after `StartAsync`; `App.axaml.cs` resolves `MainViewModel` from DI.
+
+### CLI modes & process model
+
+- `--encrypt-config [input] [output]` — build-time `.env` → `config.enc` (transport key)
+- `--print-config` — prints the config an INSTALLED build would resolve (diagnostic)
+- `--background` — headless: hosts the services with **no Avalonia/X11 UI** (systemd unit). Skips GUI init so a stale `XAUTHORITY` can never crash startup.
+- `--minimized` — start hidden to tray (auto-start launches).
+- **Single instance:** global mutex `AlphaAITracker`. A second launch that cannot acquire the mutex sends `SHOW` over the named pipe (`alpha-ai-tracker-activation`) so the running instance raises its window — but only for *user* launches (not `--background`/`--minimized`).
+- Windows: `SetThreadExecutionState(ES_SYSTEM_REQUIRED)` while tracking prevents sleep.
 
 ---
 
 ## 5. Local Data Model (SQLite)
 
-### Schema (defined in `DatabaseSchema.CreateTableSql`)
+**11 tables** (defined in `DatabaseSchema.CreateTableSql`, `IF NOT EXISTS`):
 
-**11 tables:** `device_hardware_info`, `storage_devices`, `installed_applications`, `installed_packages`, `network_info`, `session_events`, `app_sessions`, `app_items`, `app_status`, `permission_status`, `employee_info`.
+`device_hardware_info` · `storage_devices` (relational child of hardware) · `installed_applications` (GUI apps) · `installed_packages` (CLI tools/runtimes/libraries) · `network_info` · `session_events` · `app_sessions` · `app_items` (generic self-referencing child) · `app_status` (key-value, e.g. `last_heartbeat_at`, `perm_*`) · `permission_status` · `employee_info` (login + JWT token)
 
-**`device_hardware_info`** — Hardware snapshot
-```sql
-CREATE TABLE IF NOT EXISTS device_hardware_info (
-    id               TEXT PRIMARY KEY,
-    mac_address      TEXT NOT NULL DEFAULT '',
-    hostname         TEXT NOT NULL DEFAULT '',
-    os_name          TEXT NOT NULL DEFAULT '',
-    os_version       TEXT NOT NULL DEFAULT '',
-    cpu_model        TEXT NOT NULL DEFAULT '',
-    cpu_cores        INTEGER NOT NULL DEFAULT 0,
-    ram_total_mb     INTEGER NOT NULL DEFAULT 0,
-    gpu_model        TEXT NOT NULL DEFAULT '',
-    gpu_vram_mb      INTEGER NOT NULL DEFAULT 0,
-    collected_at     TEXT NOT NULL,
-    is_synced        INTEGER NOT NULL DEFAULT 0,
-    synced_at        TEXT,
-    created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
-);
-```
+### Key columns
 
-**`storage_devices`** — Relational child of `device_hardware_info` (replaces the old JSON blob)
-```sql
-CREATE TABLE IF NOT EXISTS storage_devices (
-    id                  TEXT PRIMARY KEY,
-    device_hardware_id  TEXT NOT NULL REFERENCES device_hardware_info(id),
-    device_type         TEXT NOT NULL DEFAULT '',
-    model               TEXT NOT NULL DEFAULT '',
-    capacity_mb         INTEGER NOT NULL DEFAULT 0,
-    is_synced           INTEGER NOT NULL DEFAULT 0,
-    synced_at           TEXT,
-    created_at          TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
-);
-```
+**`app_sessions`** — process_name, app_display_name (real app name), started_at/ended_at, machine_id, employee_id/name, session_id (per-launch GUID), platform, `installed_app_id`/`installed_package_id` FKs, `process_id`, `parent_process_id`, and (added via MigrateSql ALTERs) `grouped_by` ('cgroup'|'pid'), `cgroup_scope` (raw systemd scope, needed for boot hydration), `context_label` (VS Code workspace / Chrome profile).
 
-**`installed_applications`** — GUI apps only
-```sql
-CREATE TABLE IF NOT EXISTS installed_applications (
-    id               TEXT PRIMARY KEY,
-    app_name         TEXT NOT NULL UNIQUE,
-    binary_name      TEXT NOT NULL DEFAULT '',
-    app_version      TEXT NOT NULL DEFAULT '',
-    publisher        TEXT NOT NULL DEFAULT '',
-    install_path     TEXT NOT NULL DEFAULT '',
-    install_date     TEXT,
-    uninstall_string TEXT NOT NULL DEFAULT '',
-    change_type      TEXT NOT NULL DEFAULT 'seen',
-    is_browser       INTEGER NOT NULL DEFAULT 0,
-    desktop_id       TEXT NOT NULL DEFAULT '',
-    categories       TEXT NOT NULL DEFAULT '',
-    detected_at      TEXT NOT NULL,
-    is_synced        INTEGER NOT NULL DEFAULT 0,
-    synced_at        TEXT,
-    created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
-);
--- Upsert: ON CONFLICT(app_name) DO UPDATE ... is_synced = 0 (re-sync on re-detect)
-```
+**`app_items`** — self-referencing via `parent_item_id` (session → tab → navigation / terminal → child). Core columns: `item_type` ('tab','browser_tab','browser_navigation','browser_download','file_manager_tab','fm_*','terminal','folder','file','process','window'), `title`, `identifier`, `url`, `domain`, `opened_at`/`closed_at`, `process_id`. Journey fields (coexist with item_type): `object_type`, `action`, `journey_id`, `sequence`, `previous_path`, `current_path`, `window_id`, `tab_id`, `metadata_json`.
 
-**`installed_packages`** — CLI tools/runtimes/libraries
-```sql
-CREATE TABLE IF NOT EXISTS installed_packages (
-    id               TEXT PRIMARY KEY,
-    package_name     TEXT NOT NULL,
-    version          TEXT NOT NULL DEFAULT '',
-    category         TEXT NOT NULL DEFAULT 'tool',
-    source_manager   TEXT NOT NULL DEFAULT '',
-    install_path     TEXT NOT NULL DEFAULT '',
-    publisher        TEXT NOT NULL DEFAULT '',
-    description      TEXT NOT NULL DEFAULT '',
-    detected_at      TEXT NOT NULL,
-    is_synced        INTEGER NOT NULL DEFAULT 0,
-    synced_at        TEXT,
-    created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
-);
--- Upsert: ON CONFLICT(package_name, source_manager) DO UPDATE ... is_synced = 0
--- Unique index created in MigrateSql: idx_installed_packages_fingerprint
-```
+**Upserts / dedup:**
 
-**`network_info`**
-```sql
-CREATE TABLE IF NOT EXISTS network_info (
-    id                   TEXT PRIMARY KEY,
-    public_ip            TEXT NOT NULL DEFAULT '',
-    private_ip           TEXT NOT NULL DEFAULT '',
-    network_interface_name TEXT NOT NULL DEFAULT '',
-    collected_at         TEXT NOT NULL,
-    is_synced            INTEGER NOT NULL DEFAULT 0,
-    synced_at            TEXT,
-    created_at           TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
-);
-```
-
-**`session_events`** — login/logout/lock/unlock
-```sql
-CREATE TABLE IF NOT EXISTS session_events (
-    id               TEXT PRIMARY KEY,
-    event_type       TEXT NOT NULL,
-    os_username      TEXT NOT NULL DEFAULT '',
-    event_at         TEXT NOT NULL,
-    is_synced        INTEGER NOT NULL DEFAULT 0,
-    synced_at        TEXT,
-    created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
-);
-```
-
-**`app_sessions`**
-```sql
-CREATE TABLE IF NOT EXISTS app_sessions (
-    id                  TEXT PRIMARY KEY,
-    process_name        TEXT NOT NULL,
-    app_display_name    TEXT NOT NULL DEFAULT '',      -- resolved from installed_applications.app_name
-    started_at          TEXT NOT NULL,
-    ended_at            TEXT,
-    machine_id          TEXT NOT NULL DEFAULT '',
-    employee_id         TEXT,
-    employee_name       TEXT,
-    session_id          TEXT NOT NULL DEFAULT '',
-    platform            TEXT NOT NULL DEFAULT '',
-    installed_app_id    TEXT REFERENCES installed_applications(id),
-    installed_package_id TEXT REFERENCES installed_packages(id),
-    process_id          INTEGER,
-    parent_process_id   INTEGER,
-    is_synced           INTEGER NOT NULL DEFAULT 0,
-    synced_at           TEXT,
-    created_at          TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
-);
--- Added via MigrateSql ALTERs (idempotent):
---   grouped_by   ('cgroup' | 'pid' | NULL)   -- how the session's identity was grouped
---   cgroup_scope (raw systemd app-*.scope string)  -- needed for boot hydration
---   context_label (VS Code workspace folder / Chrome profile)
-```
-
-**`app_items`** — Generic self-referencing child of `app_sessions` (replaces browser_contexts/file_explorer_contexts/urls/url_visits)
-```sql
-CREATE TABLE IF NOT EXISTS app_items (
-    id                TEXT PRIMARY KEY,
-    app_session_id    TEXT NOT NULL REFERENCES app_sessions(id),
-    parent_item_id    TEXT REFERENCES app_items(id),
-    item_type         TEXT NOT NULL DEFAULT '',     -- 'tab', 'browser_tab', 'browser_navigation', 'terminal', 'folder', 'file'
-    title             TEXT NOT NULL DEFAULT '',
-    identifier        TEXT NOT NULL DEFAULT '',
-    url               TEXT NOT NULL DEFAULT '',
-    domain            TEXT NOT NULL DEFAULT '',
-    opened_at         TEXT NOT NULL,
-    closed_at         TEXT,
-    process_id        INTEGER,
-    is_synced         INTEGER NOT NULL DEFAULT 0,
-    synced_at         TEXT,
-    created_at        TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')),
-    object_type       TEXT NOT NULL DEFAULT '',     -- journey fields (9)
-    action            TEXT NOT NULL DEFAULT '',
-    journey_id        TEXT NOT NULL DEFAULT '',
-    sequence          INTEGER NOT NULL DEFAULT 0,
-    previous_path     TEXT NOT NULL DEFAULT '',
-    current_path      TEXT NOT NULL DEFAULT '',
-    window_id         INTEGER,
-    tab_id            INTEGER,
-    metadata_json     TEXT NOT NULL DEFAULT '{}'
-);
-```
-
-**`app_status`** — key-value store for flags (login state, permission statuses, `last_heartbeat_at`)
-
-**`permission_status`** — records permission check results per session (pruned older than 24h on write)
-
-**`employee_info`**
-```sql
-CREATE TABLE IF NOT EXISTS employee_info (
-    id              TEXT PRIMARY KEY,
-    employee_id     TEXT NOT NULL,
-    name            TEXT NOT NULL,
-    email           TEXT NOT NULL,
-    role            TEXT NOT NULL,
-    department      TEXT NOT NULL,
-    shift           TEXT,
-    avatar          TEXT,
-    avatar_color    TEXT,
-    token           TEXT,                  -- JWT token for API calls
-    logged_in_at    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
-);
-```
-
-### Migration Strategy
-
-**`DatabaseSchema.MigrateSql` + `SqliteLogStore.InitializeAsync`.** The base schema is created via `CreateTableSql` (`IF NOT EXISTS`) on every start. `MigrateSql` then runs a batch of **idempotent `ALTER TABLE ... ADD COLUMN`** statements (all the `process_id`, journey, `grouped_by`/`cgroup_scope`/`context_label`, `url`/`domain`, identity columns added after the base schema shipped) plus the package dedup block:
-- Deletes duplicate `installed_packages` rows keeping the newest per `(package_name, source_manager)` using a window function
-- `CREATE UNIQUE INDEX IF NOT EXISTS idx_installed_packages_fingerprint ON installed_packages(package_name, source_manager)`
-
-There is no numbered version table; the ALTERs are re-run idempotently each boot.
-
----
-
-## 6. Data Collection Flow
-
-### Collection Trigger
-
-`LogCollectorService` is a `BackgroundService` (runs in the background). It:
-
-1. Waits in an idle loop (checking every 5s) until `_trackingEnabled` is set to `true` by `MainViewModel.StartTracking()`.
-2. Once tracking is active, collects on a configurable interval (default: 30 seconds, `ALPHA_COLLECT_INTERVAL_SEC`).
-
-On startup it also runs, in order:
-- `ReconcileStaleSessionsOnBootAsync` — closes sessions whose heartbeat is stale (crash recovery)
-- `CleanupGarbageSessionRowsAsync` — closes old `--type=` Chromium subprocess rows
-- `CleanupNonGuiAppEntriesAsync` — removes non-GUI `installed_applications` entries (sh, snap) auto-registered before the GUI gate
-- Immediate hardware + network collection
-
-### Browser Journey (Option B — accessibility tree)
-
-`AccessibilityBrowserTracker` is an independent `BackgroundService` that does NOT wait for login and does NOT depend on the installed-apps catalog:
-
-1. Every `ALPHA_BROWSER_ACCESSIBILITY_POLL_SECONDS` (default 3) it calls `IAccessibilityBrowserReader.ReadAsync()` — a short platform probe that returns the currently-visible browser windows (`AccessibilitySnapshot`: window key, pid, process, title, normalized address-bar URL, incognito flag).
-2. **Linux** — embedded python3 + AT-SPI D-Bus script: FRAME/WINDOW nodes → the `ENTRY` node named `"Address and search bar"` (the omnibox) whose `Text` is the exact URL/query (scheme-less — the reader prepends `https://`); page title = FRAME `Name`. Validated live on Chrome 151.
-3. **Windows** — UIA via `Interop.UIAutomationClient`: top-level Window elements → Edit elements; the `"Address and search bar"` edit's `ValuePattern.CurrentValue` is the URL.
-4. **macOS** — osascript/System Events: window titles + best-effort address-bar value (requires the Accessibility permission granted at install).
-5. **URL fallback — `BrowserHistoryReader`** (new, `ALPHA_BROWSER_HISTORY_ENABLED`, default on): after `ReadAsync`, `EnrichUrlsFromHistoryAsync` fills any snapshot whose a11y URL is empty by matching the window title against the browser's own profile history database — Chromium `History` (Chrome/Edge/Brave/Opera/Vivaldi) and Firefox `places.sqlite`. Read while the browser runs via temp copy of DB + `-wal`/`-shm`/`-journal` sidecars (read-only; torn snapshots retried next poll), throttled by change signatures (`ALPHA_BROWSER_HISTORY_POLL_SECONDS`, default 10). Resolution is STRICTLY title-match — no unconditional newest-visit fallback, so multiple open windows never receive a misattributed URL. Generic scans of `~/.config`/`~/.mozilla` (plus Windows/macOS profile roots) discover brand-new browsers, so install→use→uninstall-in-5-min journeys are captured while the browser is alive. URLs recovered this way are tagged `metadata_json.source="history"` (vs `"a11y"`).
-6. For each window: first sight → new `app_sessions` row + `browser_tab` root `app_items` row (`url`/`domain`/`journey_id`); URL change → `browser_navigation` child item (`previous_path` → `current_path`); title-only change → root item refresh (URL-less titles don't rotate until history catches up).
-7. A window absent for 3 consecutive polls is closed; a window with no URL/title change for `ALPHA_BROWSER_JOURNEY_IDLE_MINUTES` (15) is idle-closed; shutdown closes everything gracefully via `CloseSessionsAndAppItemsAsync` (no orphans).
-8. Downloads in `~/Downloads` are appended to the most recent browser session as `browser_download` items.
-9. Incognito windows are detected (title/cmdline) and flagged in metadata; their URLs are stored only when `ALPHA_BROWSER_CAPTURE_INCOGNITO=true` (default off — legal-safe; private browsing is not silently recorded; private visits are also absent from the profile History DB).
-
-This replaces the debugger pipeline entirely — it works on every Chrome version (incl. 136+), every browser (a11y URL where exposed, profile History fallback everywhere else — Chrome 136+ on Linux, snap Firefox), and even a browser installed → used → uninstalled within minutes (nothing to detect; it reads the screen + the profile diary).
-
-### Collection Cycle (every 30s)
-
-```
-┌─────────────────┐     ┌──────────────────────────────┐     ┌────────────────┐
-│ IActivityCollect │────>│ ResolveAppInfo() per process │────>│ Store in SQLite │
-│ .CollectAsync()  │     │  - GUI gate (IsGuiApplication)│     │ via ILogStore   │
-│                  │     │  - binary_name fuzzy match    │     │ .StoreAppSessionsAsync() │
-└─────────────────┘     │  - display name + FKs          │     └────────────────┘
-         │              └──────────────────────────────┘             │
-         │ Every 30s                                                 │
-         ▼                                                           │
-┌─────────────────┐                                                  │
-│ CgroupResolver  │──▶ BuildSessionKey (scope-aware) ────────────────┤
-└─────────────────┘   close stale sessions (CloseSessionsAndAppItemsAsync)
-```
-
-### Filtering
-
-- **ProcessFilter.cs** — filters out kernel/system processes (first stage)
-- **`NonAppProcesses` / `NonAppProcessPrefixes`** (LogCollectorService) — exact + prefix blocklist (GNOME daemons, gvfsd-*, gsd-*, etc.)
-- **`ResolveAppInfo()`** resolves each process against SQLite `installed_applications` (via `binary_name` fuzzy match) and `installed_packages` (via `package_name`):
-  - **Known GUI apps** (found in `installed_applications`): tracked with full context — both with and without window titles (Wayland-native apps like VSCode don't appear in X11 client list)
-  - **Unknown processes detected as GUI**: scanned for .desktop files (Linux), .app bundles (macOS), or Start Menu/Program Files entries (Windows) via `IsGuiApplication()`; if GUI, auto-registered into `installed_applications` and tracked
-  - **CLI-only tools, shells, build tools, runtimes, and daemons**: **SKIPPED entirely** — no `installed_packages` entry created, no `app_session` created, no `app_items` created
-  - **Headless Chromium/Electron subprocesses**: filtered via `--type=` cmdline detection (`ChromiumSubprocessFlags`)
-  - **Unresolvable processes**: silently skipped
-- `AppDisplayName` is set from the installed app's `app_name` (e.g., `"Visual Studio Code"`), not from the OS process name (`"code"`) or window title
-- `InstalledAppId` / `InstalledPackageId` FK columns link each session to its app/package record
-- **Wayland note**: Linux window title enumeration uses X11 `xprop _NET_CLIENT_LIST`. On Wayland, only XWayland windows appear (not native Wayland windows). Foreground detection via AT-SPI/gdbus still works for the active window.
-
-### Session Identity & Hierarchy
-
-- Sessions are keyed by **PID + cgroup scope** (`BuildSessionKey`). Multi-process GUI apps (VS Code, Chrome) collapse to ONE `app_sessions` row per logical window via systemd `app-*.scope`; `grouped_by`/`cgroup_scope`/`context_label` record how and what.
-- `SessionHierarchyResolver` walks the OS PPID tree (through runtimes/build tools) to link child sessions under their parent via `parent_item_id`.
-- On session close, `CloseSessionsAndAppItemsAsync()` closes the session AND its open `app_items` in ONE transaction (no orphans).
-
-### Batching / Offline Behavior
-
-- Unsent rows are stored in SQLite with `is_synced = 0` / `synced_at = NULL`
-- Every 10 collection cycles (~5 min), `SyncUnsentData()` sends unsent rows per table in batches of up to **500**
-- Order matters: sessions sync before items (parents before children)
-- On success, marks them as synced
-- On failure (server unreachable, auth error), does NOT retry immediately — waits for the next sync cycle
-- **No exponential backoff** — retries every ~5 min regardless of failure count
-- **No deduplication on the client** — server uses `ON CONFLICT` (fingerprint for catalogs, `ON CONFLICT(id)` for sessions/items) to deduplicate
-
-### Periodic Collection (30s cycle)
-
-| Data | Frequency | Method |
+| Table | Conflict key | Behavior |
 |---|---|---|
-| Device hardware | Every 30 cycles (~15 min) | `CollectDeviceHardwareAsync` |
-| Network info | Every 10 cycles (~5 min) | `CollectNetworkInfoAsync` (dedup by IP change) |
-| Installed apps scan | Every 30 cycles (~15 min) | `CollectInstalledApplicationsAsync` |
-| Installed packages scan | Every 60 cycles (~30 min) | `CollectInstalledPackagesAsync` |
-| Sync unsent + permission status | Every 10 cycles (~5 min) | `SyncUnsentData` + `StorePermissionStatus` |
-| Heartbeat (`last_heartbeat_at`) | Every cycle | `SetStatusAsync` |
+| `installed_applications` | `ON CONFLICT(app_name)` | Updates metadata; **resets `is_synced = 0`** so re-detection re-syncs (drives server `last_seen_at`) |
+| `installed_packages` | `ON CONFLICT(package_name, source_manager)` | Update version/category; dedup window-fn + `CREATE UNIQUE INDEX idx_installed_packages_fingerprint` in MigrateSql (kills duplicate rows) |
+| `app_sessions` | `ON CONFLICT(id)` | Merge `ended_at` / `parent_process_id` |
+| `app_items` | `ON CONFLICT(id)` | Merge title/identifier/url/domain/parent/closed_at/journey fields |
+
+### Migration strategy
+
+`DatabaseSchema.MigrateSql` + `SqliteLogStore.InitializeAsync`: base schema via `IF NOT EXISTS` on every start, then a batch of **idempotent `ALTER TABLE ... ADD COLUMN`** statements (caught via "duplicate column" SqliteException), the installed_packages dedup block, and a few `CREATE INDEX IF NOT EXISTS`. There is no numbered version table.
+
+### Concurrency
+
+`SqliteLogStore` guards the single shared connection with `SemaphoreSlim(1,1)`; `PRAGMA busy_timeout = 5000`; `GatedTransaction` releases the gate on dispose; private ungated helpers (`SetStatusCoreAsync`, `GetEmployeeInfoCoreAsync`) avoid re-entrancy deadlocks. `CloseSessionsAndAppItemsAsync()` closes sessions + their open items in ONE transaction (crash-safe cascade — no orphaned open items).
 
 ---
 
-## 7. Sync/Transport to Server
+## 6. Lifecycle & Startup Sequence
 
-### Protocol
+1. `Program.cs` handles CLI modes, acquires the mutex, starts the single-instance pipe server, builds DI, `host.StartAsync`.
+2. **`LogCollectorService`** (hosted):
+   - `InitializeAsync` (schema), `RefreshEmployeeInfo` (restores login from SQLite),
+   - **`ReconcileStaleSessionsOnBootAsync`** — stale `last_heartbeat_at` (>60s) → close orphaned sessions + items with the heartbeat time as approximate crash time (handles poweroff/crash/fast-restart).
+   - **`CleanupGarbageSessionRowsAsync`** — closes old `--type=` / long process-name rows.
+   - **`CleanupNonGuiAppEntriesAsync`** — removes pre-GUI-gate non-GUI entries (`sh`, `snap`) from `installed_applications` and closes their sessions.
+   - Immediate hardware + network collection, then the main loop.
+3. **`DesktopEventService`** starts the file-explorer watchers after DB init.
+4. **`AccessibilityBrowserTracker`** starts polling browser windows (independent of login, no catalog dependency).
+5. **`BackgroundGuardService`** watches auto-start / systemd unit (60s loop) and re-installs if removed — it never *creates* them on its own.
+6. **Login (from UI)** → `MainViewModel.LoginAsync` → `_logCollector.StartTracking()` → permission wizard → tracking loop begins.
 
-- **REST over HTTPS** (or HTTP in dev)
-- **JSON** payloads: `{employeeId, token, entries: [...]}`
-- **No retry header, no idempotency key**
+---
 
-### Auth
+## 7. Login & Permission Wizard
 
-- Employee authenticates via `POST /api/v1/auth/employee-login` with `{employeeId, secretKey}`
-- Server returns `{employee, token}` where `token` is an **encrypted JWT**
-- Token stored in local SQLite (`employee_info.token`)
-- All subsequent sync calls include `token` in the request body
+### Login / logout
 
-### Sync Endpoints Called by Client
+- **Login:** `POST {serverUrl}/api/v1/auth/employee-login` with `{employeeId, secretKey}` → `{employee, token}`. Persists to `employee_info` (SQLite) and feeds `LogCollectorService.SetEmployeeInfo(employeeId, name, token)` + `StartTracking()` (which also records a `login` session event and arms Windows anti-sleep).
+- **Session restore:** on launch, `MainViewModel.InitializeAsync` reads `employee_info`; if present it re-authenticates the collector, resets stored `perm_*` statuses, and re-evaluates the permission steps from scratch.
+- **Logout:** `POST /api/v1/auth/employee-disconnect` (best effort), `StopTracking()` (records `logout` event), clears `perm_*`, wipes `employee_info`.
 
-| Endpoint | Method | Payload | Status |
+### Permission wizard (`GetNextPermissionStep`)
+
+Always **re-validates the actual condition** — it never trusts stored statuses. Returns the first incomplete step:
+
+| # | Step | Linux check | Grant action |
 |---|---|---|---|
-| `/api/v1/device-hardware/sync` | POST | `{employeeId, token, entries: [...]}` | ✅ Exists |
-| `/api/v1/installed-apps/sync` | POST | `{employeeId, token, entries: [...]}` (`binaryName`, `isBrowser`, `desktopId`, `categories`) | ✅ Exists |
-| `/api/v1/installed-packages/sync` | POST | `{employeeId, token, entries: [...]}` | ✅ Exists |
-| `/api/v1/network-info/sync` | POST | `{employeeId, token, entries: [...]}` | ✅ Exists |
-| `/api/v1/session-events/sync` | POST | `{employeeId, token, entries: [...]}` | ✅ Exists |
-| `/api/v1/app-sessions/sync` | POST | `{employeeId, token, entries: [...]}` (`installedAppId`, `installedPackageId`, `processId`, `parentProcessId`, `groupedBy`, `cgroupScope`, `contextLabel`) | ✅ Exists |
-| `/api/v1/app-items/sync` | POST | `{employeeId, token, entries: [...]}` (`parentItemId`, `processId`, 9 journey fields, `url`/`domain`) | ✅ Exists |
-| `/api/v1/auth/employee-login` | POST | `{employeeId, secretKey}` | ✅ Exists |
-| `/api/v1/auth/employee-disconnect` | POST | `{employeeId, token}` | ✅ Exists |
+| 1 | **Auto-Start** | `~/.config/autostart/alpha-ai-tracker.desktop` exists | `AutoStartService.EnableAutoStartForced()` (+ systemd unit enable) |
+| 2 | **Background Guard** | `~/.config/systemd/user/alpha-ai-tracker.service` exists | `EnableAutoStartForced()` (installs the unit) |
+| 3 | **Dependencies** (Linux only) | `pkexec`, `loginctl`, `gsettings`, `setcap` present | `pkexec apt-get install -y policykit-1 systemd libglib2.0-bin libcap2-bin` (or manual sudo command) |
+| 4 | **Other Permissions** | Linux: Wayland `toolkit-accessibility` via gsettings; Windows: process enumeration; macOS: osascript Accessibility grant | Linux: `pkexec` bash script (chmod +r shell-history files; enable toolkit accessibility as `$USER`; `setcap CAP_DAC_READ_SEARCH+ep` on the installed binary — skipped for `dotnet run`); Windows: UAC `runas`; macOS: instructions (Accessibility / Full Disk Access / Screen Recording) |
 
-> **Removed:** `activity-logs/sync` and `shell-commands/sync` are gone. No `activity_logs` table, no `shell_commands` table, no sync call.
+`permission_status` results (`perm_auto_start`, `perm_background`, `perm_other`) are stored in `app_status` for reference. Linux dependency installs also surface a manual `sudo apt-get install -y …` command via `ShowManualInstall`.
 
-### Sync Frequency
+### UI
 
-| Data Type | Frequency | Batch Size |
-|---|---|---|
-| All sync tables | Every ~5 min (10 cycles) | Max 500 rows per table |
-| Installed packages scan | Every ~30 min (60 cycles) | Max 500 rows |
-| Heartbeat | Every cycle (30s) | — |
+`MainWindow.axaml`: login form (Employee ID + Secret Key) → step cards (1–4 with icons, titles, descriptions, action buttons, status text) → **profile** (avatar, department, role, Disconnect) + an always-on **Browser Journey Tracking** card (accessibility-based, no setup). Dark theme via `Styles/AppTheme.xaml`; window close hides to tray (`ShutdownMode.OnExplicitShutdown`).
 
 ---
 
-## 8. Installer / Deployment
+## 8. Process Collection Pipeline
 
-### Build Scripts (`client/publish/`)
+### The 30-second cycle (`LogCollectorService.ExecuteAsync`)
+
+```
+┌─────────────────┐   ┌────────────────────────────────────┐   ┌─────────────────────────┐
+│ IActivityCollect │──▶│ Per-process resolution             │──▶│ SQLite                  │
+│ .CollectAsync()  │   │  ProcessFilter → headless filter   │   │  StoreAppSessionsAsync  │
+│  (platform)      │   │  NonAppProcesses/prefixes          │   │  StoreAppItemsAsync     │
+└─────────────────┘   │  ResolveAppInfo (known/fuzzy/auto)  │   │  CloseSessionsAnd…      │
+        │             │  CgroupResolver scope               │   └─────────────────────────┘
+        │ every 30s   │  BuildSessionKey (scope-aware)      │
+        ▼             │  SessionHierarchyResolver parent    │
+   process snapshot   └────────────────────────────────────┘
+```
+
+- Waits (5s idle poll) until `StartTracking()` after login.
+- **Every cycle:** collect → build process tree → hydrate open sessions from DB (**excluding browser-owned sessions** — those belong to the accessibility tracker and must not be closed or duplicated) → resolve each process → sort by priority (IDE → browser → file manager → terminal → shell) → compute `currentKeys` → close vanished sessions atomically → store new sessions + root items + context updates → heartbeat.
+- **Context updates** (`UpdateActivityContextAsync`): refreshes root title/identifier and appends `browser_navigation`/`folder`/`file` children with a 30s per-(session,type,identifier) cooldown.
+
+### Platform collectors
+
+| Platform | Window titles | Foreground | CPU | Cmdline |
+|---|---|---|---|---|
+| **Linux** | GNOME Shell `Introspect.GetWindows` (Wayland, ALL windows) + `xprop _NET_CLIENT_LIST` (X11/XWayland) | xprop → AT-SPI (python3 / gdbus) → xdg portal → GNOME Shell → xdotool → heuristic | `TotalProcessorTime` two-sample 100ms gap | `/proc/<pid>/cmdline` |
+| **Windows** | `EnumWindows` (all visible windows → titles) | `GetForegroundWindow` | same | PowerShell `Get-CimInstance Win32_Process` |
+| **macOS** | **foreground only** via osascript | osascript/System Events | **0 (not measured)** | `ps -o command=` |
+
+All platforms filter **headless Chromium/Electron subprocesses** (`--type=renderer|gpu-process|utility|zygote|broker|crashpad-handler`, Firefox `--contentproc`) via cmdline.
+
+### Filtering & resolution (`ResolveAppInfo`)
+
+1. Headless subprocesses without a window title → skipped.
+2. `NonAppProcesses` (exact: GNOME daemons, gvfsd-*, gsd-*, shells `sh/bash/zsh/…`, `waydroid`, `snapd`, …) + `NonAppProcessPrefixes` → skipped.
+3. **Known binary names** cache (refreshed ≤1 min from `installed_applications`): exact match, then re-verify GUI (non-browser rows need non-empty Categories).
+4. **Fuzzy match** (`GetInstalledAppByBinaryNameFuzzyAsync`, process name >3 chars): `binary_name LIKE` with corrected AND/OR precedence; prefers `is_browser` rows + shortest binary name. Also rejects non-GUI rows.
+5. **Auto-detect GUI app** (`IsGuiApplication` → `AutoDetectInstalledGuiApp`): executable in standard paths (Linux `/usr/bin`, `/opt`, `/snap/bin`, flatpak, `/home/*`, `/media/*`; Windows Program Files/WindowsApps; macOS `.app`/`/Applications`) or a matching `.desktop` `Exec=` → registers into `installed_applications`.
+6. **Anything else is skipped** — CLI tools, shells, build tools, runtimes, and daemons never become sessions/items.
+7. **Browsers are skipped when `ALPHA_BROWSER_TRACKING_ENABLED`** (owned by the accessibility tracker; hint-based skip covers the post-DB-wipe window before the catalog scan marks `is_browser=1`).
+
+### Session identity & hierarchy
+
+- **`BuildSessionKey`**: scoped processes → `scope|{scope}|{installedAppId}|{machine}|{session}` (collapses all subprocesses of one logical window); unscoped → `{pid}|{machine}|{session}`.
+- **`CgroupResolver`** reads `/proc/<pid>/cgroup` for `app-*.scope` (systemd transient scope per `.desktop` launch) — VS Code's ~11 PIDs become ONE session; two windows get different scopes.
+- **`SessionHierarchyResolver`** walks the PPID chain (through shells, terminals, build tools, runtimes, IDE subprocesses) and links sessions under their parent via `parent_item_id`. Duplicate-PID open sessions (browser tracker + main loop overlap) are deduped keeping the earliest per PID.
+- **`SessionLabelResolver`** derives `context_label` (VS Code workspace folder from argv, Chrome `--profile-directory`).
+- **Close:** `CloseSessionsAndAppItemsAsync` closes sessions + their open items in ONE transaction; crash recovery reuses it at boot.
+
+### Root item type (`AppProcessClassifier.ResolveRootItemType`)
+
+`isBrowser → browser_tab` · `.desktop Categories`/desktopId → `folder` (file manager) / `tab` (IDE/app) / `process` (runtime) · fallbacks: file manager → `folder`, shell → `terminal`, appId → `tab`, pkgId/runtime/build-tool → `process`, window title → `tab`, else `process`.
+
+---
+
+## 9. System Info Collection
+
+### Device hardware — every 30 cycles (~15 min)
+
+Fingerprint-deduped (`mac|hostname|os|cpu|ram|gpu`): hostname, `RuntimeInformation.OSDescription`, CPU model (`/proc/cpuinfo` / `PROCESSOR_IDENTIFIER`), cores, total RAM (`/proc/meminfo` / Windows fallback constant), **MAC** (first up non-loopback interface), **storage devices** (Linux `lsblk -J` with SSD/HDD via `ROTA`; Windows `DriveInfo`), **GPU** (`/proc/driver/nvidia/version`, else `lspci`). Stored as `device_hardware_info` + relational `storage_devices` rows (backfilled if the hardware fingerprint is unchanged but storage is empty).
+
+### Network info — every 10 cycles (~5 min)
+
+Public IP from `api.ipify.org` → `icanhazip.com` → `checkip.amazonaws.com` (first success), private IPs from `Dns.GetHostEntry` + per up-interface unicast addresses. Deduped by IP change (only new-IP rows are stored).
+
+### Session events
+
+`login` / `logout` rows with OS username + timestamp.
+
+### Permission status — every 10 cycles
+
+Per-platform `GetPermissionStatus()` (Linux: xprop/xdotool/gdbus/python3/portal/introspect/atspi/X11 availability; Windows: user32 probes; macOS: osascript + Accessibility grant) → `permission_status` table.
+
+### Scan cadence (30s cycle counters)
+
+| Data | Frequency |
+|---|---|
+| Device hardware | Every 30 cycles (~15 min) |
+| Installed apps | Every 30 cycles (~15 min) |
+| Installed packages | Every 60 cycles (~30 min, delegates to joint scan) |
+| Network info | Every 10 cycles (~5 min) |
+| Sync + permission status | Every 10 cycles (~5 min) |
+| Heartbeat `last_heartbeat_at` | Every cycle |
+
+---
+
+## 10. Installed Apps & Packages Inventory
+
+**Two detectors + one classifier:**
+
+1. **`InstalledAppDetector`** (GUI apps → `installed_applications`):
+   - **Linux:** `.desktop` files from `$XDG_DATA_HOME/applications`, `~/.local/share/applications`, every `$XDG_DATA_DIRS` entry + `/applications`, plus baseline `/usr/share` & `/usr/local/share` (covers **snap** `/var/lib/snapd/desktop/applications` and **flatpak** exports). `NoDisplay=true` / non-`Type=Application` skipped. Browser detection via `Categories=WebBrowser` or `MimeType x-scheme-handler/http(s)`. `desktop_id` = `.desktop` filename, `categories` stored raw.
+   - **Windows:** Start Menu `.lnk`s, Program Files (x86) dirs, registry `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` (DisplayName, version, publisher, path, uninstall string); browser via `URLAssociations` http/https.
+   - **macOS:** `/Applications` + `~/Applications` `.app` bundles; `Info.plist` → `CFBundleIdentifier` (identity) + `CFBundleURLSchemes` http+https (browser).
+2. **`PackageDetector`** (CLI tools/runtimes/libraries → `installed_packages`): npm global (`npm list -g --json`), pip (`pip list --format=json`), dpkg/apt (`dpkg-query -W -f='…'` — quoted format fix), snap (skips snaps with desktop entries), flatpak (skips apps with desktop entries), brew, macports, choco, winget, scoop, plus a built-in `CliKnownPackages` list. Categories: `runtime`/`tool`/`library`/`system`.
+3. **`SoftwareClassifier.Classify(rawApps, rawPackages)`** — the joint dedup: generates a **SHA-256 identity** per entry (`SoftwareIdentityResolver`: Linux desktop_id, macOS bundle id, Windows uninstall-key, + normalized install path), **GUI apps win** (a matching package entry is dropped — fixes Firefox-snap appearing as a package), assigns canonical categories (`SoftwareCategoryResolver`: WebBrowser/FileManager/IDE/Development/TerminalEmulator/…), and routes to exactly one table.
+
+Both detectors are forced-rechecked every scan (`ForceRecheck`) and upsert into SQLite (re-detect resets `is_synced=0`).
+
+---
+
+## 11. Browser Journey (Option B — accessibility tree + history fallback)
+
+`AccessibilityBrowserTracker` (BackgroundService, gated on `ALPHA_BROWSER_TRACKING_ENABLED`) captures the REAL browser journey — **no debugger, no extension, no catalog dependency** (works for install→use→uninstall-in-5-min browsers).
+
+### Poll loop (every `ALPHA_BROWSER_ACCESSIBILITY_POLL_SECONDS`, default 3s)
+
+1. `IAccessibilityBrowserReader.ReadAsync()` → `AccessibilitySnapshot[]` (windowKey, pid, process, title, URL, `UrlSource`, incognito).
+2. `EnrichUrlsFromHistoryAsync` fills empty URLs from the **profile-history fallback**.
+3. Per window: first sight → **new `app_sessions`** + `browser_tab` root item (URL, domain, journeyId, `metadata_json`); changes → rotate/record; vanished (5-miss grace) → close; idle (`ALPHA_BROWSER_JOURNEY_IDLE_MINUTES`, 15) → close; shutdown → close all.
+
+### Reading the URL — three merged sources (Linux embedded python3 probe)
+
+- **A) AT-SPI tree** — for browsers that expose it: the omnibox `ENTRY`/`EDITBAR` node **"Address and search bar"** gives the exact URL/query; **Firefox (incl. private windows)** additionally exposes the exact page URL via the `DOCUMENT_WEB` (role 95) node's **`DocURL`** attribute (Firefox builds its tree on demand). Chrome 136+ only builds the tree with `--force-renderer-accessibility` (the installed user-level `google-chrome.desktop` carries the flag).
+- **B) Firefox sessionstore** (`recovery.jsonlz4` / `sessionstore.jsonlz4`, decompressed by an embedded pure-python **LZ4 block decoder**) — survives snap Firefox's AppArmor D-Bus block; exact per-tab URL + active-tab index.
+- **C) WM window list** (GNOME Shell `Introspect.GetWindows`, else `xprop _NET_CLIENT_LIST`) — stable per-window ids (`wm:<id>`) and X11-only browsers AT-SPI cannot see.
+
+**Windows** = UIA (`Interop.UIAutomationClient`) address-bar `ValuePattern`. **macOS** = osascript/System Events (best-effort, Accessibility grant required).
+
+### Hybrid URL fallback (`BrowserHistoryReader`)
+
+When the a11y tree cannot expose the omnibox (Linux Chrome 136+ without the flag, snap Firefox), reads the browser's **own profile database while it runs**: Chromium-family `History` (visit_time = microseconds since 1601) and Firefox `places.sqlite` (visit_date = µs since 1970). DB + `-wal`/`-shm`/`-journal` sidecars are copied to a temp dir and opened read-only; change signatures throttle re-reads (`ALPHA_BROWSER_HISTORY_POLL_SECONDS`, 10s); resolution is **strictly title-match** (no newest-visit fallback → no cross-window misattribution); generic scans of `~/.config`, `~/.mozilla`, snap-firefox, Windows `LocalAppData`, macOS `Library/Application Support` discover brand-new profiles. Incognito visits are never written to these DBs, so they stay out automatically.
+
+### Rotation semantics (per-page records)
+
+- Each page visit gets its OWN `browser_tab` root — the previous root is **closed** via `CloseAppItemAsync` (resets `is_synced=0` so the server learns the close) and a fresh root is opened.
+- A real URL change rotates immediately; a title-only change rotates only after ~10s stability (`MinTabRotationInterval`, filters badge/timer flicker).
+- **Bounded history-lag:** if the URL is missing after a title change (private windows / `about:`/`file:` pages never write history), the tab rotates on title after ~25s (`HistoryLagTimeout`) — never frozen.
+- URL changes also write a `browser_navigation` child (`previous_path` → `current_path`, `sequence` via `GetNextSequenceAsync`).
+- **Downloads** in `~/Downloads` (watched via `FileSystemWatcher`, skipping `.crdownload`/`.part`/`.tmp`) are appended to the most recent browser session as `browser_download` items.
+- **Window identity** (`ResolveWindowKey`): re-keys by page-title match (multi-window Chrome/Edge/Firefox share one PID) or a single-window count guard — one window can never steal another's session.
+- **Incognito:** windows are detected (title/cmdline) and flagged in `metadata_json` (`"incognito":true`); their URL is stored only when `ALPHA_BROWSER_CAPTURE_INCOGNITO=true` (default off — legal-safe).
+- `metadata_json` = `{source: accessibility|history|sessionstore|downloads-watcher, windowKey, incognito, processName, capturedAt}`.
+
+---
+
+## 12. File Explorer Journey (Desktop Event Bus)
+
+An event-driven pipeline (introduced 2026-07-29) for file-manager operations (Nautilus, Dolphin, Thunar, Nemo, Caja, PCManFM, Konqueror, …):
+
+```
+Watchers (IObservableEventSource)          EventCoordinator                 JourneyEngine
+  ATSPIEventWatcher     ──raw──►  dedup (3s) / correlate (500ms)  ──normalized──►  resolve AppSession
+  FileSystemEventWatcher  (RawDesktopEvent)  journey records (15-min        create file_manager_tab root
+  RecentFilesWatcher            timeout, max 500)                           + fm_* items (9 journey fields)
+```
+
+- **`ATSPIEventWatcher`** (Linux; `Tmds.DBus.Protocol`): registers for AT-SPI `focus:`/`window:` events, detects the foreground file manager via `xdotool getactivewindow getwindowpid` + `/proc/<pid>/cwd` for the current path.
+- **`FileSystemEventWatcher`**: `FileSystemWatcher` on 6 user dirs (Desktop, Documents, Music, Pictures, Videos, Downloads) — created/deleted/renamed/changed; 500ms debounce; exclusion prefixes (Waydroid, flatpak, snap, cache, Trash, containers, Steam, node_modules, …).
+- **`RecentFilesWatcher`**: watches `~/.local/share/recently-used.xbel` (XDG), parses the top 5 bookmarks, emits `open` events for recent files.
+- **`EventCoordinator`**: validates (file manager, not ignored process, valid path), infers `object_type` (Folder/File/Window via `File.GetAttributes` + path heuristics) and `action` (navigate/open/create/delete/rename/modify/close), dedups (3s) + correlates (500ms), assigns `journey_id` + `sequence`, reaps stale journeys (15 min).
+- **`JourneyEngine`**: resolves/creates an `AppSession` per journey, ensures a `file_manager_tab` root item, and stores `fm_{object}_{action}` items with the 9 journey fields; a `close` action closes the session + items.
+- **`DesktopEventService`** (hosted) wires it all: starts Linux AT-SPI watcher + filesystem + recent-files watchers, subscribes them to the coordinator, forwards normalized events to the engine.
+
+---
+
+## 13. Sync / Transport to Server
+
+- **Protocol:** REST over HTTP(S); JSON `{employeeId, token, entries: [...]}`; token = encrypted JWT from login, sent in the request body (not a header). No idempotency key, no retry header.
+- **Frequency:** every 10 cycles (~5 min); batches of **500**; **stop-on-failure** per table (retried next cycle; no exponential backoff).
+- **Order matters:** Phase-1 tables first (device-hardware → installed-apps → installed-packages → network-info → session-events), then **app-sessions (parents)**, then **app-items (children)**.
+- On success rows are marked `is_synced=1`; on 401/403 the batch is dropped until re-login; on network failure retried next cycle.
+
+| Endpoint | Payload extras |
+|---|---|
+| `POST /api/v1/device-hardware/sync` | macAddress, storageDevices (JSON), gpuModel/vramMb |
+| `POST /api/v1/installed-apps/sync` | binaryName, isBrowser, desktopId, categories |
+| `POST /api/v1/installed-packages/sync` | packageName, version, category, sourceManager |
+| `POST /api/v1/network-info/sync` | publicIp, privateIp, networkInterfaceName |
+| `POST /api/v1/session-events/sync` | eventType, osUsername |
+| `POST /api/v1/app-sessions/sync` | installedAppId, installedPackageId, processId, parentProcessId, groupedBy, cgroupScope, contextLabel |
+| `POST /api/v1/app-items/sync` | parentItemId, processId, url/domain, 9 journey fields, windowId/tabId, metadataJson |
+| `POST /api/v1/auth/employee-login` | employeeId + secretKey → {employee, token} |
+| `POST /api/v1/auth/employee-disconnect` | employeeId + token |
+
+> `activity-logs/sync` and `shell-commands/sync` are **removed** — no `activity_logs`/`shell_commands` tables or calls.
+
+---
+
+## 14. Configuration & Encryption
+
+### Env keys (`AppConfig.FromEnv`)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `ALPHA_CLIENT_ID` | auto (`.machine-id` file next to binary, else GUID) | stable machine identifier |
+| `ALPHA_DB_PATH` | `data/alpha_tracker.db` | SQLite path (resolved under `~/.local/share/alpha-ai-tracker` Linux / `%LOCALAPPDATA%\AlphaAITracker` Win) |
+| `ALPHA_DB_ENCRYPTION_KEY` | — | SQLite encryption key (not currently wired to sqlcipher) |
+| `ALPHA_COLLECT_INTERVAL_SEC` | 30 (min 5) | process-collection interval |
+| `ALPHA_LOG_LEVEL` | Info (Verbose/Debug/Info/Warn/Error) | logging level |
+| `ALPHA_SERVER_URL` | `DefaultServerUrl` assembly metadata (baked at publish) | server base URL |
+| `ALPHA_API_KEY` | — | unused by sync (login token is used) |
+| `ALPHA_BROWSER_TRACKING_ENABLED` | true | master switch for the accessibility browser tracker |
+| `ALPHA_BROWSER_ACCESSIBILITY_POLL_SECONDS` | 3 | a11y poll interval |
+| `ALPHA_BROWSER_JOURNEY_IDLE_MINUTES` | 15 | idle-close timeout |
+| `ALPHA_BROWSER_CAPTURE_INCOGNITO` | false | store incognito URLs (legal review required) |
+| `ALPHA_BROWSER_HISTORY_ENABLED` | true | profile-history URL fallback |
+| `ALPHA_BROWSER_HISTORY_POLL_SECONDS` | 10 | history re-read cadence |
+
+> `client/.env.example` also carries a `REPO=AlphaDev-7/Alpha-AI-Tracker` key that the client **never reads** — the web dashboard owns the GitHub download link.
+
+### Loading order (`EnvLoader.Load`)
+
+1. **Explicit path** (`--config-enc`).
+2. **Dev (`dotnet run`):** plaintext `.env` in the source tree (walked up to 6 dirs) is authoritative — a stale user `config.enc` can never shadow fresh edits.
+3. **Installed:** user-config `config.enc` (`~/.config/alpha-ai-tracker`, `%APPDATA%\AlphaAITracker`, `~/Library/Application Support/AlphaAITracker`) — but if the freshly shipped copy next to the binary decrypts to **different values** (`ShippedConfigDiffers` on decrypted content), it **replaces** the stale user copy (fixes "rebuilt installer still uses old server URL").
+4. Corrupt user copies self-heal from the shipped copy; then app-dir `config.enc`; then plaintext `.env` as last resort.
+
+### Encryption
+
+`EncryptedConfigService` — **AES-256-GCM**, format `[nonce 12][tag 16][ciphertext]`. Build time encrypts with the fixed **transport key** (SHA256 of `AlphaAITracker:TransportKey:v1`); first launch re-encrypts with a **machine-derived key** (SHA256 of `AlphaAITracker:MachineKey:v1:` + OS machine id — `/etc/machine-id`, Windows `MachineGuid`, macOS `IOPlatformUUID` — falling back to a persisted `.machine-id` in the user config dir). Leftover plaintext `.env` files are securely wiped (3-pass random overwrite). `--print-config` prints the resolved values of an installed build.
+
+---
+
+## 15. Installer / Deployment
+
+### Build scripts (`client/publish/`)
 
 | Script | Purpose |
 |---|---|
-| `build-installer.sh` | Cross-platform: detects OS and calls platform-specific builder |
-| `build-deb.sh` | Linux: creates `.deb` package with prerm script to kill running instances |
-| `build-dmg.sh` | macOS: creates `.dmg` disk image |
-| `installer-windows.iss` | Windows: Inno Setup script for `.exe` installer (auto-kills running processes) |
-| `release.sh` | GitHub release workflow script |
-| `encrypt-config.sh` | Encrypts `.env` → `config.enc` for distribution |
+| `build-installer.sh` | Cross-platform: builds Release, publishes per-RID (win-x64/linux-x64/osx-x64), **stale-binary guard** (aborts if any source file is newer than the published `client.dll`), bundles `publish/*.sh` + `*.iss`, encrypts config, calls platform builders |
+| `build-deb.sh` | Linux `.deb` (prerm kills running instances) |
+| `build-dmg.sh` | macOS `.dmg` |
+| `installer-windows.iss` | Inno Setup (auto-kills running processes) |
+| `release.sh` | GitHub release workflow |
+| `encrypt-config.sh` | `.env` → `config.enc` (transport key) |
+| `firefox-a11y-apparmor.sh` | **snap Firefox fix**: loads a surgical copy of the snap AppArmor profile adding ONE `dbus (receive)` rule so the AT-SPI bridge can read snap-Firefox windows (sandbox stays enforcing); installs `alpha-ai-firefox-a11y.service` to re-apply at boot / after `snap refresh`; `--undo` supported; requires Firefox restart |
 
-### Config Encryption Flow
-
-1. **Build time**: `./encrypt-config.sh` encrypts `.env` → `config.enc` using a hardcoded transport key (SHA256 of `"AlphaAITracker:TransportKey:v1"`)
-2. **Install time**: `config.enc` is bundled with the installer
-3. **First launch**: `EnvLoader` decrypts using transport key, then immediately re-encrypts with a **machine-derived key** (SHA256 of stable machine ID: `/etc/machine-id`, Windows `MachineGuid`, macOS `IOPlatformUUID`)
-4. **Subsequent launches**: decrypts using machine key. If machine key fails (e.g., after OS reinstall), falls back to transport key.
-
-### Distribution
-
-- No auto-update mechanism exists
-- Releases are manually built and uploaded to GitHub
-- The web dashboard has a "Download App" dialog that fetches the latest release from GitHub API, filtering assets by platform pattern (`.exe`, `.deb`, `.dmg`)
-- Default GitHub repo in web config: `clickmaster4285/Alpha-AI-Tracker` (overridable via `NEXT_PUBLIC_GITHUB_REPO`). Note: `client/.env.example` still carries a stale `REPO=AlphaDev-7/Alpha-AI-Tracker` value that is **not read by the client** — the web dashboard is the source of the download link.
+> **No `extensions/`** — browser tracking is accessibility-based (embedded in the binary); `install-extensions.sh` was deleted 2026-08-05.
 
 ### ⚠️ Build-Parity Rule (mandatory) — `dotnet run` ≠ installed build
 
-`dotnet run` compiles from the source tree, so it always runs the newest code. Installed builds (`.deb` / `.exe` / `.dmg` via `build-installer.sh` + the platform builders) ship the **publish output** plus only what the scripts explicitly bundle, from a root-owned install dir. **A change is NOT done until it works from an installed build.**
+Installed builds ship the **publish output** plus only what the scripts bundle, from a root-owned install dir. **A change is NOT done until it works from an installed build.**
 
-Checklist:
-
-1. **Always ship-test** — build the installer, install the artifact, run the new functionality there. `dotnet run` success is not sufficient.
-2. **New runtime assets** (icons, JSON, images) — must be copied by `bundle_into_publish()` in `build-installer.sh` or by `build-deb.sh` / `build-dmg.sh` / `installer-windows.iss`.
-3. **New files in `extensions/`** — bundled automatically; keep extension / native-host files there.
-4. **New scripts in `publish/`** — copied into every publish output automatically.
-5. **New env vars** — add to `.env` BEFORE `encrypt-config.sh`; installers ship `config.enc` baked at build time (dev reads `.env` directly).
-6. **No writes to the exe dir** — installed app runs from root-owned `/usr/share/alpha-ai-tracker/` (Linux) / Program Files (Windows). Write only to `~/.config/alpha-ai-tracker/` (logs, machine-id) and `~/.local/share/alpha-ai-tracker/` (DB, sockets).
-7. **Packaging edits apply to all platforms** — update `build-installer.sh`, `build-deb.sh`, `build-dmg.sh`, `installer-windows.iss` together.
-8. **Stale-binary guard** — `build-installer.sh` aborts if source is newer than the published `client.dll`; run `dotnet clean && bash publish/build-installer.sh`. This guard covers compiled code only — assets are your responsibility (items 2–6).
+1. **Always ship-test** — build the installer, install it, run the feature there.
+2. **New runtime assets** (icons, JSON, images) — must be added to `bundle_into_publish()` / `build-deb.sh` / `build-dmg.sh` / `installer-windows.iss`.
+3. **New scripts in `publish/`** — copied into every publish output automatically.
+4. **New env vars** — add to `.env` BEFORE `encrypt-config.sh`; installers ship `config.enc` baked at build time (auto-propagation now replaces stale user copies on next launch).
+5. **Path assumptions** — never write relative to cwd/exe dir (root-owned). Use `~/.config/alpha-ai-tracker/` (logs, machine-id) and `~/.local/share/alpha-ai-tracker/` (DB).
+6. **Packaging edits apply to ALL platforms** — update all four builder scripts together.
+7. **Stale-binary guard** — `build-installer.sh` aborts if source is newer than published `client.dll`; fix with `dotnet clean && bash publish/build-installer.sh`. Covers compiled code only — items 2–6 are the developer's responsibility.
 
 ---
 
-## 9. Production-Readiness Gaps
+## 16. Production-Readiness Gaps
 
 | Gap | Severity | Details |
 |---|---|---|
-| **No crash handling** | 🔴 High | Unhandled exceptions crash the app. No global exception handler, no crash dump, no telemetry. `AppDomain.CurrentDomain.UnhandledException` is not subscribed. |
-| **No auto-update** | 🔴 High | Employees must manually download and reinstall new versions. No update notification, no silent update. |
-| **No tamper resistance** | 🟠 Medium | SQLite database is unencrypted (encryption code is commented out). Config encryption can be bypassed with debugger. Process collection can be stopped by killing the process (though auto-start watchdog re-launches). |
-| **macOS CPU = 0%** | 🟠 Medium | macOS `ProcessCollector` does not measure CPU. All macOS CPU values are 0. |
-| **macOS limited window capture** | 🟢 Low | Only captures foreground window via `osascript`. No EnumWindows equivalent. Background window titles are never captured on macOS. |
-| **No storage quota** | 🟢 Low | SQLite grows unbounded (no periodic deletion of old synced data — only the `permission_status` 24h prune and boot-time cleanup passes exist). Could fill disk on a heavily used machine. |
-| **No retry backoff** | 🟢 Low | Retries sync every ~5 min regardless of failure count. No exponential backoff. |
-| **Single employee per device** | 🟢 Low | Only one employee can be logged in at a time. Logging in as a different employee wipes the previous session. |
-| **Browser journey = active tab only** | 🟢 Low | The accessibility tree + profile-History fallback cover the ACTIVE tab's URL. Background tabs are not captured (Chrome does not expose them to AT-SPI, and history title-match is window-title based). Window-level journey is exact; per-tab parallelism is not. |
+| **No crash handling** | 🔴 High | No `AppDomain.UnhandledException` subscription, no crash dumps, no telemetry. |
+| **No auto-update** | 🔴 High | Manual reinstall via GitHub releases; no update notification. |
+| **SQLite unencrypted** | 🟠 Medium | `ALPHA_DB_ENCRYPTION_KEY` exists but sqlcipher is not wired in. |
+| **macOS CPU = 0%** | 🟠 Medium | macOS collector does not measure CPU. |
+| **macOS window capture limited** | 🟢 Low | Only foreground window via osascript; no EnumWindows equivalent. |
+| **No storage quota** | 🟢 Low | No periodic pruning of old synced rows (only `permission_status` 24h prune + boot cleanup passes). |
+| **No retry backoff** | 🟢 Low | Sync retries every ~5 min regardless of failure count. |
+| **Single employee per device** | 🟢 Low | One login at a time; logging in as another employee replaces it. |
+| **Browser journey = active tab only** | 🟢 Low | Background tabs are not captured (a11y exposes the active tab; history fallback is title-match). Per-window journey is exact; per-tab parallelism is not. |
+| **Tray has no Quit** | 🟢 Low | Tray menu = Show / Hide only; window close hides to tray. Full exit via process stop (systemd) or `Disconnect` in-app. |
 
 ---
 
-## 10. Immediate Next Steps
+## 17. Immediate Next Steps
 
-1. **Add tests** — start with unit tests for `SqliteLogStore`, `ProcessFilter`, and `PackageDetector`
-2. **Add crash reporting** — subscribe to `AppDomain.CurrentDomain.UnhandledException` and log to a file
-3. **Enable SQLite encryption** — uncomment the sqlcipher path in `SqliteLogStore` constructor and switch provider
-4. **Fix macOS CPU measurement** — sample `TotalProcessorTime` like Windows/Linux
-5. **Fix macOS window title capture** — only captures foreground window currently
-6. **Add periodic data cleanup** — delete old synced rows (only `permission_status` is pruned today)
-7. **Add offline retry with backoff** — exponential backoff on sync failures to reduce server load
-8. **Consider auto-update** — integrate Velopack or Squirrel.Windows for silent updates
-9. ~~**Remove dead shell-command code** — `IShellCommandCollector`, 3 impls, `ShellCommand` model deleted (2026-08-05)~~ ✅ DONE
-10. ~~**Add process ancestry tracking** — persist parent PID chain from `ParentProcessResolver` into `AppItem`~~ ✅ DONE
-11. ~~**Browser journey via debugger/extension** — REPLACED (2026-08-05) by Option B: accessibility-tree capture (`Core/BrowserAccessibility`), validated on Chrome 151 — works on Chrome 136+, no extension, no debugger~~ ✅ DONE
-12. ~~**AT-SPI for Wayland window enumeration** — File Explorer journey tracking (3 watchers + EventCoordinator + JourneyEngine)~~ ✅ DONE
-13. ~~**File manager via `xdg-open` hook or inotify** — RecentFilesWatcher + FileSystemEventWatcher + ATSPIEventWatcher~~ ✅ DONE
-14. **Installed-build acceptance** — rebuild the installer (installer-parity rule) and verify the a11y journey from the installed build
+1. **Add tests** — start with `SqliteLogStore`, `ProcessFilter`, `PackageDetector`, `AccessibilityBrowserTracker` rotation logic.
+2. **Add crash reporting** — subscribe to `AppDomain.CurrentDomain.UnhandledException`, write to the log file.
+3. **Enable SQLite encryption** — wire `ALPHA_DB_ENCRYPTION_KEY` into the provider (sqlcipher).
+4. **Fix macOS CPU + window capture** — sample `TotalProcessorTime`; enumerate windows beyond the foreground.
+5. **Add periodic data cleanup** — prune old synced `app_sessions`/`app_items` locally.
+6. **Offline retry with backoff** — exponential backoff on sync failures.
+7. **Consider auto-update** — Velopack/Squirrel for silent updates.
+8. ~~Remove dead shell-command code~~ ✅ (deleted 2026-08-05)
+9. ~~Debugger/extension browser pipeline~~ ✅ (replaced 2026-08-05 by Option B accessibility)
+10. ~~File-explorer journey watchers~~ ✅ (2026-07-29)
+11. **Installed-build acceptance** — rebuild the installer and re-verify the a11y journey + private-window URLs from the installed build (the 2026-08-07 verification passed; re-run after the next code change).
