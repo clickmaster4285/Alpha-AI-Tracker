@@ -197,7 +197,22 @@ try
     // Set service provider for App to resolve ViewModels from DI
     App.ServiceProvider = host.Services;
 
-    BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+    if (isBackground)
+    {
+        // Headless service mode (systemd `--background`): run the hosted services
+        // only, with no Avalonia/X11 UI. GUI init requires a working X connection
+        // (DISPLAY + XAUTHORITY); on Wayland the Xwayland auth file lives at
+        // /run/user/<uid>/.mutter-Xwaylandauth.* — NOT ~/.Xauthority — so a unit
+        // hardcoding XAUTHORITY=~/.Xauthority made the installed background
+        // service crash at startup (XOpenDisplay failed → Avalonia exception).
+        // Background mode never needs a window or tray, so skip the UI entirely;
+        // the process keeps running until systemd stops it (SIGTERM).
+        await Task.Delay(Timeout.Infinite, CancellationToken.None);
+    }
+    else
+    {
+        BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+    }
 
     await host.StopAsync(CancellationToken.None);
     host.Dispose();

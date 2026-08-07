@@ -1,8 +1,34 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-08-06
+> **Last audited:** 2026-08-07
 > **Changelog:**
 >
+> - 2026-08-07: **Private/incognito window URLs captured — Firefox via AT-SPI `DocURL`, Chrome needs one launch flag.**
+>   Live-DB root-causing showed private journeys rotated only when the profile-History fallback happened to match a URL;
+>   when it didn't (private visits, direct-opened sites) rotation froze and URLs stayed empty. Three fixes landed together:
+>   (1) `AccessibilityBrowserTracker` now rotates on title change after a bounded ~25s historyLag timeout even with no URL
+>   (was: held forever waiting for history) — same-tab navigation in private windows always creates the next record;
+>   (2) `LogCollectorService` main loop no longer closes browser sessions owned by the accessibility tracker — it hydrated
+>   ALL open sessions but only browser processes were in its current-key set, so browser sessions were silently closed
+>   4-40s after opening while the windows stayed up; browser-owned sessions are now excluded from the close phase
+>   (verified: sessions stay open 60s+); (3) URL sources for private windows: **Firefox builds its full AT-SPI tree on
+>   demand**, so `LinuxAtSpiBrowserReader` now reads the `DOCUMENT_WEB` (role 95) node's `DocURL` attribute — the EXACT
+>   private-window URL (verified live: pakprivatehire + wikipedia rows with `metadata_json
+>   {"source":"accessibility","incognito":true,"processName":"firefox",...}`); normal Firefox gets exact URLs from
+>   this source too (no more history false-positives). **Chrome 136+ is the hard case:** verified on Chrome 151 that a
+>   running instance's a11y tree has ZERO children below the window frame (basic mode only), and BOTH runtime wake-up
+>   signals (org.a11y.Bus `ScreenReaderEnabled` PropertiesChanged + legacy signal) are ignored — the tree is only built
+>   when Chrome is launched with `--force-renderer-accessibility` (process-wide). With the flag, the omnibox ENTRY node
+>   (`"Address and search bar"`, role 79) exposes the exact URL for EVERY window — including incognito windows opened
+>   normally via Ctrl+Shift+N (verified: `https://en.wikipedia.org/wiki/Incognito` with `"incognito":true`).
+>   Normal-mode Chrome tabs also fall back to the profile History DB; incognito writes nothing to disk so the flag is the
+>   only source. Applied a user-level `~/.local/share/applications/google-chrome.desktop` with
+>   `--force-renderer-accessibility` on ALL Exec lines (main + NewWindow + NewIncognitoWindow actions); Chrome must be
+>   relaunched once for it to take effect. Also fixed the installed `--background` systemd service crash on Wayland:
+>   `Program.cs` no longer initializes the Avalonia/X11 UI in background mode (the unit hardcodes a stale
+>   `XAUTHORITY=~/.Xauthority`; the real Xwayland auth is `/run/user/<uid>/.mutter-Xwaylandauth.*`), so the installed
+>   service stays active instead of dying at startup. Verified end-to-end in the INSTALLED build: service active, Chrome
+>   incognito journey (title + exact URL + incognito flag) in `app_items`, Firefox private journeys intact.
 > - 2026-08-06: **snap Firefox private-window capture — surgical AppArmor AT-SPI fix.** Why private
 >   Firefox was invisible even after the journey overhaul: Ubuntu's snap Firefox AppArmor profile
 >   denies EVERY inbound D-Bus call from outside the sandbox — including the AT-SPI accessibility bus
@@ -276,7 +302,7 @@ flowchart LR
 - **Hierarchy resolver**: node/bash → terminal → IDE via `parent_item_id` + OS process tree
 - **GUI-apps-only tracking**: only GUI apps with .desktop files (Linux), .app bundles (macOS), or Start Menu/Program Files entries (Windows) are tracked. CLI tools, shells, build tools, runtimes, and daemons are skipped entirely
 - **Wayland-native app tracking**: known GUI apps (VSCode, Chrome) tracked even without a window title — they don't appear in X11's `_NET_CLIENT_LIST` on Wayland
-- **Browser journey (Option B — accessibility)**: `browser_tab` + `browser_navigation` + `browser_download` items with the EXACT active-tab URL + domain, read from the OS accessibility tree (AT-SPI / UIA / AX) — works on every browser and every Chrome version (136+ included), no debugger, no extension, no catalog dependency. Session per window, idle-close, graceful close, incognito gated. Linux reader validated live on Chrome 151.
+- **Browser journey (Option B — accessibility)**: `browser_tab` + `browser_navigation` + `browser_download` items with the EXACT active-tab URL + domain, read from the OS accessibility tree (AT-SPI / UIA / AX) — works on every browser and every Chrome version (136+ included), no debugger, no extension, no catalog dependency. Session per window, idle-close, graceful close, incognito gated. Private/incognito URLs: Firefox private via AT-SPI `DocURL` (role 95); Chrome incognito requires Chrome to be launched with `--force-renderer-accessibility` (Chrome 136+ ignores runtime AT-SPI activation — the tracker's installed user-level launcher carries the flag). Same-tab navigation always rotates via a bounded historyLag timeout. Linux reader validated live on Chrome 151.
 - **File explorer journey tracking**: 3 watchers (ATSPIEventWatcher, FileSystemEventWatcher, RecentFilesWatcher) → EventCoordinator (dedup/correlate/normalize) → JourneyEngine (resolve session, create AppItem rows with 9 journey fields)
 - **IObservableEventSource interface**: common contract for all watchers — IDE, Terminal, Office integrations plug in the same pattern
 - **Headless subprocess filtering (cross-platform)**: Chromium/Electron `--type=` flags detected via cmdline on Windows (PowerShell), macOS (`ps`), and Linux (`/proc/pid/cmdline`). Centralized `ChromiumSubprocessFlags` in `AppProcessClassifier`
