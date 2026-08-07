@@ -57,6 +57,16 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
     /// <summary>Minimum dwell before a title-only change rotates the browser_tab record
     /// (badges/timers/player-state titles change often and would fragment the journey).</summary>
     private static readonly TimeSpan MinTabRotationInterval = TimeSpan.FromSeconds(10);
+    /// <summary>
+    /// When a previously-resolved URL goes missing on the next navigation, the history-DB
+    /// fallback lags real navigation by a few seconds — but for private-browsing windows
+    /// (and about:/file:/offline pages) it can NEVER catch up, because those visits are
+    /// never written to the profile history. The wait for the URL is therefore BOUNDED:
+    /// after this timeout the tab rotates on its title alone. Without this bound, the
+    /// "history-lag" hold froze the tab forever and swallowed every later same-tab
+    /// navigation (the Firefox private-window freeze).
+    /// </summary>
+    private static readonly TimeSpan HistoryLagTimeout = TimeSpan.FromSeconds(25);
 
     private readonly Dictionary<string, TrackedWindow> _tracked = new();
     private readonly List<FileSystemWatcher> _downloadWatchers = new();
@@ -377,15 +387,24 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
         // the video page is never silently merged into the previous page's record.
         //
         // History-lag case: the title already changed but the history-DB fallback has not
-        // flushed the new URL yet (enrichment returned empty). Treat it like a pending
-        // change too — rotate on the FIRST poll that carries the resolved URL instead of
-        // writing a spurious empty-URL tab record now.
+        // flushed the new URL yet (enrichment returned empty). Wait for the URL on the
+        // FIRST poll that carries it (an immediate rotation instead of a spurious
+        // empty-URL tab record) — but the wait is BOUNDED by HistoryLagTimeout: private
+        // windows and URL-less pages never produce a URL, and an unbounded hold would
+        // freeze the tab on the previous record, silently dropping every later
+        // same-tab navigation.
         var historyLag = string.IsNullOrEmpty(url) && !string.IsNullOrEmpty(tw.LastUrl);
+        var pendingDriven = false; // rotation decided by the stability/lag window below
         if (titleChanged && (!urlChanged || historyLag))
         {
             var stable = string.Equals(snap.WindowTitle, tw.PendingTitle, StringComparison.Ordinal)
                          && now - tw.PendingSinceUtc >= MinTabRotationInterval;
-            if (!stable || historyLag)
+            // Ready to rotate: either the title has been stable for the anti-flicker
+            // window (and no URL is pending), or the history-lag grace period expired
+            // (the URL is never coming — rotate on the title alone).
+            var lagExpired = historyLag && now - tw.PendingSinceUtc >= HistoryLagTimeout;
+            var ready = (!historyLag && stable) || lagExpired;
+            if (!ready)
             {
                 if (!string.Equals(snap.WindowTitle, tw.PendingTitle, StringComparison.Ordinal))
                 {
@@ -395,12 +414,25 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
                 tw.LastActivity = now;
                 return;
             }
+
+            if (historyLag && !stable)
+            {
+                // Title kept changing through the whole lag window — a fresh navigation
+                // started; restart the pending window for the new title.
+                tw.PendingTitle = snap.WindowTitle;
+                tw.PendingSinceUtc = now;
+                tw.LastActivity = now;
+                return;
+            }
+
+            pendingDriven = true;
         }
 
         var newTitle = string.IsNullOrWhiteSpace(snap.WindowTitle) ? tw.LastTitle : snap.WindowTitle;
-        // Accurate page-start time: for a title-only rotation this is when the new title
-        // FIRST appeared (not when the 10s stability window elapsed).
-        var openedAt = titleChanged && !urlChanged ? tw.PendingSinceUtc : now;
+        // Accurate page-start time: for a title/lag-driven rotation this is when the new
+        // title FIRST appeared (not when the stability/lag window elapsed); for a
+        // URL-driven rotation it is the poll that observed the new URL.
+        var openedAt = pendingDriven ? tw.PendingSinceUtc : now;
 
         // A persisted blank/unchanged title (transient load state) is not a new page —
         // don't rotate a duplicate-looking record.

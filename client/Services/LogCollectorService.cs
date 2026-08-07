@@ -262,8 +262,19 @@ public class LogCollectorService : BackgroundService
                 // N4: recompute the scope live for still-running processes — same-boot
                 // restart reuses the session; cross-boot (process gone) falls through to
                 // the PID key and the stale session closes on the next cycle as before.
+                //
+                // Browser sessions are OWNED by the accessibility browser tracker (they
+                // are excluded from resolvedLogs below), so they must NOT be hydrated
+                // here: hydrating them would make the close phase treat them as stale
+                // (their key never appears in currentKeys) and close live browser
+                // sessions while the windows are still open — silently destroying the
+                // whole journey hierarchy ~one cycle after each window opens.
                 foreach (var rec in openRecords)
                 {
+                    if (BrowserAccessibilityHelpers.IsBrowserProcess(
+                            AppProcessClassifier.ExtractBaseProcessName(rec.ProcessName)))
+                        continue;
+
                     var scope = CgroupResolver.GetAppScope(rec.ProcessId);
                     var openKey = BuildSessionKey(rec.ProcessId, scope, rec.InstalledAppId);
                     _sessionRootItems[openKey] = rec.RootItemId;
