@@ -199,7 +199,7 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
                 if (tw.LastSeen is { } lastSeen &&
                     (now - lastSeen).TotalSeconds >= intervalSeconds * MissingPollsToClose)
                 {
-                    _logger.LogInformation("Browser window closed (no longer visible): {Title}", tw.LastTitle);
+                    _logger.LogDebug("Browser window closed (no longer visible): {Title}", tw.LastTitle);
                     await CloseWindowAsync(kv.Key, tw, now, ct);
                 }
             }
@@ -210,7 +210,7 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
             {
                 if ((now - kv.Value.LastActivity) >= idleLimit)
                 {
-                    _logger.LogInformation("Browser journey closed after {Min}min idle: {Title}",
+                    _logger.LogDebug("Browser journey closed after {Min}min idle: {Title}",
                         idleLimit.TotalMinutes, kv.Value.LastTitle);
                     await CloseWindowAsync(kv.Key, kv.Value, now, ct);
                 }
@@ -364,7 +364,10 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
             LastSeen = now,
         };
 
-        _logger.LogInformation(
+        // Debug level: emitted once per window open (and on every re-open), so it would
+        // flood the terminal during `dotnet run`. The DB is the source of truth for
+        // journeys; set ALPHA_LOG_LEVEL=debug to watch them live.
+        _logger.LogDebug(
             "Browser journey opened via accessibility: {App} | {Title} | {Url}",
             session.AppDisplayName, snap.WindowTitle, string.IsNullOrEmpty(url) ? "(no url)" : url);
     }
@@ -749,7 +752,7 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
                 }),
             };
             await _store.StoreAppItemsAsync(new[] { item }, CancellationToken.None);
-            _logger.LogInformation("Recorded browser download: {File}", fi.Name);
+            _logger.LogDebug("Recorded browser download: {File}", fi.Name);
         }
         catch (Exception ex)
         {

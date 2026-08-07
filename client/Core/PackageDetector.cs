@@ -238,8 +238,15 @@ public partial class PackageDetector : Abstractions.IPackageDetector
             var psi = new ProcessStartInfo
             {
                 FileName = "dpkg-query",
-                Arguments = "-W -f=${Package}\t${Version}\t${Maintainer}\t${Section}\n",
+                // The -f format MUST be double-quoted: .NET's Unix argument parser splits
+                // on tabs as well as spaces, so an unquoted format with literal tab
+                // characters made dpkg-query receive ${Version}/${Maintainer}/${Section}
+                // as package-name PATTERNS — "no packages found matching ${Version}"
+                // (3 stderr errors on every startup). Quoted, dpkg-query gets the whole
+                // format as ONE argument and interprets the \t / \n escapes itself.
+                Arguments = "-W -f=\"${Package}\\t${Version}\\t${Maintainer}\\t${Section}\\n\"",
                 RedirectStandardOutput = true,
+                RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
@@ -248,6 +255,8 @@ public partial class PackageDetector : Abstractions.IPackageDetector
 
             var output = proc.StandardOutput.ReadToEnd();
             proc.WaitForExit(3000);
+            // Drain stderr (dpkg-query warnings) so they never pollute the app log.
+            _ = proc.StandardError.ReadToEnd();
 
             foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
             {

@@ -29,6 +29,16 @@
 >   `XAUTHORITY=~/.Xauthority`; the real Xwayland auth is `/run/user/<uid>/.mutter-Xwaylandauth.*`), so the installed
 >   service stays active instead of dying at startup. Verified end-to-end in the INSTALLED build: service active, Chrome
 >   incognito journey (title + exact URL + incognito flag) in `app_items`, Firefox private journeys intact.
+> - 2026-08-07: **Killed the `dpkg-query: no packages found matching ${Version}` startup noise** — the apt package scan's
+>   `-f` format string contained literal TAB characters, and .NET's Unix argument parser splits argv on tabs too, so
+>   `${Version}`/`${Maintainer}`/`${Section}` reached dpkg-query as package-name PATTERNS (3 stderr errors per scan, 6
+>   per startup). The format is now double-quoted so it arrives as ONE argument with `\t`/`\n` escapes for dpkg-query to
+>   interpret, and stderr is drained. Verified: `dpkg-query -W -f='${Package}\t...'` returns proper rows and the log is
+>   clean.
+> - 2026-08-07: **Quiet terminal: per-event browser-journey logs demoted to Debug** — `AccessibilityBrowserTracker`
+>   emitted "Browser journey opened / window closed / idle-closed / download recorded" at Information level, flooding the
+>   terminal during `dotnet run` (the DB is the source of truth for journeys). All four are now LogDebug (visible only
+>   with `ALPHA_LOG_LEVEL=debug`); the startup banner stays at Information.
 > - 2026-08-06: **snap Firefox private-window capture — surgical AppArmor AT-SPI fix.** Why private
 >   Firefox was invisible even after the journey overhaul: Ubuntu's snap Firefox AppArmor profile
 >   denies EVERY inbound D-Bus call from outside the sandbox — including the AT-SPI accessibility bus
