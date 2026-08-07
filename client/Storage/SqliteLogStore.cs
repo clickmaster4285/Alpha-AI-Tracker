@@ -157,6 +157,24 @@ public class SqliteLogStore : ILogStore, IDisposable
         }
     }
 
+    public async Task<DeviceHardwareInfo?> GetLastDeviceHardwareInfoAsync(CancellationToken ct)
+    {
+        if (_connection == null) return null;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT * FROM device_hardware_info ORDER BY collected_at DESC, created_at DESC LIMIT 1";
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            if (await reader.ReadAsync(ct)) return MapDeviceHardwareReader(reader);
+            return null;
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
     public async Task MarkDeviceHardwareInfoSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
         if (_connection == null || ids.Count == 0) return;
@@ -574,6 +592,9 @@ public class SqliteLogStore : ILogStore, IDisposable
             var pPrivIp = cmd.Parameters.Add("$private_ip", SqliteType.Text);
             var pIfName = cmd.Parameters.Add("$network_interface_name", SqliteType.Text);
             var pCollected = cmd.Parameters.Add("$collected_at", SqliteType.Text);
+            var pFirstSeen = cmd.Parameters.Add("$first_seen_at", SqliteType.Text);
+            var pLastSeen = cmd.Parameters.Add("$last_seen_at", SqliteType.Text);
+            var pIsCurrent = cmd.Parameters.Add("$is_current", SqliteType.Integer);
 
             await using var tx = await _connection.BeginTransactionAsync(ct);
             ((DbCommand)cmd).Transaction = tx;
@@ -584,6 +605,9 @@ public class SqliteLogStore : ILogStore, IDisposable
                 pPrivIp.Value = e.PrivateIp;
                 pIfName.Value = e.NetworkInterfaceName;
                 pCollected.Value = e.CollectedAt.ToString("O");
+                pFirstSeen.Value = e.FirstSeenAt.HasValue ? e.FirstSeenAt.Value.ToString("O") : (object)DBNull.Value;
+                pLastSeen.Value = e.LastSeenAt.HasValue ? e.LastSeenAt.Value.ToString("O") : (object)DBNull.Value;
+                pIsCurrent.Value = e.IsCurrent ? 1 : 0;
                 await cmd.ExecuteNonQueryAsync(ct);
             }
             await tx.CommitAsync(ct);
@@ -642,18 +666,78 @@ public class SqliteLogStore : ILogStore, IDisposable
             var cmd = _connection.CreateCommand();
             cmd.CommandText = DatabaseSchema.GetLastNetworkInfoSql;
             await using var reader = await cmd.ExecuteReaderAsync(ct);
-            if (await reader.ReadAsync(ct))
-            {
-                return new NetworkInfo
-                {
-                    Id = reader.GetString(reader.GetOrdinal("id")),
-                    PublicIp = reader.GetString(reader.GetOrdinal("public_ip")),
-                    PrivateIp = reader.GetString(reader.GetOrdinal("private_ip")),
-                    NetworkInterfaceName = reader.GetString(reader.GetOrdinal("network_interface_name")),
-                    CollectedAt = DateTime.Parse(reader.GetString(reader.GetOrdinal("collected_at"))),
-                };
-            }
+            if (await reader.ReadAsync(ct)) return MapNetworkInfoReader(reader);
             return null;
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task MarkNetworkInfoNotCurrentAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        if (_connection == null || ids.Count == 0) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            await using var tx = await _connection.BeginTransactionAsync(ct);
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "UPDATE network_info SET is_current = 0 WHERE id = $id";
+            var p = cmd.Parameters.Add("$id", SqliteType.Text);
+            foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
+            await tx.CommitAsync(ct);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task TouchNetworkInfoAsync(string id, DateTime lastSeenAt, CancellationToken ct)
+    {
+        if (_connection == null) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "UPDATE network_info SET last_seen_at = $last_seen WHERE id = $id";
+            cmd.Parameters.AddWithValue("$last_seen", lastSeenAt.ToString("O"));
+            cmd.Parameters.AddWithValue("$id", id);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task MarkAllNetworkInfoNotCurrentAsync(CancellationToken ct)
+    {
+        if (_connection == null) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "UPDATE network_info SET is_current = 0 WHERE is_current = 1";
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task TouchCurrentNetworkInfoAsync(DateTime lastSeenAt, CancellationToken ct)
+    {
+        if (_connection == null) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "UPDATE network_info SET last_seen_at = $last_seen WHERE is_current = 1";
+            cmd.Parameters.AddWithValue("$last_seen", lastSeenAt.ToString("O"));
+            await cmd.ExecuteNonQueryAsync(ct);
         }
         finally
         {
@@ -728,6 +812,24 @@ public class SqliteLogStore : ILogStore, IDisposable
             var p = cmd.Parameters.Add("$id", SqliteType.Text);
             foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
             await tx.CommitAsync(ct);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task<SessionEvent?> GetLastSessionEventAsync(CancellationToken ct)
+    {
+        if (_connection == null) return null;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT * FROM session_events ORDER BY event_at DESC, created_at DESC LIMIT 1";
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            if (await reader.ReadAsync(ct)) return MapSessionEventReader(reader);
+            return null;
         }
         finally
         {
@@ -991,7 +1093,7 @@ public class SqliteLogStore : ILogStore, IDisposable
         {
             var cmd = _connection.CreateCommand();
             cmd.CommandText = @"
-                SELECT s.id, s.process_name, COALESCE(s.process_id, 0), i.id AS item_id, i.item_type, s.installed_app_id
+                SELECT s.id, s.process_name, COALESCE(s.process_id, 0), i.id AS item_id, i.item_type, s.installed_app_id, i.title, i.url
                 FROM app_sessions s
                 INNER JOIN app_items i ON i.app_session_id = s.id AND i.parent_item_id IS NULL
                 WHERE s.ended_at IS NULL AND s.process_id IS NOT NULL
@@ -1008,6 +1110,8 @@ public class SqliteLogStore : ILogStore, IDisposable
                     RootItemId = reader.GetString(3),
                     ItemType = reader.GetString(4),
                     InstalledAppId = reader.IsDBNull(5) ? null : reader.GetString(5),
+                    RootItemTitle = reader.IsDBNull(6) ? string.Empty : reader.GetString(6),
+                    RootItemUrl = reader.IsDBNull(7) ? string.Empty : reader.GetString(7),
                 });
             }
             return results;
@@ -1171,6 +1275,30 @@ public class SqliteLogStore : ILogStore, IDisposable
         }
     }
 
+    public async Task<AppItem?> GetOpenRootItemAsync(string appSessionId, string itemType, CancellationToken ct)
+    {
+        if (_connection == null) return null;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+                SELECT * FROM app_items
+                WHERE app_session_id = $session_id AND item_type = $item_type
+                  AND parent_item_id IS NULL AND closed_at IS NULL
+                ORDER BY opened_at DESC
+                LIMIT 1";
+            cmd.Parameters.AddWithValue("$session_id", appSessionId);
+            cmd.Parameters.AddWithValue("$item_type", itemType);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            return await reader.ReadAsync(ct) ? MapAppItemReader(reader) : null;
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
     public async Task<AppItem?> GetOpenJourneyEventAsync(string journeyId, string objectType, string action, string currentPath, CancellationToken ct)
     {
         if (_connection == null) return null;
@@ -1321,6 +1449,105 @@ public class SqliteLogStore : ILogStore, IDisposable
             var p = cmd.Parameters.Add("$id", SqliteType.Text);
             foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
             await tx.CommitAsync(ct);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    // ────────────────────────────────────────
+    // Hardware Devices (USB / peripheral hotplug)
+    // ────────────────────────────────────────
+
+    public async Task StoreHardwareDevicesAsync(IReadOnlyList<HardwareDevice> entries, CancellationToken ct)
+    {
+        if (_connection == null || entries.Count == 0) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = DatabaseSchema.InsertHardwareDeviceSql;
+            var pId = cmd.Parameters.Add("$id", SqliteType.Text);
+            var pClass = cmd.Parameters.Add("$device_class", SqliteType.Text);
+            var pVendor = cmd.Parameters.Add("$vendor", SqliteType.Text);
+            var pProduct = cmd.Parameters.Add("$product", SqliteType.Text);
+            var pSerial = cmd.Parameters.Add("$serial", SqliteType.Text);
+            var pBusPath = cmd.Parameters.Add("$bus_path", SqliteType.Text);
+            var pNode = cmd.Parameters.Add("$device_node", SqliteType.Text);
+            var pPluggedAt = cmd.Parameters.Add("$plugged_at", SqliteType.Text);
+
+            await using var tx = await _connection.BeginTransactionAsync(ct);
+            ((DbCommand)cmd).Transaction = tx;
+            foreach (var e in entries)
+            {
+                pId.Value = e.Id;
+                pClass.Value = e.DeviceClass;
+                pVendor.Value = e.Vendor;
+                pProduct.Value = e.Product;
+                pSerial.Value = e.Serial;
+                pBusPath.Value = e.BusPath;
+                pNode.Value = e.DeviceNode;
+                pPluggedAt.Value = e.PluggedAt.ToString("O");
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+            await tx.CommitAsync(ct);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task<IReadOnlyList<HardwareDevice>> GetOpenHardwareDevicesAsync(CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<HardwareDevice>();
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT * FROM hardware_devices WHERE unplugged_at IS NULL ORDER BY plugged_at ASC";
+            var results = new List<HardwareDevice>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct)) results.Add(MapHardwareDeviceReader(reader));
+            return results;
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task<HardwareDevice?> GetOpenHardwareDeviceByBusPathAsync(string busPath, CancellationToken ct)
+    {
+        if (_connection == null || string.IsNullOrWhiteSpace(busPath)) return null;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT * FROM hardware_devices WHERE bus_path = $path AND unplugged_at IS NULL LIMIT 1";
+            cmd.Parameters.AddWithValue("$path", busPath);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            if (await reader.ReadAsync(ct)) return MapHardwareDeviceReader(reader);
+            return null;
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task CloseHardwareDeviceAsync(string id, DateTime unpluggedAt, CancellationToken ct)
+    {
+        if (_connection == null) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "UPDATE hardware_devices SET unplugged_at = $at WHERE id = $id";
+            cmd.Parameters.AddWithValue("$at", unpluggedAt.ToString("O"));
+            cmd.Parameters.AddWithValue("$id", id);
+            await cmd.ExecuteNonQueryAsync(ct);
         }
         finally
         {
@@ -1625,6 +1852,28 @@ public class SqliteLogStore : ILogStore, IDisposable
             PrivateIp = r.GetString(r.GetOrdinal("private_ip")),
             NetworkInterfaceName = r.GetString(r.GetOrdinal("network_interface_name")),
             CollectedAt = DateTime.Parse(r.GetString(r.GetOrdinal("collected_at"))),
+            FirstSeenAt = r.IsDBNull(r.GetOrdinal("first_seen_at")) ? null : DateTime.Parse(r.GetString(r.GetOrdinal("first_seen_at"))),
+            LastSeenAt = r.IsDBNull(r.GetOrdinal("last_seen_at")) ? null : DateTime.Parse(r.GetString(r.GetOrdinal("last_seen_at"))),
+            IsCurrent = TryGetInt(r, "is_current") == 1,
+            IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
+            SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
+            CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),
+        };
+    }
+
+    private static HardwareDevice MapHardwareDeviceReader(SqliteDataReader r)
+    {
+        return new HardwareDevice
+        {
+            Id = r.GetString(r.GetOrdinal("id")),
+            DeviceClass = r.GetString(r.GetOrdinal("device_class")),
+            Vendor = r.GetString(r.GetOrdinal("vendor")),
+            Product = r.GetString(r.GetOrdinal("product")),
+            Serial = r.GetString(r.GetOrdinal("serial")),
+            BusPath = r.GetString(r.GetOrdinal("bus_path")),
+            DeviceNode = r.GetString(r.GetOrdinal("device_node")),
+            PluggedAt = DateTime.Parse(r.GetString(r.GetOrdinal("plugged_at"))),
+            UnpluggedAt = r.IsDBNull(r.GetOrdinal("unplugged_at")) ? null : DateTime.Parse(r.GetString(r.GetOrdinal("unplugged_at"))),
             IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
             SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
             CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),

@@ -143,7 +143,9 @@ public class LogCollectorService : BackgroundService
             _logger.LogInformation("Tracking started");
         }
 
-        // Record login session event
+        // Record login session event — only if the last persisted event isn't already an open login.
+        // StartTracking() is called both at session restore AND on every explicit login, so without
+        // this guard a relaunch writes a duplicate "login" row while the previous one is never closed.
         _ = RecordSessionEventAsync("login", stoppingToken: default);
 
         if (OperatingSystem.IsWindows())
@@ -989,10 +991,30 @@ public class LogCollectorService : BackgroundService
             // Build a fingerprint WITHOUT storage devices (they're relational now — doesn't change often)
             var fingerprint = $"{macAddress}|{hostname}|{osName}|{osVersion}|{cpuModel}|{cpuCores}|{ramTotalMb}|{gpuModel}";
 
-            // Dedup: skip if hardware hasn't changed since last collection
-            if (_lastHardwareFingerprint == fingerprint)
+            // Dedup against the LAST row PERSISTED IN THE DB (not just this process run) —
+            // the old in-memory-only _lastHardwareFingerprint reset on every launch, so
+            // relaunching with unchanged hardware always wrote a duplicate row.
+            if (_lastHardwareFingerprint != fingerprint)
             {
-                _logger.LogDebug("Hardware unchanged since last collection, skipping");
+                var lastHw = await _store.GetLastDeviceHardwareInfoAsync(ct);
+                if (lastHw != null &&
+                    lastHw.MacAddress == macAddress && lastHw.Hostname == hostname &&
+                    lastHw.OsName == osName && lastHw.CpuModel == cpuModel &&
+                    lastHw.CpuCores == cpuCores && lastHw.RamTotalMb == ramTotalMb &&
+                    lastHw.GpuModel == gpuModel)
+                {
+                    _logger.LogDebug("Hardware unchanged since last persisted row, skipping");
+                    _lastHardwareFingerprint = fingerprint;
+                    if (!await _store.HasStorageDevicesAsync(ct))
+                    {
+                        await StoreStorageDevicesFromProbeAsync(ct);
+                    }
+                    return;
+                }
+            }
+            else
+            {
+                // Same-process fast path: nothing changed since this process already stored it.
                 if (!await _store.HasStorageDevicesAsync(ct))
                 {
                     await StoreStorageDevicesFromProbeAsync(ct);
@@ -1051,10 +1073,12 @@ public class LogCollectorService : BackgroundService
         var rawStorageDevices = GetStorageDevices();
         if (rawStorageDevices.Count == 0) return;
 
-        var unsent = await _store.GetUnsentDeviceHardwareInfoAsync(1, ct);
-        if (unsent.Count == 0) return;
+        // Attach to the LATEST hardware row (whether synced or not) — the probe may run
+        // on a later cycle than the hardware insert, and the latest row is the current one.
+        var lastHw = await _store.GetLastDeviceHardwareInfoAsync(ct);
+        if (lastHw == null) return;
 
-        var hwId = unsent[^1].Id;
+        var hwId = lastHw.Id;
         var storageRows = rawStorageDevices.Select(d => new StorageDevice
         {
             DeviceHardwareId = hwId,
@@ -1121,8 +1145,8 @@ public class LogCollectorService : BackgroundService
                             // Skip loop devices and partitions
                             if (devType != "disk") continue;
 
-                            // Determine SSD vs HDD via ROTA flag (1 = HDD, 0 = SSD)
-                            var isRotational = dev.TryGetProperty("rota", out var rota) && rota.GetInt32() == 1;
+                            // Determine SSD vs HDD via ROTA flag (lsblk -J emits a JSON boolean: true = HDD, false = SSD)
+                            var isRotational = dev.TryGetProperty("rota", out var rota) && rota.ValueKind == JsonValueKind.True;
                             var diskType = isRotational ? "HDD" : "SSD";
 
                             // Parse size string like "119.2G" to MB
@@ -1295,31 +1319,64 @@ public class LogCollectorService : BackgroundService
             // Get public IP from external service
             var publicIp = await GetPublicIpAsync(ct);
 
-            // Get private IPs from local interfaces
-            var hostName = System.Net.Dns.GetHostName();
-            var hostEntry = await System.Net.Dns.GetHostEntryAsync(hostName, ct);
-            var privateIps = hostEntry.AddressList
-                .Where(ip => ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
-                .Select(ip => ip.ToString())
+            var now = DateTime.UtcNow;
+
+            // Collect interface-derived private IPs FIRST. The dedup key must come from the
+            // SAME source that gets stored (interface unicast addresses) — the old code
+            // keyed dedup on Dns.GetHostEntry (which resolves to 127.0.1.1 on this host)
+            // while storing interface IPs (192.168.88.66), so the two NEVER matched and a
+            // fresh DB row was written on every cycle/startup.
+            var upInterfaces = System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
+                .Where(ni => ni.OperationalStatus == System.Net.NetworkInformation.OperationalStatus.Up &&
+                             ni.NetworkInterfaceType != System.Net.NetworkInformation.NetworkInterfaceType.Loopback)
                 .ToList();
 
-            var primaryPrivateIp = privateIps.FirstOrDefault() ?? "";
-
-            // Dedup: only save if IPs differ from last record
-            if (_lastNetworkPublicIp == publicIp && _lastNetworkPrivateIp == primaryPrivateIp)
+            var primaryPrivateIp = string.Empty;
+            foreach (var ni in upInterfaces)
             {
+                try
+                {
+                    var unicastAddr = ni.GetIPProperties().UnicastAddresses
+                        .FirstOrDefault(u => u.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork);
+                    if (unicastAddr == null) continue;
+                    primaryPrivateIp = unicastAddr.Address.ToString();
+                    break;
+                }
+                catch { }
+            }
+
+            // Dedup against the last row PERSISTED IN THE DB — the old in-memory
+            // _lastNetwork* fields reset on every launch, so relaunching with the same
+            // IPs always wrote a fresh duplicate row. The DB row carries is_current so
+            // exactly one row per IP-identity is "active" at any time.
+            if (publicIp == _lastNetworkPublicIp && primaryPrivateIp == _lastNetworkPrivateIp &&
+                !string.IsNullOrEmpty(publicIp))
+            {
+                // Same-process fast path — already recorded in this run.
+                await _store.TouchCurrentNetworkInfoAsync(now, ct);
                 _logger.LogDebug("Network info unchanged (public={PublicIp}, private={PrivateIp}), skipping", publicIp, primaryPrivateIp);
                 return;
             }
 
-            var interfaces = System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces();
-            foreach (var ni in interfaces)
+            var current = await _store.GetLastNetworkInfoAsync(ct);
+            if (current != null && !string.IsNullOrEmpty(current.PublicIp) &&
+                current.PublicIp == publicIp && current.PrivateIp == primaryPrivateIp)
             {
-                // Skip loopback — not useful for tracking
-                if (ni.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback)
-                    continue;
+                // Same identity as the persisted current row — touch it, don't duplicate.
+                _lastNetworkPublicIp = publicIp;
+                _lastNetworkPrivateIp = primaryPrivateIp;
+                await _store.TouchCurrentNetworkInfoAsync(now, ct);
+                _logger.LogDebug("Network info unchanged vs persisted row (public={PublicIp}, private={PrivateIp}), skipping", publicIp, primaryPrivateIp);
+                return;
+            }
 
-                if (ni.OperationalStatus == System.Net.NetworkInformation.OperationalStatus.Up)
+            // Network identity changed (or first ever record) — demote old current rows
+            // and insert fresh is_current=1 rows so the history preserves each IP change.
+            await _store.MarkAllNetworkInfoNotCurrentAsync(ct);
+
+            foreach (var ni in upInterfaces)
+            {
+                try
                 {
                     var ipProps = ni.GetIPProperties();
                     var unicastAddr = ipProps.UnicastAddresses
@@ -1331,11 +1388,15 @@ public class LogCollectorService : BackgroundService
                         PublicIp = publicIp,
                         PrivateIp = unicastAddr.Address.ToString(),
                         NetworkInterfaceName = ni.Name,
-                        CollectedAt = DateTime.UtcNow
+                        CollectedAt = now,
+                        FirstSeenAt = now,
+                        LastSeenAt = now,
+                        IsCurrent = true
                     };
 
                     await _store.StoreNetworkInfoAsync(new[] { info }, ct);
                 }
+                catch { }
             }
 
             _lastNetworkPublicIp = publicIp;
@@ -1424,10 +1485,17 @@ public class LogCollectorService : BackgroundService
     // Session Event Recording
     // ────────────────────────────────────────────
 
-    private async Task RecordSessionEventAsync(string eventType, CancellationToken stoppingToken)
+    public async Task RecordSessionEventAsync(string eventType, CancellationToken stoppingToken)
     {
         try
         {
+            var last = await _store.GetLastSessionEventAsync(stoppingToken);
+            if (last != null && last.EventType == eventType)
+            {
+                _logger.LogDebug("Skipping duplicate session event: {EventType} (last event is already {EventType})", eventType, eventType);
+                return;
+            }
+
             var evt = new SessionEvent
             {
                 EventType = eventType,

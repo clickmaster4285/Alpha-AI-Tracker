@@ -24,6 +24,9 @@ public class AppConfig
     public bool BrowserHistoryEnabled { get; init; } = true;
     public int BrowserHistoryPollSec { get; init; } = 10;        // how often history DBs are re-scanned/re-read
 
+    // USB / peripheral hotplug tracking (local SQLite only; no server sync yet)
+    public bool HardwareDevicesEnabled { get; init; } = true;
+
     public static AppConfig FromEnv()
     {
         return new AppConfig
@@ -41,6 +44,7 @@ public class AppConfig
             BrowserCaptureIncognito = GetEnv("ALPHA_BROWSER_CAPTURE_INCOGNITO") is ("1" or "true" or "True"),
             BrowserHistoryEnabled = GetEnv("ALPHA_BROWSER_HISTORY_ENABLED") is not ("0" or "false" or "False"),
             BrowserHistoryPollSec = int.TryParse(GetEnv("ALPHA_BROWSER_HISTORY_POLL_SECONDS"), out var histPoll) ? histPoll : 10,
+            HardwareDevicesEnabled = GetEnv("ALPHA_HARDWARE_DEVICES_ENABLED") is not ("0" or "false" or "False"),
         };
     }
 

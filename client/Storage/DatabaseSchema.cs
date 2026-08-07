@@ -101,6 +101,9 @@ internal static class DatabaseSchema
             private_ip           TEXT NOT NULL DEFAULT '',
             network_interface_name TEXT NOT NULL DEFAULT '',
             collected_at         TEXT NOT NULL,
+            first_seen_at        TEXT,
+            last_seen_at         TEXT,
+            is_current           INTEGER NOT NULL DEFAULT 1,
             is_synced            INTEGER NOT NULL DEFAULT 0,
             synced_at            TEXT,
             created_at           TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
@@ -108,6 +111,30 @@ internal static class DatabaseSchema
 
         CREATE INDEX IF NOT EXISTS idx_network_unsent
             ON network_info(is_synced, collected_at);
+
+        -- USB / peripheral / storage hotplug tracking (plug-in & plug-out history).
+        -- device_class: 'storage' | 'input' | 'audio' | 'display' | 'usb' | 'power' | 'other'
+        -- bus_path = udev DEVPATH (stable identity per physical plug), unplugged_at NULL while plugged.
+        CREATE TABLE IF NOT EXISTS hardware_devices (
+            id               TEXT PRIMARY KEY,
+            device_class     TEXT NOT NULL DEFAULT 'other',
+            vendor           TEXT NOT NULL DEFAULT '',
+            product          TEXT NOT NULL DEFAULT '',
+            serial           TEXT NOT NULL DEFAULT '',
+            bus_path         TEXT NOT NULL DEFAULT '',
+            device_node      TEXT NOT NULL DEFAULT '',
+            plugged_at       TEXT NOT NULL,
+            unplugged_at     TEXT,
+            is_synced        INTEGER NOT NULL DEFAULT 0,
+            synced_at        TEXT,
+            created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_hardware_devices_class
+            ON hardware_devices(device_class, plugged_at);
+
+        CREATE INDEX IF NOT EXISTS idx_hardware_devices_open
+            ON hardware_devices(unplugged_at, bus_path);
 
         CREATE TABLE IF NOT EXISTS session_events (
             id               TEXT PRIMARY KEY,
@@ -264,6 +291,26 @@ internal static class DatabaseSchema
         ALTER TABLE app_sessions ADD COLUMN grouped_by TEXT;
         ALTER TABLE app_sessions ADD COLUMN cgroup_scope TEXT;
         ALTER TABLE app_sessions ADD COLUMN context_label TEXT;
+        ALTER TABLE network_info ADD COLUMN first_seen_at TEXT;
+        ALTER TABLE network_info ADD COLUMN last_seen_at TEXT;
+        ALTER TABLE network_info ADD COLUMN is_current INTEGER NOT NULL DEFAULT 1;
+        -- Backfill dedup: legacy databases have MULTIPLE is_current=1 rows per IP identity
+        -- (one per launch — the pre-fix bug). Collapse them to the most recent per identity
+        -- so the current-row contract holds going forward without a manual DB wipe.
+        UPDATE network_info SET is_current = 0 WHERE is_current = 1 AND id NOT IN (
+            SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (PARTITION BY public_ip, private_ip ORDER BY collected_at DESC) AS rn
+                FROM network_info WHERE is_current = 1
+            ) WHERE rn = 1
+        );
+        CREATE INDEX IF NOT EXISTS idx_network_current
+            ON network_info(is_current, collected_at);
+        CREATE INDEX IF NOT EXISTS idx_hardware_devices_class
+            ON hardware_devices(device_class, plugged_at);
+        CREATE INDEX IF NOT EXISTS idx_hardware_devices_open
+            ON hardware_devices(unplugged_at, bus_path);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_hardware_devices_open_path
+            ON hardware_devices(bus_path) WHERE unplugged_at IS NULL AND bus_path != '';
         DELETE FROM installed_packages
             WHERE id NOT IN (
                 SELECT id FROM (
@@ -357,15 +404,23 @@ internal static class DatabaseSchema
 
     internal const string InsertNetworkInfoSql = @"
         INSERT INTO network_info
-            (id, public_ip, private_ip, network_interface_name, collected_at)
+            (id, public_ip, private_ip, network_interface_name, collected_at, first_seen_at, last_seen_at, is_current)
         VALUES
-            ($id, $public_ip, $private_ip, $network_interface_name, $collected_at)
+            ($id, $public_ip, $private_ip, $network_interface_name, $collected_at, $first_seen_at, $last_seen_at, $is_current)
     ";
 
     internal const string MarkNetworkInfoSentSql = @"
         UPDATE network_info
         SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')
         WHERE id IN ({0})
+    ";
+
+    internal const string InsertHardwareDeviceSql = @"
+        INSERT INTO hardware_devices
+            (id, device_class, vendor, product, serial, bus_path, device_node, plugged_at)
+        VALUES
+            ($id, $device_class, $vendor, $product, $serial, $bus_path, $device_node, $plugged_at)
+        ON CONFLICT(bus_path) WHERE unplugged_at IS NULL AND bus_path != '' DO NOTHING
     ";
 
     internal const string InsertSessionEventSql = @"
@@ -446,8 +501,8 @@ internal static class DatabaseSchema
     ";
 
     internal const string GetLastNetworkInfoSql = @"
-        SELECT id, public_ip, private_ip, network_interface_name, collected_at
-        FROM network_info
+        SELECT * FROM network_info
+        WHERE is_current = 1
         ORDER BY collected_at DESC
         LIMIT 1
     ";

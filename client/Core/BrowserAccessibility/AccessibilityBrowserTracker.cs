@@ -1,10 +1,10 @@
 using System.Text.Json;
 using client.Configuration;
+using client.Core;
 using client.Core.Abstractions;
 using client.Core.Models;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-
 namespace client.Core.BrowserAccessibility;
 
 /// <summary>
@@ -67,6 +67,13 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
     /// navigation (the Firefox private-window freeze).
     /// </summary>
     private static readonly TimeSpan HistoryLagTimeout = TimeSpan.FromSeconds(25);
+    /// <summary>
+    /// Max age of the persisted heartbeat for which a relaunch is considered "fast"
+    /// (same live browser windows) and the window registry is hydrated from open DB
+    /// sessions. Matches the main loop's CrashGracePeriod — a stale heartbeat means
+    /// those sessions are being closed as crashed, not reused.
+    /// </summary>
+    private static readonly TimeSpan HydrateGracePeriod = TimeSpan.FromSeconds(60);
 
     private readonly Dictionary<string, TrackedWindow> _tracked = new();
     private readonly List<FileSystemWatcher> _downloadWatchers = new();
@@ -103,6 +110,7 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
 
         await _store.InitializeAsync(stoppingToken);
         await RefreshEmployeeInfoAsync(stoppingToken);
+        await HydrateTrackedWindowsAsync(stoppingToken);
         StartDownloadWatchers();
         _stopping = false;
 
@@ -148,6 +156,75 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Failed to close browser sessions on shutdown");
+        }
+    }
+
+    /// <summary>
+    /// Rebuild the in-memory window registry from open DB sessions on a FAST relaunch.
+    ///
+    /// The _tracked dictionary is process-local, but the open app_sessions for browser
+    /// windows survive a restart when the heartbeat is still fresh (the main loop's
+    /// boot reconciliation skips browser-owned sessions so it never closes live windows).
+    /// Without hydration, a restart with browser windows still open would OPEN A SECOND
+    /// session per window while the previous rows stay open → duplicate open sessions.
+    ///
+    /// Hydration is skipped when the last heartbeat is stale (&gt; grace period): those old
+    /// sessions belong to a dead process and are closed by the main loop's crash recovery;
+    /// any hydrated entry with no matching live window also self-heals via the missing-polls
+    /// close path (5 polls), so a stale hydration can never leak a session.
+    /// </summary>
+    private async Task HydrateTrackedWindowsAsync(CancellationToken ct)
+    {
+        try
+        {
+            var heartbeatStr = await _store.GetStatusAsync("last_heartbeat_at", ct);
+            if (string.IsNullOrEmpty(heartbeatStr)) return;
+
+            if (!DateTime.TryParse(heartbeatStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var lastHeartbeat))
+                return;
+
+            if (DateTime.UtcNow - lastHeartbeat > HydrateGracePeriod)
+            {
+                _logger.LogDebug("Browser tracker skip hydration — heartbeat stale ({Stale:F0}s ago)",
+                    (DateTime.UtcNow - lastHeartbeat).TotalSeconds);
+                return;
+            }
+
+            var openRecords = await _store.GetOpenSessionRecordsAsync(ct);
+            var now = DateTime.UtcNow;
+            foreach (var rec in openRecords)
+            {
+                if (rec.ProcessId <= 0) continue;
+                if (!BrowserAccessibilityHelpers.IsBrowserProcess(
+                        AppProcessClassifier.ExtractBaseProcessName(rec.ProcessName))) continue;
+
+                // Use the persisted root browser_tab title/URL as the baseline so the
+                // first poll's title-match / URL-match in UpdateWindowAsync sees "no change"
+                // and doesn't rotate a duplicate tab record immediately after relaunch.
+                var key = $"hydrated:{rec.AppSessionId}";
+                _tracked[key] = new TrackedWindow
+                {
+                    SessionId = rec.AppSessionId,
+                    RootItemId = rec.RootItemId,
+                    JourneyId = rec.AppSessionId,
+                    ProcessId = rec.ProcessId,
+                    LastUrl = string.IsNullOrEmpty(rec.RootItemUrl) ? null : rec.RootItemUrl,
+                    LastTitle = rec.RootItemTitle,
+                    LastActivity = now,
+                    LastSeen = now,
+                };
+            }
+
+            if (_tracked.Count > 0)
+            {
+                _logger.LogInformation(
+                    "Hydrated {Count} browser window(s) from open sessions (fast relaunch)",
+                    _tracked.Count);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to hydrate browser tracker windows");
         }
     }
 

@@ -12,6 +12,8 @@ public interface ILogStore
     Task StoreDeviceHardwareInfoAsync(IReadOnlyList<DeviceHardwareInfo> entries, CancellationToken ct);
     Task<IReadOnlyList<DeviceHardwareInfo>> GetUnsentDeviceHardwareInfoAsync(int limit, CancellationToken ct);
     Task MarkDeviceHardwareInfoSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
+    /// <summary>Most recently collected device hardware row (for dedup across restarts).</summary>
+    Task<DeviceHardwareInfo?> GetLastDeviceHardwareInfoAsync(CancellationToken ct);
 
     Task StoreInstalledApplicationsAsync(IReadOnlyList<InstalledApplication> entries, CancellationToken ct);
     Task<IReadOnlyList<InstalledApplication>> GetUnsentInstalledApplicationsAsync(int limit, CancellationToken ct);
@@ -28,12 +30,21 @@ public interface ILogStore
     Task StoreSessionEventsAsync(IReadOnlyList<SessionEvent> entries, CancellationToken ct);
     Task<IReadOnlyList<SessionEvent>> GetUnsentSessionEventsAsync(int limit, CancellationToken ct);
     Task MarkSessionEventsSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
+    /// <summary>Most recent session event (for login/logout state machine — avoids duplicate login rows).</summary>
+    Task<SessionEvent?> GetLastSessionEventAsync(CancellationToken ct);
 
     // ── Storage Devices (relational child of device_hardware_info) ──
 
     Task StoreStorageDevicesAsync(IReadOnlyList<StorageDevice> entries, CancellationToken ct);
     Task<IReadOnlyList<StorageDevice>> GetUnsentStorageDevicesAsync(int limit, CancellationToken ct);
     Task MarkStorageDevicesSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
+
+    // ── Hardware Devices (USB / peripheral hotplug tracking) ──
+
+    Task StoreHardwareDevicesAsync(IReadOnlyList<HardwareDevice> entries, CancellationToken ct);
+    Task<IReadOnlyList<HardwareDevice>> GetOpenHardwareDevicesAsync(CancellationToken ct);
+    Task<HardwareDevice?> GetOpenHardwareDeviceByBusPathAsync(string busPath, CancellationToken ct);
+    Task CloseHardwareDeviceAsync(string id, DateTime unpluggedAt, CancellationToken ct);
 
     // ── Installed App/Package Lookup (binary name → display name mapping) ──
 
@@ -110,6 +121,9 @@ public interface ILogStore
     /// <summary>Find an open context child item by type+identifier under a session.</summary>
     Task<AppItem?> GetOpenAppItemAsync(string appSessionId, string itemType, string identifier, CancellationToken ct);
 
+    /// <summary>Find an open ROOT item of a given type (parent_item_id IS NULL) for a session — used to reuse journey roots.</summary>
+    Task<AppItem?> GetOpenRootItemAsync(string appSessionId, string itemType, CancellationToken ct);
+
     /// <summary>Find an open journey event by journey_id + object_type + action + current_path.</summary>
     Task<AppItem?> GetOpenJourneyEventAsync(string journeyId, string objectType, string action, string currentPath, CancellationToken ct);
 
@@ -128,6 +142,10 @@ public interface ILogStore
     // ── Network dedup helper ──
 
     Task<NetworkInfo?> GetLastNetworkInfoAsync(CancellationToken ct);
+    /// <summary>Flip every is_current=1 row to 0 (before recording a network change).</summary>
+    Task MarkAllNetworkInfoNotCurrentAsync(CancellationToken ct);
+    /// <summary>Refresh last_seen_at on all is_current=1 rows (same IP still active).</summary>
+    Task TouchCurrentNetworkInfoAsync(DateTime lastSeenAt, CancellationToken ct);
 
     // ── Status & Employee Info ──
 

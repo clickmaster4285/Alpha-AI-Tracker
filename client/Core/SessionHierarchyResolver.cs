@@ -9,6 +9,11 @@ public sealed class OpenSessionRecord
     public string RootItemId { get; init; } = string.Empty;
     public string ProcessName { get; init; } = string.Empty;
     public string ItemType { get; init; } = string.Empty;
+    /// <summary>Root item title — used by the accessibility browser tracker to hydrate its
+    /// in-memory window registry across a fast relaunch (title-match re-keying).</summary>
+    public string RootItemTitle { get; init; } = string.Empty;
+    /// <summary>Root item URL (browser_tab roots carry it) — same hydration purpose.</summary>
+    public string RootItemUrl { get; init; } = string.Empty;
     /// <summary>FK → installed_applications.id, needed to rebuild scope-aware session keys on boot hydration.</summary>
     public string? InstalledAppId { get; init; }
 }

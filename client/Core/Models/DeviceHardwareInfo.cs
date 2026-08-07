@@ -64,6 +64,12 @@ public class NetworkInfo
     public string MacAddress { get; set; } = string.Empty;
     public string NetworkInterfaceName { get; set; } = string.Empty;
     public DateTime CollectedAt { get; set; } = DateTime.UtcNow;
+    /// <summary>When this IP combination was first observed (row created).</summary>
+    public DateTime? FirstSeenAt { get; set; }
+    /// <summary>Last time the same IP combination was still seen as the active one.</summary>
+    public DateTime? LastSeenAt { get; set; }
+    /// <summary>True while this IP combination is the device's active one (flipped to 0 on IP change).</summary>
+    public bool IsCurrent { get; set; } = true;
     public bool IsSynced { get; set; }
     public string? SyncedAt { get; set; }
     public string CreatedAt { get; set; } = string.Empty;

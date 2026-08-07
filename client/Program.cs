@@ -185,6 +185,12 @@ builder.Services.AddSingleton<FileSystemEventWatcher>();
 builder.Services.AddSingleton<RecentFilesWatcher>();
 builder.Services.AddHostedService<DesktopEventService>();
 
+// USB / peripheral hotplug tracker (local SQLite only; no server sync yet)
+if (config.HardwareDevicesEnabled)
+{
+    builder.Services.AddHostedService<HardwareDeviceWatcherService>();
+}
+
 // Main ViewModel
 builder.Services.AddTransient<MainViewModel>();
 

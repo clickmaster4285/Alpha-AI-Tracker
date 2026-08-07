@@ -134,6 +134,12 @@ public class JourneyEngine
             if (existing != null) return existing.Id;
         }
 
+        // FileSystemWatcher / RecentFiles events carry NO WindowId, so the window-root
+        // lookup above never matches and every event used to mint a fresh file_manager_tab
+        // root (the 5-roots-per-session duplication). Reuse any open root tab instead.
+        var openTab = await _store.GetOpenRootItemAsync(appSessionId, "file_manager_tab", ct);
+        if (openTab != null) return openTab.Id;
+
         var rootItem = new AppItem
         {
             AppSessionId = appSessionId,
