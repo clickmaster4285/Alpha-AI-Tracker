@@ -14,7 +14,8 @@ namespace client.Services;
 /// Tracks when physical devices are plugged in / unplugged:
 ///   - udev monitor (subsystem=usb) gives real-time add/remove events,
 ///   - a periodic /sys enumeration backfills anything the monitor missed (devices that
-///     were present at boot before this service started) and self-heals gaps.
+///     were present at boot before this service started) and self-heals gaps,
+///   - amixer polling detects analog audio jack plug/unplug for headsets/headphones.
 ///
 /// Each plug-in writes a <c>hardware_devices</c> row (device_class/vendor/product/serial/
 /// bus_path/device_node/plugged_at); the matching plug-out sets <c>unplugged_at</c>.
@@ -59,6 +60,7 @@ public class HardwareDeviceWatcherService : BackgroundService
         }
 
         var monitorTask = Task.Run(() => RunUdevMonitorAsync(stoppingToken), stoppingToken);
+        var audioMonitorTask = Task.Run(() => RunAudioJackMonitorAsync(stoppingToken), stoppingToken);
 
         try
         {
@@ -82,9 +84,254 @@ public class HardwareDeviceWatcherService : BackgroundService
         finally
         {
             try { await monitorTask; } catch { }
+            try { await audioMonitorTask; } catch { }
         }
 
         _logger.LogInformation("Hardware device watcher stopped");
+    }
+
+    // ────────────────────────────────────────
+    // Audio jack monitor — headset/headphone plug/unplug
+    // ────────────────────────────────────────
+
+    private async Task RunAudioJackMonitorAsync(CancellationToken ct)
+    {
+        if (!CommandExists("amixer"))
+        {
+            _logger.LogDebug("amixer not found — skipping audio jack monitoring");
+            return;
+        }
+
+        _logger.LogDebug("Audio jack monitor starting (polling amixer for headphone/headset state)");
+
+        var lastHeadphonePluggedIn = false;
+        var lastHeadsetMicPluggedIn = false;
+
+        try
+        {
+            var initialState = await ReadAudioJackStateAsync();
+            if (initialState.HasValue)
+            {
+                lastHeadphonePluggedIn = initialState.Value.HeadphonePluggedIn;
+                lastHeadsetMicPluggedIn = initialState.Value.HeadsetMicPluggedIn;
+            }
+
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(2), ct);
+                    var currentState = await ReadAudioJackStateAsync();
+
+                    if (!currentState.HasValue) continue;
+
+                    var (headphoneIn, headsetMicIn, cardId, codecName) = currentState.Value;
+
+                    if (headphoneIn != lastHeadphonePluggedIn)
+                    {
+                        if (headphoneIn)
+                        {
+                            _logger.LogInformation("Analog audio jack plugged: Headphone ({Card}/{Codec})", cardId, codecName);
+                            await StoreAudioDeviceAsync("headphone", "Analog audio jack", $"Headphone jack ({codecName})", cardId, ct);
+                        }
+                        else
+                        {
+                            _logger.LogInformation("Analog audio jack unplugged: Headphone ({Card}/{Codec})", cardId, codecName);
+                            await CloseAudioDeviceAsync("headphone", $"Headphone jack ({codecName})", ct);
+                        }
+                        lastHeadphonePluggedIn = headphoneIn;
+                    }
+
+                    if (headsetMicIn != lastHeadsetMicPluggedIn)
+                    {
+                        if (headsetMicIn)
+                        {
+                            _logger.LogInformation("Analog audio jack plugged: Headset Mic ({Card}/{Codec})", cardId, codecName);
+                            await StoreAudioDeviceAsync("audio", "Headset", $"Headset mic jack ({codecName})", cardId, ct);
+                        }
+                        else
+                        {
+                            _logger.LogInformation("Analog audio jack unplugged: Headset Mic ({Card}/{Codec})", cardId, codecName);
+                            await CloseAudioDeviceAsync("audio", $"Headset mic jack ({codecName})", ct);
+                        }
+                        lastHeadsetMicPluggedIn = headsetMicIn;
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Audio jack poll failed");
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Audio jack monitor failed");
+        }
+        finally
+        {
+            _logger.LogDebug("Audio jack monitor stopped");
+        }
+    }
+
+    private async Task<(bool HeadphonePluggedIn, bool HeadsetMicPluggedIn, string CardId, string CodecName)?> ReadAudioJackStateAsync()
+    {
+        try
+        {
+            var soundCards = Directory.GetDirectories("/sys/class/sound/");
+            string? cardId = null;
+            string? codecName = null;
+
+            foreach (var cardPath in soundCards)
+            {
+                var cardName = Path.GetFileName(cardPath);
+                if (!cardName.StartsWith("card", StringComparison.Ordinal)) continue;
+
+                var idFile = Path.Combine(cardPath, "id");
+                if (File.Exists(idFile))
+                {
+                    cardId = File.ReadAllText(idFile).Trim();
+                }
+                else
+                {
+                    cardId = cardName;
+                }
+
+                var codecPath = Directory.GetDirectories(cardPath, "hw*").FirstOrDefault();
+                if (codecPath != null)
+                {
+                    var codecIdFile = Path.Combine(codecPath, "device", "id");
+                    if (File.Exists(codecIdFile))
+                    {
+                        codecName = File.ReadAllText(codecIdFile).Trim();
+                    }
+                }
+
+                var hasHeadphone = await AmixerControlExistsAsync(cardName.Replace("card", ""), "Headphone");
+                var hasHeadsetMic = await AmixerControlExistsAsync(cardName.Replace("card", ""), "Headset Mic");
+
+                if (hasHeadphone || hasHeadsetMic)
+                {
+                    break;
+                }
+            }
+
+            if (cardId == null) return null;
+
+            var cardNum = cardId.Replace("card", "");
+
+            var headphoneIn = false;
+            if (await AmixerControlExistsAsync(cardNum, "Headphone"))
+            {
+                var output = await RunProcessAsync("amixer", $"-c {cardNum} sget 'Headphone'");
+                if (!string.IsNullOrEmpty(output))
+                {
+                    headphoneIn = output.Contains("[on]", StringComparison.OrdinalIgnoreCase);
+                }
+            }
+
+            var headsetMicIn = false;
+            if (await AmixerControlExistsAsync(cardNum, "Headset Mic"))
+            {
+                var output = await RunProcessAsync("amixer", $"-c {cardNum} sget 'Headset Mic'");
+                if (!string.IsNullOrEmpty(output))
+                {
+                    headsetMicIn = output.Contains("[on]", StringComparison.OrdinalIgnoreCase);
+                }
+            }
+
+            return (headphoneIn, headsetMicIn, cardId ?? "card0", codecName ?? "ALC");
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task<bool> AmixerControlExistsAsync(string cardNum, string controlName)
+    {
+        try
+        {
+            var output = await RunProcessAsync("amixer", $"-c {cardNum} scontrols");
+            if (string.IsNullOrEmpty(output)) return false;
+
+            return output.Split('\n')
+                .Any(line => line.Contains($"'{controlName}'", StringComparison.OrdinalIgnoreCase));
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private async Task StoreAudioDeviceAsync(string deviceClass, string vendor, string product, string cardId, CancellationToken ct)
+    {
+        await _reconcileGate.WaitAsync(ct);
+        try
+        {
+            var busPath = $"/sys/class/sound/{cardId}";
+
+            var existing = await _store.GetOpenHardwareDevicesAsync(ct);
+            var alreadyOpen = existing.Any(d =>
+                d.DeviceClass == deviceClass &&
+                d.BusPath == busPath &&
+                d.Product.Contains(product));
+
+            if (alreadyOpen)
+            {
+                _logger.LogDebug("Audio device {Class} {Product} already tracked, skipping", deviceClass, product);
+                return;
+            }
+
+            var device = new HardwareDevice
+            {
+                DeviceClass = deviceClass,
+                Vendor = vendor,
+                Product = product,
+                BusPath = busPath,
+                DeviceNode = $"/devices/pci0000:00/0000:00:1f.3/sound/{cardId}",
+                PluggedAt = DateTime.UtcNow,
+            };
+
+            await _store.StoreHardwareDevicesAsync(new[] { device }, ct);
+            _logger.LogInformation("Audio device plugged in: {Class} {Product} ({BusPath})", deviceClass, product, busPath);
+        }
+        finally
+        {
+            _reconcileGate.Release();
+        }
+    }
+
+    private async Task CloseAudioDeviceAsync(string deviceClass, string product, CancellationToken ct)
+    {
+        await _reconcileGate.WaitAsync(ct);
+        try
+        {
+            var open = await _store.GetOpenHardwareDevicesAsync(ct);
+            var toClose = open.Where(d =>
+                d.DeviceClass == deviceClass &&
+                d.Product.Contains(product)).ToList();
+
+            if (toClose.Count == 0) return;
+
+            var now = DateTime.UtcNow;
+            foreach (var dev in toClose)
+            {
+                await _store.CloseHardwareDeviceAsync(dev.Id, now, ct);
+                _logger.LogInformation("Audio device unplugged: {Class} {Product} ({Id})",
+                    deviceClass, product, dev.Id);
+            }
+        }
+        finally
+        {
+            _reconcileGate.Release();
+        }
     }
 
     // ────────────────────────────────────────
@@ -368,5 +615,26 @@ public class HardwareDeviceWatcherService : BackgroundService
             return Process.Start(psi);
         }
         catch { return null; }
+    }
+
+    private static async Task<string> RunProcessAsync(string fileName, string args)
+    {
+        try
+        {
+            using var proc = StartProcess(fileName, args);
+            if (proc == null) return string.Empty;
+
+            var output = await proc.StandardOutput.ReadToEndAsync();
+            var error = await proc.StandardError.ReadToEndAsync();
+
+            try { proc.Kill(entireProcessTree: true); } catch { }
+            try { proc.WaitForExit(2000); } catch { }
+
+            return string.IsNullOrEmpty(error) ? output : string.Empty;
+        }
+        catch
+        {
+            return string.Empty;
+        }
     }
 }

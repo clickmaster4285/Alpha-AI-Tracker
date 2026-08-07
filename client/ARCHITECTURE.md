@@ -202,6 +202,7 @@ Views (XAML) ──► ViewModels (MainViewModel) ──► Models (plain DTOs) 
     profile)         GrantCurrentStepPermission       InstalledApplication,           AccessibilityBrowserTracker
                                                      InstalledPackage, NetworkInfo,   SqliteLogStore
                                                      SessionEvent, StorageDevice,     platform collectors
+                                                     HardwareDevice,                 HardwareDeviceWatcherService
 ```
 
 ### DI Container (`Program.cs`, `Host.CreateApplicationBuilder`)
@@ -210,7 +211,7 @@ Views (XAML) ──► ViewModels (MainViewModel) ──► Models (plain DTOs) 
 |---|---|
 | **Singleton** | `AppConfig`, `ILogStore` (SqliteLogStore), `HttpClient` (30s timeout), `IInstalledAppDetector`, `IPackageDetector`, `IActivityCollector` (per-platform), `AutoStartService`, `LogCollectorService`, `EventCoordinator`, `JourneyEngine`, `ATSPIEventWatcher`, `FileSystemEventWatcher`, `RecentFilesWatcher` |
 | **Singleton (conditional)** | `IAccessibilityBrowserReader` (platform reader) + `BrowserHistoryReader` — only when `ALPHA_BROWSER_TRACKING_ENABLED` |
-| **Hosted** | `BackgroundGuardService`, `LogCollectorService`, `DesktopEventService`, `AccessibilityBrowserTracker` (conditional) |
+| **Hosted** | `BackgroundGuardService`, `LogCollectorService`, `DesktopEventService`, `AccessibilityBrowserTracker` (conditional), `HardwareDeviceWatcherService` |
 | **Transient** | `MainViewModel` |
 
 `App.ServiceProvider = host.Services` is set after `StartAsync`; `App.axaml.cs` resolves `MainViewModel` from DI.
@@ -359,6 +360,17 @@ All platforms filter **headless Chromium/Electron subprocesses** (`--type=render
 ### Device hardware — every 30 cycles (~15 min)
 
 Fingerprint-deduped (`mac|hostname|os|cpu|ram|gpu`): hostname, `RuntimeInformation.OSDescription`, CPU model (`/proc/cpuinfo` / `PROCESSOR_IDENTIFIER`), cores, total RAM (`/proc/meminfo` / Windows fallback constant), **MAC** (first up non-loopback interface), **storage devices** (Linux `lsblk -J` with SSD/HDD via `ROTA`; Windows `DriveInfo`), **GPU** (`/proc/driver/nvidia/version`, else `lspci`). Stored as `device_hardware_info` + relational `storage_devices` rows (backfilled if the hardware fingerprint is unchanged but storage is empty).
+
+### Hardware device hotplug tracking — real-time (Linux only)
+
+`HardwareDeviceWatcherService` tracks physical device plug/unplug events in real-time:
+- **USB devices** via `udevadm monitor` (subsystem=usb) + periodic `/sys/bus/usb/devices/` enumeration
+- **Analog audio jacks** via `amixer` polling for headphone/headset jack state changes (ALSA)
+- Stores events in `hardware_devices` table with `device_class` (`usb`/`audio`/`headphone`/`storage`/`input`/`display`/`other`)
+- Plug events create open rows; unplug events set `unplugged_at`
+- USB storage devices detected via `/sys/class/block` entries with `/usb` in their bus path
+- Audio jack detection monitors `Headphone` and `Headset Mic` mixer controls for `[on]`/`[off]` state changes
+- Deduped by `bus_path` to avoid duplicate rows for the same physical slot
 
 ### Network info — every 10 cycles (~5 min)
 

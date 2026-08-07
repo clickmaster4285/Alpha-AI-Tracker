@@ -3,11 +3,11 @@
 > **Last audited:** 2026-08-07
 > **Changelog:**
 >
-> - 2026-08-07: **Client docs re-audited & rewritten** — `client/ARCHITECTURE.md` fully re-verified against
->   source; stale references corrected (`TrayAvailability.cs`/`SingleInstance.cs` no longer exist,
->   tray menu is Show/Hide only, `extensions/` + native-messaging pipeline fully removed, permission
->   wizard is 4 steps on Linux / 3 elsewhere and always re-validates reality, sync order is
->   app-sessions BEFORE app-items, headless `--background` service mode documented). No code changed.
+> - 2026-08-07: **Analog audio device tracking** — `HardwareDeviceWatcherService` now monitors
+>   headset/headphone analog audio jacks via `amixer` polling in addition to USB devices. Detects
+>   plug/unplug events for 3.5mm audio jacks and stores them as `audio`/`headphone` class devices
+>   in `hardware_devices` table. Fixes issue where headsets/earphones connected via analog jack
+>   were ignored. Linux-only (requires `amixer`/ALSA).
 > - 2026-08-07: **Private/incognito window URLs captured — Firefox via AT-SPI `DocURL`, Chrome needs one launch flag.**
 >   Live-DB root-causing showed private journeys rotated only when the profile-History fallback happened to match a URL;
 >   when it didn't (private visits, direct-opened sites) rotation froze and URLs stayed empty. Three fixes landed together:
