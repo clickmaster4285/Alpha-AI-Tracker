@@ -19,6 +19,91 @@ public partial class MainViewModel : ViewModelBase
     private readonly AutoStartService _autoStart;
     private readonly LogCollectorService _logCollector;
 
+    // ─── Splash Screen State ───
+
+    /// <summary>True while the GuardianConnect splash/loading screen is shown.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(Step1Active))]
+    [NotifyPropertyChangedFor(nameof(Step1Done))]
+    [NotifyPropertyChangedFor(nameof(Step2Active))]
+    [NotifyPropertyChangedFor(nameof(Step2Done))]
+    [NotifyPropertyChangedFor(nameof(Step3Active))]
+    [NotifyPropertyChangedFor(nameof(Step3Done))]
+    private bool _isSplashVisible = true;
+
+    /// <summary>Current splash step: 0 = checking auth, 1 = loading config, 2 = starting service, 3 = complete.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(Step1Active))]
+    [NotifyPropertyChangedFor(nameof(Step1Done))]
+    [NotifyPropertyChangedFor(nameof(Step2Active))]
+    [NotifyPropertyChangedFor(nameof(Step2Done))]
+    [NotifyPropertyChangedFor(nameof(Step2Pending))]
+    [NotifyPropertyChangedFor(nameof(Step3Active))]
+    [NotifyPropertyChangedFor(nameof(Step3Done))]
+    [NotifyPropertyChangedFor(nameof(Step3Pending))]
+    private int _splashStep;
+
+    /// <summary>Progress bar fill percentage (0–100).</summary>
+    [ObservableProperty]
+    private double _splashProgress;
+
+    public bool Step1Active => IsSplashVisible && SplashStep == 0;
+    public bool Step1Done => IsSplashVisible && SplashStep > 0;
+    public bool Step2Active => IsSplashVisible && SplashStep == 1;
+    public bool Step2Done => IsSplashVisible && SplashStep > 1;
+    public bool Step2Pending => IsSplashVisible && SplashStep < 1;
+    public bool Step3Active => IsSplashVisible && SplashStep == 2;
+    public bool Step3Done => IsSplashVisible && SplashStep > 2;
+    public bool Step3Pending => IsSplashVisible && SplashStep < 2;
+
+    /// <summary>
+    /// Plays the GuardianConnect splash sequence (PDF page 1):
+    /// checking authentication → loading configuration → starting monitoring service,
+    /// with a smooth progress bar, then hands off to the login/main UI.
+    /// </summary>
+    public async Task RunSplashSequenceAsync(CancellationToken ct = default)
+    {
+        if (!IsSplashVisible) return;
+
+        // Step 0: Checking authentication
+        SplashStep = 0;
+        await AnimateSplashProgressAsync(0, 25, 700, ct);
+        await Task.Delay(400, ct);
+
+        // Step 1: Loading configuration
+        SplashStep = 1;
+        await AnimateSplashProgressAsync(25, 55, 800, ct);
+        await Task.Delay(400, ct);
+
+        // Step 2: Starting monitoring service
+        SplashStep = 2;
+        await AnimateSplashProgressAsync(55, 90, 900, ct);
+        await Task.Delay(500, ct);
+
+        // Complete
+        SplashStep = 3;
+        await AnimateSplashProgressAsync(90, 100, 350, ct);
+        await Task.Delay(250, ct);
+
+        IsSplashVisible = false;
+    }
+
+    private async Task AnimateSplashProgressAsync(double from, double to, int durationMs, CancellationToken ct)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < durationMs)
+        {
+            ct.ThrowIfCancellationRequested();
+            var t = Math.Min(1.0, sw.ElapsedMilliseconds / (double)durationMs);
+            SplashProgress = from + (to - from) * EaseInOut(t);
+            await Task.Delay(16, ct);
+        }
+        SplashProgress = to;
+    }
+
+    private static double EaseInOut(double t)
+        => t < 0.5 ? 2 * t * t : 1 - Math.Pow(-2 * t + 2, 2) / 2;
+
     // ─── Auth State ───
 
     [ObservableProperty]

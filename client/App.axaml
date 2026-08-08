@@ -2,7 +2,7 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              x:Class="client.App"
              xmlns:local="using:client"
-             RequestedThemeVariant="Dark">
+             RequestedThemeVariant="Light">
 
     <Application.Resources>
         <ResourceDictionary>
@@ -49,10 +49,10 @@
             <Setter Property="FontFamily" Value="{StaticResource BodyFont}"/>
         </Style>
         <Style Selector="Button.primary:pointerover">
-            <Setter Property="Background" Value="#6D28D9"/>
+            <Setter Property="Background" Value="{StaticResource PrimaryHoverBrush}"/>
         </Style>
         <Style Selector="Button.primary:pressed">
-            <Setter Property="Background" Value="#5B21B6"/>
+            <Setter Property="Background" Value="{StaticResource PrimaryPressedBrush}"/>
         </Style>
         <Style Selector="Button.primary:disabled">
             <Setter Property="Opacity" Value="0.5"/>
@@ -126,6 +126,28 @@
                     </KeyFrame>
                     <KeyFrame Cue="100%">
                         <Setter Property="Opacity" Value="1"/>
+                    </KeyFrame>
+                </Animation>
+            </Style.Animations>
+        </Style>
+
+        <!-- Circular spinner (rotating arc) — Avalonia 12 has no ProgressRing.
+             Animate RotateTransform.Angle (registered animator) rather than the
+             RenderTransform property itself, which has no default animator. -->
+        <Style Selector="Path.spinner">
+            <Setter Property="RenderTransformOrigin" Value="50% 50%"/>
+            <Setter Property="RenderTransform">
+                <Setter.Value>
+                    <RotateTransform Angle="0"/>
+                </Setter.Value>
+            </Setter>
+            <Style.Animations>
+                <Animation Duration="0:0:0.9" IterationCount="Infinite" PlaybackDirection="Normal">
+                    <KeyFrame Cue="0%">
+                        <Setter Property="RotateTransform.Angle" Value="0"/>
+                    </KeyFrame>
+                    <KeyFrame Cue="100%">
+                        <Setter Property="RotateTransform.Angle" Value="360"/>
                     </KeyFrame>
                 </Animation>
             </Style.Animations>
