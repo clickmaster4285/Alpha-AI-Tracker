@@ -3,6 +3,57 @@
 > **Last audited:** 2026-08-08
 > **Changelog:**
 >
+> - 2026-08-08 (round 5): **DE-HARDCODED Windows software detection — pure OS metadata, zero product-name lists.**
+>   The user's rule (now §6 *No-Hardcoded-Names Rule*): never hardcode software names for detection — every employee PC
+>   has a different OS (Win 7/10/11, Ubuntu versions), department (dev/SEO/marketing/IT) and toolset, so name lists
+>   silently break detection everywhere except the machine that generated them. All Windows app-vs-package decisions are
+>   now OS metadata: (1) **PE Subsystem** — the OS's own statement of GUI (IMAGE_SUBSYSTEM_WINDOWS_GUI=2) vs console/CLI
+>   (CUI=3); new `client/Core/ExecutableMetadata.cs` reads it for the Start Menu scan (Node.js/Git Bash/Command
+>   Prompt/Python shortcuts are dropped as CUI targets — the exact .desktop analog), the registry scans (DisplayIcon/
+>   InstallLocation exes decide app vs package), the classifier, and the runtime session gate; (2) **C:\Windows tree** —
+>   anything under the Windows dir (System32/SystemApps/WinSxS) is an OS component (RuntimeBroker, GameBar, Video.UI,
+>   conhost…); `LogCollectorService` resolves the running exe once per process name (5-min memoized) and rejects it —
+>   the four Windows name blocklists (WindowsNonAppProcesses/Suffixes/Prefixes/WindowsCliOrRuntimeBinaries, ~120
+>   names) are DELETED; (3) **Driver Store** — drivers never appear in the Uninstall registry or package managers; new
+>   `PackageDetector.ScanDriverStore` reads
+>   `HKLM\SYSTEM\CurrentControlSet\Control\Class\{class-GUID}\<instance>` — the data Device Manager shows
+>   (DriverDesc/ProviderName/DriverVersion, e.g. "Realtek Audio"/"Realtek Semiconductor Corp."/6.0.9175.1), works
+>   Win 7→11, replaces the Realtek/NVIDIA/Intel/AMD name blocks; (4) **winget is the source of truth** —
+>   `IsWingetFrameworkRow` deleted, so `.NET SDK`, VC++ redists and runtimes land in installed_packages like dpkg
+>   lists every apt package (the classifier dedups GUI-app collisions); (5) **registry flags only** —
+>   `JunkRegistryNamePatterns`/`IsDevToolRegistryName`/`ClassifyRegistryPackage` (~60 names) deleted;
+>   `IsSystemComponentEntry`/`IsSystemOrUpdateRow` use SystemComponent/ParentKeyName/ReleaseType + Windows Update
+>   conventions (KB, Security Update, LocalServiceComponents, * Uninstaller); entries without a GUI exe are apps only
+>   when the OS says so (URL associations or a matching Start Menu shortcut), otherwise packages. Installer
+>   bootstrappers (C:\ProgramData\Package Cache), uninstallers (unins*/uninstall*) and *setup* executables are
+>   structurally excluded from BOTH tables (they are installers, not software); (6) `CliKnownPackages` (~60 names)
+>   deleted — `IsKnownPackage` was dead code (no consumers). **Critical bug found while validating:** the first PE
+>   reader read the optional-header magic at peOffset+4 — that is the COFF `Machine` field (0x8664 = AMD64), so EVERY
+>   x64 exe failed the magic check and read as subsystem 0 ("unknown") — the magic lives at peOffset+24 after the
+>   20-byte COFF header; the Subsystem field is at optional-header offset 68 in BOTH PE32 and PE32+. Answer to "why
+>   is dotnet missing": `.NET SDK 10.0.302` IS in installed_packages (winget); the `.NET Runtime` rows are
+>   SystemComponent=1 internal churn, correctly skipped. Honest metadata outcomes documented: Git Bash/git-gui stay
+>   apps (git-bash.exe is a GUI-subsystem mintty terminal, like gnome-terminal on Linux), GNS3 lands in packages on
+>   Windows (its gns3.exe is a genuine console launcher stub — subsystem 3 — verified byte-level). Allowed exceptions
+>   (documented in §6): OS-shell constructs only — Linux GNOME daemon prefixes, Windows shell display names
+>   (explorer→File Explorer), the KB-prefix update convention, and unins*/uninstall/*setup installer naming.
+>   Verified live: build 0/0, full re-scan: 76 apps (VS Code one clean row, browsers, Office, WPS, WinRAR, Wireshark…),
+>   55 packages (Node.js, .NET SDK, Python, Realtek, freebuff@0.0.142, drivers…), zero bootstrapper rows, zero
+>   RuntimeBroker/GameBar/Video.UI leaks.
+> - 2026-08-08 (round 4): **Windows packages now include MSI-installed dev tools + drivers.** Root-caused from the live
+>   DB: Node.js (v24.19.0) was missing entirely, and Realtek audio components vanished too. The registry dev-tool
+>   filter correctly dropped them from installed_applications (not GUI), but NO source ever added them to
+>   installed_packages — winget/npm/pip only see package-manager installs, and MSI installers exist ONLY in the
+>   registry Uninstall keys (the Windows analog of dpkg listing libs/firmware). New `PackageDetector.ScanRegistrySoftware`
+>   reads all 3 Uninstall nodes (HKLM + WOW6432Node + HKCU) and captures: dev runtimes/tools (Node.js, Eclipse Temurin
+>   JDK, .NET SDK, OpenSSL, Npcap, plus Git/Go/Python/PostgreSQL/Redis/Nmap with `IsPackageAlreadyKnown` fuzzy dedup
+>   so nothing duplicates winget) → category runtime/tool/library, and driver/system components (Realtek Audio COM
+>   Components, Realtek High Definition Audio Driver, NVIDIA/Intel/AMD patterns) → category `driver`
+>   (`SoftwareCategoryResolver.ResolveForPackage` now preserves the driver category — it previously fell through to
+>   `tool`). SystemComponent=1 rows (the .NET/VC++/Python sub-component churn) and GUI apps are excluded; names are
+>   cleaned ("Eclipse Temurin JDK with Hotspot 17.0.19+10 (x64)" → "Eclipse Temurin JDK"). Verified live: 7 new
+>   installer packages, zero duplicates, Video.UI leak fixed (`WindowsNonAppProcesses` had `videoui` but the real
+>   process is `Video.UI` — dotted name never matched). Build 0/0.
 > - 2026-08-08 (round 3): **Windows inventory accuracy — Start Menu .lnk = the .desktop analog.** Linux decides
 >   GUI-vs-package by `.desktop` presence; Windows had no equivalent, so registry DisplayNames came through raw
 >   ("Microsoft Visual Studio Code (User)" while the binary is Code) and global CLIs were invisible. Four fixes landed
@@ -473,6 +524,18 @@ flowchart LR
 6. **Path assumptions** — the installed app's working dir is root-owned / not user-writable. NEVER write files relative to cwd or the exe dir. Use `~/.config/alpha-ai-tracker/` (logs, machine-id) and `~/.local/share/alpha-ai-tracker/` (DB, sockets). `dotnet run` cannot catch this because the dev working dir is writable.
 7. **Packaging edits apply to ALL platforms** — when changing build scripts, update `build-installer.sh`, `build-deb.sh`, `build-dmg.sh`, and `installer-windows.iss` consistently.
 8. **Stale-binary guard** — `build-installer.sh` aborts if any source file is newer than the published `client.dll`; fix with `dotnet clean && bash publish/build-installer.sh`. This guard covers compiled code only — items 2–6 are the developer's responsibility.
+
+### No-Hardcoded-Names Rule (mandatory)
+
+**Software detection must NEVER use hardcoded product/software names.** Employees run different OSes (Windows 7/10/11, Ubuntu LTS/releases, macOS), different departments (development / SEO / marketing / IT support / IT technician) install different tools, and packages differ per machine — a name list only works on the machine that generated it and silently breaks (missing rows, misclassified software) everywhere else. Classification must come from **genuine OS metadata**:
+
+1. **PE Subsystem** (`client/Core/ExecutableMetadata.cs`) — the OS's own statement of GUI vs console for any Windows `.exe`: `IMAGE_SUBSYSTEM_WINDOWS_GUI` (2) = application, `IMAGE_SUBSYSTEM_WINDOWS_CUI` (3) = CLI tool/runtime. Used by the Start Menu scan, both registry scans, the classifier, and the runtime session gate. Works on every Windows version, every language, every department.
+2. **Filesystem structure** — C:\Windows\* (System32/SystemApps/WinSxS…) = OS component; Start Menu `.lnk` presence = user-facing; `.desktop` presence (Linux) / `.app` bundle (macOS) = GUI application. `ExecutableMetadata.IsWindowsSystemTree` + `IsUninstallerFileName` are the structural helpers.
+3. **Registry flags** — `SystemComponent`, `ParentKeyName`, `ReleaseType` mark installer churn/updates; `URLAssociations` http/https marks browsers; `DisplayIcon`/`InstallLocation` resolve the exe that decides app-vs-package.
+4. **Driver Store** — drivers are inventoried from `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverDatabase\DriverPackages`, never from name patterns.
+5. **Package managers are the source of truth** — winget/npm/pip/choco/scoop/apt/snap/flatpak/brew report what they installed; dedup is by identity/fingerprint, not by filtering names.
+
+**Allowed exceptions (OS-shell constructs, NOT user software):** Linux GNOME/session daemon prefixes in `NonAppProcesses`/`NonAppProcessPrefixes` (gnome-*, gsd-*, gvfsd-*, ibus-*, evolution-*), Windows shell display names (`DisplayNameOverrides`: explorer→File Explorer, svchost→Windows Services…), and the Windows Update `KB`-prefix naming convention. These are OS-provided labels for OS processes; user-installed software detection must stay 100% metadata-driven. When a fix is tempting as a name list, it must be implemented as metadata first (probe the OS), and the resulting rule documented here.
 
 ---
 

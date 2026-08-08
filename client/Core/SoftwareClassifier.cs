@@ -104,8 +104,13 @@ public static class SoftwareClassifier
                 app.AppName.EndsWith(" Uninstall", StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            if (!string.IsNullOrEmpty(app.BinaryName) && WindowsCliBinaries.Contains(app.BinaryName))
-                continue; // CLI/runtime launcher → package territory, not an app
+            // Defensive CLI gate: if a shortcut/registry row ever carries a console-subsystem
+            // executable (node, git-bash, cmd…), it is a CLI tool, not an app. The detectors
+            // already enforce this at discovery; this catches stragglers structurally via the
+            // PE Subsystem — no product names.
+            if (!string.IsNullOrEmpty(app.InstallPath) &&
+                ExecutableMetadata.GetSubsystem(app.InstallPath) == ExecutableMetadata.SubsystemWindowsCui)
+                continue;
 
             if (!string.IsNullOrEmpty(app.BinaryName))
             {
@@ -199,23 +204,6 @@ public static class SoftwareClassifier
         var candidate = m.Groups["base"].Value.Trim();
         return candidate.Length >= 3 ? candidate : n;
     }
-
-    /// <summary>
-    /// Windows executables that are CLI tools / runtimes / launchers, never GUI applications
-    /// (the Windows analog of Linux binaries with no .desktop file). Node, Git, Python,
-    /// PostgreSQL etc. are already discovered as packages by their package managers.
-    /// </summary>
-    private static readonly HashSet<string> WindowsCliBinaries = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "node", "nodejs", "npm", "npx", "yarn", "pnpm",
-        "python", "python3", "pythonw", "pip", "pip3",
-        "git", "git-bash", "git-cmd", "git-gui", "gitk",
-        "go", "gofmt", "dotnet", "msbuild", "cmd", "bash", "sh",
-        "pg_ctl", "psql", "redis-cli", "sqlite3",
-        "curl", "wget", "ssh", "scp", "sftp", "openssl",
-        "docker", "kubectl", "wsl",
-        "winget", "choco", "scoop",
-    };
 
     /// <summary>
     /// True if a package name matches a discovered GUI app name — exact, or one is a

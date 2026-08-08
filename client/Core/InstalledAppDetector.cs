@@ -465,6 +465,8 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
     /// Resolves each shortcut's target executable via WScript.Shell (COM) and records
     /// { clean display name → binary name } — "Visual Studio Code.lnk" → Code.exe,
     /// the clean name that fixes the registry's "Microsoft Visual Studio Code (User)".
+    /// GUI/console classification is the target executable's PE Subsystem (OS metadata),
+    /// not a name list.
     /// </summary>
     [SupportedOSPlatform("windows")]
     private void ScanStartMenuShortcuts()
@@ -514,20 +516,34 @@ foreach ($d in $dirs) {
                 var target = parts[1].Trim().Trim('"', '\'');
                 if (string.IsNullOrWhiteSpace(lnkName) || string.IsNullOrWhiteSpace(target)) continue;
 
-                // Skip non-application shortcuts: URLs, AppX/Store launchers, junk names.
+                // Skip non-application shortcuts: URLs, AppX/Store launchers, installer
+                // helpers, and console-subsystem targets. This is structural only — the PE
+                // Subsystem field (GUI=2 / CUI=3) is the OS's own statement of what a binary
+                // is, so CLI launchers (Node.js, Git Bash, Command Prompt, Python…) are
+                // dropped here exactly like Linux tools without a .desktop file, with ZERO
+                // product names involved.
                 if (target.StartsWith("http:", StringComparison.OrdinalIgnoreCase) ||
                     target.StartsWith("https:", StringComparison.OrdinalIgnoreCase) ||
                     target.Contains("shell:AppsFolder", StringComparison.OrdinalIgnoreCase) ||
                     target.Contains("ms-windows-store", StringComparison.OrdinalIgnoreCase) ||
                     target.Contains("ms-appx", StringComparison.OrdinalIgnoreCase))
                     continue;
-                if (IsLnkJunkName(lnkName)) continue;
-
-                _knownApps.Add(lnkName);
 
                 var binaryName = ExtractBinaryFromShortcutTarget(target);
                 if (string.IsNullOrEmpty(binaryName)) continue;
+                // Installer conventions (no product names): uninstaller/installer executables
+                // and the "Uninstall <Product>" shortcut naming installers always create.
+                if (ExecutableMetadata.IsUninstallerFileName(binaryName) ||
+                    ExecutableMetadata.IsInstallerFileName(binaryName)) continue;
+                var lnkLower = lnkName.ToLowerInvariant();
+                if (lnkLower == "uninstall" || lnkLower.StartsWith("uninstall ", StringComparison.Ordinal)) continue;
+                // Skip ONLY confirmed console-subsystem targets (node, git-bash, cmd…). An
+                // unreadable/unknown subsystem (0) is kept — err on inclusion for real apps.
+                var subsystem = ExecutableMetadata.GetSubsystem(target);
+                if (subsystem != 0 && subsystem != ExecutableMetadata.SubsystemWindowsGui)
+                    continue;
 
+                _knownApps.Add(lnkName);
                 _knownApps.Add(binaryName);
                 if (!_binaryToDisplayName.ContainsKey(binaryName))
                     _binaryToDisplayName[binaryName] = lnkName;
@@ -548,21 +564,6 @@ foreach ($d in $dirs) {
         }
         catch (UnauthorizedAccessException) { }
         catch { }
-    }
-
-    /// <summary>Shortcut names that are navigation helpers, not applications.</summary>
-    private static bool IsLnkJunkName(string name)
-    {
-        var lower = name.ToLowerInvariant();
-        return lower == "uninstall" || lower.StartsWith("uninstall ", StringComparison.Ordinal) ||
-               lower.StartsWith("getting started", StringComparison.Ordinal) ||
-               lower.StartsWith("readme", StringComparison.Ordinal) ||
-               lower.StartsWith("visit website", StringComparison.Ordinal) ||
-               lower.StartsWith("online support", StringComparison.Ordinal) ||
-               lower.StartsWith("what's new", StringComparison.Ordinal) ||
-               lower.StartsWith("whats new", StringComparison.Ordinal) ||
-               lower.StartsWith("documentation", StringComparison.Ordinal) ||
-               lower.StartsWith("license", StringComparison.Ordinal);
     }
 
     private static string? ExtractBinaryFromShortcutTarget(string target)
@@ -618,14 +619,31 @@ foreach ($d in $dirs) {
                         string.IsNullOrWhiteSpace(displayName))
                         continue;
 
-                    // Skip runtimes, redists, drivers, updates, and system components.
-                    if (IsJunkRegistryEntry(subKey, displayName))
+                    // Structural skips — OS flags + Windows conventions, no product names:
+                    // SystemComponent / ParentKeyName mark internal installer churn, ReleaseType
+                    // marks updates, KB/Update/… are Windows Update rows, LocalServiceComponents
+                    // and "… Uninstaller" entries are installer helpers.
+                    if (ExecutableMetadata.IsSystemOrUpdateRegistryRow(subKey, displayName))
                         continue;
 
-                    // Extract binary name from install location or display icon
+                    // Resolve the entry's executable from DisplayIcon/InstallLocation. The PE
+                    // Subsystem field decides app vs package: GUI-subsystem exes are applications,
+                    // CUI-subsystem exes (node, git…) are CLI tools that belong in packages.
                     var installPath = subKey.GetValue("InstallLocation") as string ?? "";
                     var displayIcon = subKey.GetValue("DisplayIcon") as string ?? "";
-                    var binaryName = ExtractBinaryFromPath(installPath) ?? ExtractBinaryFromPath(displayIcon) ?? "";
+                    var exePath = ExecutableMetadata.ResolveExePath(installPath, displayIcon);
+                    var binaryName = exePath != null ? Path.GetFileNameWithoutExtension(exePath) : "";
+                    var subsystem = exePath != null ? ExecutableMetadata.GetSubsystem(exePath) : (ushort)0;
+                    // Installer bootstrappers (C:\ProgramData\Package Cache) and uninstallers
+                    // are GUI-subsystem but are NOT applications — they install/remove the
+                    // software the registry row describes. Structural, no product names.
+                    if (!string.IsNullOrEmpty(exePath) &&
+                        (ExecutableMetadata.IsUninstallerFileName(binaryName) ||
+                         ExecutableMetadata.IsInstallerFileName(binaryName) ||
+                         ExecutableMetadata.IsInstallerCachePath(exePath)))
+                        continue;
+                    if (subsystem == ExecutableMetadata.SubsystemWindowsCui)
+                        continue; // CLI tool — PackageDetector captures it from the same registry
 
                     // Detect browser: check if app has URL Protocols registered (http, https)
                     var isBrowser = false;
@@ -641,6 +659,19 @@ foreach ($d in $dirs) {
                         }
                     }
                     catch { }
+
+                    // Entries with no resolvable GUI executable are applications ONLY when the
+                    // OS itself says so: URL associations (browser) or a Start Menu shortcut
+                    // already discovered for the same clean name/binary. Everything else —
+                    // runtimes, redists, drivers, components — is package territory.
+                    if (subsystem != ExecutableMetadata.SubsystemWindowsGui && !isBrowser)
+                    {
+                        var cleanName = CleanRegistryDisplayName(displayName);
+                        var matchesShortcut = _installedApps.Any(a =>
+                                string.Equals(a.AppName, cleanName, StringComparison.OrdinalIgnoreCase)) ||
+                            (!string.IsNullOrEmpty(binaryName) && _binaryToDisplayName.ContainsKey(binaryName));
+                        if (!matchesShortcut) continue;
+                    }
 
                     var appVersion = subKey.GetValue("DisplayVersion") as string ?? "";
                     var publisher = subKey.GetValue("Publisher") as string ?? "";
@@ -698,103 +729,6 @@ foreach ($d in $dirs) {
         }
         catch (UnauthorizedAccessException) { }
         catch { }
-    }
-
-    /// <summary>
-    /// True for registry Uninstall entries that are NOT user-facing applications:
-    /// Windows updates/patches, drivers, runtimes, redistributables, SDKs, and developer
-    /// tools (Node/Git/Go/Python/OpenSSL…) that belong in installed_packages, not apps.
-    /// </summary>
-    [SupportedOSPlatform("windows")]
-    private static bool IsJunkRegistryEntry(Microsoft.Win32.RegistryKey subKey, string displayName)
-    {
-        try
-        {
-            // System components and child packages marked by the OS/installer.
-            if (subKey.GetValue("SystemComponent") is int sc && sc == 1) return true;
-            if (subKey.GetValue("ParentKeyName") is string parent && !string.IsNullOrWhiteSpace(parent)) return true;
-            if (subKey.GetValue("ReleaseType") is string rt &&
-                (rt.Contains("Update", StringComparison.OrdinalIgnoreCase) ||
-                 rt.Contains("Hotfix", StringComparison.OrdinalIgnoreCase)))
-                return true;
-
-            // Windows updates, patches, drivers.
-            if (displayName.StartsWith("KB", StringComparison.OrdinalIgnoreCase) ||
-                displayName.Contains("Security Update", StringComparison.OrdinalIgnoreCase) ||
-                displayName.Contains("Update for ", StringComparison.OrdinalIgnoreCase) ||
-                displayName.Contains("Hotfix", StringComparison.OrdinalIgnoreCase))
-                return true;
-
-            // Installer helper rows that are not applications.
-            if (displayName.Contains("LocalServiceComponents", StringComparison.OrdinalIgnoreCase) ||
-                displayName.EndsWith(" Uninstaller", StringComparison.OrdinalIgnoreCase) ||
-                displayName.EndsWith(" Uninstall", StringComparison.OrdinalIgnoreCase) ||
-                displayName.Contains(" Uninstaller ", StringComparison.OrdinalIgnoreCase))
-                return true;
-
-            // Runtimes / redistributables / SDKs / frameworks.
-            foreach (var pattern in JunkRegistryNamePatterns)
-            {
-                if (displayName.Contains(pattern, StringComparison.OrdinalIgnoreCase))
-                    return true;
-            }
-
-            // Developer CLI tools/runtimes that belong in installed_packages (tool category).
-            if (IsDevToolRegistryName(displayName)) return true;
-        }
-        catch { return false; }
-        return false;
-    }
-
-    private static readonly string[] JunkRegistryNamePatterns =
-    {
-        ".NET", "Visual C++", "Redistributable", "Runtime", "Software Development Kit",
-        "Windows App Runtime", "WinAppRuntime", "Microsoft UI Xaml", "VC_redist",
-        "DirectX", "Microsoft Edge Update", "Microsoft Update Health", "WebView2 Runtime",
-        "Xbox Game Bar", "HEIF Image", "VP9 Video", "WebP Image Extension",
-        "Media Feature Pack", "Windows Web Experience Pack", "Windows SDK",
-        "Microsoft Edge WebView", "Visual C++ 20", "Microsoft Visual C++",
-        "Driver", "Audio COM Components", "COM Components", "Web Plugins",
-    };
-
-    /// <summary>Exact/prefix checks for dev tools that are CLI/runtime software, not GUI applications.</summary>
-    private static bool IsDevToolRegistryName(string displayName)
-    {
-        var lower = displayName.ToLowerInvariant();
-        if (lower == "git" || lower.StartsWith("git version", StringComparison.Ordinal)) return true;
-        if (lower.StartsWith("go programming language", StringComparison.Ordinal)) return true;
-        if (lower.StartsWith("node.js", StringComparison.Ordinal)) return true;
-        if (lower.StartsWith("python", StringComparison.Ordinal)) return true;
-        if (lower.Contains("openssl", StringComparison.Ordinal)) return true;
-        if (lower == "nmap" || lower.StartsWith("nmap ", StringComparison.Ordinal)) return true;
-        if (lower.StartsWith("npcap", StringComparison.Ordinal)) return true;
-        if (lower.StartsWith("postgresql ", StringComparison.Ordinal)) return true;
-        if (lower.StartsWith("redis ", StringComparison.Ordinal)) return true;
-        if (lower.Contains("jdk", StringComparison.Ordinal) ||
-            lower.Contains("temurin", StringComparison.Ordinal) ||
-            lower.Contains("java", StringComparison.Ordinal)) return true;
-        return false;
-    }
-
-    private static string? ExtractBinaryFromPath(string? path)
-    {
-        if (string.IsNullOrWhiteSpace(path)) return null;
-        try
-        {
-            // Try to find an .exe in the path
-            if (path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
-                return Path.GetFileNameWithoutExtension(path);
-            // If it's a directory, look for common exe names
-            if (Directory.Exists(path))
-            {
-                var dirName = Path.GetFileName(path);
-                var exeCandidate = Path.Combine(path, dirName + ".exe");
-                if (File.Exists(exeCandidate))
-                    return dirName;
-            }
-        }
-        catch { }
-        return null;
     }
 
     private void DetectInstalledLinux()

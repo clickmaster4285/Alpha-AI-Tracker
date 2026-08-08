@@ -129,83 +129,16 @@ public class LogCollectorService : BackgroundService
         "microsoft.",
     };
 
-    // ── Windows system/background components (2026-08-08) ──
-    // The path-based Windows GUI gate ("anything under Program Files/WindowsApps is an app")
-    // auto-registered runtime components, tray helpers, and system processes as applications.
-    // These names/suffixes are never user-facing applications and are skipped entirely.
-    private static readonly HashSet<string> WindowsNonAppProcesses = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "runtimebroker", "phonetexperiencehost", "videoui", "searchapp", "searchui",
-        "searchhost", "widgets", "widgetservice", "m365copilot", "pushnotificationslongrunningtask",
-        "webpluginservice", "localservicecontrol", "sdxhelper", "applicationframehost",
-        "shellexperiencehost", "startmenuexperiencehost", "textinputhost", "olk",
-        "gamebar", "gamebarftserver", "gamingservices", "gamingoverlay",
-        "xboxstatsserver", "chatd", "officec2rclient", "lockapp",
-        "gamebarpresentation", "shellwindowhost", "inputswitch",
-        "avira.spotlight.systray.application", "veeam.endpoint.tray",
-        "msedgewebview2", "microsoftedgeupdate", "googleupdater", "braveupdater",
-        "dropboxupdate", "onedrivesetup", "backgroundtaskhost", "taskhostw",
-        "ctfmon", "fontdrvhost", "conhost", "dllhost", "svchost", "winlogon",
-        "lsass", "csrss", "services", "systemsettings", "windowsdefender",
-        "securityhealthsystray", "programmanager",
-    };
-
-    private static readonly string[] WindowsNonAppSuffixes =
-    {
-        "tray", "helper", "updater", "longrunningtask", "notifyicon", "scheduler",
-        "notification", "backgroundtask", "service.exe", "notifier",
-    };
-
-    private static readonly string[] WindowsNonAppPrefixes =
-    {
-        "microsoftedgeupdate", "googleupdate", "braveupdater", "winappruntime",
-        "windowsappruntime",
-    };
-
-    private static bool IsWindowsNonAppProcess(string processName)
-    {
-        if (WindowsNonAppProcesses.Contains(processName)) return true;
-        foreach (var suffix in WindowsNonAppSuffixes)
-        {
-            if (processName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) return true;
-        }
-        foreach (var prefix in WindowsNonAppPrefixes)
-        {
-            if (processName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return true;
-        }
-        return false;
-    }
-
-    // ── Windows CLI tools / runtimes (2026-08-08) ──
-    // These live under Program Files so the Windows path-based GUI gate used to auto-register
-    // them as installed_applications (node, dotnet, git, go, python…). They are packages,
-    // not GUI applications — they belong in installed_packages and are never tracked as sessions.
-    private static readonly HashSet<string> WindowsCliOrRuntimeBinaries = new(StringComparer.OrdinalIgnoreCase)
-    {
-        // Must stay in sync with SoftwareClassifier.WindowsCliBinaries — if a binary is dropped
-        // from installed_applications there, launching it must not re-register it here.
-        "node", "nodejs", "npm", "npx", "yarn", "pnpm", "dotnet", "msbuild",
-        "git", "gitk", "git-bash", "git-cmd", "git-gui", "go", "gofmt",
-        "python", "python3", "pythonw", "pip", "pip3", "wsl", "pg_ctl",
-        "java", "javaw", "javac", "jre", "mvn", "maven", "gradle", "ant",
-        "cmake", "mingw32-make", "make", "gcc", "g++", "clang", "cl", "clang++",
-        "rustc", "cargo", "openssl", "sqlite3", "psql", "redis-cli", "mongosh",
-        "curl", "wget", "tar", "7z", "7za", "unzip", "gzip", "ssh", "scp",
-        "docker", "kubectl", "helm", "terraform", "ansible", "aws", "az", "gcloud",
-        "ffmpeg", "node-gyp", "corepack", "winpty", "busybox",
-        // Git Bash / MSYS coreutils and Windows shell utilities (CLIs, not GUI apps)
-        "tail", "head", "sed", "awk", "grep", "egrep", "fgrep", "cat", "ls", "cp",
-        "mv", "rm", "rmdir", "mkdir", "find", "xargs", "sort", "uniq", "wc", "printf",
-        "echo", "touch", "date", "sleep", "env", "whoami", "which", "diff", "patch",
-        "less", "more", "tee", "cut", "tr", "base64", "md5sum", "sha256sum", "xxd",
-        "od", "man", "ping", "ipconfig", "netstat", "nslookup", "tracert", "pathping",
-        "systeminfo", "tasklist", "taskkill", "reg", "sc", "schtasks", "wmic",
-        "choco", "scoop", "winget", "powershell_ise", "pwsh", "cmd", "bash", "sh",
-    };
-
     // Cached known binary names from installed_applications (refreshed from SQLite)
     private HashSet<string> _knownAppBinaryNames = new(StringComparer.OrdinalIgnoreCase);
     private DateTime _lastKnownNamesRefresh = DateTime.MinValue;
+
+    // Cached executable paths per process name (Windows structural gate). Resolving a path
+    // via Process.GetProcessesByName enumerates the whole process table, so the result is
+    // memoized per name with a 5-minute TTL — the path of a running exe is stable.
+    private readonly Dictionary<string, (string path, DateTime at)> _execPathCache =
+        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan ExecPathCacheTtl = TimeSpan.FromMinutes(5);
 
     public LogCollectorService(
         AppConfig config,
@@ -789,10 +722,6 @@ public class LogCollectorService : BackgroundService
             NonAppProcessPrefixes.Any(p => processName.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
             return (false, null, null, null, false);
 
-        // Windows system/background components that the path-based GUI gate would otherwise accept.
-        if (OperatingSystem.IsWindows() && IsWindowsNonAppProcess(processName))
-            return (false, null, null, null, false);
-
         // 1. Check known app binary names from installed_applications (fast in-memory path)
         // 🟡 Phase 0a: Even if the process is in the DB, verify it's actually a GUI app.
         // Pre-existing rows for non-GUI tools (sh, snap) were auto-registered before the
@@ -832,15 +761,34 @@ public class LogCollectorService : BackgroundService
             return (true, existingFuzzy.AppName, existingFuzzy.Id, null, existingFuzzy.IsBrowser);
         }
 
-        // 2b. CLI tools/runtimes are packages, never GUI applications — skip auto-registration
-        // so node/dotnet/git/go/python no longer pollute installed_applications (2026-08-08).
-        if (OperatingSystem.IsWindows() && WindowsCliOrRuntimeBinaries.Contains(processName))
-            return (false, null, null, null, false);
+        // 2b. Windows structural gate (no product names): resolve the running executable and
+        // let the OS's own metadata decide.
+        //   - Anything inside C:\Windows (System32 / SystemApps / WinSxS / …) is an OS-provided
+        //     component (RuntimeBroker, GameBar, Video.UI, conhost…) — never a user app.
+        //   - A console-subsystem executable (node, git, dotnet, cmd…) is a CLI tool/runtime
+        //     that belongs in installed_packages, not installed_applications.
+        //
+        // ⚠️ LOAD-BEARING ORDER: this gate runs AFTER the known-binary fast path above. The
+        // inventory scan registers inbox System32 GUI apps (Notepad, WordPad, mspaint…) as
+        // installed_applications, so their binary names hit the fast path and are never
+        // rejected here. Moving this gate above the fast path would silently stop tracking
+        // every inbox Windows tool.
+        if (OperatingSystem.IsWindows())
+        {
+            var gatePath = GetCachedExecutablePath(processName);
+            if (!string.IsNullOrEmpty(gatePath))
+            {
+                if (ExecutableMetadata.IsWindowsSystemTree(gatePath))
+                    return (false, null, null, null, false);
+                if (ExecutableMetadata.GetSubsystem(gatePath) == ExecutableMetadata.SubsystemWindowsCui)
+                    return (false, null, null, null, false);
+            }
+        }
 
         // 3. Auto-detect: is this a GUI application? (has .desktop / .app bundle / Start Menu)
         // Only GUI applications get registered into installed_applications and tracked.
         // CLI-only tools, shells, build tools, runtimes, and daemons are all skipped.
-        var execPath = GetExecutablePath(processName);
+        var execPath = GetCachedExecutablePath(processName);
         if (_appDetector.IsGuiApplication(processName, execPath))
         {
             if (!string.IsNullOrEmpty(execPath))
@@ -889,6 +837,18 @@ public class LogCollectorService : BackgroundService
         }
         catch { }
         return null;
+    }
+
+    /// <summary>Memoized executable-path lookup (5-min TTL) so the Windows structural gate never
+    /// enumerates the process table for the same name on every collection cycle.</summary>
+    private string? GetCachedExecutablePath(string processName)
+    {
+        if (_execPathCache.TryGetValue(processName, out var entry) &&
+            DateTime.UtcNow - entry.at < ExecPathCacheTtl)
+            return entry.path;
+        var path = GetExecutablePath(processName) ?? "";
+        _execPathCache[processName] = (path, DateTime.UtcNow);
+        return path.Length == 0 ? null : path;
     }
 
     private async Task<string?> ResolveDisplayNameFromPath(string processName, string? execPath, CancellationToken ct)
