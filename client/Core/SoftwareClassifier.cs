@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using client.Core.Models;
 
 namespace client.Core;
@@ -27,6 +28,10 @@ public static class SoftwareClassifier
         IReadOnlyList<InstalledApplication> rawApps,
         IReadOnlyList<InstalledPackage> rawPackages)
     {
+        // Windows: collapse the two discovery sources (Start Menu shortcut + registry Uninstall
+        // entry) into ONE row per software and route CLI/runtime launchers to packages.
+        rawApps = CollapseWindowsDuplicateApps(rawApps);
+
         var appByIdentity = new Dictionary<string, InstalledApplication>(StringComparer.Ordinal);
         foreach (var app in rawApps)
         {
@@ -35,7 +40,10 @@ public static class SoftwareClassifier
             var category = SoftwareCategoryResolver.ResolveFromCategories(app.Categories, app.IsBrowser);
             // Only GUI categories belong in installed_applications; if somehow a non-GUI
             // entry reached the detector, it is dropped here (will be re-evaluated as a package).
-            if (category == SoftwareCategoryResolver.Unknown && string.IsNullOrEmpty(app.BinaryName))
+            // Registry-sourced entries (ChangeType="installed") are a trusted app source: many
+            // ARP entries have no InstallLocation/DisplayIcon, so keep them even without a binary.
+            if (category == SoftwareCategoryResolver.Unknown && string.IsNullOrEmpty(app.BinaryName) &&
+                !string.Equals(app.ChangeType, "installed", StringComparison.OrdinalIgnoreCase))
                 continue;
             appByIdentity[identity] = app;
         }
@@ -62,7 +70,7 @@ public static class SoftwareClassifier
         foreach (var pkg in rawPackages)
         {
             // Suppress a package if its name matches a discovered GUI app (one software = one identity).
-            if (appNames.Contains(pkg.PackageName)) continue;
+            if (IsSuppressedByAppName(pkg.PackageName, appNames)) continue;
             var identity = SoftwareIdentityResolver.ResolvePackageIdentity(pkg);
             if (!pkgIdentitySet.Add(identity)) continue; // dedup identical packages
             // Classify the package (runtime/tool/library) and persist the canonical category.
@@ -71,5 +79,161 @@ public static class SoftwareClassifier
         }
 
         return (appByIdentity.Values.ToList(), packages);
+    }
+
+    /// <summary>
+    /// Windows-only pre-pass: the same software is discovered twice — once from the Start Menu
+    /// shortcut (clean name + binary, e.g. "Visual Studio Code" / Code) and once from the registry
+    /// Uninstall key (noisy name + richer metadata, e.g. "Microsoft Visual Studio Code (User)"
+    /// with version/publisher). This collapses them into ONE row: the shortcut's clean name wins,
+    /// registry metadata is merged in. CLI/runtime launchers (node, git-bash, cmd…) are dropped
+    /// here — they belong in installed_packages, exactly like Linux tools without a .desktop.
+    /// </summary>
+    private static IReadOnlyList<InstalledApplication> CollapseWindowsDuplicateApps(
+        IReadOnlyList<InstalledApplication> apps)
+    {
+        if (!OperatingSystem.IsWindows() || apps.Count == 0) return apps;
+
+        var byBinary = new Dictionary<string, InstalledApplication>(StringComparer.OrdinalIgnoreCase);
+        var leftovers = new List<InstalledApplication>();
+
+        foreach (var app in apps)
+        {
+            // Installer helper shortcuts ("… Uninstaller") are never applications.
+            if (app.AppName.EndsWith(" Uninstaller", StringComparison.OrdinalIgnoreCase) ||
+                app.AppName.EndsWith(" Uninstall", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (!string.IsNullOrEmpty(app.BinaryName) && WindowsCliBinaries.Contains(app.BinaryName))
+                continue; // CLI/runtime launcher → package territory, not an app
+
+            if (!string.IsNullOrEmpty(app.BinaryName))
+            {
+                if (byBinary.TryGetValue(app.BinaryName, out var existing))
+                    MergeAppMetadata(existing, app);
+                else
+                    byBinary[app.BinaryName] = app;
+            }
+            else
+            {
+                leftovers.Add(app);
+            }
+        }
+
+        var merged = byBinary.Values.ToList();
+        var keptNames = new HashSet<string>(merged.Select(a => a.AppName), StringComparer.OrdinalIgnoreCase);
+
+        foreach (var app in leftovers)
+        {
+            var matchKey = StripVersionSuffix(app.AppName, out var versionLike);
+            var target = merged.FirstOrDefault(m =>
+                string.Equals(m.AppName, matchKey, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(m.AppName, app.AppName, StringComparison.OrdinalIgnoreCase));
+
+            if (target != null)
+            {
+                MergeAppMetadata(target, app);
+            }
+            else if (keptNames.Add(app.AppName))
+            {
+                // Registry-only install (no Start Menu shortcut) — keep it. The name is
+                // version-stripped ONLY when a version/edition suffix was actually removed
+                // ("Zed Attack Proxy by Checkmarx 2.17.0" → "…Checkmarx"); a " - " truncation
+                // is only ever a match key, never a rename, so names like "X - Y" survive.
+                if (versionLike)
+                    app.AppName = matchKey;
+                merged.Add(app);
+            }
+        }
+
+        return merged;
+    }
+
+    /// <summary>Copy registry metadata (version/publisher/install path) into the shortcut row.</summary>
+    private static void MergeAppMetadata(InstalledApplication target, InstalledApplication source)
+    {
+        // Prefer the shortest display name — the clean base name over noisier variants
+        // ("VLC media player" over "VLC media player - reset preferences and cache files",
+        //  "Windows PowerShell" over "Windows PowerShell (x86)").
+        if (!string.IsNullOrEmpty(source.AppName) && source.AppName.Length < target.AppName.Length)
+            target.AppName = source.AppName;
+        if (string.IsNullOrEmpty(target.AppVersion)) target.AppVersion = source.AppVersion;
+        if (string.IsNullOrEmpty(target.Publisher)) target.Publisher = source.Publisher;
+        if (string.IsNullOrEmpty(target.InstallPath)) target.InstallPath = source.InstallPath;
+        if (string.IsNullOrEmpty(target.UninstallString)) target.UninstallString = source.UninstallString;
+        if (string.IsNullOrEmpty(target.DesktopId)) target.DesktopId = source.DesktopId;
+        target.IsBrowser |= source.IsBrowser;
+        if (source.IsBrowser && !target.Categories.Contains("WebBrowser", StringComparison.OrdinalIgnoreCase))
+            target.Categories = "WebBrowser";
+    }
+
+    /// <summary>
+    /// Strip trailing version/edition noise so a registry name can match its shortcut name:
+    /// "Advanced IP Scanner 2.5.1" → "Advanced IP Scanner", "PuTTY release 0.83" → "PuTTY",
+    /// "VLC media player - reset preferences and cache files" → "VLC media player".
+    /// versionLike is true only when a REAL version/edition token was removed (release/v/1.2.3)
+    /// — the " - " truncation is a match key only and must never drive a rename.
+    /// </summary>
+    private static string StripVersionSuffix(string name, out bool versionLike)
+    {
+        versionLike = false;
+        var n = name.Trim();
+        if (n.Length < 6) return n;
+
+        var m = Regex.Match(n, @"^(?<base>.+?)\s+(?:release|version)\s+v?\d[\d.]*\s*$", RegexOptions.IgnoreCase);
+        if (m.Success) versionLike = true;
+        if (!m.Success)
+        {
+            m = Regex.Match(n, @"^(?<base>.+?)\s+v\d[\d.]*\s*$", RegexOptions.IgnoreCase);
+            if (m.Success) versionLike = true;
+        }
+        if (!m.Success)
+        {
+            m = Regex.Match(n, @"^(?<base>.+?)\s+\d+(?:\.\d+)+\s*(?:64\s?bit|x64|x86|32\s?bit)?\s*$", RegexOptions.IgnoreCase);
+            if (m.Success) versionLike = true;
+        }
+        if (!m.Success)
+            m = Regex.Match(n, @"^(?<base>.+?)\s+-\s+.+$");
+        if (!m.Success) return n;
+
+        var candidate = m.Groups["base"].Value.Trim();
+        return candidate.Length >= 3 ? candidate : n;
+    }
+
+    /// <summary>
+    /// Windows executables that are CLI tools / runtimes / launchers, never GUI applications
+    /// (the Windows analog of Linux binaries with no .desktop file). Node, Git, Python,
+    /// PostgreSQL etc. are already discovered as packages by their package managers.
+    /// </summary>
+    private static readonly HashSet<string> WindowsCliBinaries = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "node", "nodejs", "npm", "npx", "yarn", "pnpm",
+        "python", "python3", "pythonw", "pip", "pip3",
+        "git", "git-bash", "git-cmd", "git-gui", "gitk",
+        "go", "gofmt", "dotnet", "msbuild", "cmd", "bash", "sh",
+        "pg_ctl", "psql", "redis-cli", "sqlite3",
+        "curl", "wget", "ssh", "scp", "sftp", "openssl",
+        "docker", "kubectl", "wsl",
+        "winget", "choco", "scoop",
+    };
+
+    /// <summary>
+    /// True if a package name matches a discovered GUI app name — exact, or one is a
+    /// substring of the other with BOTH sides ≥4 chars. This catches winget names like
+    /// "Microsoft Visual Studio Code (User)" against the registry app "Visual Studio Code",
+    /// while short tool names ("Git", "Go") are never over-suppressed.
+    /// </summary>
+    private static bool IsSuppressedByAppName(string packageName, HashSet<string> appNames)
+    {
+        if (appNames.Contains(packageName)) return true;
+        if (packageName.Length < 4) return false;
+        foreach (var appName in appNames)
+        {
+            if (appName.Length < 4) continue;
+            if (appName.Contains(packageName, StringComparison.OrdinalIgnoreCase) ||
+                packageName.Contains(appName, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
     }
 }

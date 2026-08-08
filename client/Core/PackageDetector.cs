@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using client.Core.Models;
 
 namespace client.Core;
@@ -112,21 +113,44 @@ public partial class PackageDetector : Abstractions.IPackageDetector
         }
     }
 
+    /// <summary>
+    /// Build a ProcessStartInfo that can launch batch-shimmed CLIs (npm.cmd, scoop.cmd).
+    /// Process.Start → CreateProcess only resolves .exe files, so on Windows these are
+    /// invoked through cmd.exe /c — without this, npm/scoop scans die silently in the
+    /// catch and global tools (freebuff, opencode-ai…) never reach installed_packages.
+    /// </summary>
+    private static ProcessStartInfo BuildCliStartInfo(string command, string arguments)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return new ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = $"/c {command} {arguments}",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+        }
+        return new ProcessStartInfo
+        {
+            FileName = command,
+            Arguments = arguments,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+    }
+
     // ── npm global packages ──
 
     private void ScanNpmGlobal()
     {
         try
         {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "npm",
-                Arguments = "list -g --json --depth=0",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
+            var psi = BuildCliStartInfo("npm", "list -g --json --depth=0");
             using var proc = Process.Start(psi);
             if (proc == null) return;
 
@@ -549,7 +573,18 @@ public partial class PackageDetector : Abstractions.IPackageDetector
     }
 
     // ── Winget (Windows) ──
-
+    //
+    // `winget list` reports EVERY installed program (GUI apps, MSIX packages, ARP entries,
+    // frameworks) in a space-padded console table. The old parser split on whitespace, which
+    // (a) shredded every multi-word name ("Google Chrome" → package "Google" version
+    // "ARP\Machine\X86\Google") and (b) dumped every GUI app on the machine into
+    // installed_packages. Now:
+    //   - Column start offsets are read from the header line, so multi-word names survive.
+    //   - ARP\… / MSIX\… rows are dropped — those ARE the GUI applications, discovered by the
+    //     registry scan in InstalledAppDetector (one software = one identity).
+    //   - MS Store apps and known framework/runtime rows are dropped too.
+    //   - What remains (dotted package ids like Git.Git, GoLang.Go) is further deduped against
+    //     the discovered GUI apps by SoftwareClassifier's name suppression.
     private void ScanWinget()
     {
         try
@@ -557,8 +592,9 @@ public partial class PackageDetector : Abstractions.IPackageDetector
             var psi = new ProcessStartInfo
             {
                 FileName = "winget",
-                Arguments = "list --accept-source-agreements",
+                Arguments = "list --accept-source-agreements --disable-interactivity",
                 RedirectStandardOutput = true,
+                RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
@@ -566,31 +602,107 @@ public partial class PackageDetector : Abstractions.IPackageDetector
             if (proc == null) return;
 
             var output = proc.StandardOutput.ReadToEnd();
-            proc.WaitForExit(10000);
+            proc.WaitForExit(15000);
+            // Drain stderr (first-run agreements / progress) so it never pollutes the app log.
+            _ = proc.StandardError.ReadToEnd();
 
-            foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            if (lines.Length == 0) return;
+
+            var (nameStart, idStart, versionStart, availableStart, sourceStart) = ParseWingetColumnStarts(lines);
+            if (idStart < 0) return;
+
+            foreach (var line in lines)
             {
-                // winget table format: Name  Id  Version  Available  Source
-                // Skip header and separator lines
                 if (line.StartsWith("Name", StringComparison.OrdinalIgnoreCase) ||
-                    line.StartsWith("---", StringComparison.Ordinal) ||
-                    string.IsNullOrWhiteSpace(line))
+                    line.StartsWith("---", StringComparison.Ordinal))
                     continue;
 
-                var parts = line.Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length < 1) continue;
+                var name = SliceWingetColumn(line, nameStart, idStart);
+                var id = SliceWingetColumn(line, idStart, versionStart);
+                var version = SliceWingetColumn(line, versionStart, availableStart);
+                var source = SliceWingetColumn(line, sourceStart, line.Length);
+
+                if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(id)) continue;
+
+                // ARP\… and MSIX\… rows are the GUI applications (also in the registry scan).
+                if (id.StartsWith("ARP\\", StringComparison.OrdinalIgnoreCase) ||
+                    id.StartsWith("MSIX\\", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                // MS Store apps are GUI applications too.
+                if (source.Equals("msstore", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                // Frameworks/runtimes that are neither apps nor interesting packages.
+                if (IsWingetFrameworkRow(name, id)) continue;
 
                 AddPackage(new InstalledPackage
                 {
-                    PackageName = parts[0],
-                    Version = parts.Length >= 3 ? parts[2] : "",
+                    PackageName = name,
+                    Version = version,
                     Category = "tool",
                     SourceManager = "winget",
+                    Description = id,
                     DetectedAt = DateTime.UtcNow,
                 });
             }
         }
         catch { }
+    }
+
+    /// <summary>Locate the winget table column starts from the header line ("Name Id Version Available Source").</summary>
+    private static (int name, int id, int version, int available, int source) ParseWingetColumnStarts(string[] lines)
+    {
+        var header = lines.FirstOrDefault(l => l.StartsWith("Name", StringComparison.OrdinalIgnoreCase)) ?? "";
+        var tokens = Regex.Matches(header, @"\S+");
+        int name = 0, id = -1, version = -1, available = -1, source = -1;
+        foreach (Match token in tokens)
+        {
+            switch (token.Value)
+            {
+                case "Name": name = token.Index; break;
+                case "Id": id = token.Index; break;
+                case "Version": version = token.Index; break;
+                case "Available": available = token.Index; break;
+                case "Source": source = token.Index; break;
+            }
+        }
+        // Older winget versions have no Available column — treat it as the Source start.
+        if (available < 0) available = source;
+        return (name, id, version, available, source);
+    }
+
+    /// <summary>Slice a fixed-width table column safely (out-of-range → empty string).</summary>
+    private static string SliceWingetColumn(string line, int start, int end)
+    {
+        if (start < 0 || start >= line.Length) return "";
+        var length = end < 0 ? line.Length - start : Math.Min(end, line.Length) - start;
+        return length <= 0 ? "" : line.Substring(start, length).Trim();
+    }
+
+    /// <summary>Windows framework/runtime rows that belong in neither installed_applications nor the package inventory.</summary>
+    private static bool IsWingetFrameworkRow(string name, string id)
+    {
+        if (name.Contains("Windows App Runtime", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("WinAppRuntime", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("App Installer", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Microsoft.UI.Xaml", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains(".NET SDK", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains(".NET Native", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("ASP.NET Core", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Desktop Runtime", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Shared Framework", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Visual C++", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (id.StartsWith("Microsoft.VCLibs", StringComparison.OrdinalIgnoreCase) ||
+            id.StartsWith("Microsoft.VCRedist", StringComparison.OrdinalIgnoreCase) ||
+            id.StartsWith("Microsoft.DotNet", StringComparison.OrdinalIgnoreCase) ||
+            id.StartsWith("Microsoft.UI.Xaml", StringComparison.OrdinalIgnoreCase) ||
+            id.StartsWith("Microsoft.WindowsAppRuntime", StringComparison.OrdinalIgnoreCase) ||
+            id.Equals("Microsoft.AppInstaller", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return false;
     }
 
     // ── Scoop (Windows) ──
@@ -599,14 +711,7 @@ public partial class PackageDetector : Abstractions.IPackageDetector
     {
         try
         {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "scoop",
-                Arguments = "list",
-                RedirectStandardOutput = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
+            var psi = BuildCliStartInfo("scoop", "list");
             using var proc = Process.Start(psi);
             if (proc == null) return;
 

@@ -15,6 +15,24 @@ public class LogCollectorService : BackgroundService
     [DllImport("kernel32.dll")]
     private static extern uint SetThreadExecutionState(uint esFlags);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MEMORYSTATUSEX
+    {
+        public uint dwLength;
+        public uint dwMemoryLoad;
+        public ulong ullTotalPhys;
+        public ulong ullAvailPhys;
+        public ulong ullTotalPageFile;
+        public ulong ullAvailPageFile;
+        public ulong ullTotalVirtual;
+        public ulong ullAvailVirtual;
+        public ulong ullAvailExtendedVirtual;
+    }
+
     private const uint ES_CONTINUOUS = 0x80000000;
     private const uint ES_SYSTEM_REQUIRED = 0x00000001;
 
@@ -109,6 +127,80 @@ public class LogCollectorService : BackgroundService
         "gdm", "mutter-",
         // 🟡 Phase 0a: VS Code / .NET subprocesses (extension host, language server, etc.)
         "microsoft.",
+    };
+
+    // ── Windows system/background components (2026-08-08) ──
+    // The path-based Windows GUI gate ("anything under Program Files/WindowsApps is an app")
+    // auto-registered runtime components, tray helpers, and system processes as applications.
+    // These names/suffixes are never user-facing applications and are skipped entirely.
+    private static readonly HashSet<string> WindowsNonAppProcesses = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "runtimebroker", "phonetexperiencehost", "videoui", "searchapp", "searchui",
+        "searchhost", "widgets", "widgetservice", "m365copilot", "pushnotificationslongrunningtask",
+        "webpluginservice", "localservicecontrol", "sdxhelper", "applicationframehost",
+        "shellexperiencehost", "startmenuexperiencehost", "textinputhost", "olk",
+        "gamebar", "gamebarftserver", "gamingservices", "gamingoverlay",
+        "xboxstatsserver", "chatd", "officec2rclient", "lockapp",
+        "gamebarpresentation", "shellwindowhost", "inputswitch",
+        "avira.spotlight.systray.application", "veeam.endpoint.tray",
+        "msedgewebview2", "microsoftedgeupdate", "googleupdater", "braveupdater",
+        "dropboxupdate", "onedrivesetup", "backgroundtaskhost", "taskhostw",
+        "ctfmon", "fontdrvhost", "conhost", "dllhost", "svchost", "winlogon",
+        "lsass", "csrss", "services", "systemsettings", "windowsdefender",
+        "securityhealthsystray", "programmanager",
+    };
+
+    private static readonly string[] WindowsNonAppSuffixes =
+    {
+        "tray", "helper", "updater", "longrunningtask", "notifyicon", "scheduler",
+        "notification", "backgroundtask", "service.exe", "notifier",
+    };
+
+    private static readonly string[] WindowsNonAppPrefixes =
+    {
+        "microsoftedgeupdate", "googleupdate", "braveupdater", "winappruntime",
+        "windowsappruntime",
+    };
+
+    private static bool IsWindowsNonAppProcess(string processName)
+    {
+        if (WindowsNonAppProcesses.Contains(processName)) return true;
+        foreach (var suffix in WindowsNonAppSuffixes)
+        {
+            if (processName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        foreach (var prefix in WindowsNonAppPrefixes)
+        {
+            if (processName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
+
+    // ── Windows CLI tools / runtimes (2026-08-08) ──
+    // These live under Program Files so the Windows path-based GUI gate used to auto-register
+    // them as installed_applications (node, dotnet, git, go, python…). They are packages,
+    // not GUI applications — they belong in installed_packages and are never tracked as sessions.
+    private static readonly HashSet<string> WindowsCliOrRuntimeBinaries = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // Must stay in sync with SoftwareClassifier.WindowsCliBinaries — if a binary is dropped
+        // from installed_applications there, launching it must not re-register it here.
+        "node", "nodejs", "npm", "npx", "yarn", "pnpm", "dotnet", "msbuild",
+        "git", "gitk", "git-bash", "git-cmd", "git-gui", "go", "gofmt",
+        "python", "python3", "pythonw", "pip", "pip3", "wsl", "pg_ctl",
+        "java", "javaw", "javac", "jre", "mvn", "maven", "gradle", "ant",
+        "cmake", "mingw32-make", "make", "gcc", "g++", "clang", "cl", "clang++",
+        "rustc", "cargo", "openssl", "sqlite3", "psql", "redis-cli", "mongosh",
+        "curl", "wget", "tar", "7z", "7za", "unzip", "gzip", "ssh", "scp",
+        "docker", "kubectl", "helm", "terraform", "ansible", "aws", "az", "gcloud",
+        "ffmpeg", "node-gyp", "corepack", "winpty", "busybox",
+        // Git Bash / MSYS coreutils and Windows shell utilities (CLIs, not GUI apps)
+        "tail", "head", "sed", "awk", "grep", "egrep", "fgrep", "cat", "ls", "cp",
+        "mv", "rm", "rmdir", "mkdir", "find", "xargs", "sort", "uniq", "wc", "printf",
+        "echo", "touch", "date", "sleep", "env", "whoami", "which", "diff", "patch",
+        "less", "more", "tee", "cut", "tr", "base64", "md5sum", "sha256sum", "xxd",
+        "od", "man", "ping", "ipconfig", "netstat", "nslookup", "tracert", "pathping",
+        "systeminfo", "tasklist", "taskkill", "reg", "sc", "schtasks", "wmic",
+        "choco", "scoop", "winget", "powershell_ise", "pwsh", "cmd", "bash", "sh",
     };
 
     // Cached known binary names from installed_applications (refreshed from SQLite)
@@ -229,6 +321,19 @@ public class LogCollectorService : BackgroundService
         // Collect hardware and network info immediately on startup
         await CollectDeviceHardwareAsync(stoppingToken);
         await CollectNetworkInfoAsync(stoppingToken);
+
+        // Collect the installed app/package inventory immediately too — otherwise a fresh
+        // DB shows empty installed_* tables for the first ~15 minutes (the periodic scan
+        // runs every 30 collection cycles). Long-lived Linux DBs never hit this; fresh
+        // Windows DBs did, which read as "the tables are missing".
+        try
+        {
+            await CollectInstalledApplicationsAsync(stoppingToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Initial installed software scan failed");
+        }
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -684,6 +789,10 @@ public class LogCollectorService : BackgroundService
             NonAppProcessPrefixes.Any(p => processName.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
             return (false, null, null, null, false);
 
+        // Windows system/background components that the path-based GUI gate would otherwise accept.
+        if (OperatingSystem.IsWindows() && IsWindowsNonAppProcess(processName))
+            return (false, null, null, null, false);
+
         // 1. Check known app binary names from installed_applications (fast in-memory path)
         // 🟡 Phase 0a: Even if the process is in the DB, verify it's actually a GUI app.
         // Pre-existing rows for non-GUI tools (sh, snap) were auto-registered before the
@@ -694,8 +803,10 @@ public class LogCollectorService : BackgroundService
             if (app != null)
             {
                 // Skip non-GUI apps that happen to be in the DB from before the GUI gate.
-                // A GUI app has non-empty Categories OR is flagged as a browser.
-                if (!app.IsBrowser && string.IsNullOrWhiteSpace(app.Categories))
+                // A GUI app has non-empty Categories OR is flagged as a browser. On Windows,
+                // Categories is only ever set for browsers — Start Menu/registry entries have
+                // no .desktop-Categories equivalent — so the gate is Linux-only.
+                if (!OperatingSystem.IsWindows() && !app.IsBrowser && string.IsNullOrWhiteSpace(app.Categories))
                     return (false, null, null, null, false);
 
                 if (app.IsBrowser && string.IsNullOrWhiteSpace(windowTitle) && isHeadlessSubProcess)
@@ -713,13 +824,18 @@ public class LogCollectorService : BackgroundService
             : null;
         if (existingFuzzy != null)
         {
-            // Also verify the fuzzy match is actually a GUI app
-            if (!existingFuzzy.IsBrowser && string.IsNullOrWhiteSpace(existingFuzzy.Categories))
+            // Also verify the fuzzy match is actually a GUI app (Linux-only gate — see above).
+            if (!OperatingSystem.IsWindows() && !existingFuzzy.IsBrowser && string.IsNullOrWhiteSpace(existingFuzzy.Categories))
                 return (false, null, null, null, false);
 
             _knownAppBinaryNames.Add(processName);
             return (true, existingFuzzy.AppName, existingFuzzy.Id, null, existingFuzzy.IsBrowser);
         }
+
+        // 2b. CLI tools/runtimes are packages, never GUI applications — skip auto-registration
+        // so node/dotnet/git/go/python no longer pollute installed_applications (2026-08-08).
+        if (OperatingSystem.IsWindows() && WindowsCliOrRuntimeBinaries.Contains(processName))
+            return (false, null, null, null, false);
 
         // 3. Auto-detect: is this a GUI application? (has .desktop / .app bundle / Start Menu)
         // Only GUI applications get registered into installed_applications and tracked.
@@ -905,17 +1021,21 @@ public class LogCollectorService : BackgroundService
             }
             else if (OperatingSystem.IsWindows())
             {
-                // Executable in standard Windows paths → likely an app
+                // Executable in standard Windows paths → likely an app. Browsers get flagged so
+                // they resolve as real browser apps (not raw binary names / window titles).
                 if (execPath.Contains("Program Files", StringComparison.OrdinalIgnoreCase) ||
                     execPath.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase) ||
                     execPath.Contains("\\Microsoft\\", StringComparison.OrdinalIgnoreCase))
                 {
+                    var isBrowser = BrowserAccessibilityHelpers.IsBrowserProcess(processName);
                     return new InstalledApplication
                     {
-                        AppName = processName,
+                        AppName = _appDetector.ResolveDisplayName(processName) ?? processName,
                         BinaryName = processName,
                         InstallPath = execPath,
                         ChangeType = "seen",
+                        IsBrowser = isBrowser,
+                        Categories = isBrowser ? "WebBrowser" : "",
                         DetectedAt = DateTime.UtcNow,
                     };
                 }
@@ -1208,6 +1328,35 @@ public class LogCollectorService : BackgroundService
         return 0;
     }
 
+    private static (string model, long vramMb) GetWindowsGpuInfo()
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "powershell",
+                Arguments = "-NoProfile -NonInteractive -Command \"Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Select-Object -First 1 Name, AdapterRAM | ConvertTo-Json -Compress\"",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            using var proc = System.Diagnostics.Process.Start(psi);
+            if (proc == null) return ("", 0);
+
+            var output = proc.StandardOutput.ReadToEnd();
+            proc.WaitForExit(10000);
+
+            using var doc = JsonDocument.Parse(output);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return ("", 0);
+
+            var model = doc.RootElement.TryGetProperty("Name", out var n) ? n.GetString() ?? "" : "";
+            var ram = doc.RootElement.TryGetProperty("AdapterRAM", out var r) ? r.GetInt64() : 0;
+            return (model, ram > 0 ? ram / (1024 * 1024) : 0);
+        }
+        catch { return ("", 0); }
+    }
+
     private static (string model, long vramMb) GetGpuInfo()
     {
         try
@@ -1248,8 +1397,8 @@ public class LogCollectorService : BackgroundService
             }
             if (OperatingSystem.IsWindows())
             {
-                // On Windows, return empty as WMI would require System.Management package
-                return ("", 0);
+                // PowerShell + Win32_VideoController (no System.Management package needed).
+                return GetWindowsGpuInfo();
             }
         }
         catch { }
@@ -1300,7 +1449,12 @@ public class LogCollectorService : BackgroundService
                 }
             }
             if (OperatingSystem.IsWindows())
-                return Environment.Is64BitProcess ? 16384 : 4096;
+            {
+                // Real physical RAM via GlobalMemoryStatusEx (no fake hardcoded value).
+                var status = new MEMORYSTATUSEX { dwLength = (uint)Marshal.SizeOf<MEMORYSTATUSEX>() };
+                if (GlobalMemoryStatusEx(ref status))
+                    return (long)(status.ullTotalPhys / (1024 * 1024));
+            }
         }
         catch { }
         return 0;

@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -39,16 +41,65 @@ public class HardwareDeviceWatcherService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (!OperatingSystem.IsLinux() || !_config.HardwareDevicesEnabled)
+        if (!_config.HardwareDevicesEnabled)
+        {
+            _logger.LogInformation("Hardware device watcher disabled (enabled={Enabled})",
+                _config.HardwareDevicesEnabled);
+            return;
+        }
+
+        await _store.InitializeAsync(stoppingToken);
+
+        // ── Windows: PnP device polling (2026-08-08) ──
+        // Enumeration + present/absent diffing against the open rows. A 30s poll keeps
+        // plug/unplug detection reasonably fresh without WM_DEVICECHANGE plumbing.
+        if (OperatingSystem.IsWindows())
+        {
+            _logger.LogInformation("Hardware device watcher starting (Windows PnP polling)");
+
+            try
+            {
+                await ReconcileWindowsAsync(stoppingToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Initial Windows hardware device enumeration failed");
+            }
+
+            try
+            {
+                while (!stoppingToken.IsCancellationRequested)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
+                    try
+                    {
+                        await ReconcileWindowsAsync(stoppingToken);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Windows hardware device reconcile failed");
+                    }
+                }
+            }
+            catch (OperationCanceledException) { }
+
+            _logger.LogInformation("Hardware device watcher stopped");
+            return;
+        }
+
+        // ── Non-Linux, non-Windows: no implementation ──
+        if (!OperatingSystem.IsLinux())
         {
             _logger.LogInformation("Hardware device watcher disabled (platform={Platform}, enabled={Enabled})",
                 OperatingSystem.IsLinux() ? "linux" : "non-linux", _config.HardwareDevicesEnabled);
             return;
         }
 
-        await _store.InitializeAsync(stoppingToken);
-
-        _logger.LogInformation("Hardware device watcher starting");
+        _logger.LogInformation("Hardware device watcher starting (Linux udev + /sys)");
 
         try
         {
@@ -88,6 +139,166 @@ public class HardwareDeviceWatcherService : BackgroundService
         }
 
         _logger.LogInformation("Hardware device watcher stopped");
+    }
+
+    // ────────────────────────────────────────
+    // Windows — PnP device polling
+    // ────────────────────────────────────────
+
+    // PnP device classes that represent real physical peripherals (everything else — PCI,
+    // system devices, processors, batteries, host controllers — is internal hardware).
+    private static readonly HashSet<string> TrackedWindowsClasses = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "DiskDrive", "KeyBoard", "Mouse", "HIDDevice", "Camera", "Image", "Media",
+        "AudioEndpoint", "Monitor", "NetworkAdapter", "Bluetooth", "USB", "USBDevice",
+        "Printer", "PortableDevice", "SmartCardReader", "Modem", "WPD",
+    };
+
+    // Virtual printer queues ("Microsoft Print to PDF", "AnyDesk Printer", "Fax"…)
+    // appear under the PrintQueue class — they are software, not physical hardware.
+    // Physical USB printers arrive as class "Printer" (or "USB"), which is tracked.
+
+    private async Task ReconcileWindowsAsync(CancellationToken ct)
+    {
+        await _reconcileGate.WaitAsync(ct);
+        try
+        {
+            var present = await EnumerateWindowsPnpDevicesAsync();
+            if (present.Count == 0)
+            {
+                // Probe failed (PowerShell missing / no devices) — never close rows on a bad probe.
+                _logger.LogDebug("Windows PnP probe returned no devices, skipping reconcile");
+                return;
+            }
+
+            var now = DateTime.UtcNow;
+            var open = await _store.GetOpenHardwareDevicesAsync(ct);
+            var openPaths = open.Select(d => d.BusPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            // Insert newly-present devices that don't have an open row yet.
+            var toInsert = new List<HardwareDevice>();
+            foreach (var kvp in present)
+            {
+                if (openPaths.Contains(kvp.Key)) continue;
+                toInsert.Add(new HardwareDevice
+                {
+                    DeviceClass = kvp.Value.cls,
+                    Vendor = kvp.Value.vendor,
+                    Product = kvp.Value.product,
+                    BusPath = kvp.Key, // PnP DeviceInstanceId is the stable slot identity
+                    PluggedAt = now,
+                });
+            }
+            if (toInsert.Count > 0)
+            {
+                await _store.StoreHardwareDevicesAsync(toInsert, ct);
+                foreach (var dev in toInsert)
+                {
+                    _logger.LogInformation("Hardware device plugged in: {Class} {Product} ({BusPath})",
+                        dev.DeviceClass, dev.Product, dev.BusPath);
+                }
+            }
+
+            // Close open rows whose device is no longer present (unplugged).
+            foreach (var dev in open)
+            {
+                if (string.IsNullOrEmpty(dev.BusPath) || present.ContainsKey(dev.BusPath)) continue;
+                await _store.CloseHardwareDeviceAsync(dev.Id, now, ct);
+                _logger.LogInformation("Hardware device unplugged: {Class} {Product} ({BusPath})",
+                    dev.DeviceClass, string.IsNullOrEmpty(dev.Product) ? "(unnamed)" : dev.Product, dev.BusPath);
+            }
+        }
+        finally
+        {
+            _reconcileGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Enumerate present PnP peripherals via PowerShell Get-PnpDevice.
+    /// Returns DeviceInstanceId → (device class, vendor, product). Keyed by the PnP id so the
+    /// same physical slot keeps one open row across re-plugs of the same device model.
+    ///
+    /// NOTE: Win32_PnPEntity must NOT be used here — it has no "Class" property (only
+    /// ClassGuid), so a Class-based filter silently matches nothing. Get-PnpDevice exposes
+    /// the friendly Class name ("DiskDrive", "KeyBoard", "HIDDevice", …).
+    /// </summary>
+    private async Task<Dictionary<string, (string cls, string vendor, string product)>> EnumerateWindowsPnpDevicesAsync()
+    {
+        var result = new Dictionary<string, (string cls, string vendor, string product)>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "powershell",
+                Arguments = "-NoProfile -NonInteractive -Command \"Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Select-Object Class, FriendlyName, Manufacturer, InstanceId | ConvertTo-Json -Compress\"",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+            };
+            using var proc = Process.Start(psi);
+            if (proc == null) return result;
+
+            var output = proc.StandardOutput.ReadToEnd();
+            proc.WaitForExit(30000);
+
+            using var doc = JsonDocument.Parse(output);
+            var items = doc.RootElement.ValueKind == JsonValueKind.Array
+                ? doc.RootElement.EnumerateArray()
+                : doc.RootElement.ValueKind == JsonValueKind.Object
+                    ? new[] { doc.RootElement }.AsEnumerable()
+                    : [];
+
+            foreach (var item in items)
+            {
+                var cls = item.TryGetProperty("Class", out var c) ? c.GetString() ?? "" : "";
+                var vendor = item.TryGetProperty("Manufacturer", out var m) ? m.GetString() ?? "" : "";
+                var name = item.TryGetProperty("FriendlyName", out var n) ? n.GetString() ?? "" : "";
+                var id = item.TryGetProperty("InstanceId", out var p) ? p.GetString() ?? "" : "";
+                if (string.IsNullOrWhiteSpace(id) || !TrackedWindowsClasses.Contains(cls)) continue;
+
+                // Internal USB infrastructure, not a peripheral (covers "USB Root Hub",
+                // "Generic USB Hub", "… Host Controller").
+                if (name.Contains("Hub", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("Host Controller", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                // Only EXTERNAL USB peripherals are hotplug events — internal SATA/NVMe
+                // drives (InstanceId SCSI\…/NVME\…/IDE\…) and onboard NICs are part of the
+                // machine, so USB-storage/USB-NIC InstanceIds are required for those classes.
+                if (cls.Equals("DiskDrive", StringComparison.OrdinalIgnoreCase) &&
+                    !id.StartsWith("USBSTOR\\", StringComparison.OrdinalIgnoreCase) &&
+                    !id.StartsWith("USB\\", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (cls.Equals("NetworkAdapter", StringComparison.OrdinalIgnoreCase) &&
+                    !id.StartsWith("USB\\", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                result[id] = (ClassifyWindowsPnpClass(cls), vendor ?? "", name ?? "");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Windows PnP device enumeration failed");
+        }
+        return result;
+    }
+
+    private static string ClassifyWindowsPnpClass(string cls)
+    {
+        return cls.ToLowerInvariant() switch
+        {
+            "diskdrive" => "storage",
+            "keyboard" or "mouse" or "hiddevice" => "input",
+            "camera" or "image" or "monitor" => "display",
+            "media" or "audioendpoint" => "audio",
+            "networkadapter" => "network",
+            "bluetooth" or "usb" or "usbdevice" => "usb",
+            "printer" or "portabledevice" or "wpd" => "storage",
+            _ => "usb",
+        };
     }
 
     // ────────────────────────────────────────

@@ -1,8 +1,63 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-08-07
+> **Last audited:** 2026-08-08
 > **Changelog:**
 >
+> - 2026-08-08 (round 3): **Windows inventory accuracy — Start Menu .lnk = the .desktop analog.** Linux decides
+>   GUI-vs-package by `.desktop` presence; Windows had no equivalent, so registry DisplayNames came through raw
+>   ("Microsoft Visual Studio Code (User)" while the binary is Code) and global CLIs were invisible. Four fixes landed
+>   together, verified live on a Windows 10 machine: (1) `InstalledAppDetector.ScanStartMenuShortcuts` enumerates Start
+>   Menu .lnk files (user + common) via WScript.Shell (base64 `-EncodedCommand` PowerShell — no quoting bugs), resolves
+>   each target exe → clean display name + binary map (`Visual Studio Code.lnk` → Code.exe) — the exact Windows analog
+>   of `Exec=` in a `.desktop`; AppX/URL/folder targets and junk names (Uninstall/Getting Started/…) are skipped.
+>   (2) Registry scan now prefers the shortcut name over the registry DisplayName and merges registry metadata
+>   (version/publisher) into the SAME row (the table is keyed on `app_name`), so "Microsoft Visual Studio Code (User)"
+>   dedups to "Visual Studio Code"; `CleanRegistryDisplayName` strips (User)/(64-bit) noise; junk filter extended
+>   (LocalServiceComponents, * Uninstaller). (3) New `SoftwareClassifier.CollapseWindowsDuplicateApps` pre-pass:
+>   same-binary rows collapse to the shortest clean name, registry-only stragglers match their shortcut by
+>   version-stripped name ("Advanced IP Scanner 2.5.1" → "Advanced IP Scanner"), and CLI/runtime launchers (node,
+>   git-bash, git-cmd, git-gui, python, pythonw, cmd, pg_ctl, wsl…) are dropped from apps — they belong in
+>   installed_packages, exactly like Linux tools without a .desktop. (4) `PackageDetector.BuildCliStartInfo` — npm/scoop
+>   are `.cmd` batch shims that `Process.Start`/CreateProcess can't launch, so `ScanNpmGlobal`/`ScanScoop` died silently
+>   in the catch and global npm tools never appeared (freebuff@0.0.142, opencode-ai@1.18.15 missing). Now invoked via
+>   `cmd.exe /c` on Windows. Also: the empty-`Categories` GUI gate in `LogCollectorService.ResolveAppInfoInner` is now
+>   Linux-only (Windows registry/lnk apps only get Categories for browsers, so the gate wrongly rejected every
+>   non-browser). Verified live: 81 clean apps (VS Code one row, binary Code, v1.132.0 + publisher), 13 packages
+>   (freebuff npm, Git, Go, Nmap, PostgreSQL, Python, Redis, Ubuntu, WSL, pip — zero GUI apps), zero system-component
+>   leaks. Note: old polluted installed_* rows linger until wiped — the scan upserts by app_name but never deletes
+>   stale rows (wipe keeping employee login rebuilds clean, as on Linux).
+> - 2026-08-08 (round 2): **Fresh-Windows-DB "missing tables" + hardware_devices fix.** A brand-new Windows DB showed empty
+>   installed_* tables for the first minutes because the app/package scan only ran every 30 collection cycles (~15 min)
+>   — the periodic cadence is invisible on long-lived Linux DBs. `LogCollectorService.ExecuteAsync` now also runs
+>   `CollectInstalledApplicationsAsync` immediately at startup. `hardware_devices` stayed at 0 on Windows because the
+>   PnP probe used `Win32_PnPEntity`, which has NO `Class` property (only ClassGuid) — the class filter silently matched
+>   nothing. Switched to `Get-PnpDevice -PresentOnly` (real Class values), dropped `PrintQueue` (virtual printer queues
+>   like "Microsoft Print to PDF"/". AnyDesk Printer"), required USBSTOR/USB InstanceIds for DiskDrive and USB for
+>   NetworkAdapter (internal SATA/NVMe/NIC excluded), and verified live: 7 clean peripherals (keyboard, mouse, headset,
+>   monitor, USB composite) recorded on the test machine. Blocklist extended for the remaining WindowsApps components
+>   (GameBarFTServer, olk, GameBar, gamingservices, xboxstatsserver…) and Git-Bash/Windows CLI tools (tail, grep, sed,
+>   ipconfig, tasklist…) so they never auto-register as applications.
+> - 2026-08-08: **Windows installed-software + hardware detection overhaul (root-caused from the live Windows DB).**
+>   `installed_packages` was flooded with GUI apps (77/78 rows from `winget list`) and `installed_applications`
+>   with runtimes/system components (node, dotnet, RuntimeBroker, tray helpers) — both fixed:
+>   (1) `PackageDetector.ScanWinget` rewritten — the space-padded console table is now sliced by column start
+>   offsets read from the header (multi-word names like "Google Chrome" are no longer shredded), ARP\/MSIX rows
+>   (the actual GUI apps) and MS Store apps are dropped, .NET/VC++ framework rows are filtered, and the version
+>   column is sliced against `Available`. `SoftwareClassifier` gained fuzzy name suppression ("Microsoft Visual
+>   Studio Code (User)" vs registry "Visual Studio Code", ≥4 chars both sides so Git/Go are never over-suppressed);
+>   (2) `InstalledAppDetector.DetectInstalledWindows` now scans ALL three registry Uninstall nodes
+>   (HKLM, WOW6432Node, HKCU — the old code read only HKLM, which is why only 3 apps were ever found) with a
+>   junk filter (SystemComponent, updates, runtimes/redists/drivers, dev tools Git/Go/Python/Node/PostgreSQL→
+>   packages) and an explorer→"File Explorer" display-name override; (3) `LogCollectorService` gained a Windows
+>   non-app blocklist (RuntimeBroker, tray/helper/updater suffixes, WindowsApps components), a CLI-runtime skip
+>   set (node/dotnet/git/go/python… never auto-register as apps), auto-detected browsers now get IsBrowser+
+>   WebBrowser categories, real RAM via `GlobalMemoryStatusEx` P/Invoke (was a hardcoded fake) and GPU via
+>   PowerShell `Win32_VideoController` (was always empty on Windows); (4) `HardwareDeviceWatcherService` is no
+>   longer Linux-only — new Windows PnP implementation polls `Get-CimInstance Win32_PnPEntity` every 30s,
+>   keys open rows by `PNPDeviceID`, closes rows when a device disappears, and maps PnP classes
+>   (DiskDrive→storage, KeyBoard/Mouse/HID→input, Camera/Monitor→display, Media/AudioEndpoint→audio,
+>   Bluetooth/USB→usb). Verified: `dotnet build` 0/0 and the new winget parser was validated against the real
+>   machine output (125 of 153 rows correctly skipped).
 > - 2026-08-07: **Analog audio device tracking** — `HardwareDeviceWatcherService` now monitors
 >   headset/headphone analog audio jacks via `amixer` polling in addition to USB devices. Detects
 >   plug/unplug events for 3.5mm audio jacks and stores them as `audio`/`headphone` class devices
