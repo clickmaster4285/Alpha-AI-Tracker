@@ -546,6 +546,25 @@ public class SqliteLogStore : ILogStore, IDisposable
         }
     }
 
+    public async Task<IReadOnlyList<InstalledApplication>> GetInstalledAppsWithEmptyDesktopIdAsync(CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<InstalledApplication>();
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT * FROM installed_applications WHERE desktop_id IS NULL OR desktop_id = ''";
+            var results = new List<InstalledApplication>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct)) results.Add(MapInstalledAppReader(reader));
+            return results;
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
     public async Task<string> StoreInstalledPackageAsync(InstalledPackage entry, CancellationToken ct)
     {
         if (_connection == null) return entry.Id;

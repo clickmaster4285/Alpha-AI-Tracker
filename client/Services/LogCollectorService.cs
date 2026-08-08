@@ -249,6 +249,13 @@ public class LogCollectorService : BackgroundService
         // that put anything in /usr/bin/ into the DB without checking for a .desktop file.
         await CleanupNonGuiAppEntriesAsync(stoppingToken);
 
+        // ─── Phase 0b: Windows runtime-auto-registration junk sweep ───
+        // Removes installed_applications rows with an empty desktop_id (the structural signature
+        // of runtime auto-registration — svchost → "Windows Services", dllhost, conhost, Video.UI,
+        // SearchApp…) and closes the sessions they produced. Real inventory rows always carry a
+        // Start Menu shortcut name / registry key / .desktop filename as desktop_id.
+        await CleanupWindowsJunkSessionsAsync(stoppingToken);
+
         var interval = TimeSpan.FromSeconds(Math.Max(5, _config.CollectIntervalSec));
 
         // Collect hardware and network info immediately on startup
@@ -738,37 +745,30 @@ public class LogCollectorService : BackgroundService
                 if (!OperatingSystem.IsWindows() && !app.IsBrowser && string.IsNullOrWhiteSpace(app.Categories))
                     return (false, null, null, null, false);
 
+                // Windows junk guard: a real inventory row always carries a desktop_id
+                // (Start Menu shortcut name / registry key / .desktop filename). Rows with
+                // an empty desktop_id are the runtime auto-registered junk (svchost,
+                // dllhost, conhost, Video.UI…) — refuse them even before the cleanup sweep
+                // deletes them, so no new junk session can ever attach to one.
+                if (OperatingSystem.IsWindows() && string.IsNullOrWhiteSpace(app.DesktopId))
+                    return (false, null, null, null, false);
+
                 if (app.IsBrowser && string.IsNullOrWhiteSpace(windowTitle) && isHeadlessSubProcess)
                     return (false, null, null, null, true);
                 return (true, app.AppName, app.Id, null, app.IsBrowser);
             }
         }
 
-        // 2. Fuzzy match: process may exist in DB under a similar binary name
-        // 🟡 Phase 0a: Only consider fuzzy matches that could plausibly be the same app.
-        // Reject matches where the process name is very short (≤3 chars) because short
-        // SQL LIKE patterns like '%sh%' or '%go%' are too broad and match unrelated processes.
-        var existingFuzzy = processName.Length > 3
-            ? await _store.GetInstalledAppByBinaryNameFuzzyAsync(processName, ct)
-            : null;
-        if (existingFuzzy != null)
-        {
-            // Also verify the fuzzy match is actually a GUI app (Linux-only gate — see above).
-            if (!OperatingSystem.IsWindows() && !existingFuzzy.IsBrowser && string.IsNullOrWhiteSpace(existingFuzzy.Categories))
-                return (false, null, null, null, false);
-
-            _knownAppBinaryNames.Add(processName);
-            return (true, existingFuzzy.AppName, existingFuzzy.Id, null, existingFuzzy.IsBrowser);
-        }
-
-        // 2b. Windows structural gate (no product names): resolve the running executable and
-        // let the OS's own metadata decide.
+        // 2b. Windows structural gate (no product names) — runs BEFORE the fuzzy match so a
+        // CUI/system-tree binary can never fuzzy-match its way into an app row (powershell.exe
+        // was matching the "Windows PowerShell ISE" row and produced 7 junk console sessions).
+        // Resolve the running executable and let the OS's own metadata decide:
         //   - Anything inside C:\Windows (System32 / SystemApps / WinSxS / …) is an OS-provided
-        //     component (RuntimeBroker, GameBar, Video.UI, conhost…) — never a user app.
+        //     component (RuntimeBroker, GameBar, Video.UI, conhost, SearchApp…) — never a user app.
         //   - A console-subsystem executable (node, git, dotnet, cmd…) is a CLI tool/runtime
         //     that belongs in installed_packages, not installed_applications.
         //
-        // ⚠️ LOAD-BEARING ORDER: this gate runs AFTER the known-binary fast path above. The
+        // ⚠️ LOAD-BEARING ORDER: the gate stays AFTER the known-binary fast path above. The
         // inventory scan registers inbox System32 GUI apps (Notepad, WordPad, mspaint…) as
         // installed_applications, so their binary names hit the fast path and are never
         // rejected here. Moving this gate above the fast path would silently stop tracking
@@ -785,7 +785,39 @@ public class LogCollectorService : BackgroundService
             }
         }
 
-        // 3. Auto-detect: is this a GUI application? (has .desktop / .app bundle / Start Menu)
+        // 2c. Fuzzy match: process may exist in DB under a similar binary name
+        // 🟡 Phase 0a: Only consider fuzzy matches that could plausibly be the same app.
+        // Reject matches where the process name is very short (≤3 chars) because short
+        // SQL LIKE patterns like '%sh%' or '%go%' are too broad and match unrelated processes.
+        var existingFuzzy = processName.Length > 3
+            ? await _store.GetInstalledAppByBinaryNameFuzzyAsync(processName, ct)
+            : null;
+        if (existingFuzzy != null)
+        {
+            // Also verify the fuzzy match is actually a GUI app (Linux-only gate — see above).
+            if (!OperatingSystem.IsWindows() && !existingFuzzy.IsBrowser && string.IsNullOrWhiteSpace(existingFuzzy.Categories))
+                return (false, null, null, null, false);
+
+            // Same Windows junk guard as the fast path: only inventory rows (desktop_id
+            // set) can be fuzzy-matched into a session.
+            if (OperatingSystem.IsWindows() && string.IsNullOrWhiteSpace(existingFuzzy.DesktopId))
+                return (false, null, null, null, false);
+
+            _knownAppBinaryNames.Add(processName);
+            return (true, existingFuzzy.AppName, existingFuzzy.Id, null, existingFuzzy.IsBrowser);
+        }
+
+        // 3. Windows: NO runtime auto-registration. Tracking is driven STRICTLY by the
+        // installed_applications inventory (Start Menu shortcut + registry Uninstall scan —
+        // the Windows analog of the .desktop scan). Runtime auto-registration was the source
+        // of every junk row: it registered system components (svchost → "Windows Services",
+        // conhost → "Windows Console Host", Video.UI, SearchApp, …) that have no GUI of their
+        // own. The inventory scan re-runs every ~15 min, so a genuinely new app is picked up
+        // there within minutes — no runtime fallback needed.
+        if (OperatingSystem.IsWindows())
+            return (false, null, null, null, false);
+
+        // 3b. Auto-detect (non-Windows): is this a GUI application? (has .desktop / .app bundle)
         // Only GUI applications get registered into installed_applications and tracked.
         // CLI-only tools, shells, build tools, runtimes, and daemons are all skipped.
         var execPath = GetCachedExecutablePath(processName);
@@ -1829,6 +1861,96 @@ public class LogCollectorService : BackgroundService
     /// processes that were incorrectly registered into installed_applications by the old
     /// AutoDetectInstalledApp code (which put anything in /usr/bin/ into the DB).
     /// </summary>
+    /// <summary>
+    /// Windows boot sweep that removes the junk produced by the old runtime auto-registration
+    /// path (which registered ANY process whose exe lived in Program Files/WindowsApps or whose
+    /// display name could be resolved — svchost → "Windows Services", dllhost → "Windows DCOM
+    /// Host", conhost → "Windows Console Host", Video.UI, WebPluginService, SDXHelper,
+    /// SearchApp, M365Copilot…).
+    ///
+    /// Structural signal (no product names): real inventory rows ALWAYS carry a desktop_id
+    /// (Start Menu shortcut name / registry Uninstall key / .desktop filename). Runtime
+    /// auto-registered rows have an empty desktop_id, so they are safe to delete, and the
+    /// sessions that reference them are closed (their process is a background system component
+    /// that is not a user application).
+    /// </summary>
+    private async Task CleanupWindowsJunkSessionsAsync(CancellationToken ct)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        try
+        {
+            var junkApps = await _store.GetInstalledAppsWithEmptyDesktopIdAsync(ct);
+            var junkIds = junkApps.Select(a => a.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            // Runtime-registered junk has no desktop_id; its BINARY names mark the sessions it
+            // produced, so also close any open session whose process name matches one of them
+            // (covers sessions whose installed_app_id was never linked).
+            var junkBinaries = new HashSet<string>(
+                junkApps.Select(a => a.BinaryName).Where(b => !string.IsNullOrWhiteSpace(b)),
+                StringComparer.OrdinalIgnoreCase);
+
+            var openRecords = await _store.GetAllOpenSessionRecordsAsync(ct);
+            var closeSessions = new List<AppSession>();
+
+            foreach (var rec in openRecords)
+            {
+                var processName = AppProcessClassifier.ExtractBaseProcessName(rec.ProcessName);
+
+                // Sessions that reference a SURVIVING legit app row (desktop_id set, e.g.
+                // inbox GUI apps like Notepad/Task Manager whose exe lives in C:\Windows)
+                // are NEVER junk — the structural check below must not touch them.
+                var hasLegitApp = rec.InstalledAppId != null && !junkIds.Contains(rec.InstalledAppId);
+
+                // Linked to a deleted junk row, OR the process binary is a deleted junk binary,
+                // OR (only for sessions with NO legit app link) the executable is structurally
+                // not an app (system tree / console subsystem).
+                var linkedToJunk = rec.InstalledAppId != null && junkIds.Contains(rec.InstalledAppId);
+                var junkBinary = junkBinaries.Contains(processName);
+                var structuralJunk = false;
+                if (!hasLegitApp && !linkedToJunk && !junkBinary &&
+                    !BrowserAccessibilityHelpers.IsBrowserProcess(processName))
+                {
+                    var path = GetCachedExecutablePath(processName);
+                    if (!string.IsNullOrEmpty(path))
+                    {
+                        structuralJunk = ExecutableMetadata.IsWindowsSystemTree(path) ||
+                                         ExecutableMetadata.GetSubsystem(path) == ExecutableMetadata.SubsystemWindowsCui;
+                    }
+                }
+
+                if (linkedToJunk || junkBinary || structuralJunk)
+                {
+                    closeSessions.Add(new AppSession
+                    {
+                        Id = rec.AppSessionId,
+                        ProcessName = string.Empty,
+                        EndedAt = DateTime.UtcNow,
+                    });
+                }
+            }
+
+            if (closeSessions.Count > 0)
+            {
+                await _store.CloseSessionsAndAppItemsAsync(closeSessions, DateTime.UtcNow, ct);
+            }
+
+            foreach (var app in junkApps)
+            {
+                await _store.DeleteInstalledAppAsync(app.Id, ct);
+            }
+
+            if (junkApps.Count > 0 || closeSessions.Count > 0)
+            {
+                _logger.LogWarning(
+                    "🧹 Windows junk sweep: removed {Apps} runtime-auto-registered app entries (empty desktop_id) and closed {Sessions} junk session(s)",
+                    junkApps.Count, closeSessions.Count);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to clean Windows junk app entries");
+        }
+    }
+
     private async Task CleanupNonGuiAppEntriesAsync(CancellationToken ct)
     {
         try

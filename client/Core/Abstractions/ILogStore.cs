@@ -73,6 +73,11 @@ public interface ILogStore
     /// Used by Phase 0a cleanup to remove shell/system entries (sh, snap) from the DB.</summary>
     Task DeleteInstalledAppAsync(string id, CancellationToken ct);
 
+    /// <summary>Rows with an EMPTY desktop_id — the structural signature of runtime auto-registered
+    /// junk (svchost, dllhost, conhost, Video.UI…). Real inventory rows always carry a Start Menu
+    /// shortcut name / registry key / .desktop filename as their desktop_id.</summary>
+    Task<IReadOnlyList<InstalledApplication>> GetInstalledAppsWithEmptyDesktopIdAsync(CancellationToken ct);
+
     /// <summary>Store a single auto-detected installed package (called when a running process is not yet in the DB).
     /// Returns the actual stored ID.</summary>
     Task<string> StoreInstalledPackageAsync(InstalledPackage entry, CancellationToken ct);
