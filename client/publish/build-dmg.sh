@@ -5,8 +5,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-APP_NAME="Alpha AI Tracker"
-APP_BUNDLE="/tmp/${APP_NAME}.app"
+
+# Load app identifiers from single source of truth
+source "$PROJECT_DIR/APP_IDENTIFIERS"
+
+APP_BUNDLE="/tmp/${MACOS_BUNDLE_NAME}.app"
 INSTALLER_DIR="$PROJECT_DIR/installers"
 VERSION="$(cat "$PROJECT_DIR/VERSION")"
 
@@ -34,11 +37,11 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << EOF
 <plist version="1.0">
 <dict>
   <key>CFBundleExecutable</key>
-  <string>client</string>
+  <string>$EXECUTABLE_NAME</string>
   <key>CFBundleIdentifier</key>
-  <string>com.alphaai.tracker</string>
+  <string>$BUNDLE_ID</string>
   <key>CFBundleName</key>
-  <string>${APP_NAME}</string>
+  <string>$DISPLAY_NAME</string>
   <key>CFBundleVersion</key>
   <string>$VERSION</string>
   <key>CFBundleShortVersionString</key>
@@ -66,17 +69,17 @@ mkdir -p "$INSTALLER_DIR"
 # Use create-dmg if available, otherwise use hdiutil
 if command -v create-dmg &>/dev/null; then
   create-dmg \
-    --volname "${APP_NAME}" \
+    --volname "${MACOS_BUNDLE_NAME}" \
     --window-pos 200 120 \
     --window-size 600 400 \
     --icon-size 100 \
-    --icon "${APP_NAME}.app" 150 190 \
+    --icon "${MACOS_BUNDLE_NAME}.app" 150 190 \
     --app-drop-link 450 190 \
     "${INSTALLER_DIR}/AlphaAITracker.dmg" \
     "$APP_BUNDLE"
 elif command -v hdiutil &>/dev/null; then
-  TEMP_DMG="/tmp/${APP_NAME}-temp.dmg"
-  hdiutil create -srcfolder "$APP_BUNDLE" -volname "${APP_NAME}" \
+  TEMP_DMG="/tmp/${MACOS_BUNDLE_NAME}-temp.dmg"
+  hdiutil create -srcfolder "$APP_BUNDLE" -volname "${MACOS_BUNDLE_NAME}" \
     -fs HFS+ -format UDRW "$TEMP_DMG" -ov
   hdiutil convert "$TEMP_DMG" -format UDZO -o "${INSTALLER_DIR}/AlphaAITracker.dmg"
   echo "DMG created with hdiutil (basic layout)"

@@ -2,10 +2,9 @@
 ; Produces a single .exe installer with wizard UI
 ; Requires Inno Setup 6+ (https://jrsoftware.org/isinfo.php)
 
-#define MyAppName "Alpha AI Tracker"
-#define MyAppPublisher "Alpha AI"
-#define MyAppURL "https://alpha-ai-tracker.example.com"
-#define MyAppExeName "client.exe"
+; Generated app identifiers from APP_IDENTIFIERS
+#include "windows\windows_vars.iss"
+
 #define MyAppAssocName MyAppName + " File"
 #define MyAppAssocExt ".myp"
 #define MyAppAssocKey StringChange(MyAppAssocName, " ", "") + MyAppAssocExt

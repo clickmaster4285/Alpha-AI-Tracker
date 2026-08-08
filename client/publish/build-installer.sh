@@ -204,7 +204,8 @@ bundle_into_publish() {
     cp "$PROJECT_DIR/publish"/*.sh "$rid_dir/publish/" 2>/dev/null || true
     chmod +x "$rid_dir/publish"/*.sh 2>/dev/null || true
     cp "$PROJECT_DIR/publish"/*.iss "$rid_dir/publish/" 2>/dev/null || true
-    echo "  ✓ Bundled publish/*.sh into $rid_dir"
+    cp "$PROJECT_DIR/publish/windows/windows_vars.iss" "$rid_dir/publish/windows/" 2>/dev/null || true
+    echo "  ✓ Bundled publish scripts and ISS includes into $rid_dir"
   fi
 }
 [ "$BUILD_WIN" = true ] && bundle_into_publish "$PUBLISH_WIN"
@@ -230,6 +231,7 @@ fi
 if [ "$BUILD_WIN" = true ]; then
   echo ""
   echo "[Windows] Building Windows installer..."
+  bash "$SCRIPT_DIR/generate-windows-vars.sh"
   if command -v iscc &>/dev/null; then
     iscc "$SCRIPT_DIR/installer-windows.iss"
   elif command -v wine &>/dev/null && [ -f "/usr/share/wine/ISCC.exe" ]; then
