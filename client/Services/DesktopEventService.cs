@@ -12,6 +12,7 @@ public class DesktopEventService : BackgroundService
     private readonly EventCoordinator _coordinator;
     private readonly JourneyEngine _engine;
     private readonly ATSPIEventWatcher _atspiWatcher;
+    private readonly WindowsExplorerWatcher _explorerWatcher;
     private readonly FileSystemEventWatcher _fsWatcher;
     private readonly RecentFilesWatcher _recentWatcher;
     private readonly ILogStore _store;
@@ -24,6 +25,7 @@ public class DesktopEventService : BackgroundService
         EventCoordinator coordinator,
         JourneyEngine engine,
         ATSPIEventWatcher atspiWatcher,
+        WindowsExplorerWatcher explorerWatcher,
         FileSystemEventWatcher fsWatcher,
         RecentFilesWatcher recentWatcher)
     {
@@ -32,6 +34,7 @@ public class DesktopEventService : BackgroundService
         _coordinator = coordinator;
         _engine = engine;
         _atspiWatcher = atspiWatcher;
+        _explorerWatcher = explorerWatcher;
         _fsWatcher = fsWatcher;
         _recentWatcher = recentWatcher;
     }
@@ -55,12 +58,22 @@ public class DesktopEventService : BackgroundService
             _logger.LogInformation("AT-SPI watcher skipped (not Linux)");
         }
 
+        if (OperatingSystem.IsWindows())
+        {
+            startupTasks.Add(StartWatcherSafe(_explorerWatcher, stoppingToken));
+        }
+        else
+        {
+            _logger.LogInformation("Windows Explorer watcher skipped (not Windows)");
+        }
+
         startupTasks.Add(StartWatcherSafe(_fsWatcher, stoppingToken));
         startupTasks.Add(StartWatcherSafe(_recentWatcher, stoppingToken));
 
         await Task.WhenAll(startupTasks);
 
         _watchers.Add(_atspiWatcher);
+        _watchers.Add(_explorerWatcher);
         _watchers.Add(_fsWatcher);
         _watchers.Add(_recentWatcher);
 
@@ -127,6 +140,22 @@ public class DesktopEventService : BackgroundService
             {
                 await _store.InitializeAsync(CancellationToken.None);
                 _initialized = true;
+            }
+
+            // Journey-driven watching: when the user NAVIGATES an Explorer window to a folder
+            // outside the fixed 6 user folders (e.g. C:\project, D:\Work), attach a recursive
+            // watcher to it so file create/rename/delete there is captured too. On Linux the
+            // AT-SPI watcher emits cwd-based navigations that flow through the same event.
+            //
+            // ONLY navigate actions may trigger this. File create/rename/delete/modify events
+            // (including cache churn inside an already-watched broad folder) must never spawn
+            // new watchers — that was the feedback loop: AppData\Local was watched, its cache
+            // churn emitted "Folder/rename" events for extensionless files, and each one tried
+            // to watch an even deeper cache folder.
+            if (evt.ObjectType == "Folder" && evt.Action == "navigate" &&
+                !string.IsNullOrEmpty(evt.CurrentPath))
+            {
+                _fsWatcher.EnsureWatching(evt.CurrentPath);
             }
 
             await _engine.ProcessEventAsync(evt, CancellationToken.None);

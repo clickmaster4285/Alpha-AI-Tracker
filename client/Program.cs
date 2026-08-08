@@ -177,10 +177,14 @@ if (config.BrowserTrackingEnabled)
     builder.Services.AddHostedService<AccessibilityBrowserTracker>();
 }
 
-// Desktop Event Bus (File Explorer tracking via AT-SPI + FileSystemWatcher)
+// Desktop Event Bus (File Explorer tracking via AT-SPI on Linux, Shell COM on Windows,
+// plus FileSystemWatcher + recent-files sources on every platform)
 builder.Services.AddSingleton<EventCoordinator>();
 builder.Services.AddSingleton<JourneyEngine>();
 builder.Services.AddSingleton<ATSPIEventWatcher>();
+builder.Services.AddSingleton<WindowsExplorerWatcher>();
+builder.Services.AddSingleton<IExplorerWindowProvider>(
+    sp => sp.GetRequiredService<WindowsExplorerWatcher>());
 builder.Services.AddSingleton<FileSystemEventWatcher>();
 builder.Services.AddSingleton<RecentFilesWatcher>();
 builder.Services.AddHostedService<DesktopEventService>();

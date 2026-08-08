@@ -206,6 +206,7 @@ public class JourneyEngine
             "nemo" => "Nemo",
             "caja" => "Caja",
             "pcmanfm" => "PCManFM",
+            "explorer" or "explorer.exe" => "File Explorer",
             _ => processName,
         };
     }

@@ -1,11 +1,13 @@
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
+using client.Services.Watchers;
 
 namespace client.Core.DesktopEventBus;
 
 public class EventCoordinator : IDisposable
 {
     private readonly ILogger<EventCoordinator> _logger;
+    private readonly IExplorerWindowProvider? _explorerProvider;
     private readonly ConcurrentDictionary<string, JourneyRecord> _activeJourneys = new();
     private readonly ConcurrentDictionary<string, DateTime> _dedupCache = new();
     private readonly ConcurrentDictionary<string, DateTime> _correlationCache = new();
@@ -17,9 +19,10 @@ public class EventCoordinator : IDisposable
 
     public event EventHandler<DesktopEvent>? NormalizedEventRaised;
 
-    public EventCoordinator(ILogger<EventCoordinator> logger)
+    public EventCoordinator(ILogger<EventCoordinator> logger, IExplorerWindowProvider? explorerProvider = null)
     {
         _logger = logger;
+        _explorerProvider = explorerProvider;
     }
 
     public void Subscribe(IObservableEventSource source)
@@ -56,6 +59,23 @@ public class EventCoordinator : IDisposable
         try
         {
             if (DesktopEventValidator.IsIgnoredProcess(raw.AppName)) return;
+
+            // Windows: raw FileSystemWatcher events carry no window identity — attribute them
+            // to the Explorer window that is browsing the containing folder so the create /
+            // rename / delete joins the SAME journey as the navigation (same WindowId key).
+            if (_explorerProvider != null &&
+                raw.Source == "filesystem" &&
+                !raw.WindowId.HasValue &&
+                !string.IsNullOrEmpty(raw.CurrentPath))
+            {
+                if (_explorerProvider.TryGetWindowForPath(raw.CurrentPath,
+                        out var winId, out var winTitle, out var procName))
+                {
+                    raw.AppName = procName;
+                    raw.WindowTitle = winTitle;
+                    raw.WindowId = winId;
+                }
+            }
 
             var normalized = Normalize(raw);
             if (normalized == null) return;
@@ -127,17 +147,33 @@ public class EventCoordinator : IDisposable
         {
             if (path.StartsWith("file://", StringComparison.OrdinalIgnoreCase))
                 path = new Uri(path).LocalPath;
+        }
+        catch { return string.Empty; }
 
+        // Prefer the OS's own answer first. Browser cache churn creates/renames/deletes the
+        // target before the debounce fires, so File.GetAttributes can throw even though the
+        // path was a real file ("Local State", "TransportSecurity" — extensionless FILES
+        // that the old extension-heuristic misread as folders).
+        try
+        {
             var attrs = File.GetAttributes(path);
             if ((attrs & FileAttributes.Directory) != 0)
                 return "Folder";
+            return "File";
         }
         catch { }
 
-        if (path.EndsWith('/') || string.IsNullOrEmpty(Path.GetExtension(path)))
+        if (path.EndsWith('/'))
             return "Folder";
 
-        return "File";
+        // Ambiguous (path already gone): use the platform convention. On Windows an
+        // extensionless name is normally a FILE (browser config stores: Local State,
+        // Cookies, Preferences, History…); on Linux an extensionless path is normally a
+        // directory. Structural rule, not a product list.
+        if (OperatingSystem.IsWindows() && path.Length >= 2 && path[1] == ':')
+            return "File";
+
+        return "Folder";
     }
 
     private static string InferAction(string eventType, string source)
@@ -160,6 +196,14 @@ public class EventCoordinator : IDisposable
                 "deleted" => "delete",
                 "renamed" => "rename",
                 "changed" => "modify",
+                _ => eventType,
+            },
+            // The Windows Explorer watcher emits raw events with the same vocabulary as the
+            // AT-SPI watcher: navigate on folder change, close when a window disappears.
+            "explorer" => eventType switch
+            {
+                "navigate" => "navigate",
+                "close" => "close",
                 _ => eventType,
             },
             "recentfiles" => eventType switch

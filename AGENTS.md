@@ -3,6 +3,43 @@
 > **Last audited:** 2026-08-08
 > **Changelog:**
 >
+> - 2026-08-08 (round 2): **Journey noise flood fixed — AppData churn + feedback loop.** Fresh-DB
+>   test showed 374 junk rows appearing with NO user file ops: Chrome/Brave/Edge rewrite
+>   `Local State`, `Cookies-journal`, `History-journal`, `Breadcrumbs`, `Network Persistent
+>   State`, `Cache_Data\f_*` via tmp+rename every few seconds, and a recursive journey watcher
+>   had been attached to `C:\Users\pc005\AppData\Local` (browsed while checking the DB). Fixes:
+>   (1) `FileSystemEventWatcher` excludes the Windows app-data/package trees structurally —
+>   `appdata/`, `programdata/`, `program files/` (slash-normalized, no product names) — plus
+>   the user-profile root and drive roots are never watched recursively. (2) `EnsureWatching`
+>   now requires a real existing DIRECTORY, returns a success bool, and only logs on success —
+>   extensionless cache FILES ("Local State") can no longer be mistaken for folders and spawn
+>   watchers. (3) `EventCoordinator.InferObjectType` on Windows: extensionless paths that no
+>   longer exist classify as **File** (browser config stores), not Folder — killed the
+>   misclassification that fed the loop. (4) `DesktopEventService` calls `EnsureWatching` ONLY
+>   for `navigate` actions, never for file create/rename/delete/modify — file-op events can no
+>   longer spawn new watchers (the feedback loop). Verified: 90s idle with zero file ops → 13
+>   rows, all legitimate (4 Explorer navigations for actually-open windows + 5 browser tabs),
+>   0 cache-churn rows; journey watchers only on real browsed folders (`C:\tetsting`).
+> - 2026-08-08: **Windows file-explorer journey — Explorer navigation + journey-driven watching.**
+>   The journey pipeline was Linux-shaped: `ATSPIEventWatcher` (D-Bus AT-SPI) is Linux-only, so on
+>   Windows nothing reported which folder the user was browsing, and `FileSystemEventWatcher` only
+>   covered the 6 fixed user folders — create/rename/delete in any other folder (e.g. `C:\project`)
+>   was invisible, and `RecentFilesWatcher` watched the Linux `recently-used.xbel` path. Fixes:
+>   (1) NEW `WindowsExplorerWatcher` — polls the shell's OWN registry via Shell COM
+>   (`Shell.Application → Windows()`), reads each Explorer window's `file://` `LocationURL` as its
+>   exact browsed folder, and emits `navigate`/`close` events per window (verified live: a window on
+>   `C:\tetsting` exposed `file:///C:/tetsting`). No UIA tree walking, no product-name lists.
+>   (2) `FileSystemEventWatcher.EnsureWatching(folder)` — journey-driven watching: the folder the
+>   user navigates to gets a recursive watcher even when it is outside the fixed 6 (bounded set of
+>   24, pruned after 15min idle; drive roots and `C:\Windows` tree excluded). (3) `EventCoordinator`
+>   now attributes raw `filesystem` events (which carry no window identity) to the Explorer window
+>   browsing the containing folder via `IExplorerWindowProvider.TryGetWindowForPath` — the file op
+>   joins the SAME journey (same WindowId key) as the navigation. (4) `RecentFilesWatcher` Windows
+>   source: watches `%APPDATA%\Microsoft\Windows\Recent\*.lnk` and resolves each shortcut's target
+>   via WScript.Shell COM (the OS's own LNK reader) → `open` events. Windows shell `explorer` is a
+>   platform constant (like `C:\Windows`), mapped to "File Explorer" for display. Verified:
+>   `dotnet build` 0/0, client healthy, create/rename/delete now stored with `WindowId` matching the
+>   browsing Explorer window.
 > - 2026-08-08 (round 5): **DE-HARDCODED Windows software detection — pure OS metadata, zero product-name lists.**
 >   The user's rule (now §6 *No-Hardcoded-Names Rule*): never hardcode software names for detection — every employee PC
 >   has a different OS (Win 7/10/11, Ubuntu versions), department (dev/SEO/marketing/IT) and toolset, so name lists
