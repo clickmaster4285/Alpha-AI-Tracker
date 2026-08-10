@@ -2,6 +2,12 @@
 
 > **Last audited:** 2026-08-01 (docs re-synced with code — routes, migrations 001–016, 12 tables, staleness job)
 > **Changelog:**
+> - 2026-08-10: **Employee disconnect endpoint removed** — `POST /api/v1/auth/employee-disconnect`
+>   (handler `EmployeeDisconnect`, DTO `EmployeeDisconnectRequest`, route) was deleted along with the
+>   client-side Disconnect button. The web admin `POST /api/v1/auth/logout` is unrelated and
+>   unchanged. Route count 31 → 30. Client consequence: no `logout` session event is emitted anymore
+>   (only `login`, from `StartTracking`) and the Windows anti-sleep state now persists for the whole
+>   process lifetime (the OS clears it at process exit — no leak).
 > - 2026-08-01: **Docs audit** — removed stale `activity_logs` / `shell_commands` references (both dropped server-side), corrected migration inventory to 001–016 (15 files), added `jobs/staleness_sweep.go`, added `employee_app_link.go` junction models, corrected the API surface (7 sync endpoints + 2 list endpoints, no `/activity-logs`, no `/shell-commands`), and documented all 12 Postgres tables including the app/package catalogs.
 > - 2026-07-31: Migrations 013–016 + catalog/link sync rewrite. 013 adds `installed_app_id`/`installed_package_id`/`grouped_by`/`cgroup_scope`/`context_label` to `app_sessions`. 014 adds `process_id` + 9 journey fields to `app_items`. 015/016 build company-global app/package catalogs (`app_fingerprint = desktop_id|binary_name`, `package_fingerprint = package_name|source_manager`) with per-employee junction tables `employee_installed_applications`/`employee_installed_packages` (version/path/install_date + first/last_seen_at + is_active) — two employees with the same app now share ONE catalog row. `SyncInstalledApps`/`SyncInstalledPackages` rewritten to upsert-catalog-then-link inside one tx. New `internal/jobs/staleness_sweep.go` hourly deactivates links idle > `LINK_STALE_DAYS` (default 7, configurable). `NewSchemaRepo` gains `Begin()` + 4 upsert methods. App-session/item bulk inserts + list queries extended with the new fields.
 > - 2026-07-29: Browser/terminal/headless filtering arrived client-side only; server DTOs extended with `url`/`domain` (migration 011) and installed-application identity columns (migration 012).
@@ -93,7 +99,7 @@ server/
     │
     ├── dto/                     # Request/Response DTOs
     │   ├── user_dto.go          # LoginRequest, CreateUserRequest, UserResponse, etc.
-    │   ├── employee_dto.go      # EmployeeLoginRequest, EmployeeDisconnectRequest, GenerateSecretResponse, etc.
+    │   ├── employee_dto.go      # EmployeeLoginRequest, GenerateSecretResponse, etc.
     │   └── new_schema_dto.go    # Sync DTOs for all 7 tables + AppSessionListResponse + AppItemListResponse
     │                             # (still contains unused legacy DTOs: BrowserContext/FileExplorerContext/Url/UrlVisit/ShellCommand)
     │
@@ -112,7 +118,7 @@ server/
     │   └── redis_interface.go   # Interface for Redis operations (decouples auth handler)
     │
     ├── handlers/                # HTTP handlers (Echo context)
-    │   ├── auth_handler.go      # Login, Logout, Me, CheckAuth, EmployeeLogin, EmployeeDisconnect
+    │   ├── auth_handler.go      # Login, Logout, Me, CheckAuth, EmployeeLogin
     │   ├── user_handler.go      # List, Get, Create, Update, Delete users
     │   ├── employee_handler.go  # List, Get, Create, Update, Delete, GenerateSecret
     │   ├── department_handler.go # List, Create, Update, Delete departments
@@ -143,7 +149,7 @@ server/
 
 ## 4. API Surface
 
-All endpoints are under `/api/v1`. Full route inventory (31 routes):
+All endpoints are under `/api/v1`. Full route inventory (30 routes):
 
 ### Health
 
@@ -157,7 +163,6 @@ All endpoints are under `/api/v1`. Full route inventory (31 routes):
 |---|---|---|---|
 | POST | `/auth/login` | None | Web admin login. Sets httpOnly cookie. |
 | POST | `/auth/employee-login` | None | Employee desktop login. Returns JWT. |
-| POST | `/auth/employee-disconnect` | None | Employee disconnect. Sets untracked + offline. |
 
 ### Auth (Semi-Protected — validates token if present)
 
@@ -338,7 +343,7 @@ id TEXT PK · employee_id FK · public_ip · private_ip · mac_address
 network_interface_name · collected_at / synced_at / created_at / deleted_at
 ```
 
-**`session_events`** — Login/logout/lock/unlock events (migration 006)
+**`session_events`** — Login/logout/lock/unlock events (migration 006). The client now emits only `login` (via `StartTracking`); `logout` stopped being emitted when the employee-disconnect flow was removed 2026-08-10.
 ```
 id TEXT PK · employee_id FK · event_type · os_username
 event_at / synced_at / created_at / deleted_at

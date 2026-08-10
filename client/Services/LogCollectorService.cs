@@ -48,7 +48,6 @@ public class LogCollectorService : BackgroundService
     private string? _currentEmployeeName;
     private string? _currentToken;
     private bool _trackingEnabled;
-    private bool _previousTrackingState;
     private readonly object _trackingLock = new();
     private DateTime _lastHardwareCollection = DateTime.MinValue;
     private DateTime _lastNetworkCollection = DateTime.MinValue;
@@ -162,7 +161,6 @@ public class LogCollectorService : BackgroundService
     {
         lock (_trackingLock)
         {
-            _previousTrackingState = _trackingEnabled;
             _trackingEnabled = true;
             _cycleCount = 0;
             _logger.LogInformation("Tracking started");
@@ -184,28 +182,6 @@ public class LogCollectorService : BackgroundService
             {
                 _logger.LogDebug(ex, "Failed to set Windows execution state");
             }
-        }
-    }
-
-    public void StopTracking()
-    {
-        lock (_trackingLock)
-        {
-            _previousTrackingState = _trackingEnabled;
-            _trackingEnabled = false;
-            _currentEmployeeId = null;
-            _currentEmployeeName = null;
-            _currentToken = null;
-            _logger.LogInformation("Tracking stopped");
-        }
-
-        // Record logout session event
-        _ = RecordSessionEventAsync("logout", stoppingToken: default);
-
-        if (OperatingSystem.IsWindows())
-        {
-            try { SetThreadExecutionState(ES_CONTINUOUS); }
-            catch { }
         }
     }
 

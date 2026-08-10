@@ -2,6 +2,13 @@
 
 > **Last audited:** 2026-08-10 (§3, §4, §7 re-verified against source after the six-page GUI rewrite)
 > **Changelog:**
+> - 2026-08-10: **Employee disconnect removed.** The nav-rail **Disconnect** button, `LogoutCommand`/
+>   `LogoutAsync` and `LogCollectorService.StopTracking()` are deleted; the client no longer calls
+>   `POST /api/v1/auth/employee-disconnect`. Once `IsProfile` is reached the shell has no in-app
+>   logout — tracking runs until the process stops. No `logout` session event is emitted anymore
+>   (only `login`, from `StartTracking`), and the Windows anti-sleep state now persists for the whole
+>   process lifetime (the OS clears it at process exit — no leak). `ClearEmployeeInfoAsync` remains
+>   on `ILogStore` (store primitive).
 > - 2026-08-10: **Six-page GUI rewrite + runtime branding pipeline.** `MainWindow.axaml` is now a
 >   ~230-line **router**; every screen lives in `Views/Pages/` as its own `UserControl` (Splash, Login,
 >   PermissionSetup, Dashboard, SystemSpecs, InstalledApps). Three new page ViewModels
@@ -69,7 +76,7 @@
 - Building a **software inventory** (GUI apps in `installed_applications`, CLI tools/runtimes/libraries in `installed_packages`)
 - Collecting **system info** (device hardware incl. storage/GPU, network info, session events, permission status)
 - Storing everything locally in SQLite before batched sync to the central server
-- Managing the employee login/logout lifecycle (JWT in request body) and the post-login **permission wizard**
+- Managing the employee login lifecycle (JWT in request body) and the post-login **permission wizard**
 - Keeping the app alive (auto-start + background-guard watchdog), single-instance signalling, tray, headless systemd mode
 
 **Does NOT own:**
@@ -205,7 +212,7 @@ client/
 │
 ├── ViewModels/                     # ⭐ One VM per concern — see UI_ARCHITECTURE.md
 │   ├── ViewModelBase.cs            # ObservableObject base
-│   ├── MainViewModel.cs            # Shell VM (~1150 lines): splash sequence, login/logout, permission
+│   ├── MainViewModel.cs            # Shell VM (~1150 lines): splash sequence, login, permission
 │   │                               #   wizard, AppPage router state, branding passthrough to AppInfo
 │   ├── DashboardViewModel.cs       # Page 4 — identity + status tiles, pipeline health, attached devices
 │   ├── SystemSpecsViewModel.cs     # Page 5 — machine/compute/network, storage + peripherals
@@ -340,11 +347,11 @@ log banners).
 
 ## 7. Login & Permission Wizard
 
-### Login / logout
+### Login
 
 - **Login:** `POST {serverUrl}/api/v1/auth/employee-login` with `{employeeId, secretKey}` → `{employee, token}`. Persists to `employee_info` (SQLite) and feeds `LogCollectorService.SetEmployeeInfo(employeeId, name, token)` + `StartTracking()` (which also records a `login` session event and arms Windows anti-sleep).
 - **Session restore:** on launch, `MainViewModel.InitializeAsync` reads `employee_info`; if present it re-authenticates the collector, resets stored `perm_*` statuses, and re-evaluates the permission steps from scratch.
-- **Logout:** `POST /api/v1/auth/employee-disconnect` (best effort), `StopTracking()` (records `logout` event), clears `perm_*`, wipes `employee_info`.
+- **No logout:** the employee-disconnect flow (button, `LogoutCommand`, `StopTracking()`, `POST /api/v1/auth/employee-disconnect`) was **removed** 2026-08-10. Once logged in the client tracks until the process stops.
 
 ### Permission wizard (`GetNextPermissionStep`)
 
@@ -375,7 +382,7 @@ top-level states from `MainViewModel`, in this order:
 once the wizard reports nothing left to grant.
 
 The shell is a 246px nav rail (brand mark, three nav buttons, an always-on **Browser Journey** info card
-gated on `IsBrowserTracking`, signed-in employee, Disconnect, version) plus a content column with a top
+gated on `IsBrowserTracking`, signed-in employee, version) plus a content column with a top
 bar (`ActivePageTitle` / `ActivePageSubtitle`, environment badge, refresh) hosting pages 4–6. Navigation
 is `NavigateCommand` with a string parameter (`dashboard` / `specs` / `apps`) which sets `ActivePage` and
 awaits `RefreshActivePageAsync()`.
@@ -463,7 +470,7 @@ Public IP from `api.ipify.org` → `icanhazip.com` → `checkip.amazonaws.com` (
 
 ### Session events
 
-`login` / `logout` rows with OS username + timestamp.
+`login` rows with OS username + timestamp.
 
 ### Permission status — every 10 cycles
 
@@ -569,7 +576,6 @@ Watchers (IObservableEventSource)          EventCoordinator                 Jour
 | `POST /api/v1/app-sessions/sync` | installedAppId, installedPackageId, processId, parentProcessId, groupedBy, cgroupScope, contextLabel |
 | `POST /api/v1/app-items/sync` | parentItemId, processId, url/domain, 9 journey fields, windowId/tabId, metadataJson |
 | `POST /api/v1/auth/employee-login` | employeeId + secretKey → {employee, token} |
-| `POST /api/v1/auth/employee-disconnect` | employeeId + token |
 
 > `activity-logs/sync` and `shell-commands/sync` are **removed** — no `activity_logs`/`shell_commands` tables or calls.
 
@@ -675,7 +681,7 @@ Two consequences worth knowing before you touch either file:
 | **No retry backoff** | 🟢 Low | Sync retries every ~5 min regardless of failure count. |
 | **Single employee per device** | 🟢 Low | One login at a time; logging in as another employee replaces it. |
 | **Browser journey = active tab only** | 🟢 Low | Background tabs are not captured (a11y exposes the active tab; history fallback is title-match). Per-window journey is exact; per-tab parallelism is not. |
-| **Tray has no Quit** | 🟢 Low | Tray menu = Show / Hide only; window close hides to tray. Full exit via process stop (systemd) or `Disconnect` in-app. |
+| **Tray has no Quit** | 🟢 Low | Tray menu = Show / Hide only; window close hides to tray. Full exit via process stop (systemd); there is no in-app disconnect/logout. |
 
 ---
 

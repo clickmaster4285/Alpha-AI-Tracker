@@ -53,7 +53,6 @@ func Setup(
 	a := e.Group("/api/v1/auth")
 	a.POST("/login", authHandler.Login)
 	a.POST("/employee-login", authHandler.EmployeeLogin)
-	a.POST("/employee-disconnect", authHandler.EmployeeDisconnect)
 
 	// Phase 1 sync endpoints — authenticated by employee token in body (not cookie)
 	e.POST("/api/v1/device-hardware/sync", newSchemaHandler.SyncDeviceHardware)

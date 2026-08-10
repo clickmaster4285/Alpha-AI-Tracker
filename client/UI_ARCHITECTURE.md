@@ -22,7 +22,7 @@ MainWindow.axaml (236 lines — a ROUTER, not a screen)
         ├─ RequiresPermissionAction → pages:PermissionSetupPage  (page 3)
         └─ IsProfile → ColumnDefinitions="246,*"
               ├─ col 0  Nav rail (dark navy) — brand tile, 3 nav buttons,
-              │         browser-journeys note, employee card, Disconnect, version
+              │         browser-journeys note, employee card, version
               └─ col 1  RowDefinitions="Auto,*"
                     ├─ Top bar: ActivePageTitle / ActivePageSubtitle / env badge / refresh
                     └─ Page host — three UserControls stacked, one visible:
@@ -31,7 +31,7 @@ MainWindow.axaml (236 lines — a ROUTER, not a screen)
                          InstalledAppsPage  (page 6)  DataContext = InstalledApps
 ```
 
-Four top-level states are **mutually exclusive booleans**, not a navigation stack — there is no back button and no history, because the wizard is a one-way gate: splash → login → permissions → shell. Once `IsProfile` is true the user never returns to pages 1–3 except by `LogoutCommand`.
+Four top-level states are **mutually exclusive booleans**, not a navigation stack — there is no back button and no history, because the wizard is a one-way gate: splash → login → permissions → shell. Once `IsProfile` is true the user never returns to pages 1–3 — the Disconnect button/`LogoutCommand` was removed 2026-08-10, so the shell has no in-app logout (tracking runs until the process stops).
 
 ---
 

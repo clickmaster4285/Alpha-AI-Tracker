@@ -148,7 +148,7 @@
                             </Border>
                         </StackPanel>
 
-                        <!-- Signed-in employee + disconnect -->
+                        <!-- Signed-in employee -->
                         <StackPanel Grid.Row="3" Margin="12,0,12,16" Spacing="10">
                             <Rectangle Height="1" Fill="{StaticResource RailBorderBrush}"
                                        Margin="2,0,2,6"/>
@@ -171,17 +171,6 @@
                                                TextTrimming="CharacterEllipsis" MaxWidth="150"/>
                                 </StackPanel>
                             </StackPanel>
-
-                            <Button Command="{Binding LogoutCommand}"
-                                    Content="Disconnect"
-                                    HorizontalAlignment="Stretch"
-                                    HorizontalContentAlignment="Center"
-                                    Background="{StaticResource TransparentBrush}"
-                                    Foreground="#F87171"
-                                    BorderBrush="{StaticResource RailBorderBrush}"
-                                    BorderThickness="1"
-                                    CornerRadius="{StaticResource RadiusMd}"
-                                    Padding="10,8" FontSize="12" Cursor="Hand"/>
 
                             <TextBlock Text="{Binding AppVersionDisplay}"
                                        Foreground="{StaticResource RailFgBrush}" FontSize="10"

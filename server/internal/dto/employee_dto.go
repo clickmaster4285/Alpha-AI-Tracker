@@ -33,12 +33,6 @@ type EmployeeLoginRequest struct {
 	SecretKey  string `json:"secretKey"`
 }
 
-// EmployeeDisconnectRequest is the payload for employee disconnect.
-type EmployeeDisconnectRequest struct {
-	EmployeeID string `json:"employeeId"`
-	Token      string `json:"token,omitempty"`
-}
-
 // GenerateSecretResponse is returned when generating a login secret.
 type GenerateSecretResponse struct {
 	Secret    string `json:"secret"`

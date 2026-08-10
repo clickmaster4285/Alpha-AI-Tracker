@@ -3,6 +3,13 @@
 > **Last audited:** 2026-08-10
 > **Changelog:**
 >
+> - 2026-08-10: **Employee disconnect removed.** The **Disconnect** button was removed from the
+>   client nav rail, along with the entire employee-disconnect flow: `LogoutCommand`/
+>   `LogoutAsync` and `LogCollectorService.StopTracking()` are gone from the client, and the server
+>   endpoint `POST /api/v1/auth/employee-disconnect` (handler + `EmployeeDisconnectRequest` DTO +
+>   route) was deleted. The web admin `POST /api/v1/auth/logout` (httpOnly-cookie flow) is
+>   unrelated and unchanged. Employees can no longer disconnect themselves; the client tracks until
+>   the process stops. Contract table updated below.
 > - 2026-08-10: **Client GUI rebuilt as six pages + runtime branding pipeline.** The Avalonia UI was a
 >   single `MainWindow.axaml` monolith (login → wizard → profile, dark theme). It is now a **router**
 >   plus six `UserControl` pages under `client/Views/Pages/` — Splash, Login, PermissionSetup, Dashboard,
@@ -419,7 +426,6 @@ flowchart LR
 | Direction                                  | Protocol                                      | Auth Method                           | Format                                                   |
 | ------------------------------------------ | --------------------------------------------- | ------------------------------------- | -------------------------------------------------------- |
 | Employee login (client → server)          | REST POST`/api/v1/auth/employee-login`      | emp_id + secret_key (Redis-validated) | JSON`{employeeId, secretKey}` → `{employee, token}` |
-| Employee disconnect                        | REST POST`/api/v1/auth/employee-disconnect` | JWT token in body                     | JSON`{employeeId, token}`                              |
 | Device hardware sync (client → server)    | REST POST`/api/v1/device-hardware/sync`     | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
 | Installed apps sync (client → server)     | REST POST`/api/v1/installed-apps/sync`      | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
 | Installed packages sync (client → server) | REST POST`/api/v1/installed-packages/sync`  | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
@@ -497,7 +503,7 @@ flowchart LR
 - **Headless subprocess filtering (cross-platform)**: Chromium/Electron `--type=` flags detected via cmdline on Windows (PowerShell), macOS (`ps`), and Linux (`/proc/pid/cmdline`). Centralized `ChromiumSubprocessFlags` in `AppProcessClassifier`
 - Models: DeviceHardwareInfo (with mac/gpu/storage), InstalledApplication (with metadata + binary_name), NetworkInfo (with public IP), SessionEvent, AppSession (with FK to installed_apps/packages), AppItem (self-referencing via parent_item_id)
 - Encrypted config system (AES-256-GCM, transport→machine key migration)
-- Login/logout flow with server
+- Login flow with server
 - Batched sync engine (every ~5 min, FK-ordered, 500-row batches, stop-on-failure per table)
 - **Device hardware**: now collects mac_address, storage_devices, gpu_model from OS
 - **Installed apps**: scans actual OS databases (registry, .desktop files, .app bundles) — GUI apps only, not running processes; binary_name mapping extracted from Exec= line

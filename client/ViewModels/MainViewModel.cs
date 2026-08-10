@@ -803,42 +803,6 @@ public partial class MainViewModel : ViewModelBase
         }
     }
 
-    [RelayCommand]
-    private async Task LogoutAsync()
-    {
-        try
-        {
-            var info = await _store.GetEmployeeInfoAsync(CancellationToken.None);
-            if (info != null)
-            {
-                var serverUrl = _config.ServerUrl ?? "http://localhost:8080";
-                var payload = new { employeeId = info.EmployeeId, token = info.Token ?? "" };
-                var json = JsonSerializer.Serialize(payload);
-                var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
-                await _httpClient.PostAsync($"{serverUrl}/api/v1/auth/employee-disconnect", content);
-            }
-        }
-        catch { }
-
-        _logCollector.StopTracking();
-
-        // Clear permission progress
-        await _store.SetStatusAsync("perm_auto_start", "false", CancellationToken.None);
-        await _store.SetStatusAsync("perm_background", "false", CancellationToken.None);
-        await _store.SetStatusAsync("perm_other", "false", CancellationToken.None);
-
-        await _store.ClearEmployeeInfoAsync(CancellationToken.None);
-        IsLoggedIn = false;
-        CurrentPermissionStep = PermissionStep.None;
-        EmployeeName = string.Empty;
-        EmployeeDepartment = string.Empty;
-        EmployeeRole = string.Empty;
-        EmployeeAvatar = string.Empty;
-        EmployeeAvatarColor = string.Empty;
-        StatusMessage = string.Empty;
-        StepStatusText = string.Empty;
-    }
-
     // ─── Permission Step Execution ───
 
     [RelayCommand]
