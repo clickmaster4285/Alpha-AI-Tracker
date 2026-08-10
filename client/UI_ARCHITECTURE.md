@@ -116,7 +116,7 @@ Step panels are mutually exclusive, driven by `MainViewModel.CurrentPermissionSt
 
 Two decisions worth keeping:
 - **Sync health is tolerance-based, not binary.** `IsSyncHealthy` allows three missed collect cycles (`max(120s, CollectIntervalSec * 3)`) before it reports "Pipeline stalled" — a single slow cycle must not flash a red state at the user.
-- **The app-count tile does a live scan**, the same call the inventory page makes, so the tile and page 6 can never disagree. It runs inside `Task.Run` and swallows to `0` on failure.
+- **The app-count tile does a live scan through the same joint classifier the inventory page and collector use**, so the tile and page 6 can never disagree (and neither shows the raw un-deduped detector count — on Windows the same app is discovered up to ~4× across Start Menu + registry sources). It runs inside `Task.Run` and swallows to `0` on failure.
 
 The `Or` / `Join` / `FormatMb` / `FormatDuration` / `FormatAgo` helpers are `internal static` here and reused by `SystemSpecsViewModel` and `InstalledAppsViewModel` — one em-dash placeholder convention (`"—"`) across all three pages.
 
@@ -126,7 +126,7 @@ The `Or` / `Join` / `FormatMb` / `FormatDuration` / `FormatAgo` helpers are `int
 
 ### Page 6 — Installed Applications
 
-`InstalledAppsViewModel` (204 lines) scans through the same `IInstalledAppDetector` / `IPackageDetector` the collectors use, so the list matches what is reported upstream.
+`InstalledAppsViewModel` (204 lines) scans through the same `IInstalledAppDetector` / `IPackageDetector` the collectors use and then runs the same **`SoftwareClassifier.Classify`** dedup/classification pass the collector runs before storing — so the list matches exactly what is reported upstream (the raw detector output is un-deduped: Windows discovers each app up to ~4× via user/common Start Menu + HKLM/WOW6432Node/HKCU registry, which inflated the page to ~4× the real 92-app inventory before the classifier was wired in).
 
 - **`InventoryRow` projection.** Applications and packages have different shapes on disk but the same shape on screen, so both are projected onto one record and a single virtualised template renders either tab.
 - **`SearchKey` is precomputed and lowercased at projection time**, so filtering thousands of rows stays a plain `Contains` with no per-keystroke allocation.

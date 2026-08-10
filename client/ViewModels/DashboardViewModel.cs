@@ -19,17 +19,20 @@ public partial class DashboardViewModel : ViewModelBase
     private readonly ILogStore _store;
     private readonly AppConfig _config;
     private readonly IInstalledAppDetector _appDetector;
+    private readonly IPackageDetector _packageDetector;
     private readonly LogCollectorService _logCollector;
 
     public DashboardViewModel(
         ILogStore store,
         AppConfig config,
         IInstalledAppDetector appDetector,
+        IPackageDetector packageDetector,
         LogCollectorService logCollector)
     {
         _store = store;
         _config = config;
         _appDetector = appDetector;
+        _packageDetector = packageDetector;
         _logCollector = logCollector;
     }
 
@@ -66,7 +69,6 @@ public partial class DashboardViewModel : ViewModelBase
     [ObservableProperty] private string _privateIp = "—";
     [ObservableProperty] private string _publicIp = "—";
     [ObservableProperty] private string _networkInterface = "—";
-    [ObservableProperty] private string _serverEndpoint = "—";
 
     [ObservableProperty] private bool _isBusy;
     [ObservableProperty] private string _lastRefreshed = string.Empty;
@@ -123,8 +125,6 @@ public partial class DashboardViewModel : ViewModelBase
                 SyncStateLabel = "Awaiting first cycle";
             }
 
-            ServerEndpoint = string.IsNullOrWhiteSpace(_config.ServerUrl) ? "Not configured" : _config.ServerUrl!;
-
             var hardware = await _store.GetLastDeviceHardwareInfoAsync(ct);
             if (hardware != null)
             {
@@ -153,11 +153,19 @@ public partial class DashboardViewModel : ViewModelBase
 
             StorageDeviceCount = (await _store.GetLatestStorageDevicesAsync(ct)).Count;
 
-            // Live OS scan — the same source the inventory page uses, so the tile
-            // count and the Installed Applications page never disagree.
+            // Live OS scan through the SAME joint classifier the collector + inventory
+            // page use, so the tile count never disagrees with the Installed Applications
+            // page or with what gets synced upstream. (The raw detector output is
+            // un-deduped — Windows merges Start Menu + registry sources, inflating the
+            // count ~4x — the classifier collapses it to the real inventory.)
             InstalledAppCount = await Task.Run(() =>
             {
-                try { return _appDetector.GetAllInstalledApplications().Count; }
+                try
+                {
+                    var apps = _appDetector.GetAllInstalledApplications();
+                    var packages = _packageDetector.GetAllInstalledPackages();
+                    return SoftwareClassifier.Classify(apps, packages).apps.Count;
+                }
                 catch { return 0; }
             }, ct);
 

@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using client.Core;
 using client.Core.Abstractions;
 using client.Core.Models;
 
@@ -111,13 +112,20 @@ public partial class InstalledAppsViewModel : ViewModelBase
                 return (a, p);
             }, ct);
 
-            _allApps = apps
+            // Run the SAME joint classification the collector uses before the data is
+            // stored/synced. The raw detector output is un-deduped — on Windows the same
+            // app is discovered up to ~4 times (user + common Start Menu, HKLM +
+            // WOW6432Node + HKCU registry), so without this the page would show ~4x the
+            // real inventory (376 rows vs the 92 unique apps actually in SQLite).
+            var (classifiedApps, classifiedPackages) = SoftwareClassifier.Classify(apps, packages);
+
+            _allApps = classifiedApps
                 .Where(a => !string.IsNullOrWhiteSpace(a.AppName))
                 .OrderBy(a => a.AppName, StringComparer.OrdinalIgnoreCase)
                 .Select(ToRow)
                 .ToList();
 
-            _allPackages = packages
+            _allPackages = classifiedPackages
                 .Where(p => !string.IsNullOrWhiteSpace(p.PackageName))
                 .OrderBy(p => p.PackageName, StringComparer.OrdinalIgnoreCase)
                 .Select(ToRow)

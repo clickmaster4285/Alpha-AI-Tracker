@@ -161,18 +161,13 @@
                             <TextBlock Text="{Binding SyncStateLabel}"/>
                         </Border>
 
-                        <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto" >
+                        <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto">
                             <TextBlock Grid.Row="0" Grid.Column="0" Text="Last heartbeat" Classes="label"/>
                             <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding LastHeartbeat}"
                                        Classes="value" HorizontalAlignment="Right"/>
 
                             <Rectangle Grid.Row="1" Grid.ColumnSpan="2" Height="1"
                                        Fill="{StaticResource BorderBrush}" Margin="0,11"/>
-
-                            <TextBlock Grid.Row="2" Grid.Column="0" Text="Server" Classes="label"/>
-                            <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding ServerEndpoint}"
-                                       Classes="value mono" FontSize="12"
-                                       HorizontalAlignment="Right" MaxWidth="230"/>
                         </Grid>
                     </StackPanel>
                 </Border>
