@@ -72,6 +72,12 @@ public interface ILogStore
     /// <summary>Get all installed package names for fast in-memory filtering</summary>
     Task<HashSet<string>> GetAllInstalledPackageNamesAsync(CancellationToken ct);
 
+    /// <summary>ALL installed_applications rows (the full inventory, for the Installed Applications page).</summary>
+    Task<IReadOnlyList<InstalledApplication>> GetAllInstalledAppsAsync(CancellationToken ct);
+
+    /// <summary>ALL installed_packages rows (the full inventory, for the Installed Applications page).</summary>
+    Task<IReadOnlyList<InstalledPackage>> GetAllInstalledPackagesAsync(CancellationToken ct);
+
     /// <summary>Store a single auto-detected installed app (called when a running process is not yet in the DB).
     /// Returns the actual stored ID (may differ from entry.Id if app_name already existed via ON CONFLICT).</summary>
     Task<string> StoreInstalledAppAsync(InstalledApplication entry, CancellationToken ct);

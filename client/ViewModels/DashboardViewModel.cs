@@ -18,21 +18,15 @@ public partial class DashboardViewModel : ViewModelBase
 {
     private readonly ILogStore _store;
     private readonly AppConfig _config;
-    private readonly IInstalledAppDetector _appDetector;
-    private readonly IPackageDetector _packageDetector;
     private readonly LogCollectorService _logCollector;
 
     public DashboardViewModel(
         ILogStore store,
         AppConfig config,
-        IInstalledAppDetector appDetector,
-        IPackageDetector packageDetector,
         LogCollectorService logCollector)
     {
         _store = store;
         _config = config;
-        _appDetector = appDetector;
-        _packageDetector = packageDetector;
         _logCollector = logCollector;
     }
 
@@ -153,21 +147,11 @@ public partial class DashboardViewModel : ViewModelBase
 
             StorageDeviceCount = (await _store.GetLatestStorageDevicesAsync(ct)).Count;
 
-            // Live OS scan through the SAME joint classifier the collector + inventory
-            // page use, so the tile count never disagrees with the Installed Applications
-            // page or with what gets synced upstream. (The raw detector output is
-            // un-deduped — Windows merges Start Menu + registry sources, inflating the
-            // count ~4x — the classifier collapses it to the real inventory.)
-            InstalledAppCount = await Task.Run(() =>
-            {
-                try
-                {
-                    var apps = _appDetector.GetAllInstalledApplications();
-                    var packages = _packageDetector.GetAllInstalledPackages();
-                    return SoftwareClassifier.Classify(apps, packages).apps.Count;
-                }
-                catch { return 0; }
-            }, ct);
+            // Read the stored inventory count straight from SQLite — the exact same
+            // table the Installed Applications page renders (same empty-name filter),
+            // so the tile and the page always agree with the DB and upstream.
+            InstalledAppCount = (await _store.GetAllInstalledAppsAsync(ct))
+                .Count(a => !string.IsNullOrWhiteSpace(a.AppName));
 
             LastRefreshed = $"Updated {DateTime.Now:HH:mm:ss}";
         }

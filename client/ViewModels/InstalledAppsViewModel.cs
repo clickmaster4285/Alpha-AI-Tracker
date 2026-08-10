@@ -1,7 +1,6 @@
 using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using client.Core;
 using client.Core.Abstractions;
 using client.Core.Models;
 
@@ -28,15 +27,14 @@ public sealed class InventoryRow
 }
 
 /// <summary>
-/// Page 6 — Installed Applications. Scans the OS live through the same detectors the
-/// collectors use, so the list matches exactly what gets reported upstream. The scan is
-/// slow (registry / .desktop / package-manager walks) so it runs off the UI thread and
-/// the results are cached until the user explicitly refreshes.
+/// Page 6 — Installed Applications. Renders the EXACT stored inventory from SQLite
+/// (installed_applications / installed_packages), so the page always matches the DB
+/// and what gets synced upstream. The collector refreshes these tables on its periodic
+/// inventory scan; this page never scans the OS itself.
 /// </summary>
 public partial class InstalledAppsViewModel : ViewModelBase
 {
-    private readonly IInstalledAppDetector _appDetector;
-    private readonly IPackageDetector _packageDetector;
+    private readonly ILogStore _store;
 
     private IReadOnlyList<InventoryRow> _allApps = Array.Empty<InventoryRow>();
     private IReadOnlyList<InventoryRow> _allPackages = Array.Empty<InventoryRow>();
@@ -48,10 +46,9 @@ public partial class InstalledAppsViewModel : ViewModelBase
         "#2563EB", "#0EA5E9", "#8B5CF6", "#10B981", "#F59E0B", "#EC4899", "#14B8A6", "#6366F1"
     };
 
-    public InstalledAppsViewModel(IInstalledAppDetector appDetector, IPackageDetector packageDetector)
+    public InstalledAppsViewModel(ILogStore store)
     {
-        _appDetector = appDetector;
-        _packageDetector = packageDetector;
+        _store = store;
     }
 
     public ObservableCollection<InventoryRow> Items { get; } = new();
@@ -99,33 +96,19 @@ public partial class InstalledAppsViewModel : ViewModelBase
         IsBusy = true;
         try
         {
-            // Both detector calls hit the filesystem / registry / package managers.
-            // Keep them off the UI thread or the window freezes for seconds.
-            var (apps, packages) = await Task.Run(() =>
-            {
-                IReadOnlyList<InstalledApplication> a;
-                IReadOnlyList<InstalledPackage> p;
-                try { a = _appDetector.GetAllInstalledApplications(); }
-                catch { a = Array.Empty<InstalledApplication>(); }
-                try { p = _packageDetector.GetAllInstalledPackages(); }
-                catch { p = Array.Empty<InstalledPackage>(); }
-                return (a, p);
-            }, ct);
+            // Read the stored inventory straight from SQLite — the same tables the
+            // collector writes on its periodic scan and the same rows that get synced
+            // upstream. Local reads are fast, so no Task.Run offload is needed.
+            var apps = await _store.GetAllInstalledAppsAsync(ct);
+            var packages = await _store.GetAllInstalledPackagesAsync(ct);
 
-            // Run the SAME joint classification the collector uses before the data is
-            // stored/synced. The raw detector output is un-deduped — on Windows the same
-            // app is discovered up to ~4 times (user + common Start Menu, HKLM +
-            // WOW6432Node + HKCU registry), so without this the page would show ~4x the
-            // real inventory (376 rows vs the 92 unique apps actually in SQLite).
-            var (classifiedApps, classifiedPackages) = SoftwareClassifier.Classify(apps, packages);
-
-            _allApps = classifiedApps
+            _allApps = apps
                 .Where(a => !string.IsNullOrWhiteSpace(a.AppName))
                 .OrderBy(a => a.AppName, StringComparer.OrdinalIgnoreCase)
                 .Select(ToRow)
                 .ToList();
 
-            _allPackages = classifiedPackages
+            _allPackages = packages
                 .Where(p => !string.IsNullOrWhiteSpace(p.PackageName))
                 .OrderBy(p => p.PackageName, StringComparer.OrdinalIgnoreCase)
                 .Select(ToRow)
@@ -135,7 +118,7 @@ public partial class InstalledAppsViewModel : ViewModelBase
             PackageCount = _allPackages.Count;
             ApplyFilter();
 
-            LastRefreshed = $"Scanned {DateTime.Now:HH:mm:ss}";
+            LastRefreshed = $"Updated {DateTime.Now:HH:mm:ss}";
         }
         catch (OperationCanceledException)
         {

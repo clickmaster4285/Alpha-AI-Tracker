@@ -286,6 +286,26 @@ public class SqliteLogStore : ILogStore, IDisposable
         }
     }
 
+    /// <summary>Every installed_applications row — the full inventory the Installed Applications page renders.</summary>
+    public async Task<IReadOnlyList<InstalledApplication>> GetAllInstalledAppsAsync(CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<InstalledApplication>();
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT * FROM installed_applications ORDER BY app_name COLLATE NOCASE ASC";
+            var results = new List<InstalledApplication>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct)) results.Add(MapInstalledAppReader(reader));
+            return results;
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
     // ────────────────────────────────────────
     // Installed Packages
     // ────────────────────────────────────────
@@ -363,6 +383,26 @@ public class SqliteLogStore : ILogStore, IDisposable
             var p = cmd.Parameters.Add("$id", SqliteType.Text);
             foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
             await tx.CommitAsync(ct);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    /// <summary>Every installed_packages row — the full inventory the Installed Applications page renders.</summary>
+    public async Task<IReadOnlyList<InstalledPackage>> GetAllInstalledPackagesAsync(CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<InstalledPackage>();
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT * FROM installed_packages ORDER BY package_name COLLATE NOCASE ASC";
+            var results = new List<InstalledPackage>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct)) results.Add(MapInstalledPackageReader(reader));
+            return results;
         }
         finally
         {
