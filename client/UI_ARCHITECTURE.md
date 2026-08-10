@@ -22,7 +22,7 @@ MainWindow.axaml (236 lines — a ROUTER, not a screen)
         ├─ RequiresPermissionAction → pages:PermissionSetupPage  (page 3)
         └─ IsProfile → ColumnDefinitions="246,*"
               ├─ col 0  Nav rail (dark navy) — brand tile, 3 nav buttons,
-              │         browser-journeys note, employee card, version
+              │         employee card, version
               └─ col 1  RowDefinitions="Auto,*"
                     ├─ Top bar: ActivePageTitle / ActivePageSubtitle / env badge / refresh
                     └─ Page host — three UserControls stacked, one visible:

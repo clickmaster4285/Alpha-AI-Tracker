@@ -125,27 +125,6 @@
                                 </StackPanel>
                             </Button>
 
-                            <!-- Browser journeys need no setup; say so where the user
-                                 would otherwise go looking for a switch. -->
-                            <Border Background="{StaticResource RailAltBrush}"
-                                    CornerRadius="{StaticResource RadiusMd}"
-                                    Padding="13,11" Margin="0,22,0,0"
-                                    IsVisible="{Binding IsBrowserTracking}">
-                                <StackPanel Spacing="6">
-                                    <StackPanel Orientation="Horizontal" Spacing="7">
-                                        <Ellipse Classes="pulse" Width="7" Height="7"
-                                                 Fill="{StaticResource SuccessBrush}"
-                                                 VerticalAlignment="Center"/>
-                                        <TextBlock Text="BROWSER JOURNEYS" FontSize="9"
-                                                   FontWeight="SemiBold" LetterSpacing="1.1"
-                                                   Foreground="{StaticResource RailFgActiveBrush}"
-                                                   VerticalAlignment="Center"/>
-                                    </StackPanel>
-                                    <TextBlock Text="Captured automatically through the OS accessibility tree — no extension, no debugger port."
-                                               FontSize="10.5" TextWrapping="Wrap"
-                                               Foreground="{StaticResource RailFgBrush}"/>
-                                </StackPanel>
-                            </Border>
                         </StackPanel>
 
                         <!-- Signed-in employee -->

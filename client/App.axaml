@@ -178,6 +178,19 @@
             <Setter Property="Stroke" Value="{StaticResource RailFgActiveBrush}"/>
         </Style>
 
+        <!-- Nav labels follow the same ramp as the item's state. Foreground is
+             inherited from the button, but pinning it here guarantees the label
+             stays white on hover (and matches the icon stroke on every state). -->
+        <Style Selector="Button.nav TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource RailFgBrush}"/>
+        </Style>
+        <Style Selector="Button.nav:pointerover TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource RailFgActiveBrush}"/>
+        </Style>
+        <Style Selector="Button.nav.active TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource RailFgActiveBrush}"/>
+        </Style>
+
         <!-- Segmented tab button (Applications / Packages switcher) -->
         <Style Selector="Button.tab">
             <Setter Property="Background" Value="{StaticResource TransparentBrush}"/>

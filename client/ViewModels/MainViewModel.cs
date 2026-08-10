@@ -216,20 +216,6 @@ public partial class MainViewModel : ViewModelBase
     public bool IsProfile => IsLoggedIn && CurrentPermissionStep == PermissionStep.None;
     public bool RequiresPermissionAction => IsLoggedIn && CurrentPermissionStep != PermissionStep.None;
 
-    private bool _isBrowserTracking;
-    public bool IsBrowserTracking
-    {
-        get => _isBrowserTracking;
-        set => SetProperty(ref _isBrowserTracking, value);
-    }
-
-    private string _browserTrackingStatus = string.Empty;
-    public string BrowserTrackingStatus
-    {
-        get => _browserTrackingStatus;
-        set => SetProperty(ref _browserTrackingStatus, value);
-    }
-
     public string StepTitle => CurrentPermissionStep switch
     {
         PermissionStep.AutoStart => "Enable Auto-Start",
@@ -413,9 +399,6 @@ public partial class MainViewModel : ViewModelBase
 
             // Forced auto-start — always ensure it's configured
             _autoStart.EnableAutoStartForced();
-
-            IsBrowserTracking = true;
-            BrowserTrackingStatus = "Active — browser journeys are captured automatically via the OS accessibility tree (no debugger, no extension).";
 
             await EnterShellAsync();
         }

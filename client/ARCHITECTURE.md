@@ -381,11 +381,10 @@ top-level states from `MainViewModel`, in this order:
 `IsProfile => IsLoggedIn && CurrentPermissionStep == PermissionStep.None`, so the shell only appears
 once the wizard reports nothing left to grant.
 
-The shell is a 246px nav rail (brand mark, three nav buttons, an always-on **Browser Journey** info card
-gated on `IsBrowserTracking`, signed-in employee, version) plus a content column with a top
-bar (`ActivePageTitle` / `ActivePageSubtitle`, environment badge, refresh) hosting pages 4–6. Navigation
-is `NavigateCommand` with a string parameter (`dashboard` / `specs` / `apps`) which sets `ActivePage` and
-awaits `RefreshActivePageAsync()`.
+The shell is a 246px nav rail (brand mark, three nav buttons, signed-in employee, version) plus a
+content column with a top bar (`ActivePageTitle` / `ActivePageSubtitle`, environment badge, refresh)
+hosting pages 4–6. Navigation is `NavigateCommand` with a string parameter (`dashboard` / `specs` /
+`apps`) which sets `ActivePage` and awaits `RefreshActivePageAsync()`.
 
 Theming is the **light** token dictionary in `Styles/AppTheme.xaml` plus the style classes in
 `App.axaml`. Window close hides to tray (`ShutdownMode.OnExplicitShutdown`). Full detail:
