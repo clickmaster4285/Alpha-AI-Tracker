@@ -21,6 +21,15 @@ public sealed class InventoryRow
     public string Detail { get; init; } = string.Empty;
     /// <summary>Short tag shown in the trailing chip — "apt", "winget", "GUI"…</summary>
     public string Source { get; init; } = string.Empty;
+    /// <summary>Install date-time of this cycle — "yyyy-MM-dd HH:mm" local, or "Unknown" when
+    /// the OS did not report it (pre-existing software on Linux; only new installs get stamped).</summary>
+    public string InstalledDate { get; init; } = "Unknown";
+    /// <summary>When this cycle ended ("—" while installed). Closed rows are history.</summary>
+    public string UninstalledDate { get; init; } = "—";
+    /// <summary>False = closed install cycle (uninstalled history row); the row is never deleted.</summary>
+    public bool IsInstalled { get; init; } = true;
+    /// <summary>Row opacity: 1.0 while installed, 0.5 for closed history rows.</summary>
+    public double RowOpacity => IsInstalled ? 1.0 : 0.5;
     public string Initials { get; init; } = "?";
     public string AccentColor { get; init; } = "#2563EB";
     /// <summary>Lowercased haystack precomputed once so filtering stays O(n) with no allocations.</summary>
@@ -160,8 +169,10 @@ public partial class InstalledAppsViewModel : ViewModelBase
             .Select(ToRow)
             .ToList();
 
-        AppCount = _allApps.Count;
-        PackageCount = _allPackages.Count;
+        // Badges count CURRENTLY-INSTALLED cycles (open rows) — closed history cycles are
+        // still listed in the table but are not installed software.
+        AppCount = _allApps.Count(r => r.IsInstalled);
+        PackageCount = _allPackages.Count(r => r.IsInstalled);
         ApplyFilter();
 
         LastRefreshed = $"Updated {DateTime.Now:HH:mm:ss}";
@@ -191,6 +202,9 @@ public partial class InstalledAppsViewModel : ViewModelBase
             Publisher = DashboardViewModel.Or(a.Publisher),
             Detail = detail,
             Source = a.IsBrowser ? "browser" : "app",
+            InstalledDate = a.InstallDate.HasValue ? FormatDate(a.InstallDate.Value) : "Unknown",
+            UninstalledDate = a.UninstallDate.HasValue ? FormatDate(a.UninstallDate.Value) : "—",
+            IsInstalled = a.IsInstalled,
             Initials = InitialsOf(a.AppName),
             AccentColor = AccentFor(a.AppName),
             SearchKey = $"{a.AppName} {a.BinaryName} {a.Publisher} {a.AppVersion}".ToLowerInvariant()
@@ -209,11 +223,17 @@ public partial class InstalledAppsViewModel : ViewModelBase
             Publisher = DashboardViewModel.Or(p.Publisher),
             Detail = detail,
             Source = string.IsNullOrWhiteSpace(p.SourceManager) ? p.Category : p.SourceManager,
+            InstalledDate = p.InstallDate.HasValue ? FormatDate(p.InstallDate.Value) : "Unknown",
+            UninstalledDate = p.UninstallDate.HasValue ? FormatDate(p.UninstallDate.Value) : "—",
+            IsInstalled = p.IsInstalled,
             Initials = InitialsOf(p.PackageName),
             AccentColor = AccentFor(p.PackageName),
             SearchKey = $"{p.PackageName} {p.Publisher} {p.SourceManager} {p.Category} {p.Version}".ToLowerInvariant()
         };
     }
+
+    /// <summary>Local "yyyy-MM-dd HH:mm" — the shared date format for the inventory table.</summary>
+    private static string FormatDate(DateTime value) => value.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
 
     private static string InitialsOf(string name)
     {

@@ -1595,6 +1595,19 @@ public class LogCollectorService : BackgroundService
             if (packages.Count > 0)
                 await _store.StoreInstalledPackagesAsync(packages, ct);
 
+            // Inventory lifecycle: rows are never deleted — ONE ROW PER INSTALL CYCLE. After
+            // this completed scan, open cycles no longer found close (is_installed=0 +
+            // uninstall_date = the uninstall event). A reinstall opens a NEW cycle row with a
+            // fresh install_date in the Store* pass above, so install→uninstall→reinstall is
+            // visible as separate records. The store skips a pass when its seen-set is empty
+            // and applies a 50% confidence guard, so a failed/partial scan can't falsely
+            // uninstall the whole inventory.
+            await _store.ApplyInventoryLifecycleAsync(
+                apps.Select(a => a.AppName).ToHashSet(StringComparer.OrdinalIgnoreCase),
+                packages.Select(p => $"{p.PackageName}|{p.SourceManager}").ToHashSet(StringComparer.OrdinalIgnoreCase),
+                DateTime.UtcNow,
+                ct);
+
             _logger.LogDebug("Software inventory: {Apps} applications, {Packages} packages (pre-classify: {RawApps}/{RawPkgs})",
                 apps.Count, packages.Count, rawApps.Count, rawPackages.Count);
         }

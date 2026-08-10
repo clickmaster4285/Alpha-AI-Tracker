@@ -148,10 +148,11 @@ public partial class DashboardViewModel : ViewModelBase
             StorageDeviceCount = (await _store.GetLatestStorageDevicesAsync(ct)).Count;
 
             // Read the stored inventory count straight from SQLite — the exact same
-            // table the Installed Applications page renders (same empty-name filter),
-            // so the tile and the page always agree with the DB and upstream.
+            // table the Installed Applications page renders (same empty-name filter), so
+            // the tile and the page always agree with the DB and upstream. Only OPEN
+            // install cycles count as installed software — closed rows are history.
             InstalledAppCount = (await _store.GetAllInstalledAppsAsync(ct))
-                .Count(a => !string.IsNullOrWhiteSpace(a.AppName));
+                .Count(a => a.IsInstalled && !string.IsNullOrWhiteSpace(a.AppName));
 
             LastRefreshed = $"Updated {DateTime.Now:HH:mm:ss}";
         }

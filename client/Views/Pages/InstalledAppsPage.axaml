@@ -114,11 +114,13 @@
             <Grid RowDefinitions="Auto,Auto,*,Auto">
 
                 <!-- Column header -->
-                <Grid Grid.Row="0" Margin="14,13" ColumnDefinitions="Auto,2.2*,1*,1.4*,Auto">
+                <Grid Grid.Row="0" Margin="14,13" ColumnDefinitions="Auto,2.2*,1*,1.4*,1.35*,1.35*,Auto">
                     <TextBlock Grid.Column="1" Text="NAME" Classes="eyebrow" Margin="42,0,0,0"/>
                     <TextBlock Grid.Column="2" Text="VERSION" Classes="eyebrow"/>
                     <TextBlock Grid.Column="3" Text="PUBLISHER" Classes="eyebrow"/>
-                    <TextBlock Grid.Column="4" Text="SOURCE" Classes="eyebrow" MinWidth="82"/>
+                    <TextBlock Grid.Column="4" Text="INSTALLED" Classes="eyebrow"/>
+                    <TextBlock Grid.Column="5" Text="UNINSTALLED" Classes="eyebrow"/>
+                    <TextBlock Grid.Column="6" Text="SOURCE" Classes="eyebrow" MinWidth="82"/>
                 </Grid>
 
                 <Rectangle Grid.Row="1" Height="1" Fill="{StaticResource BorderBrush}"/>
@@ -128,8 +130,10 @@
                     <ListBox.ItemTemplate>
                         <DataTemplate x:DataType="vm:InventoryRow">
                             <Border Classes="row" BorderBrush="{StaticResource BorderBrush}"
-                                    BorderThickness="0,0,0,1">
-                                <Grid ColumnDefinitions="Auto,2.2*,1*,1.4*,Auto">
+                                    BorderThickness="0,0,0,1"
+                                    Opacity="{Binding RowOpacity}" >
+                                <!-- Opacity 1.0 while installed; uninstalled rows render dimmed (history) -->
+                                <Grid ColumnDefinitions="Auto,2.2*,1*,1.4*,1.35*,1.35*,Auto">
                                     <Border Grid.Column="0" Width="30" Height="30" CornerRadius="9"
                                             Background="{Binding AccentColor}">
                                         <TextBlock Text="{Binding Initials}" Foreground="White"
@@ -153,7 +157,16 @@
                                                VerticalAlignment="Center" Margin="0,0,10,0"
                                                TextTrimming="CharacterEllipsis"/>
 
-                                    <Border Grid.Column="4" Classes="badge" VerticalAlignment="Center"
+                                    <TextBlock Grid.Column="4" Text="{Binding InstalledDate}"
+                                               Classes="label mono" FontSize="11"
+                                               VerticalAlignment="Center" Margin="0,0,10,0"
+                                               TextTrimming="CharacterEllipsis"/>
+
+                                    <TextBlock Grid.Column="5" Text="{Binding UninstalledDate}"
+                                               Classes="label mono" FontSize="11"
+                                               VerticalAlignment="Center" Margin="0,0,10,0"/>
+
+                                    <Border Grid.Column="6" Classes="badge" VerticalAlignment="Center"
                                             MinWidth="82">
                                         <TextBlock Text="{Binding Source}" HorizontalAlignment="Center"/>
                                     </Border>

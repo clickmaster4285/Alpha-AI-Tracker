@@ -19,6 +19,22 @@ public interface ILogStore
     Task<IReadOnlyList<InstalledApplication>> GetUnsentInstalledApplicationsAsync(int limit, CancellationToken ct);
     Task MarkInstalledApplicationsSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
 
+    /// <summary>
+    /// Inventory lifecycle reconciliation, called after every completed OS scan (rows are
+    /// NEVER deleted — one row per install cycle). OPEN cycles (uninstall_date IS NULL)
+    /// missing from the scan are CLOSED: is_installed=0 + uninstall_date=now (the uninstall
+    /// event). A reinstall is NOT handled here — the next Store* pass opens a brand-new
+    /// cycle row with the new install_date, so install→uninstall→reinstall yields one record
+    /// per cycle. Each pass is skipped when its seen-set is empty, and a 50% confidence guard
+    /// skips closing when a scan looks partial (failed/partial scan must not uninstall
+    /// everything).
+    /// </summary>
+    Task ApplyInventoryLifecycleAsync(
+        IReadOnlySet<string> seenAppNames,
+        IReadOnlySet<string> seenPackageKeys,
+        DateTime now,
+        CancellationToken ct);
+
     Task StoreInstalledPackagesAsync(IReadOnlyList<InstalledPackage> entries, CancellationToken ct);
     Task<IReadOnlyList<InstalledPackage>> GetUnsentInstalledPackagesAsync(int limit, CancellationToken ct);
     Task MarkInstalledPackagesSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
