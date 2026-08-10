@@ -126,11 +126,11 @@ The `Or` / `Join` / `FormatMb` / `FormatDuration` / `FormatAgo` helpers are `int
 
 ### Page 6 — Installed Applications
 
-`InstalledAppsViewModel` (204 lines) reads the **stored inventory straight from SQLite** via `ILogStore.GetAllInstalledAppsAsync` / `GetAllInstalledPackagesAsync` — the exact tables the collector writes on its periodic scan and the rows that get synced upstream. The page never scans the OS itself, so it always shows exactly what the DB holds (no raw detector drift: Windows would otherwise rediscover each app up to ~4× across Start Menu + registry sources).
+`InstalledAppsViewModel` (204 lines) reads the **stored inventory straight from SQLite** via `ILogStore.GetAllInstalledAppsAsync` / `GetAllInstalledPackagesAsync` — the exact tables the collector writes on its periodic scan and the rows that get synced upstream. Display never scans the OS: the collector owns the OS scan (periodic loop + the page's **Rescan** button, which calls `LogCollectorService.RescanInventoryAsync` and then re-reads the tables). This always shows exactly what the DB holds (no raw detector drift: Windows would otherwise rediscover each app up to ~4× across Start Menu + registry sources).
 
 - **`InventoryRow` projection.** Applications and packages have different shapes on disk but the same shape on screen, so both are projected onto one record and a single virtualised template renders either tab.
 - **`SearchKey` is precomputed and lowercased at projection time**, so filtering thousands of rows stays a plain `Contains` with no per-keystroke allocation.
-- **Scans run in `Task.Run`** (registry / `.desktop` / package-manager walks take seconds) and results are cached in `_allApps` / `_allPackages` until an explicit refresh; tab switching and searching re-filter the cache and never re-scan.
+- **Page loads are pure SQLite reads** — `GetAllInstalledAppsAsync` / `GetAllInstalledPackagesAsync` are fast local queries, no `Task.Run` offload needed. Results are cached in `_allApps` / `_allPackages` until the next refresh; tab switching and searching re-filter the cache and never touch the DB again.
 - **`AccentFor` hashes the name** into a fixed 8-colour palette so a given app keeps its colour between refreshes instead of flickering.
 
 ---

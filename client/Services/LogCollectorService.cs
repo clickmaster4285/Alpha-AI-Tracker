@@ -1564,6 +1564,16 @@ public class LogCollectorService : BackgroundService
     // NOT from running processes. Collects metadata (version, publisher, etc.)
     // ────────────────────────────────────────────
 
+    /// <summary>
+    /// On-demand OS inventory rescan — used by the Installed Applications page's
+    /// Rescan button. Re-runs the SAME joint app+package scan the periodic loop
+    /// uses (deduped + classified via SoftwareClassifier) and stores the result
+    /// into SQLite; the GUI then re-reads the tables. The OS scan stays here in
+    /// the collector — the UI never scans the OS for display.
+    /// </summary>
+    public Task RescanInventoryAsync(CancellationToken ct = default)
+        => CollectInstalledApplicationsAsync(ct);
+
     private async Task CollectInstalledApplicationsAsync(CancellationToken ct)
     {
         try

@@ -263,7 +263,7 @@ Views (XAML)          ──►  ViewModels                ──►  Models (pl
   Pages/PermissionSetupPage  └─ branding → Core/AppInfo     InstalledPackage, NetworkInfo, SqliteLogStore
   Pages/DashboardPage        DashboardViewModel             SessionEvent, StorageDevice,  platform collectors
   Pages/SystemSpecsPage      SystemSpecsViewModel           HardwareDevice                HardwareDeviceWatcherService
-  Pages/InstalledAppsPage    InstalledAppsViewModel                                       InstalledAppDetector / PackageDetector
+  Pages/InstalledAppsPage    InstalledAppsViewModel                                       SqliteLogStore (+ Rescan → LogCollectorService)
 ```
 
 `MainViewModel` owns the three page VMs as properties (`Dashboard`, `SystemSpecs`, `InstalledApps`) and

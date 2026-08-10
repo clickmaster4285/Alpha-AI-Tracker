@@ -6,9 +6,11 @@
              x:DataType="vm:InstalledAppsViewModel">
 
     <!-- ═══ PAGE 6 — Installed Applications ══════════════════════════════
-         Live OS scan through the same detectors the collectors use, so
-         this list matches what is reported upstream. The table is a
-         virtualised ListBox — inventories run to thousands of rows.
+         Renders the stored SQLite inventory (installed_applications /
+         installed_packages) written by the collector — display never scans
+         the OS. Rescan asks the collector to re-scan and re-store, then
+         re-reads the tables. The table is a virtualised ListBox — inventories
+         run to thousands of rows.
     ═══════════════════════════════════════════════════════════════════════ -->
 
     <UserControl.Resources>
@@ -95,7 +97,7 @@
                 <TextBlock Text="{Binding LastRefreshed}" Classes="label" FontSize="11.5"
                            VerticalAlignment="Center"
                            IsVisible="{Binding LastRefreshed, Converter={StaticResource StringNotEmpty}}"/>
-                <Button Classes="secondary" Command="{Binding RefreshCommand}"
+                <Button Classes="secondary" Command="{Binding RescanCommand}"
                         IsEnabled="{Binding !IsBusy}">
                     <StackPanel Orientation="Horizontal" Spacing="7">
                         <Path Data="{StaticResource RefreshGeometry}"
@@ -168,7 +170,7 @@
                           Stroke="{StaticResource PrimaryBrush}" StrokeThickness="2.2"
                           StrokeLineCap="Round" Stretch="Uniform" Width="22" Height="22"
                           HorizontalAlignment="Center" IsVisible="{Binding IsBusy}"/>
-                    <TextBlock Text="Scanning this machine…" Classes="label"
+                    <TextBlock Text="Loading inventory…" Classes="label"
                                HorizontalAlignment="Center" IsVisible="{Binding IsBusy}"/>
                     <TextBlock Text="{Binding EmptyMessage}" Classes="label"
                                TextWrapping="Wrap" MaxWidth="400" TextAlignment="Center"
