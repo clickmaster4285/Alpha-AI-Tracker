@@ -8,22 +8,29 @@
     <DefaultServerUrl Condition="'$(DefaultServerUrl)'==''">http://localhost:8080</DefaultServerUrl>
   </PropertyGroup>
 
-  <!-- Read version from VERSION file (single source of truth) -->
-  <Target Name="ReadVersionFromFile" BeforeTargets="BeforeBuild">
-    <ReadLinesFromFile File="$(MSBuildProjectDirectory)/VERSION">
-      <Output TaskParameter="Lines" PropertyName="VersionFromFile" />
-    </ReadLinesFromFile>
-    <PropertyGroup>
-      <Version>$(VersionFromFile)</Version>
-      <AssemblyVersion>$(VersionFromFile).0</AssemblyVersion>
-      <FileVersion>$(VersionFromFile).0</FileVersion>
-      <InformationalVersion>$(VersionFromFile)</InformationalVersion>
-    </PropertyGroup>
-  </Target>
+  <!-- Read version from VERSION file (single source of truth).
+       Evaluated at project-evaluation time (NOT in a BeforeBuild target) so that
+       design-time builds from the IDE pick it up too. A target-based read is
+       skipped by design-time compiles, which silently fall back to 1.0.0. -->
+  <PropertyGroup Condition="Exists('$(MSBuildProjectDirectory)/VERSION')">
+    <VersionFromFile>$([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)/VERSION').Trim())</VersionFromFile>
+    <Version>$(VersionFromFile)</Version>
+    <AssemblyVersion>$(VersionFromFile).0</AssemblyVersion>
+    <FileVersion>$(VersionFromFile).0</FileVersion>
+    <InformationalVersion>$(VersionFromFile)</InformationalVersion>
+  </PropertyGroup>
 
   <ItemGroup>
     <AvaloniaResource Include="Assets\**" />
     <AvaloniaResource Include="Styles\**" />
+  </ItemGroup>
+
+  <!-- APP_IDENTIFIERS is the single source of truth for app branding. Embedding it
+       in the assembly lets Core/AppInfo.cs read it at runtime, so the GUI picks up
+       edits on the next build with no extra wiring. Because it lives INSIDE
+       client.dll it needs no installer bundling (see AGENTS.md installer parity). -->
+  <ItemGroup>
+    <EmbeddedResource Include="APP_IDENTIFIERS" LogicalName="client.APP_IDENTIFIERS" />
   </ItemGroup>
 
   <ItemGroup>

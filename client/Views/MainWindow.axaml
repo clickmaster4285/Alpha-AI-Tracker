@@ -1,6 +1,7 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:client.ViewModels"
+        xmlns:pages="using:client.Views.Pages"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:conv="clr-namespace:client.Converters"
@@ -8,12 +9,26 @@
         x:Class="client.Views.MainWindow"
         x:DataType="vm:MainViewModel"
         Icon="/Assets/avalonia-logo.ico"
-        Title="GuardianConnect"
+        Title="{Binding AppTitleWithVersion}"
         WindowStartupLocation="CenterScreen"
-        MinWidth="900" MinHeight="640"
+        MinWidth="1000" MinHeight="660"
         Width="1280" Height="800"
         Background="{StaticResource CanvasBrush}"
         Foreground="{StaticResource FgBrush}">
+
+    <!-- ═══ SHELL ════════════════════════════════════════════════════════════
+         Three mutually exclusive top-level states, then a nav rail hosting
+         pages 4–6. Every page lives in Views/Pages as its own UserControl so
+         this file stays a router, not a monolith.
+
+           IsSplashVisible          → page 1  SplashPage
+           !IsLoggedIn              → page 2  LoginPage
+           RequiresPermissionAction → page 3  PermissionSetupPage
+           IsProfile                → pages 4–6 behind the rail
+
+         All brand strings come from AppInfo (client/APP_IDENTIFIERS +
+         client/VERSION); nothing here is hardcoded.
+    ═══════════════════════════════════════════════════════════════════════ -->
 
     <Window.Resources>
         <conv:BoolInvertConverter x:Key="BoolInvert" />
@@ -22,509 +37,200 @@
         <conv:PercentToGridLengthConverter x:Key="PercentToGridLength" />
     </Window.Resources>
 
-    <Design.DataContext>
-        <vm:MainViewModel />
-    </Design.DataContext>
-
     <Grid>
-        <!-- ════════════════════════════════════════════════════════════ -->
-        <!--  SCREEN 1: SPLASH / LOADING  (visily_client_design.pdf p.1) -->
-        <!-- ════════════════════════════════════════════════════════════ -->
-        <Border IsVisible="{Binding IsSplashVisible}"
-                Background="{StaticResource CanvasBrush}">
-            <Grid HorizontalAlignment="Center" VerticalAlignment="Center" Margin="32">
-                <!-- Main app card -->
-                <Border Background="{StaticResource CardBrush}"
-                        CornerRadius="{StaticResource RadiusXl}"
-                        BoxShadow="{StaticResource ShadowLg}"
-                        Padding="44,40"
-                        MaxWidth="460">
-                    <StackPanel Spacing="0">
 
-                        <!-- Shield logo -->
-                        <Border Width="64" Height="64" CornerRadius="18"
-                                Background="#E8F0FE"
-                                HorizontalAlignment="Center">
-                            <Grid>
-                                <!-- Shield path (feather shield) filled enterprise blue -->
-                                <Path Data="M12 2l8 3v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5l8-3z"
-                                      Fill="#2563EB"
-                                      Stretch="Uniform"
-                                      Width="36" Height="36"
-                                      HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                <!-- White check inside -->
-                                <Path Data="M8.5 12.5l2.5 2.5 5-5"
-                                      Stroke="White" StrokeThickness="2.6"
-                                      StrokeLineCap="Round"
-                                      Width="30" Height="30"
-                                      HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                            </Grid>
-                        </Border>
+        <!-- ── Page 1 — splash ── -->
+        <pages:SplashPage IsVisible="{Binding IsSplashVisible}"/>
+
+        <Grid IsVisible="{Binding !IsSplashVisible}">
+
+            <!-- ── Page 2 — login ── -->
+            <pages:LoginPage IsVisible="{Binding !IsLoggedIn}"/>
+
+            <!-- ── Page 3 — permission wizard ── -->
+            <pages:PermissionSetupPage IsVisible="{Binding RequiresPermissionAction}"/>
+
+            <!-- ── Pages 4–6 — main shell ── -->
+            <Grid IsVisible="{Binding IsProfile}" ColumnDefinitions="246,*">
+
+                <!-- ══ Nav rail ══ -->
+                <Border Grid.Column="0" Background="{StaticResource RailBrush}"
+                        BorderBrush="{StaticResource RailBorderBrush}"
+                        BorderThickness="0,0,1,0">
+                    <Grid RowDefinitions="Auto,Auto,*,Auto">
 
                         <!-- Brand -->
-                        <TextBlock Text="GuardianConnect"
-                                   FontSize="26" FontWeight="Bold"
-                                   Foreground="{StaticResource FgBrush}"
-                                   HorizontalAlignment="Center" Margin="0,14,0,0"/>
-                        <TextBlock Text="ENTERPRISE SECURITY SUITE"
-                                   FontSize="11" FontWeight="Medium"
-                                   Foreground="{StaticResource FaintFgBrush}"
-                                   LetterSpacing="2.2"
-                                   HorizontalAlignment="Center" Margin="0,4,0,0"/>
-
-                        <!-- Authentication card -->
-                        <Border Background="{StaticResource CardBrush}"
-                                BorderBrush="{StaticResource BorderBrush}"
-                                BorderThickness="1"
-                                CornerRadius="{StaticResource RadiusLg}"
-                                BoxShadow="{StaticResource ShadowSm}"
-                                Padding="24,20"
-                                Margin="0,30,0,0">
-                            <StackPanel Spacing="14">
-
-                                <!-- Header: spinner + status -->
-                                <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Center">
-                                    <Path Classes="spinner"
-                                          Data="M 2 8 A 6 6 0 1 1 8 2"
-                                          Stroke="{StaticResource PrimaryBrush}" StrokeThickness="2.2"
-                                          StrokeLineCap="Round"
-                                          Stretch="Uniform"
-                                          Width="16" Height="16"
-                                          VerticalAlignment="Center"/>
-                                    <TextBlock Text="Checking authentication"
-                                               FontSize="13" FontWeight="SemiBold"
-                                               Foreground="{StaticResource CardFgBrush}"
-                                               VerticalAlignment="Center"/>
-                                </StackPanel>
-
-                                <!-- Divider -->
-                                <Rectangle Height="1" Fill="{StaticResource BorderBrush}"/>
-
-                                <!-- Step 1: Checking authentication (active until done) -->
-                                <StackPanel Orientation="Horizontal" Spacing="10">
-                                    <Path Classes="spinner"
-                                          Data="M 2 8 A 6 6 0 1 1 8 2"
-                                          Stroke="{StaticResource PrimaryBrush}" StrokeThickness="2.2"
-                                          StrokeLineCap="Round"
-                                          Stretch="Uniform"
-                                          Width="14" Height="14"
-                                          VerticalAlignment="Center"
-                                          IsVisible="{Binding Step1Active}"/>
-                                    <Path IsVisible="{Binding Step1Done}"
-                                          Data="M5 13l4 4L19 7"
-                                          Stroke="#2563EB" StrokeThickness="2.2"
-                                          StrokeLineCap="Round"
-                                          Width="14" Height="14"
-                                          Stretch="Uniform"
-                                          VerticalAlignment="Center"/>
-                                    <TextBlock Text="Checking authentication"
-                                               FontSize="13"
-                                               Foreground="{StaticResource CardFgBrush}"
-                                               VerticalAlignment="Center"/>
-                                </StackPanel>
-
-                                <!-- Step 2: Loading configuration -->
-                                <StackPanel Orientation="Horizontal" Spacing="10">
-                                    <Path Classes="spinner"
-                                          Data="M 2 8 A 6 6 0 1 1 8 2"
-                                          Stroke="{StaticResource PrimaryBrush}" StrokeThickness="2.2"
-                                          StrokeLineCap="Round"
-                                          Stretch="Uniform"
-                                          Width="14" Height="14"
-                                          VerticalAlignment="Center"
-                                          IsVisible="{Binding Step2Active}"/>
-                                    <Path IsVisible="{Binding Step2Done}"
-                                          Data="M5 13l4 4L19 7"
-                                          Stroke="#2563EB" StrokeThickness="2.2"
-                                          StrokeLineCap="Round"
-                                          Width="14" Height="14"
-                                          Stretch="Uniform"
-                                          VerticalAlignment="Center"/>
-                                    <Ellipse IsVisible="{Binding Step2Pending}"
-                                              Width="14" Height="14"
-                                              Stroke="#CBD5E1" StrokeThickness="2"
-                                              Fill="Transparent"
-                                              VerticalAlignment="Center"/>
-                                    <TextBlock Text="Loading configuration"
-                                               FontSize="13"
-                                               Foreground="{StaticResource MutedFgBrush}"
-                                               VerticalAlignment="Center"/>
-                                </StackPanel>
-
-                                <!-- Step 3: Starting monitoring service -->
-                                <StackPanel Orientation="Horizontal" Spacing="10">
-                                    <Path Classes="spinner"
-                                          Data="M 2 8 A 6 6 0 1 1 8 2"
-                                          Stroke="{StaticResource PrimaryBrush}" StrokeThickness="2.2"
-                                          StrokeLineCap="Round"
-                                          Stretch="Uniform"
-                                          Width="14" Height="14"
-                                          VerticalAlignment="Center"
-                                          IsVisible="{Binding Step3Active}"/>
-                                    <Path IsVisible="{Binding Step3Done}"
-                                          Data="M5 13l4 4L19 7"
-                                          Stroke="#2563EB" StrokeThickness="2.2"
-                                          StrokeLineCap="Round"
-                                          Width="14" Height="14"
-                                          Stretch="Uniform"
-                                          VerticalAlignment="Center"/>
-                                    <Ellipse IsVisible="{Binding Step3Pending}"
-                                              Width="14" Height="14"
-                                              Stroke="#CBD5E1" StrokeThickness="2"
-                                              Fill="Transparent"
-                                              VerticalAlignment="Center"/>
-                                    <TextBlock Text="Starting monitoring service"
-                                               FontSize="13"
-                                               Foreground="{StaticResource MutedFgBrush}"
-                                               VerticalAlignment="Center"/>
-                                </StackPanel>
-
-                                <!-- Progress bar -->
-                                <Grid Height="6" Margin="0,6,0,0">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="{Binding SplashProgress, Converter={StaticResource PercentToGridLength}}"/>
-                                        <ColumnDefinition Width="{Binding SplashProgress, Converter={StaticResource PercentToGridLength}, ConverterParameter=remainder}"/>
-                                    </Grid.ColumnDefinitions>
-                                    <Border Grid.Column="0"
-                                            Background="{StaticResource PrimaryBrush}"
-                                            CornerRadius="3"/>
-                                    <Border Grid.Column="1"
-                                            Background="{StaticResource TrackBrush}"
-                                            CornerRadius="3" Margin="2,0,0,0"/>
+                        <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="12"
+                                    Margin="18,24,18,22">
+                            <Border Width="40" Height="40" CornerRadius="12"
+                                    Background="{StaticResource PrimaryBrush}">
+                                <Grid>
+                                    <Path Data="{StaticResource ShieldGeometry}"
+                                          Fill="White" Stretch="Uniform"
+                                          Width="21" Height="21" Opacity="0.28"
+                                          HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    <TextBlock Text="{Binding AppInitials}"
+                                               Foreground="White" FontSize="14" FontWeight="Bold"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                 </Grid>
-
+                            </Border>
+                            <StackPanel VerticalAlignment="Center" Spacing="2">
+                                <TextBlock Text="{Binding AppDisplayName}"
+                                           Foreground="{StaticResource RailFgActiveBrush}"
+                                           FontSize="14.5" FontWeight="Bold"
+                                           TextTrimming="CharacterEllipsis"/>
+                                <TextBlock Text="{Binding AppTagline}"
+                                           Foreground="{StaticResource RailFgBrush}"
+                                           FontSize="8.5" LetterSpacing="1.1"
+                                           TextTrimming="CharacterEllipsis"/>
                             </StackPanel>
-                        </Border>
+                        </StackPanel>
 
-                        <!-- Environment pill -->
-                        <Border CornerRadius="999"
-                                Background="#F0FDF4"
-                                BorderBrush="#BBF7D0"
-                                BorderThickness="1"
-                                Padding="14,5"
-                                HorizontalAlignment="Center" Margin="0,24,0,0">
-                            <StackPanel Orientation="Horizontal" Spacing="7">
-                                <Ellipse Width="8" Height="8" Fill="#22C55E"
-                                         VerticalAlignment="Center"/>
-                                <TextBlock Text="ENVIRONMENT: PRODUCTION"
-                                           FontSize="10" FontWeight="SemiBold"
-                                           Foreground="#166534"
-                                           LetterSpacing="1.4"
-                                           VerticalAlignment="Center"/>
-                            </StackPanel>
-                        </Border>
+                        <Rectangle Grid.Row="1" Height="1"
+                                   Fill="{StaticResource RailBorderBrush}" Margin="14,0"/>
 
-                        <!-- Version -->
-                        <TextBlock Text="Version 1.0.0 (Build 2024.Q4)"
-                                   FontSize="11"
-                                   Foreground="{StaticResource FaintFgBrush}"
-                                   HorizontalAlignment="Center" Margin="0,12,0,0"/>
+                        <!-- Nav items -->
+                        <StackPanel Grid.Row="2" Margin="12,20,12,0" Spacing="4">
 
-                        <!-- System status line (mono) -->
-                        <TextBlock Text="INITIALISING CORE.MONITORING_SERVICE.V1 // SECURITY_HANDSHAKE_ESTABLISHED"
-                                   FontSize="9.5"
-                                   Foreground="#CBD5E1"
-                                   FontFamily="Cascadia Mono,Consolas,DejaVu Sans Mono,Courier New"
-                                   HorizontalAlignment="Center" Margin="0,10,0,0"
-                                   TextWrapping="Wrap" TextAlignment="Center"/>
+                            <Button Classes="nav" Classes.active="{Binding IsDashboardPage}"
+                                    Command="{Binding NavigateCommand}" CommandParameter="dashboard">
+                                <StackPanel Orientation="Horizontal" Spacing="11">
+                                    <Path Data="{StaticResource GaugeGeometry}"
+                                          StrokeThickness="1.7" StrokeLineCap="Round"
+                                          Stretch="Uniform" Width="17" Height="17"
+                                          VerticalAlignment="Center"/>
+                                    <TextBlock Text="Overview" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </Button>
 
-                    </StackPanel>
-                </Border>
-            </Grid>
-        </Border>
+                            <Button Classes="nav" Classes.active="{Binding IsSystemSpecsPage}"
+                                    Command="{Binding NavigateCommand}" CommandParameter="specs">
+                                <StackPanel Orientation="Horizontal" Spacing="11">
+                                    <Path Data="{StaticResource ChipGeometry}"
+                                          StrokeThickness="1.5" StrokeLineCap="Round"
+                                          Stretch="Uniform" Width="17" Height="17"
+                                          VerticalAlignment="Center"/>
+                                    <TextBlock Text="System Specs" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </Button>
 
-        <!-- ════════════════════════════════════════════════════════════ -->
-        <!--  POST-SPLASH CONTENT  (login / profile / permission steps)  -->
-        <!-- ════════════════════════════════════════════════════════════ -->
-        <Grid IsVisible="{Binding IsSplashVisible, Converter={StaticResource BoolInvert}}">
+                            <Button Classes="nav" Classes.active="{Binding IsInstalledAppsPage}"
+                                    Command="{Binding NavigateCommand}" CommandParameter="apps">
+                                <StackPanel Orientation="Horizontal" Spacing="11">
+                                    <Path Data="{StaticResource GridGeometry}"
+                                          StrokeThickness="1.6" StrokeLineCap="Round"
+                                          Stretch="Uniform" Width="17" Height="17"
+                                          VerticalAlignment="Center"/>
+                                    <TextBlock Text="Applications" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </Button>
 
-        <!-- ── SECTION 1: LOGIN (shown when not logged in) ── -->
-        <Border IsVisible="{Binding IsLoggedIn, Converter={StaticResource BoolInvert}}"
-                Background="{StaticResource CanvasBrush}">
-            <ScrollViewer VerticalScrollBarVisibility="Auto">
-                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center"
-                            MaxWidth="360" Spacing="14" Margin="32,48">
-
-                    <!-- Logo -->
-                    <Border Background="{StaticResource PrimaryBrush}"
-                            CornerRadius="{StaticResource RadiusLg}"
-                            Width="56" Height="56"
-                            HorizontalAlignment="Center"
-                            BoxShadow="{StaticResource CardShadow}">
-                        <TextBlock Text="AI" FontSize="22" FontWeight="Bold"
-                                   Foreground="{StaticResource PrimaryFgBrush}"
-                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                    </Border>
-
-                    <TextBlock Text="GuardianConnect" FontSize="22" FontWeight="Bold"
-                               Foreground="{StaticResource FgBrush}"
-                               HorizontalAlignment="Center"/>
-
-                    <TextBlock Text="Employee Login" FontSize="14"
-                               Foreground="{StaticResource MutedFgBrush}"
-                               HorizontalAlignment="Center" Margin="0,0,0,4"/>
-
-                    <TextBlock Text="Employee ID" FontSize="12"
-                               Foreground="{StaticResource MutedFgBrush}"/>
-                    <TextBox Text="{Binding EmployeeId}" PlaceholderText="e.g. EMP-10001"/>
-
-                    <TextBlock Text="Secret Key" FontSize="12"
-                               Foreground="{StaticResource MutedFgBrush}"/>
-                    <TextBox Text="{Binding SecretKey}" PlaceholderText="Enter your secret key"/>
-
-                    <!-- Error / status message -->
-                    <TextBlock Text="{Binding StatusMessage}"
-                               Foreground="{StaticResource DestructiveBrush}" FontSize="12"
-                               HorizontalAlignment="Center" TextWrapping="Wrap"
-                               IsVisible="{Binding StatusMessage, Converter={StaticResource StringNotEmpty}}"/>
-
-                    <!-- Login button -->
-                    <Button Classes="primary"
-                            Command="{Binding LoginCommand}"
-                            HorizontalAlignment="Stretch" Height="44"
-                            IsEnabled="{Binding IsLoading, Converter={StaticResource BoolInvert}}"
-                            Content="{Binding IsLoading, Converter={StaticResource LoadingToText}}"
-                            Margin="0,6,0,0"/>
-                </StackPanel>
-            </ScrollViewer>
-        </Border>
-
-        <!-- ── SECTION 2: LOGGED IN — Steps or Profile ── -->
-        <Border IsVisible="{Binding IsLoggedIn}" Background="{StaticResource CanvasBrush}">
-            <ScrollViewer VerticalScrollBarVisibility="Auto">
-                <Grid RowDefinitions="Auto,*" Margin="24,32">
-
-                    <Border IsVisible="{Binding RequiresPermissionAction}"
-                            Background="{StaticResource CardBrush}"
-                            CornerRadius="{StaticResource RadiusLg}"
-                            Padding="14,10"
-                            HorizontalAlignment="Center" Margin="0,0,0,24"
-                            BoxShadow="{StaticResource CardShadow}">
-                        <TextBlock FontSize="13" Foreground="{StaticResource MutedFgBrush}"
-                                   HorizontalAlignment="Center">
-                            <Run Text="Step "/>
-                            <Run Text="{Binding CurrentPermissionStepNumber}"/>
-                            <Run Text=" of "/>
-                            <Run Text="{Binding TotalPermissionSteps}"/>
-                        </TextBlock>
-                    </Border>
-
-                    <!-- Content area -->
-                    <Grid Grid.Row="1">
-
-                        <!-- ── Step 1: Auto-Start ── -->
-                        <Border Classes="fade-in" IsVisible="{Binding IsAutoStartStep}">
-                            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center"
-                                        MaxWidth="360" Spacing="14">
-                                <Border Background="{StaticResource PrimaryBrush}"
-                                        CornerRadius="{StaticResource RadiusLg}"
-                                        Width="48" Height="48" HorizontalAlignment="Center"
-                                        BoxShadow="{StaticResource CardShadow}">
-                                    <TextBlock Text="1" FontSize="20" FontWeight="Bold"
-                                               Foreground="{StaticResource PrimaryFgBrush}"
-                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                </Border>
-                                <TextBlock Text="{Binding StepTitle}" FontSize="20" FontWeight="Bold"
-                                           Foreground="{StaticResource FgBrush}"
-                                           HorizontalAlignment="Center"/>
-                                <TextBlock Text="{Binding StepDescription}" FontSize="13"
-                                           Foreground="{StaticResource MutedFgBrush}"
-                                           TextWrapping="Wrap" HorizontalAlignment="Center"
-                                           TextAlignment="Center"/>
-                                <Button Classes="primary"
-                                        Command="{Binding GrantCurrentStepPermissionCommand}"
-                                        IsEnabled="{Binding IsStepWorking, Converter={StaticResource BoolInvert}}"
-                                        Content="{Binding StepButtonText}"
-                                        HorizontalAlignment="Center" MinWidth="200" Margin="0,8,0,0"/>
-                                <TextBlock Text="{Binding StepStatusText}" FontSize="12"
-                                           Foreground="{StaticResource SuccessBrush}"
-                                           HorizontalAlignment="Center" TextWrapping="Wrap"/>
-                            </StackPanel>
-                        </Border>
-
-                        <!-- ── Step 2: Background Guard ── -->
-                        <Border Classes="fade-in" IsVisible="{Binding IsBackgroundStep}">
-                            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center"
-                                        MaxWidth="360" Spacing="14">
-                                <Border Background="{StaticResource InfoBrush}"
-                                        CornerRadius="{StaticResource RadiusLg}"
-                                        Width="48" Height="48" HorizontalAlignment="Center"
-                                        BoxShadow="{StaticResource CardShadow}">
-                                    <TextBlock Text="2" FontSize="20" FontWeight="Bold"
-                                               Foreground="{StaticResource InfoFgBrush}"
-                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                </Border>
-                                <TextBlock Text="{Binding StepTitle}" FontSize="20" FontWeight="Bold"
-                                           Foreground="{StaticResource FgBrush}"
-                                           HorizontalAlignment="Center"/>
-                                <TextBlock Text="{Binding StepDescription}" FontSize="13"
-                                           Foreground="{StaticResource MutedFgBrush}"
-                                           TextWrapping="Wrap" HorizontalAlignment="Center"
-                                           TextAlignment="Center"/>
-                                <Button Classes="success"
-                                        Command="{Binding GrantCurrentStepPermissionCommand}"
-                                        IsEnabled="{Binding IsStepWorking, Converter={StaticResource BoolInvert}}"
-                                        Content="{Binding StepButtonText}"
-                                        HorizontalAlignment="Center" MinWidth="200" Margin="0,8,0,0"/>
-                                <TextBlock Text="{Binding StepStatusText}" FontSize="12"
-                                           Foreground="{StaticResource SuccessBrush}"
-                                           HorizontalAlignment="Center" TextWrapping="Wrap"/>
-                            </StackPanel>
-                        </Border>
-
-                        <!-- ── Step 3: Dependencies (Linux Only) ── -->
-                        <Border Classes="fade-in" IsVisible="{Binding IsDependencyStep}">
-                            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center"
-                                        MaxWidth="360" Spacing="14">
-                                <Border Background="{StaticResource WarningBrush}"
-                                        CornerRadius="{StaticResource RadiusLg}"
-                                        Width="48" Height="48" HorizontalAlignment="Center"
-                                        BoxShadow="{StaticResource CardShadow}">
-                                    <TextBlock Text="3" FontSize="20" FontWeight="Bold"
-                                               Foreground="{StaticResource WarningFgBrush}"
-                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                </Border>
-                                <TextBlock Text="{Binding StepTitle}" FontSize="20" FontWeight="Bold"
-                                           Foreground="{StaticResource FgBrush}"
-                                           HorizontalAlignment="Center"/>
-                                <TextBlock Text="{Binding StepDescription}" FontSize="13"
-                                           Foreground="{StaticResource MutedFgBrush}"
-                                           TextWrapping="Wrap" HorizontalAlignment="Center"
-                                           TextAlignment="Center"/>
-                                <TextBlock Text="{Binding MissingDependenciesList}" FontSize="14" FontWeight="Bold"
-                                           Foreground="{StaticResource DestructiveBrush}"
-                                           TextWrapping="Wrap" HorizontalAlignment="Center"
-                                           TextAlignment="Center" Margin="0,4,0,4"/>
-                                <Button Classes="primary"
-                                        Command="{Binding GrantCurrentStepPermissionCommand}"
-                                        IsEnabled="{Binding IsStepWorking, Converter={StaticResource BoolInvert}}"
-                                        Content="Install Automatically"
-                                        HorizontalAlignment="Center" MinWidth="200" Margin="0,8,0,0"/>
-                                <Button Classes="secondary"
-                                        Command="{Binding ShowManualInstallCommand}"
-                                        Content="Install Manually"
-                                        HorizontalAlignment="Center" MinWidth="200"/>
-                                <TextBox Text="{Binding StepStatusText}" FontSize="12" IsReadOnly="True"
-                                         Foreground="{StaticResource MutedFgBrush}" Background="Transparent"
-                                         HorizontalAlignment="Stretch" TextWrapping="Wrap" BorderThickness="0"
-                                         IsVisible="{Binding StepStatusText, Converter={StaticResource StringNotEmpty}}"/>
-                            </StackPanel>
-                        </Border>
-
-                        <!-- ── Step 4: Other Permissions ── -->
-                        <Border Classes="fade-in" IsVisible="{Binding IsPermissionStep}">
-                            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center"
-                                        MaxWidth="360" Spacing="14">
-                                <Border Background="{StaticResource WarningBrush}"
-                                        CornerRadius="{StaticResource RadiusLg}"
-                                        Width="48" Height="48" HorizontalAlignment="Center"
-                                        BoxShadow="{StaticResource CardShadow}">
-                                    <TextBlock Text="{Binding CurrentPermissionStepNumber}" FontSize="20" FontWeight="Bold"
-                                               Foreground="{StaticResource WarningFgBrush}"
-                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                </Border>
-                                <TextBlock Text="{Binding StepTitle}" FontSize="20" FontWeight="Bold"
-                                           Foreground="{StaticResource FgBrush}"
-                                           HorizontalAlignment="Center"/>
-                                <TextBlock Text="{Binding StepDescription}" FontSize="13"
-                                           Foreground="{StaticResource MutedFgBrush}"
-                                           TextWrapping="Wrap" HorizontalAlignment="Center"
-                                           TextAlignment="Center"/>
-                                <Button Classes="primary"
-                                        Command="{Binding GrantCurrentStepPermissionCommand}"
-                                        IsEnabled="{Binding IsStepWorking, Converter={StaticResource BoolInvert}}"
-                                        Content="{Binding StepButtonText}"
-                                        HorizontalAlignment="Center" MinWidth="200" Margin="0,8,0,0"/>
-                                <TextBlock Text="{Binding StepStatusText}" FontSize="12"
-                                           Foreground="{StaticResource MutedFgBrush}"
-                                           HorizontalAlignment="Center" TextWrapping="Wrap"/>
-                            </StackPanel>
-                        </Border>
-
-                        <!-- ── Browser Journey Tracking (accessibility-based, automatic) ── -->
-                        <Border Classes="fade-in" IsVisible="{Binding IsBrowserTracking}">
-                            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center"
-                                        MaxWidth="360" Spacing="12" Margin="0,8,0,0">
-                                <Border Background="{StaticResource InfoBrush}"
-                                        CornerRadius="{StaticResource RadiusLg}"
-                                        Width="48" Height="48" HorizontalAlignment="Center"
-                                        BoxShadow="{StaticResource CardShadow}">
-                                    <TextBlock Text="🌐" FontSize="20"
-                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                </Border>
-                                <TextBlock Text="Browser Journey Tracking" FontSize="20" FontWeight="Bold"
-                                           Foreground="{StaticResource FgBrush}"
-                                           HorizontalAlignment="Center"/>
-                                <TextBlock Text="Browser activity is captured automatically via the OS accessibility tree (AT-SPI / UIA / macOS Accessibility). No debugger, no extension, and no manual setup required."
-                                           FontSize="13" Foreground="{StaticResource MutedFgBrush}"
-                                           TextWrapping="Wrap" HorizontalAlignment="Center"
-                                           TextAlignment="Center"/>
-                                <TextBlock Text="{Binding BrowserTrackingStatus}" FontSize="12"
-                                           Foreground="{StaticResource SuccessBrush}"
-                                           TextWrapping="Wrap" HorizontalAlignment="Center"
-                                           TextAlignment="Center"
-                                           IsVisible="{Binding BrowserTrackingStatus, Converter={StaticResource StringNotEmpty}}"/>
-                            </StackPanel>
-                        </Border>
-
-                        <!-- ── Profile (all permissions granted) ── -->
-                        <Border Classes="fade-in" IsVisible="{Binding IsProfile}">
-                            <StackPanel VerticalAlignment="Top" HorizontalAlignment="Center"
-                                        MaxWidth="360" Spacing="16" Margin="0,8,0,0">
-                                <!-- Avatar -->
-                                <Border Background="{Binding EmployeeAvatarColor}"
-                                        CornerRadius="36" Width="72" Height="72"
-                                        HorizontalAlignment="Center"
-                                        BoxShadow="{StaticResource ShadowLg}">
-                                    <TextBlock Text="{Binding EmployeeAvatar}"
-                                               FontSize="28" FontWeight="Bold"
-                                               Foreground="White"
-                                               VerticalAlignment="Center" HorizontalAlignment="Center"/>
-                                </Border>
-
-                                <TextBlock Text="{Binding EmployeeName}" FontSize="22" FontWeight="Bold"
-                                           Foreground="{StaticResource FgBrush}"
-                                           HorizontalAlignment="Center"/>
-
-                                <!-- Info card -->
-                                <Border Background="{StaticResource CardBrush}"
-                                        CornerRadius="{StaticResource RadiusLg}" Padding="16"
-                                        BoxShadow="{StaticResource CardShadow}">
-                                    <StackPanel Spacing="12">
-                                        <Grid ColumnDefinitions="Auto,*">
-                                            <TextBlock Text="Department" FontSize="12"
-                                                       Foreground="{StaticResource MutedFgBrush}"/>
-                                            <TextBlock Grid.Column="1"
-                                                       Text="{Binding EmployeeDepartment}"
-                                                       FontSize="14" FontWeight="Medium"
-                                                       Foreground="{StaticResource FgBrush}"
-                                                       HorizontalAlignment="Right"/>
-                                        </Grid>
-                                        <Rectangle Height="1" Fill="{StaticResource BorderBrush}"/>
-                                        <Grid ColumnDefinitions="Auto,*">
-                                            <TextBlock Text="Role" FontSize="12"
-                                                       Foreground="{StaticResource MutedFgBrush}"/>
-                                            <TextBlock Grid.Column="1"
-                                                       Text="{Binding EmployeeRole}"
-                                                       FontSize="14" FontWeight="Medium"
-                                                       Foreground="{StaticResource FgBrush}"
-                                                       HorizontalAlignment="Right"/>
-                                        </Grid>
+                            <!-- Browser journeys need no setup; say so where the user
+                                 would otherwise go looking for a switch. -->
+                            <Border Background="{StaticResource RailAltBrush}"
+                                    CornerRadius="{StaticResource RadiusMd}"
+                                    Padding="13,11" Margin="0,22,0,0"
+                                    IsVisible="{Binding IsBrowserTracking}">
+                                <StackPanel Spacing="6">
+                                    <StackPanel Orientation="Horizontal" Spacing="7">
+                                        <Ellipse Classes="pulse" Width="7" Height="7"
+                                                 Fill="{StaticResource SuccessBrush}"
+                                                 VerticalAlignment="Center"/>
+                                        <TextBlock Text="BROWSER JOURNEYS" FontSize="9"
+                                                   FontWeight="SemiBold" LetterSpacing="1.1"
+                                                   Foreground="{StaticResource RailFgActiveBrush}"
+                                                   VerticalAlignment="Center"/>
                                     </StackPanel>
+                                    <TextBlock Text="Captured automatically through the OS accessibility tree — no extension, no debugger port."
+                                               FontSize="10.5" TextWrapping="Wrap"
+                                               Foreground="{StaticResource RailFgBrush}"/>
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+
+                        <!-- Signed-in employee + disconnect -->
+                        <StackPanel Grid.Row="3" Margin="12,0,12,16" Spacing="10">
+                            <Rectangle Height="1" Fill="{StaticResource RailBorderBrush}"
+                                       Margin="2,0,2,6"/>
+
+                            <StackPanel Orientation="Horizontal" Spacing="11" Margin="4,0">
+                                <Border Width="36" Height="36" CornerRadius="18"
+                                        Background="{Binding EmployeeAvatarColor}">
+                                    <TextBlock Text="{Binding EmployeeAvatar}"
+                                               Foreground="White" FontSize="13" FontWeight="Bold"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                 </Border>
-
-                                <Button Classes="danger"
-                                        Command="{Binding LogoutCommand}"
-                                        HorizontalAlignment="Center" Width="160" Margin="0,8,0,0"
-                                        Content="Disconnect"/>
+                                <StackPanel VerticalAlignment="Center" Spacing="1">
+                                    <TextBlock Text="{Binding EmployeeName}"
+                                               Foreground="{StaticResource RailFgActiveBrush}"
+                                               FontSize="12.5" FontWeight="SemiBold"
+                                               TextTrimming="CharacterEllipsis" MaxWidth="150"/>
+                                    <TextBlock Text="{Binding EmployeeRole}"
+                                               Foreground="{StaticResource RailFgBrush}"
+                                               FontSize="10.5"
+                                               TextTrimming="CharacterEllipsis" MaxWidth="150"/>
+                                </StackPanel>
                             </StackPanel>
-                        </Border>
 
+                            <Button Command="{Binding LogoutCommand}"
+                                    Content="Disconnect"
+                                    HorizontalAlignment="Stretch"
+                                    HorizontalContentAlignment="Center"
+                                    Background="{StaticResource TransparentBrush}"
+                                    Foreground="#F87171"
+                                    BorderBrush="{StaticResource RailBorderBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="{StaticResource RadiusMd}"
+                                    Padding="10,8" FontSize="12" Cursor="Hand"/>
+
+                            <TextBlock Text="{Binding AppVersionDisplay}"
+                                       Foreground="{StaticResource RailFgBrush}" FontSize="10"
+                                       Opacity="0.75" HorizontalAlignment="Center"/>
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <!-- ══ Content column ══ -->
+                <Grid Grid.Column="1" RowDefinitions="Auto,*">
+
+                    <!-- Top bar -->
+                    <Border Grid.Row="0" Background="{StaticResource CardBrush}"
+                            BorderBrush="{StaticResource BorderBrush}"
+                            BorderThickness="0,0,0,1" Padding="26,15">
+                        <Grid ColumnDefinitions="*,Auto">
+                            <StackPanel Spacing="3">
+                                <TextBlock Text="{Binding ActivePageTitle}" Classes="h1" FontSize="20"/>
+                                <TextBlock Text="{Binding ActivePageSubtitle}" Classes="label"/>
+                            </StackPanel>
+
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="12"
+                                        VerticalAlignment="Center">
+                                <Border Classes="badge ok">
+                                    <TextBlock Text="{Binding EnvironmentLabel}"/>
+                                </Border>
+                                <Button Classes="ghost" Command="{Binding RefreshActivePageCommand}"
+                                        ToolTip.Tip="Refresh this page">
+                                    <Path Data="{StaticResource RefreshGeometry}"
+                                          Stroke="{StaticResource MutedFgBrush}" StrokeThickness="1.8"
+                                          StrokeLineCap="Round" Stretch="Uniform"
+                                          Width="15" Height="15"/>
+                                </Button>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <!-- Pages 4–6. Each binds to its own VM; the page-in class
+                         gives the switch a transition instead of a flicker. -->
+                    <Grid Grid.Row="1">
+                        <pages:DashboardPage DataContext="{Binding Dashboard}"
+                                             IsVisible="{Binding $parent[Window].((vm:MainViewModel)DataContext).IsDashboardPage}"/>
+                        <pages:SystemSpecsPage DataContext="{Binding SystemSpecs}"
+                                               IsVisible="{Binding $parent[Window].((vm:MainViewModel)DataContext).IsSystemSpecsPage}"/>
+                        <pages:InstalledAppsPage DataContext="{Binding InstalledApps}"
+                                                 IsVisible="{Binding $parent[Window].((vm:MainViewModel)DataContext).IsInstalledAppsPage}"/>
                     </Grid>
                 </Grid>
-            </ScrollViewer>
-        </Border>
-
+            </Grid>
         </Grid>
     </Grid>
 </Window>

@@ -195,7 +195,11 @@ if (config.HardwareDevicesEnabled)
     builder.Services.AddHostedService<HardwareDeviceWatcherService>();
 }
 
-// Main ViewModel
+// Main ViewModel + the per-page ViewModels it composes (pages 4–6).
+// Transient alongside MainViewModel so each window gets its own page state.
+builder.Services.AddTransient<DashboardViewModel>();
+builder.Services.AddTransient<SystemSpecsViewModel>();
+builder.Services.AddTransient<InstalledAppsViewModel>();
 builder.Services.AddTransient<MainViewModel>();
 
 var host = builder.Build();

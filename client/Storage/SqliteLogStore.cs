@@ -1456,6 +1456,33 @@ public class SqliteLogStore : ILogStore, IDisposable
         }
     }
 
+    public async Task<IReadOnlyList<StorageDevice>> GetLatestStorageDevicesAsync(CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<StorageDevice>();
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            // Scope to the newest hardware snapshot so re-collections don't stack duplicates
+            // in the UI. Falls back to nothing when no hardware row exists yet.
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = """
+                SELECT * FROM storage_devices
+                WHERE device_hardware_id = (
+                    SELECT id FROM device_hardware_info ORDER BY collected_at DESC LIMIT 1
+                )
+                ORDER BY capacity_mb DESC
+                """;
+            var results = new List<StorageDevice>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct)) results.Add(MapStorageDeviceReader(reader));
+            return results;
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
     public async Task MarkStorageDevicesSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
         if (_connection == null || ids.Count == 0) return;

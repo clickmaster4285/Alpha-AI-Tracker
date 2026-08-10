@@ -2,10 +2,11 @@
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
     <!-- ═══════════════════════════════════════════════════════════════════ -->
-    <!--  GuardianConnect Enterprise Security Suite — Light Theme           -->
-    <!--  Recreated 1:1 from visily_client_design.pdf                       -->
-    <!--  Palette: #F8F9FA canvas / white cards / #2563EB enterprise blue  -->
-    <!--           / #0EA5E9 cyan accent / #0F172A navy cards              -->
+    <!--  Design tokens — Light Theme                                       -->
+    <!--  The product name is NOT baked in here; every visible brand string  -->
+    <!--  comes from Core/AppInfo (APP_IDENTIFIERS + VERSION) at runtime.    -->
+    <!--  Palette: #F8F9FA canvas / white cards / #2563EB enterprise blue   -->
+    <!--           / #0EA5E9 cyan accent / #0F172A navy chrome             -->
     <!-- ═══════════════════════════════════════════════════════════════════ -->
 
     <!-- Colors -->
@@ -69,16 +70,81 @@
     <SolidColorBrush x:Key="TrackBrush" Color="{StaticResource TrackColor}"/>
     <SolidColorBrush x:Key="TransparentBrush" Color="Transparent"/>
 
+    <!-- ── Navigation chrome (sidebar rail) ── -->
+    <Color x:Key="RailColor">#0B1524</Color>
+    <Color x:Key="RailAltColor">#111F33</Color>
+    <Color x:Key="RailFgColor">#94A9C0</Color>
+    <Color x:Key="RailFgActiveColor">#FFFFFF</Color>
+    <Color x:Key="RailHoverColor">#18293F</Color>
+    <Color x:Key="RailActiveColor">#1B3A63</Color>
+    <Color x:Key="RailBorderColor">#1C2B3F</Color>
+
+    <SolidColorBrush x:Key="RailBrush" Color="{StaticResource RailColor}"/>
+    <SolidColorBrush x:Key="RailAltBrush" Color="{StaticResource RailAltColor}"/>
+    <SolidColorBrush x:Key="RailFgBrush" Color="{StaticResource RailFgColor}"/>
+    <SolidColorBrush x:Key="RailFgActiveBrush" Color="{StaticResource RailFgActiveColor}"/>
+    <SolidColorBrush x:Key="RailHoverBrush" Color="{StaticResource RailHoverColor}"/>
+    <SolidColorBrush x:Key="RailActiveBrush" Color="{StaticResource RailActiveColor}"/>
+    <SolidColorBrush x:Key="RailBorderBrush" Color="{StaticResource RailBorderColor}"/>
+
+    <!-- ── Soft tinted surfaces for badges / stat tiles ── -->
+    <SolidColorBrush x:Key="PrimarySoftBrush" Color="#E8F0FE"/>
+    <SolidColorBrush x:Key="PrimarySoftFgBrush" Color="#1D4ED8"/>
+    <SolidColorBrush x:Key="SuccessSoftBrush" Color="#ECFDF5"/>
+    <SolidColorBrush x:Key="SuccessSoftFgBrush" Color="#047857"/>
+    <SolidColorBrush x:Key="SuccessSoftBorderBrush" Color="#A7F3D0"/>
+    <SolidColorBrush x:Key="WarningSoftBrush" Color="#FFFBEB"/>
+    <SolidColorBrush x:Key="WarningSoftFgBrush" Color="#B45309"/>
+    <SolidColorBrush x:Key="WarningSoftBorderBrush" Color="#FDE68A"/>
+    <SolidColorBrush x:Key="DangerSoftBrush" Color="#FEF2F2"/>
+    <SolidColorBrush x:Key="DangerSoftFgBrush" Color="#B91C1C"/>
+    <SolidColorBrush x:Key="DangerSoftBorderBrush" Color="#FECACA"/>
+    <SolidColorBrush x:Key="CyanSoftBrush" Color="#ECFEFF"/>
+    <SolidColorBrush x:Key="CyanSoftFgBrush" Color="#0E7490"/>
+    <SolidColorBrush x:Key="VioletSoftBrush" Color="#F5F3FF"/>
+    <SolidColorBrush x:Key="VioletSoftFgBrush" Color="#6D28D9"/>
+
+    <!-- Zebra striping / hover for data rows -->
+    <SolidColorBrush x:Key="RowAltBrush" Color="#FAFBFD"/>
+    <SolidColorBrush x:Key="RowHoverBrush" Color="#F1F6FE"/>
+
+    <!-- Scrim laid over hero photography so white text stays legible -->
+    <LinearGradientBrush x:Key="HeroScrimBrush" StartPoint="0%,0%" EndPoint="0%,100%">
+        <GradientStop Offset="0.0" Color="#CC0B1524"/>
+        <GradientStop Offset="0.55" Color="#990B1524"/>
+        <GradientStop Offset="1.0" Color="#E60B1524"/>
+    </LinearGradientBrush>
+
+    <!-- Deep navy field used behind the login artwork -->
+    <LinearGradientBrush x:Key="LoginPanelBrush" StartPoint="0%,0%" EndPoint="100%,100%">
+        <GradientStop Offset="0.0" Color="#0A2438"/>
+        <GradientStop Offset="0.5" Color="#0C3550"/>
+        <GradientStop Offset="1.0" Color="#0A2F4A"/>
+    </LinearGradientBrush>
+
     <!-- Shadows (Avalonia: offsetX offsetY blur spread color) -->
     <BoxShadows x:Key="CardShadow">0 2 8 0 #0F172A14</BoxShadows>
     <BoxShadows x:Key="ShadowLg">0 8 24 0 #0F172A26</BoxShadows>
     <BoxShadows x:Key="ShadowSm">0 1 3 0 #0F172A0D</BoxShadows>
+    <BoxShadows x:Key="ShadowXl">0 18 48 0 #0F172A33</BoxShadows>
 
     <!-- Radii -->
     <CornerRadius x:Key="RadiusSm">8</CornerRadius>
     <CornerRadius x:Key="RadiusMd">10</CornerRadius>
     <CornerRadius x:Key="RadiusLg">14</CornerRadius>
     <CornerRadius x:Key="RadiusXl">20</CornerRadius>
+    <CornerRadius x:Key="RadiusPill">999</CornerRadius>
+
+    <!-- Shared icon geometry — the shield mark was duplicated per-screen before -->
+    <StreamGeometry x:Key="ShieldGeometry">M12 2l8 3v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5l8-3z</StreamGeometry>
+    <StreamGeometry x:Key="CheckGeometry">M5 13l4 4L19 7</StreamGeometry>
+    <StreamGeometry x:Key="SpinnerArcGeometry">M 2 8 A 6 6 0 1 1 8 2</StreamGeometry>
+    <StreamGeometry x:Key="GaugeGeometry">M3 13a9 9 0 0 1 18 0M12 13l5-4M3 19h18</StreamGeometry>
+    <StreamGeometry x:Key="ChipGeometry">M7 7h10v10H7zM4 9h3M4 12h3M4 15h3M17 9h3M17 12h3M17 15h3M9 4v3M12 4v3M15 4v3M9 17v3M12 17v3M15 17v3</StreamGeometry>
+    <StreamGeometry x:Key="GridGeometry">M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z</StreamGeometry>
+    <StreamGeometry x:Key="UserGeometry">M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21c0-4 3.6-6 8-6s8 2 8 6</StreamGeometry>
+    <StreamGeometry x:Key="SearchGeometry">M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4.2-4.2</StreamGeometry>
+    <StreamGeometry x:Key="RefreshGeometry">M20 12a8 8 0 1 1-2.3-5.7M20 4v4h-4</StreamGeometry>
 
     <!-- Fonts -->
     <FontFamily x:Key="DisplayFont">avares://Avalonia.Fonts.Inter/Assets#Inter</FontFamily>

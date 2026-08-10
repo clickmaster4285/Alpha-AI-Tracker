@@ -39,6 +39,13 @@ public interface ILogStore
     Task<IReadOnlyList<StorageDevice>> GetUnsentStorageDevicesAsync(int limit, CancellationToken ct);
     Task MarkStorageDevicesSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
 
+    /// <summary>
+    /// Storage devices belonging to the most recent device_hardware_info row, for display.
+    /// Unlike GetUnsentStorageDevicesAsync this ignores is_synced — the System Specifications
+    /// page needs the current inventory, not the sync backlog.
+    /// </summary>
+    Task<IReadOnlyList<StorageDevice>> GetLatestStorageDevicesAsync(CancellationToken ct);
+
     // ── Hardware Devices (USB / peripheral hotplug tracking) ──
 
     Task StoreHardwareDevicesAsync(IReadOnlyList<HardwareDevice> entries, CancellationToken ct);

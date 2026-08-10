@@ -17,8 +17,8 @@ public partial class MainWindow : Window
         // Open at ~90% of the screen's working area by default.
         ResizeToNinetyPercent();
 
-        // Play the GuardianConnect splash sequence (PDF page 1) once on open,
-        // then reveal the login / profile UI.
+        // Play the boot/splash sequence once on open, then reveal the
+        // login / setup / shell UI.
         if (DataContext is MainViewModel vm)
         {
             try
