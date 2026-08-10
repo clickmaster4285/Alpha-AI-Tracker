@@ -1,7 +1,16 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-08-07 (full re-audit against source — every section below was verified by reading the current code)
+> **Last audited:** 2026-08-10 (§3, §4, §7 re-verified against source after the six-page GUI rewrite)
 > **Changelog:**
+> - 2026-08-10: **Six-page GUI rewrite + runtime branding pipeline.** `MainWindow.axaml` is now a
+>   ~230-line **router**; every screen lives in `Views/Pages/` as its own `UserControl` (Splash, Login,
+>   PermissionSetup, Dashboard, SystemSpecs, InstalledApps). Three new page ViewModels
+>   (`DashboardViewModel`, `SystemSpecsViewModel`, `InstalledAppsViewModel`) joined `MainViewModel` in DI
+>   as Transient. `Styles/AppTheme.xaml` flipped from a dark palette to a **light design-token
+>   dictionary** (colors, radii, shadows, vector icon geometries); `App.axaml` carries ~30 style classes
+>   and 5 animations. New: `Core/AppInfo.cs` reads `client/APP_IDENTIFIERS` (embedded resource) +
+>   `client/VERSION` (informational version) so **every visible brand string and version is derived at
+>   runtime** — no product name is baked into XAML or C#. Full UI reference: **[UI_ARCHITECTURE.md](UI_ARCHITECTURE.md)**.
 > - 2026-08-07: **Docs re-audit & rewrite.** Re-verified every claim against source. Corrected stale
 >   references: `TrayAvailability.cs` and `SingleInstance.cs` do not exist (`SingleInstanceService.cs`
 >   does); the tray menu has **Show / Hide only (no Quit item)**; `extensions/`, `native-host.py`,
@@ -110,7 +119,14 @@ client/
 ├── SingleInstanceService.cs        # (in Core/) named-pipe signalling ("alpha-ai-tracker-activation")
 ├── app.manifest                    # Windows compatibility manifest
 ├── ViewLocator.cs                  # ViewModel → View resolution (reflection, simple replacement)
-├── client.csproj                   # net10.0, Avalonia 12.1.0, DefaultServerUrl AssemblyMetadata
+├── client.csproj                   # net10.0, Avalonia 12.1.0, DefaultServerUrl AssemblyMetadata,
+│                                   #   VERSION → Version/InformationalVersion (read at evaluation time),
+│                                   #   APP_IDENTIFIERS → EmbeddedResource "client.APP_IDENTIFIERS"
+├── APP_IDENTIFIERS                 # ⭐ Single source of truth for branding (13 KEY="value" pairs).
+│                                   #   Consumed at BUILD time by publish/* and at RUNTIME by Core/AppInfo.cs
+├── VERSION                         # ⭐ Single source of truth for the version string (currently 0.2.0)
+├── APP_IDENTIFIERS_README.md       # How to re-brand; lists every consumer
+├── VERSION_README.md               # How to bump the version
 ├── appsettings.json                # Logging config (largely unused — level comes from ALPHA_LOG_LEVEL)
 ├── .env / .env.example             # Dev plaintext config template (REPO key is NOT read by client)
 │
@@ -145,8 +161,13 @@ client/
 │   │   └── JourneyRecord.cs            # in-memory journey state
 │   ├── Models/                     # ActivityLog, AppSession/AppItem (journey fields), DeviceHardwareInfo,
 │   │                               #   InstalledApplication, InstalledPackage, NetworkInfo, StorageDevice,
-│   │                               #   SessionEvent, EmployeeInfo, SessionInfo (static per-launch GUID)
+│   │                               #   HardwareDevice, SessionEvent, EmployeeInfo, SessionInfo (per-launch GUID)
+│   ├── AppInfo.cs                  # ⭐ Runtime branding accessor — parses the embedded APP_IDENTIFIERS
+│   │                               #   (strict regex, never executed) + reads VERSION from the assembly's
+│   │                               #   InformationalVersion. Every brand string in the UI comes from here.
+│   ├── SingleInstanceService.cs    # Named-pipe signalling ("alpha-ai-tracker-activation")
 │   ├── EncryptedConfigService.cs   # AES-256-GCM: transport key → machine-derived key; fallback .machine-id
+│   │                               #   ⚠️ TransportKeySeed / MachineKeyPrefix are KDF seeds — never templatize
 │   ├── CgroupResolver.cs           # /proc/<pid>/cgroup → systemd app-*.scope (session dedup key)
 │   ├── SessionLabelResolver.cs     # context_label: VS Code workspace folder / Chrome --profile-directory
 │   ├── InstalledAppDetector.cs     # GUI apps: .desktop (XDG), registry/Start Menu (Win), .app bundles (mac)
@@ -154,6 +175,8 @@ client/
 │   ├── SoftwareCategoryResolver.cs # canonical categories from .desktop Categories / bundle id
 │   ├── SoftwareClassifier.cs       # joint dedup pipeline — GUI apps win over matching package entries
 │   ├── SoftwareIdentityResolver.cs # SHA-256 stable identity for cross-source dedup
+│   ├── ExecutableMetadata.cs       # publisher/product strings read off the binary itself (no name lists)
+│   ├── CollectionExtensions.cs     # small LINQ-ish helpers shared by the resolvers
 │   ├── ProcessFilter.cs            # kernel/system process filtering (names, prefixes, session, window, age)
 │   ├── ParentProcessResolver.cs    # PPID tree, window-title resolution, cmdline, browser profile extraction
 │   ├── AppProcessClassifier.cs     # category + root item_type resolution, headless --type= filter
@@ -180,14 +203,44 @@ client/
 │   ├── DatabaseSchema.cs           # CreateTableSql (11 tables) + MigrateSql (idempotent ALTERs + dedup) + insert SQL
 │   └── SqliteLogStore.cs           # ILogStore impl: SemaphoreSlim(1,1) gate, PRAGMA busy_timeout, atomic cascade-close
 │
-├── ViewModels/                     # ViewModelBase (ObservableObject) + MainViewModel (login, 4-step wizard, profile)
-├── Views/MainWindow.axaml(.cs)     # login → wizard steps → profile; browser-journey info card; dark theme
-├── Converters/                     # BoolInvert, StringNotEmpty, LoadingToText
-├── Styles/AppTheme.xaml            # dark theme resources
-├── Assets/                         # avalonia-logo.ico, icon.png
+├── ViewModels/                     # ⭐ One VM per concern — see UI_ARCHITECTURE.md
+│   ├── ViewModelBase.cs            # ObservableObject base
+│   ├── MainViewModel.cs            # Shell VM (~1150 lines): splash sequence, login/logout, permission
+│   │                               #   wizard, AppPage router state, branding passthrough to AppInfo
+│   ├── DashboardViewModel.cs       # Page 4 — identity + status tiles, pipeline health, attached devices
+│   ├── SystemSpecsViewModel.cs     # Page 5 — machine/compute/network, storage + peripherals
+│   └── InstalledAppsViewModel.cs   # Page 6 — apps + packages inventory, search, InventoryRow projection
+│
+├── Views/
+│   ├── MainWindow.axaml(.cs)       # ⭐ ROUTER ONLY — 4 top-level states + nav rail; splash on Opened,
+│   │                               #   90%-of-working-area sizing, close-hides-to-tray
+│   └── Pages/                      # One UserControl per screen (.axaml + .axaml.cs each)
+│       ├── SplashPage              # 1 — boot checklist + determinate progress
+│       ├── LoginPage               # 2 — artwork panel + credential card
+│       ├── PermissionSetupPage     # 3 — stepper (4 steps Linux / 3 elsewhere)
+│       ├── DashboardPage           # 4 — operational overview
+│       ├── SystemSpecsPage         # 5 — system specifications
+│       └── InstalledAppsPage       # 6 — installed applications & packages
+│
+├── Converters/                     # BoolInvert, StringNotEmpty, LoadingToText, PercentToGridLength
+├── Styles/AppTheme.xaml            # ⭐ Light design-token dictionary: palette + rail tokens + badge
+│                                   #   surfaces + 4 shadows + 5 radii + 9 StreamGeometry icons + Inter fonts.
+│                                   #   No product name here — branding is resolved at runtime.
+├── App.axaml                       # ~30 style classes (card/nav/badge/table/h1/label/ghost…) + 5 animations
+├── Assets/
+│   ├── avalonia-logo.ico, icon.png
+│   └── backgrounds/                # dashboard-hero.png, login-hero.png, specs-hero.png, apps-hero.png
+│                                   #   (covered by the existing <AvaloniaResource Include="Assets\**" />
+│                                   #    glob → compiled into client.dll, so installer parity is automatic)
+├── installers/                     # Built artifacts, version-stamped from VERSION
 └── publish/                        # build-installer.sh, encrypt-config.sh, firefox-a11y-apparmor.sh,
-                                    #   release.sh, build-deb.sh, build-dmg.sh, installer-windows.iss
+                                    #   release.sh, build-deb.sh, build-dmg.sh, generate-windows-vars.sh,
+                                    #   installer-windows.iss, linux/, macos/, windows/
 ```
+
+> **Adding a screen, a style class, or a design token?** Read
+> **[UI_ARCHITECTURE.md](UI_ARCHITECTURE.md)** — it documents the token set, every style class, the
+> router contract, the binding patterns, and the branding pipeline.
 
 ---
 
@@ -196,25 +249,36 @@ client/
 ### Layers
 
 ```
-Views (XAML) ──► ViewModels (MainViewModel) ──► Models (plain DTOs) ──► Services / Infrastructure
-   MainWindow       [ObservableProperty] state       ActivityLog, AppSession,        LogCollectorService
-   (login/steps/     [RelayCommand] Login/Logout/     AppItem, DeviceHardwareInfo,    DesktopEventService
-    profile)         GrantCurrentStepPermission       InstalledApplication,           AccessibilityBrowserTracker
-                                                     InstalledPackage, NetworkInfo,   SqliteLogStore
-                                                     SessionEvent, StorageDevice,     platform collectors
-                                                     HardwareDevice,                 HardwareDeviceWatcherService
+Views (XAML)          ──►  ViewModels                ──►  Models (plain DTOs)      ──►  Services / Infrastructure
+  MainWindow (router)        MainViewModel                  ActivityLog, AppSession,      LogCollectorService
+  Pages/SplashPage           ├─ splash / login / wizard     AppItem, DeviceHardwareInfo,  DesktopEventService
+  Pages/LoginPage            ├─ AppPage router state        InstalledApplication,         AccessibilityBrowserTracker
+  Pages/PermissionSetupPage  └─ branding → Core/AppInfo     InstalledPackage, NetworkInfo, SqliteLogStore
+  Pages/DashboardPage        DashboardViewModel             SessionEvent, StorageDevice,  platform collectors
+  Pages/SystemSpecsPage      SystemSpecsViewModel           HardwareDevice                HardwareDeviceWatcherService
+  Pages/InstalledAppsPage    InstalledAppsViewModel                                       InstalledAppDetector / PackageDetector
 ```
+
+`MainViewModel` owns the three page VMs as properties (`Dashboard`, `SystemSpecs`, `InstalledApps`) and
+re-points each hosted page's `DataContext` to its own VM. Because of that re-pointing, a page that needs
+shell state binds through the window:
+`{Binding $parent[Window].((vm:MainViewModel)DataContext).IsDashboardPage}`.
 
 ### DI Container (`Program.cs`, `Host.CreateApplicationBuilder`)
 
 | Lifetime | Services |
 |---|---|
-| **Singleton** | `AppConfig`, `ILogStore` (SqliteLogStore), `HttpClient` (30s timeout), `IInstalledAppDetector`, `IPackageDetector`, `IActivityCollector` (per-platform), `AutoStartService`, `LogCollectorService`, `EventCoordinator`, `JourneyEngine`, `ATSPIEventWatcher`, `FileSystemEventWatcher`, `RecentFilesWatcher` |
+| **Singleton** | `AppConfig`, `ILogStore` (SqliteLogStore), `HttpClient` (30s timeout), `IInstalledAppDetector`, `IPackageDetector`, `IActivityCollector` (per-platform), `AutoStartService`, `LogCollectorService`, `EventCoordinator`, `JourneyEngine`, `ATSPIEventWatcher`, `WindowsExplorerWatcher`, `IExplorerWindowProvider`, `FileSystemEventWatcher`, `RecentFilesWatcher` |
 | **Singleton (conditional)** | `IAccessibilityBrowserReader` (platform reader) + `BrowserHistoryReader` — only when `ALPHA_BROWSER_TRACKING_ENABLED` |
 | **Hosted** | `BackgroundGuardService`, `LogCollectorService`, `DesktopEventService`, `AccessibilityBrowserTracker` (conditional), `HardwareDeviceWatcherService` |
-| **Transient** | `MainViewModel` |
+| **Transient** | `DashboardViewModel`, `SystemSpecsViewModel`, `InstalledAppsViewModel`, `MainViewModel` |
 
-`App.ServiceProvider = host.Services` is set after `StartAsync`; `App.axaml.cs` resolves `MainViewModel` from DI.
+`App.ServiceProvider = host.Services` is set after `StartAsync`; `App.axaml.cs` resolves `MainViewModel`
+from DI (which pulls the three page VMs in through its constructor).
+
+`Core/AppInfo` is deliberately **static, not injected** — branding is process-wide immutable data read
+from an embedded resource, and it is needed from places with no container (XAML resources, tray setup,
+log banners).
 
 ### CLI modes & process model
 
@@ -297,7 +361,28 @@ Always **re-validates the actual condition** — it never trusts stored statuses
 
 ### UI
 
-`MainWindow.axaml`: login form (Employee ID + Secret Key) → step cards (1–4 with icons, titles, descriptions, action buttons, status text) → **profile** (avatar, department, role, Disconnect) + an always-on **Browser Journey Tracking** card (accessibility-based, no setup). Dark theme via `Styles/AppTheme.xaml`; window close hides to tray (`ShutdownMode.OnExplicitShutdown`).
+`MainWindow.axaml` is a **router**, not a screen. It picks exactly one of four mutually exclusive
+top-level states from `MainViewModel`, in this order:
+
+| Guard | Shows |
+|---|---|
+| `IsSplashVisible` | **Page 1** `SplashPage` — boot checklist + determinate progress, played once on window open |
+| `!IsLoggedIn` | **Page 2** `LoginPage` — Employee ID + Secret Key (secret masked; it is a long-lived credential) |
+| `RequiresPermissionAction` | **Page 3** `PermissionSetupPage` — the wizard above, one card per step |
+| `IsProfile` | **Pages 4–6** behind the nav rail |
+
+`IsProfile => IsLoggedIn && CurrentPermissionStep == PermissionStep.None`, so the shell only appears
+once the wizard reports nothing left to grant.
+
+The shell is a 246px nav rail (brand mark, three nav buttons, an always-on **Browser Journey** info card
+gated on `IsBrowserTracking`, signed-in employee, Disconnect, version) plus a content column with a top
+bar (`ActivePageTitle` / `ActivePageSubtitle`, environment badge, refresh) hosting pages 4–6. Navigation
+is `NavigateCommand` with a string parameter (`dashboard` / `specs` / `apps`) which sets `ActivePage` and
+awaits `RefreshActivePageAsync()`.
+
+Theming is the **light** token dictionary in `Styles/AppTheme.xaml` plus the style classes in
+`App.axaml`. Window close hides to tray (`ShutdownMode.OnExplicitShutdown`). Full detail:
+**[UI_ARCHITECTURE.md](UI_ARCHITECTURE.md)**.
 
 ---
 
@@ -535,6 +620,7 @@ Watchers (IObservableEventSource)          EventCoordinator                 Jour
 | `build-deb.sh` | Linux `.deb` (prerm kills running instances) |
 | `build-dmg.sh` | macOS `.dmg` |
 | `installer-windows.iss` | Inno Setup (auto-kills running processes) |
+| `generate-windows-vars.sh` | Reads `APP_IDENTIFIERS` + `VERSION` → `windows_vars.iss`, so the Inno script carries no literal product name |
 | `release.sh` | GitHub release workflow |
 | `encrypt-config.sh` | `.env` → `config.enc` (transport key) |
 | `firefox-a11y-apparmor.sh` | **snap Firefox fix**: loads a surgical copy of the snap AppArmor profile adding ONE `dbus (receive)` rule so the AT-SPI bridge can read snap-Firefox windows (sandbox stays enforcing); installs `alpha-ai-firefox-a11y.service` to re-apply at boot / after `snap refresh`; `--undo` supported; requires Firefox restart |
@@ -552,6 +638,27 @@ Installed builds ship the **publish output** plus only what the scripts bundle, 
 5. **Path assumptions** — never write relative to cwd/exe dir (root-owned). Use `~/.config/alpha-ai-tracker/` (logs, machine-id) and `~/.local/share/alpha-ai-tracker/` (DB).
 6. **Packaging edits apply to ALL platforms** — update all four builder scripts together.
 7. **Stale-binary guard** — `build-installer.sh` aborts if source is newer than published `client.dll`; fix with `dotnet clean && bash publish/build-installer.sh`. Covers compiled code only — items 2–6 are the developer's responsibility.
+
+### Branding & version — one file each, two consumers each
+
+`client/APP_IDENTIFIERS` and `client/VERSION` are the only places a product name or version number is
+written. Both feed **two** paths from that single edit:
+
+| File | Build-time consumer | Runtime consumer |
+|---|---|---|
+| `APP_IDENTIFIERS` | `build-deb.sh`, `build-dmg.sh`, `generate-windows-vars.sh` → `installer-windows.iss`, `release.sh` — package names, bundle id, desktop entry, publisher | `client.csproj` embeds it as `client.APP_IDENTIFIERS`; `Core/AppInfo` parses it and the UI binds to `AppDisplayName`, `AppTagline`, `AppInitials`, `AppCopyright` |
+| `VERSION` | installer filenames and package metadata | `client.csproj` sets `Version` / `InformationalVersion`; `AppInfo.Version` reads it back (stripping any `+sha`), surfaced as `AppVersionDisplay` and the window title |
+
+Two consequences worth knowing before you touch either file:
+
+- **The embedded resource lives inside `client.dll`,** so branding needs no `bundle_into_publish()` entry
+  — installer parity for item 2 above is automatic. Same for `Assets/backgrounds/*.png`, which the
+  existing `<AvaloniaResource Include="Assets\**" />` glob already compiles in.
+- **`client.csproj` reads `VERSION` at project-evaluation time,** not in a `BeforeBuild` target. That is
+  deliberate: a `BeforeBuild` read would leave IDE design-time builds silently on `1.0.0`.
+- ⚠️ **`Core/EncryptedConfigService.cs` `TransportKeySeed` / `MachineKeyPrefix` are NOT branding.** They
+  are key-derivation seeds. Re-branding must leave them byte-for-byte alone — changing them makes every
+  `config.enc` already deployed in the field undecryptable.
 
 ---
 
@@ -585,3 +692,5 @@ Installed builds ship the **publish output** plus only what the scripts bundle, 
 9. ~~Debugger/extension browser pipeline~~ ✅ (replaced 2026-08-05 by Option B accessibility)
 10. ~~File-explorer journey watchers~~ ✅ (2026-07-29)
 11. **Installed-build acceptance** — rebuild the installer and re-verify the a11y journey + private-window URLs from the installed build (the 2026-08-07 verification passed; re-run after the next code change).
+12. **Ship-test the six-page GUI** — the hero images and `APP_IDENTIFIERS` both ride inside `client.dll`, so no packaging change was needed, but that has not yet been confirmed from an installed build. Per the Build-Parity Rule this is the remaining acceptance step for the 2026-08-10 redesign.
+13. **Re-brand smoke test** — change `DISPLAY_NAME` in `APP_IDENTIFIERS`, bump `VERSION`, rebuild, and confirm the rail, window title, splash, footer, tray tooltip and installer filenames all follow with no other edit.

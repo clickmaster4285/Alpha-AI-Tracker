@@ -11,8 +11,10 @@ All build and release commands automatically read the version from this file. Yo
 ### Current Version
 
 ```
-0.0.1
+0.2.0
 ```
+
+> Read the file rather than trusting this snippet — `cat client/VERSION` is authoritative.
 
 ## Usage
 
@@ -47,9 +49,9 @@ bash publish/build-installer.sh -b win
 bash publish/build-installer.sh -b mac
 ```
 
-Each installer will automatically use the version from the `VERSION` file:
-- **Linux (.deb):** `alpha-ai-tracker_0.0.1_amd64.deb`
-- **Windows (.exe):** `AlphaAITracker-Setup-0.0.1.exe`
+Each installer will automatically use the version from the `VERSION` file (at `0.2.0`, that is):
+- **Linux (.deb):** `alpha-ai-tracker_0.2.0_amd64.deb`
+- **Windows (.exe):** `AlphaAITracker-Setup-0.2.0.exe`
 - **macOS (.dmg):** `AlphaAITracker.dmg` (with version in app bundle)
 
 ### Creating Releases
@@ -65,7 +67,7 @@ bash publish/release.sh v1.2.3
 ```
 
 The release script will:
-1. Read version from `VERSION` file (default: `v0.0.1`)
+1. Read version from `VERSION` file, prefixed with "v" (currently `v0.2.0`)
 2. Build all installers with that version
 3. Create a git tag with the version
 4. Create a GitHub release with the installers
@@ -105,13 +107,17 @@ Examples:
 
 ## Files That Use the Version
 
-The following files automatically read from the `VERSION` file:
+**Build time** — these read `VERSION` directly:
 
-1. **`client.csproj`** - .NET assembly versioning
-2. **`publish/build-deb.sh`** - Linux .deb package version
-3. **`publish/build-dmg.sh`** - macOS app bundle version (CFBundleVersion)
-4. **`publish/installer-windows.iss`** - Windows installer version
-5. **`publish/release.sh`** - Git tag and GitHub release version
+1. **`client.csproj`** — .NET assembly versioning (`Version`, `FileVersion`, `InformationalVersion`)
+2. **`publish/build-deb.sh`** — Linux .deb package version
+3. **`publish/build-dmg.sh`** — macOS app bundle version (CFBundleVersion)
+4. **`publish/generate-windows-vars.sh`** → **`publish/installer-windows.iss`** — Windows installer version
+5. **`publish/release.sh`** — Git tag and GitHub release version
+
+**Runtime** — the version is read back out of the assembly, not re-read from disk:
+
+6. **`Core/AppInfo.cs`** — reads `AssemblyInformationalVersionAttribute`, strips any `+<sha>` source-link suffix, and exposes `AppInfo.Version` / `VersionDisplay` ("Version 0.2.0") / `TitleWithVersion`. `MainViewModel` re-exposes these as `AppVersionDisplay` / `AppTitleWithVersion`, which is what the window title, splash footer and nav-rail footer bind to. No XAML or C# file contains a literal version string.
 
 ## Verification
 
@@ -122,15 +128,15 @@ To verify the version is correctly embedded:
 cat client/VERSION
 
 # Check the built assembly
-strings bin/Release/net10.0/client.dll | grep "^0\.0\.1"
+strings bin/Release/net10.0/client.dll | grep "^0\.2\.0"
 
 # Check a built installer
-dpkg-deb -f installers/alpha-ai-tracker_0.0.1_amd64.deb Version
+dpkg-deb -f installers/alpha-ai-tracker_0.2.0_amd64.deb Version
 ```
 
 ## Notes
 
 - The `VERSION` file should contain **only** the version number (no "v" prefix, no extra whitespace)
-- The `release.sh` script adds a "v" prefix for git tags (e.g., `v0.0.1`)
-- Installer filenames use the version without the "v" prefix (e.g., `0.0.1`)
-- Changing the version requires a rebuild: `dotnet clean && dotnet build`
+- The `release.sh` script adds a "v" prefix for git tags (e.g., `v0.2.0`)
+- Installer filenames use the version without the "v" prefix (e.g., `0.2.0`)
+- Changing the version requires a rebuild: `dotnet clean && dotnet build`. The clean is **not optional** — `client.csproj` reads `VERSION` at project-evaluation time (deliberately, so IDE design-time builds don't fall back to `1.0.0`), so an incremental build reuses the cached project graph and keeps stamping the old version.

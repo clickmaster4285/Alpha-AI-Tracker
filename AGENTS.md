@@ -1,8 +1,27 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-08-08
+> **Last audited:** 2026-08-10
 > **Changelog:**
 >
+> - 2026-08-10: **Client GUI rebuilt as six pages + runtime branding pipeline.** The Avalonia UI was a
+>   single `MainWindow.axaml` monolith (login → wizard → profile, dark theme). It is now a **router**
+>   plus six `UserControl` pages under `client/Views/Pages/` — Splash, Login, PermissionSetup, Dashboard,
+>   SystemSpecs, InstalledApps — behind a 246px nav rail. Three page ViewModels
+>   (`DashboardViewModel`, `SystemSpecsViewModel`, `InstalledAppsViewModel`) joined `MainViewModel` in DI
+>   as Transient; `Styles/AppTheme.xaml` became a **light design-token dictionary** (palette, rail tokens,
+>   badge surfaces, 4 shadows, 5 radii, 9 vector icon geometries) and `App.axaml` carries ~30 style
+>   classes + 5 animations. Two previously-unsurfaced data sets got real screens: **System Specs** (CPU,
+>   RAM, GPU, storage, network, hot-plugged peripherals) and **Installed Applications** (the
+>   `installed_applications` + `installed_packages` inventory, searchable, virtualized for
+>   multi-thousand-row lists). New `client/Core/AppInfo.cs` makes **every visible brand string and version
+>   derive from `client/APP_IDENTIFIERS` + `client/VERSION` at runtime** — `APP_IDENTIFIERS` is embedded
+>   into `client.dll` as `client.APP_IDENTIFIERS` and parsed with a strict regex (read as data, never
+>   executed); `VERSION` flows through `InformationalVersion` and is read back with any `+sha` stripped.
+>   Change either file, rebuild, and the rail, window title, splash, footer, tray tooltip and installer
+>   filenames all follow — see §6 → *Branding-Single-Source Rule*. No installer-script change was needed:
+>   the embedded resource and the `Assets/**` glob both ship inside `client.dll`. New docs:
+>   [FILE_HIERARCHY.md](./FILE_HIERARCHY.md), [WORKFLOW.md](./WORKFLOW.md),
+>   [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md).
 > - 2026-08-08 (round 2): **Journey noise flood fixed — AppData churn + feedback loop.** Fresh-DB
 >   test showed 374 junk rows appearing with NO user file ops: Chrome/Brave/Edge rewrite
 >   `Local State`, `Cookies-journal`, `History-journal`, `Breadcrumbs`, `Network Persistent
@@ -380,6 +399,17 @@ flowchart LR
 | **server/** | Go 1.25, Echo v4.15, pgx v5.10, go-redis v9.21                       | Central API hub, data storage, auth  | `cmd/server/main.go`                     | [server/ARCHITECTURE.md](./server/ARCHITECTURE.md) |
 | **web/**    | Next.js 15.3.4, React 18, Redux Toolkit, TanStack Query              | Admin dashboard & analytics          | `next.config.ts`, `src/app/layout.tsx` | [web/ARCHITECTURE.md](./web/ARCHITECTURE.md)       |
 
+### Cross-cutting docs
+
+| Doc | Answers |
+|---|---|
+| [FILE_HIERARCHY.md](./FILE_HIERARCHY.md) | *Where does this file live and who owns it?* — annotated node tree of all three services |
+| [WORKFLOW.md](./WORKFLOW.md) | *How do I do X?* — dev loop, adding a GUI page, re-branding, version bump, adding a runtime asset, release |
+| [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md) | *How is the desktop UI built?* — design tokens, style classes, the 6 pages, router, binding patterns |
+| [client/APP_IDENTIFIERS_README.md](./client/APP_IDENTIFIERS_README.md) | *How do I re-brand?* — every consumer of `APP_IDENTIFIERS` |
+| [client/VERSION_README.md](./client/VERSION_README.md) | *How do I bump the version?* |
+| [client/build.md](./client/build.md) | *How do I build installers?* |
+
 ---
 
 ## 4. Cross-Service Contracts
@@ -486,6 +516,8 @@ flowchart LR
 - Windows power management (prevents sleep)
 - **Headless `--background` service mode** — runs the tracking services with no Avalonia/X11 UI (systemd); skips GUI init so the installed service can't crash on Wayland `XAUTHORITY`
 - **Single-instance activation** — a second user launch signals the running instance (named pipe `alpha-ai-tracker-activation`) to raise its window; `--background`/`--minimized` relaunches exit quietly
+- **Six-page GUI** (2026-08-10) — `MainWindow` is a router over four exclusive states; pages live in `Views/Pages/`: Splash (boot checklist), Login, PermissionSetup (stepper), and behind the nav rail Dashboard (identity + status tiles + pipeline health + attached devices), System Specs (machine/compute/network/storage/peripherals) and Installed Applications (searchable apps + packages inventory, virtualized). One VM per page, all Transient in DI. Details: [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md)
+- **Runtime branding from a single source** — `Core/AppInfo.cs` resolves the product name, tagline, initials, publisher, copyright and version from the embedded `APP_IDENTIFIERS` + `VERSION`; no XAML or C# literal names anywhere in the UI. Editing either file re-brands both the app and the installers (§6 → *Branding-Single-Source Rule*)
 
 **What's missing:**
 
@@ -496,6 +528,7 @@ flowchart LR
 - **No encryption at rest** — SQLite encryption (sqlcipher) is commented out
 - **macOS CPU measurement** — macOS process collector skips CPU measurement (always 0%)
 - **macOS window titles** — only captures foreground window
+- **Six-page GUI not yet ship-tested** — it needs no packaging change (hero images and `APP_IDENTIFIERS` both compile into `client.dll`), but per the Installer-Parity Rule it is not "done" until verified from an installed build
 
 ### Web — ~16% complete
 
@@ -542,6 +575,7 @@ flowchart LR
 | **Commit style**        | Descriptive lowercase messages: "now remove the exit btn on the tray on windows", "fixit" |
 | **Monorepo tooling**    | No shared tooling (no Turborepo, Nx, etc.). Each service has its own build system.        |
 | **Build parity**        | `dotnet run` is NOT a release test — every change must be verified from an installed build; new assets/config/scripts must be bundled by the `publish/*` scripts (see below) |
+| **Branding & version**  | Product name and version are written in exactly two files — `client/APP_IDENTIFIERS` and `client/VERSION`. No literal product name or version string anywhere else in C#, XAML, or the build scripts (see below) |
 
 ### Installer-Parity Rule (mandatory)
 
@@ -553,7 +587,7 @@ flowchart LR
    ```bash
    cd client
    bash publish/build-installer.sh -b linux   # or win / mac
-   sudo dpkg -i installers/alpha-ai-tracker_1.0.0_amd64.deb
+   sudo dpkg -i installers/alpha-ai-tracker_0.2.0_amd64.deb   # filename tracks client/VERSION
    ```
 2. **New runtime assets** (icons, JSON, images, fonts) — bundled ONLY if copied by `build-installer.sh` (`bundle_into_publish`) or the platform builders (`build-deb.sh`, `build-dmg.sh`, `installer-windows.iss`). Add the copy step when you add the asset.
 3. **New runtime assets** (embedded scripts, JSON, icons) — the accessibility probe is embedded as a C# string in `LinuxAtSpiBrowserReader` (no external file to bundle). Anything file-based must be added to `bundle_into_publish()` or the platform builders.
@@ -574,6 +608,25 @@ flowchart LR
 5. **Package managers are the source of truth** — winget/npm/pip/choco/scoop/apt/snap/flatpak/brew report what they installed; dedup is by identity/fingerprint, not by filtering names.
 
 **Allowed exceptions (OS-shell constructs, NOT user software):** Linux GNOME/session daemon prefixes in `NonAppProcesses`/`NonAppProcessPrefixes` (gnome-*, gsd-*, gvfsd-*, ibus-*, evolution-*), Windows shell display names (`DisplayNameOverrides`: explorer→File Explorer, svchost→Windows Services…), and the Windows Update `KB`-prefix naming convention. These are OS-provided labels for OS processes; user-installed software detection must stay 100% metadata-driven. When a fix is tempting as a name list, it must be implemented as metadata first (probe the OS), and the resulting rule documented here.
+
+### Branding-Single-Source Rule (mandatory)
+
+**Every visible product name and version comes from `client/APP_IDENTIFIERS` + `client/VERSION`.** Neither value is duplicated anywhere else. Edit either file, rebuild, and the rail wordmark, window title, splash, footer, tray tooltip, log banners, installer filenames and package metadata all follow — with no other source edit. This is a structural guarantee, not a convention to remember:
+
+| File                    | Build-time consumers                                                                                    | Runtime consumer                                                          |
+| ----------------------- | ------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `APP_IDENTIFIERS` | `build-deb.sh`, `build-dmg.sh`, `generate-windows-vars.sh` → `installer-windows.iss`, `release.sh` (sourced as shell) | `client.csproj` embeds it as `client.APP_IDENTIFIERS`; `Core/AppInfo.cs` parses it |
+| `VERSION`         | same scripts — package/artifact filenames and installer version fields                                   | `client.csproj` → `Version` / `InformationalVersion`; `AppInfo.Version` reads it back |
+
+**Runtime path.** `Core/AppInfo.cs` reads the embedded resource with `Assembly.GetManifestResourceStream()` and parses it with a **strict regex — the file is read as data, never executed** — exposing `DisplayName`, `Publisher`, `AppUrl`, `PackageName`, `BundleId`, `ExecutableName`, `AppMutex`, `WmClass`, `Tagline`, `Initials`, `Copyright`, `Version`, `VersionDisplay`, `TitleWithVersion`. Every accessor has a fallback default and the loader swallows exceptions — **branding must never take the app down**. `MainViewModel` re-exposes these as `AppDisplayName` / `AppTagline` / `AppInitials` / `AppVersionDisplay` / `AppCopyright` / `AppTitleWithVersion` so XAML binds to them; `App.axaml.cs` uses `AppInfo.DisplayName` directly for the tray tooltip and menu.
+
+**Three consequences worth knowing before you "fix" something:**
+
+1. **Re-branding needs NO installer-script change.** The embedded resource lives inside `client.dll`, and hero images are swept in by the existing `<AvaloniaResource Include="Assets\**" />` glob — both ride the publish output automatically. The Installer-Parity Rule still applies to *new file-based* runtime assets; it does not apply to branding strings or to anything under `Assets/`.
+2. **`client.csproj` reads `VERSION` at project-evaluation time, not in a `BeforeBuild` target.** This is deliberate — a target-based read leaves IDE design-time builds silently falling back to `1.0.0`. Trade-off: after editing `VERSION`, run `dotnet clean` (or restart the IDE) so the cached project graph is flushed.
+3. ⚠️ **`Core/EncryptedConfigService.cs` `TransportKeySeed` / `MachineKeyPrefix` are NOT branding.** They read like product names (`"AlphaAITracker:TransportKey:v1"`) but are cryptographic key-derivation seeds. Templatizing them from `APP_IDENTIFIERS` would make **every `config.enc` already deployed in the field undecryptable**. Leave them byte-for-byte alone during any re-brand.
+
+**Acceptance proof (re-brand smoke test):** change `DISPLAY_NAME` in `APP_IDENTIFIERS`, bump `VERSION`, `dotnet clean && bash publish/build-installer.sh -b linux`, install the artifact, and confirm the rail, window title, splash, footer, tray tooltip and installer filename all changed with no other edit. Details: [client/APP_IDENTIFIERS_README.md](./client/APP_IDENTIFIERS_README.md), [client/VERSION_README.md](./client/VERSION_README.md).
 
 ---
 

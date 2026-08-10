@@ -66,8 +66,8 @@ bash publish/build-installer.sh -h
 
 | Command      | Output                                          | Format                      |
 | ------------ | ----------------------------------------------- | --------------------------- |
-| `-b win`   | `installers/AlphaAITracker-Setup-1.0.0.exe`   | Inno Setup wizard installer |
-| `-b linux` | `installers/alpha-ai-tracker_1.0.0_amd64.deb` | Debian package              |
+| `-b win`   | `installers/AlphaAITracker-Setup-0.2.0.exe`   | Inno Setup wizard installer |
+| `-b linux` | `installers/alpha-ai-tracker_0.2.0_amd64.deb` | Debian package              |
 | `-b mac`   | `installers/AlphaAITracker.dmg`               | macOS disk image            |
 
 ---
@@ -170,9 +170,9 @@ Run **from the `client/` directory**.
 
 ```bash
 # Build all installers, create git tag, and upload to GitHub Releases
-bash publish/release.sh v1.0.0
+bash publish/release.sh v0.2.0
 
-# Or without a version (defaults to v1.0.0)
+# Or without a version (defaults to v0.2.0)
 bash publish/release.sh
 ```
 
@@ -180,7 +180,7 @@ This will:
 
 1. Build all installers via `build-installer.sh`
 2. Commit any pending changes
-3. Create and push the git tag (e.g. `v1.0.0`)
+3. Create and push the git tag (e.g. `v0.2.0`)
 4. Create a GitHub Release with the installer files attached
 5. Verify the release was created
 
@@ -201,21 +201,21 @@ bash publish/build-installer.sh
 
 ### Windows
 
-Share `installers/AlphaAITracker-Setup-1.0.0.exe` — double-click, Next > Next > Install.
+Share `installers/AlphaAITracker-Setup-0.2.0.exe` — double-click, Next > Next > Install.
 
 ### Linux
 
-Share `installers/alpha-ai-tracker_1.0.0_amd64.deb` — double-click or:
+Share `installers/alpha-ai-tracker_0.2.0_amd64.deb` — double-click or:
 
 ```bash
-sudo dpkg -i alpha-ai-tracker_1.0.0_amd64.deb
+sudo dpkg -i alpha-ai-tracker_0.2.0_amd64.deb
 ```
 
 > **If the app is already installed** (Software Center opens but shows nothing), remove the old package first, then install the new one:
 >
 > ```bash
 > sudo dpkg -r alpha-ai-tracker
-> sudo dpkg -i alpha-ai-tracker_1.0.0_amd64.deb
+> sudo dpkg -i alpha-ai-tracker_0.2.0_amd64.deb
 > ```
 
 ### macOS
