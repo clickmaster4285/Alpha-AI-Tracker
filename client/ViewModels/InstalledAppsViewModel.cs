@@ -24,12 +24,11 @@ public sealed class InventoryRow
     /// <summary>Install date-time of this cycle — "yyyy-MM-dd HH:mm" local, or "Unknown" when
     /// the OS did not report it (pre-existing software on Linux; only new installs get stamped).</summary>
     public string InstalledDate { get; init; } = "Unknown";
-    /// <summary>When this cycle ended ("—" while installed). Closed rows are history.</summary>
+    /// <summary>When this cycle ended ("—" while installed). Kept in the model for sync/debug
+    /// purposes; the GUI filters uninstalled rows out entirely so this is never rendered.</summary>
     public string UninstalledDate { get; init; } = "—";
     /// <summary>False = closed install cycle (uninstalled history row); the row is never deleted.</summary>
     public bool IsInstalled { get; init; } = true;
-    /// <summary>Row opacity: 1.0 while installed, 0.5 for closed history rows.</summary>
-    public double RowOpacity => IsInstalled ? 1.0 : 0.5;
     public string Initials { get; init; } = "?";
     public string AccentColor { get; init; } = "#2563EB";
     /// <summary>Lowercased haystack precomputed once so filtering stays O(n) with no allocations.</summary>
@@ -85,9 +84,11 @@ public partial class InstalledAppsViewModel : ViewModelBase
     public bool IsPackagesTab => ShowPackages;
     public bool HasResults => VisibleCount > 0;
 
+    // The table lists only currently-installed rows, so this state also covers the case
+    // where the inventory has rows but every cycle is closed (all uninstalled).
     public string EmptyMessage => ShowPackages
-        ? "No packages in the inventory yet — the collector\u2019s first scan has not run or found none. Try Rescan."
-        : "No applications in the inventory yet — the collector\u2019s first scan has not run or found none. Try Rescan.";
+        ? "No installed packages to show — the collector\u2019s first scan may not have run, or everything is uninstalled. Try Rescan."
+        : "No installed applications to show — the collector\u2019s first scan may not have run, or everything is uninstalled. Try Rescan.";
 
     partial void OnSearchTextChanged(string value) => ApplyFilter();
 
@@ -204,6 +205,9 @@ public partial class InstalledAppsViewModel : ViewModelBase
         Items.Clear();
         foreach (var row in source)
         {
+            // The table lists ONLY currently-installed cycles — closed (uninstalled) history
+            // rows stay in SQLite and sync upstream, but are never shown on the GUI.
+            if (!row.IsInstalled) continue;
             if (needle.Length > 0 && !row.SearchKey.Contains(needle, StringComparison.Ordinal)) continue;
             Items.Add(row);
         }
