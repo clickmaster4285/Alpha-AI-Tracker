@@ -1,8 +1,250 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-08-07
+> **Last audited:** 2026-08-11
 > **Changelog:**
 >
+> - 2026-08-11: **Web user-detail page + employee detail endpoint.** The HR → List of Users page
+>   dropdown was clipped by the table's `overflow-x-auto` scroll container whenever the list was
+>   short (the custom absolute-positioned menu) — replaced with the Radix `DropdownMenu` (portal-
+>   rendered, can never be clipped), and each row now links to a new **`/users/[id]`** page.
+>   Server: new aggregate endpoint **`GET /employees/:id/detail`** (protected) returns one
+>   employee's full machine picture in a single response — employee record, latest
+>   `device_hardware_info`, `storage_devices`, latest `network_info`, currently-installed
+>   applications/packages (active `employee_installed_*` junction links joined with the catalog
+>   rows), `hardware_devices` peripherals, `permission_status` checks, `app_status` key/value map
+>   and activity stats (session/item counts + last activity). UUID route param is resolved to the
+>   `EMP-XXXXX` id first (sync tables are keyed by it). New repo read methods in `new_schema_repo.go`
+>   (`GetLatestDeviceHardware`, `ListStorageDevices`, `GetLatestNetworkInfo`,
+>   `ListEmployeeApplications`, `ListEmployeePackages`, `ListHardwareDevices`, `ListAppStatus`,
+>   `ListPermissionStatus`, `GetEmployeeActivityStats`), `NewSchemaService.GetEmployeeDetail`,
+>   handler + route. The page shows identity/status, six stat tiles, and tabbed sections for
+>   Hardware (specs + storage + network + device status), Applications, Packages, Peripherals and
+>   Permissions — all real API data, with loading/empty/error states and a Generate-Secret dialog.
+>   Verified: `go build`/`go vet` clean, `tsc --noEmit` clean, `next build` succeeds with
+>   `/users/[id]` registered as a dynamic route.
+> - 2026-08-11: **Instant sync on login — full machine picture lands on the server the moment an employee logs in.**
+>   `SyncService` gained a wake-up signal (`RequestImmediateSync()` — `SemaphoreSlim(0,1)` released by the caller;
+>   the inter-pass wait is now `WaitAsync(wait, ct)` so a release ends the wait at once and runs a full drain pass
+>   instead of waiting out the 60s idle tick). `MainViewModel` injects the singleton `SyncService` (now registered
+>   `AddSingleton` + `AddHostedService(GetRequiredService)` — same pattern as `LogCollectorService`) and fires it in
+>   BOTH login paths: `LoginAsync` (after `SaveEmployeeInfoAsync`, so the token is persisted before the sync reads it)
+>   and `InitializeAsync` (session restore on launch). The instant pass drains every unsent table —
+>   `device_hardware_info`, `installed_applications`, `installed_packages`, `network_info`, `storage_devices`,
+>   `hardware_devices`, `session_events`, `permission_status`, `app_status`, `app_sessions`, `app_items` — in the same
+>   byte-bounded/gzip/backoff pipeline as the idle passes. `employee_info` itself needs no sync: the login endpoint
+>   response already carries the employee record server-side (the client table is its offline cache). Semantics: a
+>   request while a pass is running or while one is already pending is a single no-op release (one drain covers it),
+>   so login never stacks passes. Verified: `dotnet build` 0/0, code review clean (no races; credentials persisted
+>   before signal; DI resolves the same singleton).
+> - 2026-08-11: **Client retention + 4 new server sync surfaces.** The client now DELETES synced
+>   data the server already has: `app_items`/`app_sessions` older than `ALPHA_SYNC_RETENTION_HOURS`
+>   (24h default; OPEN sessions are NEVER deleted, and a session is only deleted once all its
+>   app_items are gone), `installed_applications`/`installed_packages` rows with `is_installed=0`
+>   (closed install cycles), and superseded `network_info` rows (`is_current=0`). Everything else
+>   is retained forever. Runs in `SyncService` after each clean drain pass, one SQLite transaction.
+>   **Four previously local-only tables now sync to the server** (migration 017): `app_status`
+>   (key/value; a value change resets is_synced so the server learns it next roundtrip),
+>   `hardware_devices`, `permission_status`, `storage_devices` — new DTO/service/repo/handler/routes
+>   (11 sync endpoints total). **permission_status duplication root-caused & fixed:**
+>   `SetPermissionStatusAsync` minted a FRESH GUID per check (~every 5 min) and inserted new rows
+>   instead of updating → ~2,800 rows/day; now keyed on the stable `"{platform}_{method}"` with
+>   `ON CONFLICT(check_id) DO UPDATE` (one row per permission method). Client: `is_synced`/`synced_at`
+>   columns added to `app_status`/`permission_status` (idempotent MigrateSql ALTERs);
+>   `MarkSentCoreAsync` generalized to a configurable id column. Server DB wiped as requested
+>   (all data tables emptied; users/employees/departments/schema_migrations kept — verified).
+>   Verified: `dotnet build` 0/0, `go build`/`go vet` clean, migrations 001–017 applied.
+> - 2026-08-11: **Sync engine decoupled — collection NEVER blocks on the network; 50k+ backlogs drain in minutes.**
+>   The old inline sync ran inside the collection loop every 10 cycles (~5 min) and fetched a FIXED 500 rows/table/cycle
+>   (50k queued rows → ~8 h to drain, while collection paused and CPU spiked). New dedicated `client/Services/SyncService.cs`
+>   (BackgroundService, registered in `Program.cs`) drains unsent SQLite rows on its own loop: chunks bounded by BOTH row
+>   count (`ALPHA_SYNC_MAX_ROWS`, 1000) and serialized payload bytes (`ALPHA_SYNC_MAX_BYTES`, ~1 MB, oversized slices
+>   auto-split by binary halving), ~150 ms politeness pause between chunks, a 5-min per-pass budget
+>   (`ALPHA_SYNC_MAX_DURATION_SEC`) so a huge backlog never monopolizes CPU, and **exponential backoff** on failure
+>   (5s→10s→…→`ALPHA_SYNC_BACKOFF_MAX_SEC` 5 min). Request bodies are **gzip-compressed** (`ALPHA_SYNC_COMPRESSION`,
+>   server side: `middleware.BodyLimit("20M")` + `middleware.Decompress()` added in `server/internal/router/router.go` —
+>   Echo's default 2 MB body cap could reject big raw batches). SQLite mark-sent is now batched
+>   (`UPDATE … WHERE id IN (…)`, 400 ids/statement — was one UPDATE per row), and existing DBs gained
+>   `(is_synced, started_at)` / `(is_synced, opened_at)` indexes on the two big tables (fresh DBs already had them).
+>   Server: `SyncInstalledApps`/`SyncInstalledPackages` now use **ONE transaction per request** (was 1 tx per entry =
+>   500 tx per batch). New env knobs: `ALPHA_SYNC_INTERVAL_SEC / MAX_ROWS / MAX_BYTES / CHUNK_DELAY_MS /
+>   MAX_DURATION_SEC / BACKOFF_MAX_SEC / COMPRESSION` (`.env` + `.env.example` + `AppConfig`). The collection loop now
+>   only does `StorePermissionStatus` + heartbeat. Docs: `client/ARCHITECTURE.md` §13 + env table. Verified: `dotnet build`
+>   0/0, `go build`/`go vet` clean. ⚠️ Installer-Parity: not "done" until verified from an installed build (re-bake
+>   `config.enc` — the new vars must be in `.env` before `encrypt-config.sh`).
+> - 2026-08-11: **Inventory GUI shows ONLY currently-installed software — uninstall history hidden.** The Installed Applications page (Applications/Packages tabs) no longer lists closed install cycles: `InstalledAppsViewModel.ApplyFilter` skips `IsInstalled == false` rows, and the table's **UNINSTALLED column was removed** (header + cell) along with the dimmed `RowOpacity` history treatment — the `RowOpacity` property is gone from `InventoryRow` (closed-cycle rows still live in SQLite and sync upstream unchanged; page + dashboard badges already counted only installed cycles). The lifecycle data model is untouched — this is display-only, client-only (no server/web change).
+> - 2026-08-11: **Package install/uninstall is now real-time too — `InstalledSoftwareWatcher` gained package-manager watch locations.** The round-3 watcher only watched APP evidence (`.desktop` dirs + `/var/lib/dpkg` on Linux), so `npm install -g`/`npm uninstall -g` (e.g. cline) changed nothing the watcher saw — the DB only updated when the GUI Rescan button manually called `RescanInventoryAsync`. New `GetPackageWatchDirectories()` watches the trees where PACKAGE installs leave filesystem evidence: **Linux** — npm global root (resolved at runtime via a time-boxed `npm root -g` probe, since the root varies per setup: nvm/fnm/user-prefix/deb node, plus `/usr/local/lib/node_modules` + `/usr/lib/node_modules` fallbacks; a package dir is a DIRECT child, so one non-recursive watcher sees install/uninstall instantly), `~/.local/lib` (PEP 370 pip `--user` site, recursive — the versioned site-packages dir is a grandchild), `/var/lib/snapd/db` (snap state, rewritten in place → LastWrite), flatpak runtime roots; **Windows** — `%APPDATA%\npm\node_modules` (npm global); **macOS** — Homebrew Cellars. node_modules/Program Files trees are watched top-level only (recursion inside package trees only adds noise); `RescanInventoryAsync` already re-scans apps AND packages, so one event covers both. Verified live on this DB, one process lifetime, no GUI: `npm install -g cline` → new open `installed_packages` row in **~2 s**; `npm uninstall -g cline` → that cycle closed in **~3 s**; rescan count stays flat while idle (2 total, no loop); cline restored to its pre-test (uninstalled) state; build 0/0, client healthy.
+> - 2026-08-10 (round 3): **Install/uninstall detection is now 100% EVENT-DRIVEN — no minute-based polling (user rule 2026-08-10: no periodic inventory scan).** New `InstalledSoftwareWatcher` (BackgroundService) watches the OS install locations — Linux `.desktop` dirs (user + system + flatpak + snap exports) and `/var/lib/dpkg`; Windows Start Menu (user + common) and Program Files (top-level only); macOS `/Applications` — and triggers an instant `LogCollectorService.RescanInventoryAsync` whenever software is installed/uninstalled through terminal, software center, control panel, cmd/powershell or manual file delete. Events are debounced (1.5s anchored to the FIRST event of the burst, so a constant event stream can never starve the rescan), min-gapped (5s) and coalesced (an in-flight rescan is never stacked; a change arriving mid-scan re-arms the burst so nothing is lost). The collector's `_cycleCount % 30/60` periodic app/package scans were REMOVED entirely — the one-time startup scan is the only other scan — and `ALPHA_INVENTORY_SCAN_MINUTES` was deleted (only `ALPHA_INVENTORY_WATCH_ENABLED` remains). The GUI Installed Apps page runs a 5s `DispatcherTimer → PollAsync` (pure SQLite re-read, no OS scan) while visible, so changes appear live without clicking Rescan or restarting. **Two root-cause bugs were found and fixed live:** (1) **probe deadlock froze the watcher** — the old `StandardOutput.ReadToEnd() → WaitForExit(ms)` pattern blocked forever when a grandchild inherited the stdout pipe (observed `wait_for_partner`/`anon_pipe_read`); because the rescan never returned, its in-flight flag stayed set and EVERY later install/uninstall event was coalesced away — the DB looked frozen until an app restart. All 11 CLI probes (10 in `PackageDetector`, 1 in `InstalledAppDetector`) now go through the new `ProcessFilter.RunProbe`: concurrent stdout+stderr drain (a chatty stderr can never fill its pipe), a hard time-box on BOTH exit and stream drain, and `Kill(entireProcessTree)` on timeout; (2) **uninstall was invisible after the first rescan** — `InstalledAppDetector.ForceRecheck()` cleared `_knownApps` but NEVER `_installedApps`, and the platform scanners only APPEND, so an uninstalled app stayed in every scan result forever and the lifecycle pass never closed its cycle (it only looked correct in earlier tests because each test cycle restarted the client). `ForceRecheck` now clears `_installedApps` + `_binaryToDisplayName` (PackageDetector already cleared its `_packages`). Verified live on this DB, one process lifetime, no restart: copyq install → new open row in **~2–5 s**; copyq uninstall → that row closed in **~2–5 s**; rescan count stays flat while idle (no loop); client healthy, build 0/0. Installer note: the watcher is compiled into `client.dll` (no packaging change); the `ALPHA_INVENTORY_WATCH_ENABLED` knob ships via the normal `config.enc` pipeline (`.env` before `encrypt-config.sh`).
+> - 2026-08-10 (round 2): **Install/uninstall lifecycle REDESIGNED — ONE ROW PER INSTALL CYCLE (v1 install_count design replaced).** The user's rule: install date is the *honest* OS-reported date — pre-existing software the tracker never saw installed shows **NULL / “Unknown”** on the GUI (no `detected_at` backfill faking a date), and only **newly detected installs** (copyq while the tracker runs) get the current time stamped. And no install counter: install→uninstall→reinstall yields **one record per cycle** — `record 1 (install → uninstall)`, `record 2 (install → …)`. Client SQLite tables were rebuilt into the rows-per-cycle shape: `app_name` and the package `(package_name, source_manager)` fingerprint are **no longer unique** (a UNIQUE constraint would block reinstall history), `install_count` is dropped, and `install_date` is reset to NULL for all pre-existing rows (legacy detection via `install_count` column presence → `RebuildInventoryTablesIfLegacyAsync` drops+recreates both tables in one tx with `PRAGMA foreign_keys=OFF` — the parent tables are FK-referenced by `app_sessions`, and the idempotent migration must also NOT re-create the old UNIQUE fingerprint index, which it previously did on every launch and which would have broken reinstall inserts). Store upserts now open/close cycles: an open cycle (`uninstall_date IS NULL`) is updated in place (install_date kept), otherwise a NEW cycle row is inserted (install_date = OS date, or NULL on the baseline scan, or now for a runtime-detected install). `ApplyInventoryLifecycleAsync` is close-only (missing open rows → `is_installed=0` + `uninstall_date`); reinstalls open new rows in the store pass. Mappers/lookups prefer the open cycle; the GUI lists **only currently-installed cycles** — closed history rows are filtered out of the table and there is no Uninstalled column (display-only change, 2026-08-11); page + dashboard badges count only currently-installed cycles. Two migration bugs found & fixed on the live DB: the rebuild deadlocked startup (`SemaphoreSlim` gate re-acquired inside the gated `InitializeAsync` — now gate-free, documented) and then failed with `SQLite Error 19 FOREIGN KEY constraint failed` on `DROP TABLE` — fixed with `PRAGMA foreign_keys=OFF/ON` around the rebuild. Verified live on this DB (build 0/0): copyq install → `install_date=12:19:00` while VS Code/Firefox/Chrome stay NULL/Unknown; copyq uninstall → `is_installed=0` + `uninstall_date=12:20:05`; copyq reinstall → **NEW row** `install_date=12:21:03` (2 records for 2 cycles, exactly as specified); cline reinstall likewise opens a new row; migration zero false uninstalls; client healthy.
+> - 2026-08-10: **Employee disconnect removed.** The **Disconnect** button was removed from the
+>   client nav rail, along with the entire employee-disconnect flow: `LogoutCommand`/
+>   `LogoutAsync` and `LogCollectorService.StopTracking()` are gone from the client, and the server
+>   endpoint `POST /api/v1/auth/employee-disconnect` (handler + `EmployeeDisconnectRequest` DTO +
+>   route) was deleted. The web admin `POST /api/v1/auth/logout` (httpOnly-cookie flow) is
+>   unrelated and unchanged. Employees can no longer disconnect themselves; the client tracks until
+>   the process stops. Contract table updated below.
+> - 2026-08-10: **Client GUI rebuilt as six pages + runtime branding pipeline.** The Avalonia UI was a
+>   single `MainWindow.axaml` monolith (login → wizard → profile, dark theme). It is now a **router**
+>   plus six `UserControl` pages under `client/Views/Pages/` — Splash, Login, PermissionSetup, Dashboard,
+>   SystemSpecs, InstalledApps — behind a 246px nav rail. Three page ViewModels
+>   (`DashboardViewModel`, `SystemSpecsViewModel`, `InstalledAppsViewModel`) joined `MainViewModel` in DI
+>   as Transient; `Styles/AppTheme.xaml` became a **light design-token dictionary** (palette, rail tokens,
+>   badge surfaces, 4 shadows, 5 radii, 9 vector icon geometries) and `App.axaml` carries ~30 style
+>   classes + 5 animations. Two previously-unsurfaced data sets got real screens: **System Specs** (CPU,
+>   RAM, GPU, storage, network, hot-plugged peripherals) and **Installed Applications** (the
+>   `installed_applications` + `installed_packages` inventory, searchable, virtualized for
+>   multi-thousand-row lists). New `client/Core/AppInfo.cs` makes **every visible brand string and version
+>   derive from `client/APP_IDENTIFIERS` + `client/VERSION` at runtime** — `APP_IDENTIFIERS` is embedded
+>   into `client.dll` as `client.APP_IDENTIFIERS` and parsed with a strict regex (read as data, never
+>   executed); `VERSION` flows through `InformationalVersion` and is read back with any `+sha` stripped.
+>   Change either file, rebuild, and the rail, window title, splash, footer, tray tooltip and installer
+>   filenames all follow — see §6 → *Branding-Single-Source Rule*. No installer-script change was needed:
+>   the embedded resource and the `Assets/**` glob both ship inside `client.dll`. New docs:
+>   [FILE_HIERARCHY.md](./FILE_HIERARCHY.md), [WORKFLOW.md](./WORKFLOW.md),
+>   [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md).
+> - 2026-08-08 (round 2): **Journey noise flood fixed — AppData churn + feedback loop.** Fresh-DB
+>   test showed 374 junk rows appearing with NO user file ops: Chrome/Brave/Edge rewrite
+>   `Local State`, `Cookies-journal`, `History-journal`, `Breadcrumbs`, `Network Persistent
+>   State`, `Cache_Data\f_*` via tmp+rename every few seconds, and a recursive journey watcher
+>   had been attached to `C:\Users\pc005\AppData\Local` (browsed while checking the DB). Fixes:
+>   (1) `FileSystemEventWatcher` excludes the Windows app-data/package trees structurally —
+>   `appdata/`, `programdata/`, `program files/` (slash-normalized, no product names) — plus
+>   the user-profile root and drive roots are never watched recursively. (2) `EnsureWatching`
+>   now requires a real existing DIRECTORY, returns a success bool, and only logs on success —
+>   extensionless cache FILES ("Local State") can no longer be mistaken for folders and spawn
+>   watchers. (3) `EventCoordinator.InferObjectType` on Windows: extensionless paths that no
+>   longer exist classify as **File** (browser config stores), not Folder — killed the
+>   misclassification that fed the loop. (4) `DesktopEventService` calls `EnsureWatching` ONLY
+>   for `navigate` actions, never for file create/rename/delete/modify — file-op events can no
+>   longer spawn new watchers (the feedback loop). Verified: 90s idle with zero file ops → 13
+>   rows, all legitimate (4 Explorer navigations for actually-open windows + 5 browser tabs),
+>   0 cache-churn rows; journey watchers only on real browsed folders (`C:\tetsting`).
+> - 2026-08-08: **Windows file-explorer journey — Explorer navigation + journey-driven watching.**
+>   The journey pipeline was Linux-shaped: `ATSPIEventWatcher` (D-Bus AT-SPI) is Linux-only, so on
+>   Windows nothing reported which folder the user was browsing, and `FileSystemEventWatcher` only
+>   covered the 6 fixed user folders — create/rename/delete in any other folder (e.g. `C:\project`)
+>   was invisible, and `RecentFilesWatcher` watched the Linux `recently-used.xbel` path. Fixes:
+>   (1) NEW `WindowsExplorerWatcher` — polls the shell's OWN registry via Shell COM
+>   (`Shell.Application → Windows()`), reads each Explorer window's `file://` `LocationURL` as its
+>   exact browsed folder, and emits `navigate`/`close` events per window (verified live: a window on
+>   `C:\tetsting` exposed `file:///C:/tetsting`). No UIA tree walking, no product-name lists.
+>   (2) `FileSystemEventWatcher.EnsureWatching(folder)` — journey-driven watching: the folder the
+>   user navigates to gets a recursive watcher even when it is outside the fixed 6 (bounded set of
+>   24, pruned after 15min idle; drive roots and `C:\Windows` tree excluded). (3) `EventCoordinator`
+>   now attributes raw `filesystem` events (which carry no window identity) to the Explorer window
+>   browsing the containing folder via `IExplorerWindowProvider.TryGetWindowForPath` — the file op
+>   joins the SAME journey (same WindowId key) as the navigation. (4) `RecentFilesWatcher` Windows
+>   source: watches `%APPDATA%\Microsoft\Windows\Recent\*.lnk` and resolves each shortcut's target
+>   via WScript.Shell COM (the OS's own LNK reader) → `open` events. Windows shell `explorer` is a
+>   platform constant (like `C:\Windows`), mapped to "File Explorer" for display. Verified:
+>   `dotnet build` 0/0, client healthy, create/rename/delete now stored with `WindowId` matching the
+>   browsing Explorer window.
+> - 2026-08-08 (round 5): **DE-HARDCODED Windows software detection — pure OS metadata, zero product-name lists.**
+>   The user's rule (now §6 *No-Hardcoded-Names Rule*): never hardcode software names for detection — every employee PC
+>   has a different OS (Win 7/10/11, Ubuntu versions), department (dev/SEO/marketing/IT) and toolset, so name lists
+>   silently break detection everywhere except the machine that generated them. All Windows app-vs-package decisions are
+>   now OS metadata: (1) **PE Subsystem** — the OS's own statement of GUI (IMAGE_SUBSYSTEM_WINDOWS_GUI=2) vs console/CLI
+>   (CUI=3); new `client/Core/ExecutableMetadata.cs` reads it for the Start Menu scan (Node.js/Git Bash/Command
+>   Prompt/Python shortcuts are dropped as CUI targets — the exact .desktop analog), the registry scans (DisplayIcon/
+>   InstallLocation exes decide app vs package), the classifier, and the runtime session gate; (2) **C:\Windows tree** —
+>   anything under the Windows dir (System32/SystemApps/WinSxS) is an OS component (RuntimeBroker, GameBar, Video.UI,
+>   conhost…); `LogCollectorService` resolves the running exe once per process name (5-min memoized) and rejects it —
+>   the four Windows name blocklists (WindowsNonAppProcesses/Suffixes/Prefixes/WindowsCliOrRuntimeBinaries, ~120
+>   names) are DELETED; (3) **Driver Store** — drivers never appear in the Uninstall registry or package managers; new
+>   `PackageDetector.ScanDriverStore` reads
+>   `HKLM\SYSTEM\CurrentControlSet\Control\Class\{class-GUID}\<instance>` — the data Device Manager shows
+>   (DriverDesc/ProviderName/DriverVersion, e.g. "Realtek Audio"/"Realtek Semiconductor Corp."/6.0.9175.1), works
+>   Win 7→11, replaces the Realtek/NVIDIA/Intel/AMD name blocks; (4) **winget is the source of truth** —
+>   `IsWingetFrameworkRow` deleted, so `.NET SDK`, VC++ redists and runtimes land in installed_packages like dpkg
+>   lists every apt package (the classifier dedups GUI-app collisions); (5) **registry flags only** —
+>   `JunkRegistryNamePatterns`/`IsDevToolRegistryName`/`ClassifyRegistryPackage` (~60 names) deleted;
+>   `IsSystemComponentEntry`/`IsSystemOrUpdateRow` use SystemComponent/ParentKeyName/ReleaseType + Windows Update
+>   conventions (KB, Security Update, LocalServiceComponents, * Uninstaller); entries without a GUI exe are apps only
+>   when the OS says so (URL associations or a matching Start Menu shortcut), otherwise packages. Installer
+>   bootstrappers (C:\ProgramData\Package Cache), uninstallers (unins*/uninstall*) and *setup* executables are
+>   structurally excluded from BOTH tables (they are installers, not software); (6) `CliKnownPackages` (~60 names)
+>   deleted — `IsKnownPackage` was dead code (no consumers). **Critical bug found while validating:** the first PE
+>   reader read the optional-header magic at peOffset+4 — that is the COFF `Machine` field (0x8664 = AMD64), so EVERY
+>   x64 exe failed the magic check and read as subsystem 0 ("unknown") — the magic lives at peOffset+24 after the
+>   20-byte COFF header; the Subsystem field is at optional-header offset 68 in BOTH PE32 and PE32+. Answer to "why
+>   is dotnet missing": `.NET SDK 10.0.302` IS in installed_packages (winget); the `.NET Runtime` rows are
+>   SystemComponent=1 internal churn, correctly skipped. Honest metadata outcomes documented: Git Bash/git-gui stay
+>   apps (git-bash.exe is a GUI-subsystem mintty terminal, like gnome-terminal on Linux), GNS3 lands in packages on
+>   Windows (its gns3.exe is a genuine console launcher stub — subsystem 3 — verified byte-level). Allowed exceptions
+>   (documented in §6): OS-shell constructs only — Linux GNOME daemon prefixes, Windows shell display names
+>   (explorer→File Explorer), the KB-prefix update convention, and unins*/uninstall/*setup installer naming.
+>   Verified live: build 0/0, full re-scan: 76 apps (VS Code one clean row, browsers, Office, WPS, WinRAR, Wireshark…),
+>   55 packages (Node.js, .NET SDK, Python, Realtek, freebuff@0.0.142, drivers…), zero bootstrapper rows, zero
+>   RuntimeBroker/GameBar/Video.UI leaks.
+> - 2026-08-08 (round 4): **Windows packages now include MSI-installed dev tools + drivers.** Root-caused from the live
+>   DB: Node.js (v24.19.0) was missing entirely, and Realtek audio components vanished too. The registry dev-tool
+>   filter correctly dropped them from installed_applications (not GUI), but NO source ever added them to
+>   installed_packages — winget/npm/pip only see package-manager installs, and MSI installers exist ONLY in the
+>   registry Uninstall keys (the Windows analog of dpkg listing libs/firmware). New `PackageDetector.ScanRegistrySoftware`
+>   reads all 3 Uninstall nodes (HKLM + WOW6432Node + HKCU) and captures: dev runtimes/tools (Node.js, Eclipse Temurin
+>   JDK, .NET SDK, OpenSSL, Npcap, plus Git/Go/Python/PostgreSQL/Redis/Nmap with `IsPackageAlreadyKnown` fuzzy dedup
+>   so nothing duplicates winget) → category runtime/tool/library, and driver/system components (Realtek Audio COM
+>   Components, Realtek High Definition Audio Driver, NVIDIA/Intel/AMD patterns) → category `driver`
+>   (`SoftwareCategoryResolver.ResolveForPackage` now preserves the driver category — it previously fell through to
+>   `tool`). SystemComponent=1 rows (the .NET/VC++/Python sub-component churn) and GUI apps are excluded; names are
+>   cleaned ("Eclipse Temurin JDK with Hotspot 17.0.19+10 (x64)" → "Eclipse Temurin JDK"). Verified live: 7 new
+>   installer packages, zero duplicates, Video.UI leak fixed (`WindowsNonAppProcesses` had `videoui` but the real
+>   process is `Video.UI` — dotted name never matched). Build 0/0.
+> - 2026-08-08 (round 3): **Windows inventory accuracy — Start Menu .lnk = the .desktop analog.** Linux decides
+>   GUI-vs-package by `.desktop` presence; Windows had no equivalent, so registry DisplayNames came through raw
+>   ("Microsoft Visual Studio Code (User)" while the binary is Code) and global CLIs were invisible. Four fixes landed
+>   together, verified live on a Windows 10 machine: (1) `InstalledAppDetector.ScanStartMenuShortcuts` enumerates Start
+>   Menu .lnk files (user + common) via WScript.Shell (base64 `-EncodedCommand` PowerShell — no quoting bugs), resolves
+>   each target exe → clean display name + binary map (`Visual Studio Code.lnk` → Code.exe) — the exact Windows analog
+>   of `Exec=` in a `.desktop`; AppX/URL/folder targets and junk names (Uninstall/Getting Started/…) are skipped.
+>   (2) Registry scan now prefers the shortcut name over the registry DisplayName and merges registry metadata
+>   (version/publisher) into the SAME row (the table is keyed on `app_name`), so "Microsoft Visual Studio Code (User)"
+>   dedups to "Visual Studio Code"; `CleanRegistryDisplayName` strips (User)/(64-bit) noise; junk filter extended
+>   (LocalServiceComponents, * Uninstaller). (3) New `SoftwareClassifier.CollapseWindowsDuplicateApps` pre-pass:
+>   same-binary rows collapse to the shortest clean name, registry-only stragglers match their shortcut by
+>   version-stripped name ("Advanced IP Scanner 2.5.1" → "Advanced IP Scanner"), and CLI/runtime launchers (node,
+>   git-bash, git-cmd, git-gui, python, pythonw, cmd, pg_ctl, wsl…) are dropped from apps — they belong in
+>   installed_packages, exactly like Linux tools without a .desktop. (4) `PackageDetector.BuildCliStartInfo` — npm/scoop
+>   are `.cmd` batch shims that `Process.Start`/CreateProcess can't launch, so `ScanNpmGlobal`/`ScanScoop` died silently
+>   in the catch and global npm tools never appeared (freebuff@0.0.142, opencode-ai@1.18.15 missing). Now invoked via
+>   `cmd.exe /c` on Windows. Also: the empty-`Categories` GUI gate in `LogCollectorService.ResolveAppInfoInner` is now
+>   Linux-only (Windows registry/lnk apps only get Categories for browsers, so the gate wrongly rejected every
+>   non-browser). Verified live: 81 clean apps (VS Code one row, binary Code, v1.132.0 + publisher), 13 packages
+>   (freebuff npm, Git, Go, Nmap, PostgreSQL, Python, Redis, Ubuntu, WSL, pip — zero GUI apps), zero system-component
+>   leaks. Note: old polluted installed_* rows linger until wiped — the scan upserts by app_name but never deletes
+>   stale rows (wipe keeping employee login rebuilds clean, as on Linux).
+> - 2026-08-08 (round 2): **Fresh-Windows-DB "missing tables" + hardware_devices fix.** A brand-new Windows DB showed empty
+>   installed_* tables for the first minutes because the app/package scan only ran every 30 collection cycles (~15 min)
+>   — the periodic cadence is invisible on long-lived Linux DBs. `LogCollectorService.ExecuteAsync` now also runs
+>   `CollectInstalledApplicationsAsync` immediately at startup. `hardware_devices` stayed at 0 on Windows because the
+>   PnP probe used `Win32_PnPEntity`, which has NO `Class` property (only ClassGuid) — the class filter silently matched
+>   nothing. Switched to `Get-PnpDevice -PresentOnly` (real Class values), dropped `PrintQueue` (virtual printer queues
+>   like "Microsoft Print to PDF"/". AnyDesk Printer"), required USBSTOR/USB InstanceIds for DiskDrive and USB for
+>   NetworkAdapter (internal SATA/NVMe/NIC excluded), and verified live: 7 clean peripherals (keyboard, mouse, headset,
+>   monitor, USB composite) recorded on the test machine. Blocklist extended for the remaining WindowsApps components
+>   (GameBarFTServer, olk, GameBar, gamingservices, xboxstatsserver…) and Git-Bash/Windows CLI tools (tail, grep, sed,
+>   ipconfig, tasklist…) so they never auto-register as applications.
+> - 2026-08-08: **Windows installed-software + hardware detection overhaul (root-caused from the live Windows DB).**
+>   `installed_packages` was flooded with GUI apps (77/78 rows from `winget list`) and `installed_applications`
+>   with runtimes/system components (node, dotnet, RuntimeBroker, tray helpers) — both fixed:
+>   (1) `PackageDetector.ScanWinget` rewritten — the space-padded console table is now sliced by column start
+>   offsets read from the header (multi-word names like "Google Chrome" are no longer shredded), ARP\/MSIX rows
+>   (the actual GUI apps) and MS Store apps are dropped, .NET/VC++ framework rows are filtered, and the version
+>   column is sliced against `Available`. `SoftwareClassifier` gained fuzzy name suppression ("Microsoft Visual
+>   Studio Code (User)" vs registry "Visual Studio Code", ≥4 chars both sides so Git/Go are never over-suppressed);
+>   (2) `InstalledAppDetector.DetectInstalledWindows` now scans ALL three registry Uninstall nodes
+>   (HKLM, WOW6432Node, HKCU — the old code read only HKLM, which is why only 3 apps were ever found) with a
+>   junk filter (SystemComponent, updates, runtimes/redists/drivers, dev tools Git/Go/Python/Node/PostgreSQL→
+>   packages) and an explorer→"File Explorer" display-name override; (3) `LogCollectorService` gained a Windows
+>   non-app blocklist (RuntimeBroker, tray/helper/updater suffixes, WindowsApps components), a CLI-runtime skip
+>   set (node/dotnet/git/go/python… never auto-register as apps), auto-detected browsers now get IsBrowser+
+>   WebBrowser categories, real RAM via `GlobalMemoryStatusEx` P/Invoke (was a hardcoded fake) and GPU via
+>   PowerShell `Win32_VideoController` (was always empty on Windows); (4) `HardwareDeviceWatcherService` is no
+>   longer Linux-only — new Windows PnP implementation polls `Get-CimInstance Win32_PnPEntity` every 30s,
+>   keys open rows by `PNPDeviceID`, closes rows when a device disappears, and maps PnP classes
+>   (DiskDrive→storage, KeyBoard/Mouse/HID→input, Camera/Monitor→display, Media/AudioEndpoint→audio,
+>   Bluetooth/USB→usb). Verified: `dotnet build` 0/0 and the new winget parser was validated against the real
+>   machine output (125 of 153 rows correctly skipped).
+> - 2026-08-08: **Windows journey fixes — real incognito flag + junk-data sweep.** (1) **Incognito was mis-detected on Windows:** Chrome/Edge never put "incognito" in the window TITLE (the title heuristic only ever matched Firefox's "Private Browsing"), so incognito journeys were stored with `"incognito":false`. The `WindowsUiaBrowserReader` now also scans the window's accessibility tree for the dedicated **"Incognito"/"InPrivate" toggle button** Chrome and Edge expose (verified live via UIA) — the flag is now truthful and the URL is still captured (incognito capture is on). (2) **Junk-session root cause fixed:** `SearchApp` was treated as a BROWSER because the `"arc"` hint **substring-matched** `SearchApp` — `IsBrowserProcess` now matches hints as STANDALONE WORDS only (`arc` no longer matches `SearchApp`; `edge` no longer matches `msedge`-unrelated names). (3) **Runtime auto-registration disabled on Windows** — it was the factory for every junk `installed_applications` row (svchost → "Windows Services", dllhost → "Windows DCOM Host", conhost, Video.UI, SearchApp, M365Copilot…): `ResolveAppInfoInner` now refuses rows with an **empty `desktop_id`** (real inventory rows always carry a Start Menu shortcut / registry key / .desktop id) and the Windows structural gate (C:\Windows tree + PE CUI subsystem) now runs BEFORE the fuzzy matcher (powershell.exe was fuzzy-matching the "Windows PowerShell ISE" row → 7 junk console sessions). New boot sweep `CleanupWindowsJunkSessionsAsync` deletes empty-desktop_id app rows and closes their sessions. Tracking is now strictly driven by the `installed_applications` inventory.
 > - 2026-08-07: **Analog audio device tracking** — `HardwareDeviceWatcherService` now monitors
 >   headset/headphone analog audio jacks via `amixer` polling in addition to USB devices. Detects
 >   plug/unplug events for 3.5mm audio jacks and stores them as `audio`/`headphone` class devices
@@ -224,7 +466,7 @@ flowchart LR
     style note_ws fill:#5a3a3a,color:#fff,stroke-dasharray: 5 5
 ```
 
-> All 7 sync endpoints exist on the server. `activity-logs/sync` and `shell-commands/sync` were removed from the product entirely (client + server).
+> All 11 sync endpoints exist on the server (7 original + app-status/hardware-devices/permission-status/storage-devices, 2026-08-11). `activity-logs/sync` and `shell-commands/sync` were removed from the product entirely (client + server).
 
 ---
 
@@ -236,6 +478,17 @@ flowchart LR
 | **server/** | Go 1.25, Echo v4.15, pgx v5.10, go-redis v9.21                       | Central API hub, data storage, auth  | `cmd/server/main.go`                     | [server/ARCHITECTURE.md](./server/ARCHITECTURE.md) |
 | **web/**    | Next.js 15.3.4, React 18, Redux Toolkit, TanStack Query              | Admin dashboard & analytics          | `next.config.ts`, `src/app/layout.tsx` | [web/ARCHITECTURE.md](./web/ARCHITECTURE.md)       |
 
+### Cross-cutting docs
+
+| Doc | Answers |
+|---|---|
+| [FILE_HIERARCHY.md](./FILE_HIERARCHY.md) | *Where does this file live and who owns it?* — annotated node tree of all three services |
+| [WORKFLOW.md](./WORKFLOW.md) | *How do I do X?* — dev loop, adding a GUI page, re-branding, version bump, adding a runtime asset, release |
+| [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md) | *How is the desktop UI built?* — design tokens, style classes, the 6 pages, router, binding patterns |
+| [client/APP_IDENTIFIERS_README.md](./client/APP_IDENTIFIERS_README.md) | *How do I re-brand?* — every consumer of `APP_IDENTIFIERS` |
+| [client/VERSION_README.md](./client/VERSION_README.md) | *How do I bump the version?* |
+| [client/build.md](./client/build.md) | *How do I build installers?* |
+
 ---
 
 ## 4. Cross-Service Contracts
@@ -245,7 +498,6 @@ flowchart LR
 | Direction                                  | Protocol                                      | Auth Method                           | Format                                                   |
 | ------------------------------------------ | --------------------------------------------- | ------------------------------------- | -------------------------------------------------------- |
 | Employee login (client → server)          | REST POST`/api/v1/auth/employee-login`      | emp_id + secret_key (Redis-validated) | JSON`{employeeId, secretKey}` → `{employee, token}` |
-| Employee disconnect                        | REST POST`/api/v1/auth/employee-disconnect` | JWT token in body                     | JSON`{employeeId, token}`                              |
 | Device hardware sync (client → server)    | REST POST`/api/v1/device-hardware/sync`     | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
 | Installed apps sync (client → server)     | REST POST`/api/v1/installed-apps/sync`      | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
 | Installed packages sync (client → server) | REST POST`/api/v1/installed-packages/sync`  | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
@@ -253,6 +505,10 @@ flowchart LR
 | Session events sync (client → server)     | REST POST`/api/v1/session-events/sync`      | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
 | App sessions sync (client → server)       | REST POST`/api/v1/app-sessions/sync`        | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
 | App items sync (client → server)          | REST POST`/api/v1/app-items/sync`           | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
+| App status sync (client → server)          | REST POST`/api/v1/app-status/sync`          | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
+| Hardware devices sync (client → server)    | REST POST`/api/v1/hardware-devices/sync`    | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
+| Permission status sync (client → server)   | REST POST`/api/v1/permission-status/sync`   | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
+| Storage devices sync (client → server)     | REST POST`/api/v1/storage-devices/sync`     | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
 
 ### Server ↔ Web
 
@@ -281,11 +537,11 @@ flowchart LR
 
 **What works:**
 
-- Migrations 001-016 run on startup (15 files; 010 adds `process_id`/`parent_process_id`, 013 adds session identity, 014 adds journey fields, 015/016 add app/package catalogs + junction tables)
+- Migrations 001-017 run on startup (16 files; 010 adds `process_id`/`parent_process_id`, 013 adds session identity, 014 adds journey fields, 015/016 add app/package catalogs + junction tables, 017 adds app_status/hardware_devices/permission_status/storage_devices)
 - Full CRUD for users, employees, departments
 - Web admin auth (email/password → httpOnly cookie with encrypted JWT)
 - Employee auth (Redis one-time secret → JWT token)
-- 7 sync endpoints: device_hardware, installed_apps, installed_packages, network_info, session_events, app_sessions, app_items (+ synced_at for all)
+- 11 sync endpoints: device_hardware, installed_apps, installed_packages, network_info, session_events, app_sessions, app_items, app_status, hardware_devices, permission_status, storage_devices (+ synced_at for all; 2026-08-11 added the last four)
 - Catalog dedup: apps keyed by `app_fingerprint` (desktop_id|binary_name), packages by `package_fingerprint` (package_name|source_manager), per-employee junction tables with `first_seen_at`/`last_seen_at`/`is_active`
 - Hourly `jobs/staleness_sweep.go` deactivates junction links idle > `LINK_STALE_DAYS=7`
 - App sessions + app items listing (`GET /app-sessions`, `GET /app-items`) with filtering/pagination
@@ -323,8 +579,8 @@ flowchart LR
 - **Headless subprocess filtering (cross-platform)**: Chromium/Electron `--type=` flags detected via cmdline on Windows (PowerShell), macOS (`ps`), and Linux (`/proc/pid/cmdline`). Centralized `ChromiumSubprocessFlags` in `AppProcessClassifier`
 - Models: DeviceHardwareInfo (with mac/gpu/storage), InstalledApplication (with metadata + binary_name), NetworkInfo (with public IP), SessionEvent, AppSession (with FK to installed_apps/packages), AppItem (self-referencing via parent_item_id)
 - Encrypted config system (AES-256-GCM, transport→machine key migration)
-- Login/logout flow with server
-- Batched sync engine (every ~5 min, FK-ordered, 500-row batches, stop-on-failure per table)
+- Login flow with server
+- **Dedicated sync engine** (2026-08-11) — `SyncService` background loop decoupled from collection: drains unsent rows in byte-bounded chunks (1000 rows / ~1MB), gzip-compressed, ~150ms polite pauses, 5-min per-pass budget, exponential backoff; FK-ordered (sessions before items). Collection never blocks on the network.
 - **Device hardware**: now collects mac_address, storage_devices, gpu_model from OS
 - **Installed apps**: scans actual OS databases (registry, .desktop files, .app bundles) — GUI apps only, not running processes; binary_name mapping extracted from Exec= line
 - **Installed packages**: detects CLI tools/runtimes/libraries from npm/pip/apt/brew/choco/winget/scoop/cargo/snap/flatpak — separate table from installed_applications
@@ -342,6 +598,8 @@ flowchart LR
 - Windows power management (prevents sleep)
 - **Headless `--background` service mode** — runs the tracking services with no Avalonia/X11 UI (systemd); skips GUI init so the installed service can't crash on Wayland `XAUTHORITY`
 - **Single-instance activation** — a second user launch signals the running instance (named pipe `alpha-ai-tracker-activation`) to raise its window; `--background`/`--minimized` relaunches exit quietly
+- **Six-page GUI** (2026-08-10) — `MainWindow` is a router over four exclusive states; pages live in `Views/Pages/`: Splash (boot checklist), Login, PermissionSetup (stepper), and behind the nav rail Dashboard (identity + status tiles + pipeline health + attached devices), System Specs (machine/compute/network/storage/peripherals) and Installed Applications (searchable apps + packages inventory, virtualized). One VM per page, all Transient in DI. Details: [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md)
+- **Runtime branding from a single source** — `Core/AppInfo.cs` resolves the product name, tagline, initials, publisher, copyright and version from the embedded `APP_IDENTIFIERS` + `VERSION`; no XAML or C# literal names anywhere in the UI. Editing either file re-brands both the app and the installers (§6 → *Branding-Single-Source Rule*)
 
 **What's missing:**
 
@@ -352,6 +610,7 @@ flowchart LR
 - **No encryption at rest** — SQLite encryption (sqlcipher) is commented out
 - **macOS CPU measurement** — macOS process collector skips CPU measurement (always 0%)
 - **macOS window titles** — only captures foreground window
+- **Six-page GUI not yet ship-tested** — it needs no packaging change (hero images and `APP_IDENTIFIERS` both compile into `client.dll`), but per the Installer-Parity Rule it is not "done" until verified from an installed build
 
 ### Web — ~16% complete
 
@@ -360,7 +619,8 @@ flowchart LR
 - ~45 page routes exist with polished UI
 - Login page with animated hero section
 - Auth check on mount (Redux + server cookie)
-- Users page — real API calls via TanStack Query (CRUD + generate secret)
+- Users page — real API calls via TanStack Query (CRUD + generate secret, portal-rendered Radix action menu)
+- **User detail page (`/users/[id]`)** — real API calls via new aggregate `GET /employees/:id/detail`: identity + status, stat tiles, hardware/storage/network, installed apps, packages, peripherals, permissions
 - Departments page — real API calls (CRUD)
 - Logs/Comprehensive page — real API calls (now using new app_sessions API)
 - Sidebar with permission-based filtering (client-side only)
@@ -398,6 +658,7 @@ flowchart LR
 | **Commit style**        | Descriptive lowercase messages: "now remove the exit btn on the tray on windows", "fixit" |
 | **Monorepo tooling**    | No shared tooling (no Turborepo, Nx, etc.). Each service has its own build system.        |
 | **Build parity**        | `dotnet run` is NOT a release test — every change must be verified from an installed build; new assets/config/scripts must be bundled by the `publish/*` scripts (see below) |
+| **Branding & version**  | Product name and version are written in exactly two files — `client/APP_IDENTIFIERS` and `client/VERSION`. No literal product name or version string anywhere else in C#, XAML, or the build scripts (see below) |
 
 ### Installer-Parity Rule (mandatory)
 
@@ -409,7 +670,7 @@ flowchart LR
    ```bash
    cd client
    bash publish/build-installer.sh -b linux   # or win / mac
-   sudo dpkg -i installers/alpha-ai-tracker_1.0.0_amd64.deb
+   sudo dpkg -i installers/alpha-ai-tracker_0.2.0_amd64.deb   # filename tracks client/VERSION
    ```
 2. **New runtime assets** (icons, JSON, images, fonts) — bundled ONLY if copied by `build-installer.sh` (`bundle_into_publish`) or the platform builders (`build-deb.sh`, `build-dmg.sh`, `installer-windows.iss`). Add the copy step when you add the asset.
 3. **New runtime assets** (embedded scripts, JSON, icons) — the accessibility probe is embedded as a C# string in `LinuxAtSpiBrowserReader` (no external file to bundle). Anything file-based must be added to `bundle_into_publish()` or the platform builders.
@@ -418,6 +679,37 @@ flowchart LR
 6. **Path assumptions** — the installed app's working dir is root-owned / not user-writable. NEVER write files relative to cwd or the exe dir. Use `~/.config/alpha-ai-tracker/` (logs, machine-id) and `~/.local/share/alpha-ai-tracker/` (DB, sockets). `dotnet run` cannot catch this because the dev working dir is writable.
 7. **Packaging edits apply to ALL platforms** — when changing build scripts, update `build-installer.sh`, `build-deb.sh`, `build-dmg.sh`, and `installer-windows.iss` consistently.
 8. **Stale-binary guard** — `build-installer.sh` aborts if any source file is newer than the published `client.dll`; fix with `dotnet clean && bash publish/build-installer.sh`. This guard covers compiled code only — items 2–6 are the developer's responsibility.
+
+### No-Hardcoded-Names Rule (mandatory)
+
+**Software detection must NEVER use hardcoded product/software names.** Employees run different OSes (Windows 7/10/11, Ubuntu LTS/releases, macOS), different departments (development / SEO / marketing / IT support / IT technician) install different tools, and packages differ per machine — a name list only works on the machine that generated it and silently breaks (missing rows, misclassified software) everywhere else. Classification must come from **genuine OS metadata**:
+
+1. **PE Subsystem** (`client/Core/ExecutableMetadata.cs`) — the OS's own statement of GUI vs console for any Windows `.exe`: `IMAGE_SUBSYSTEM_WINDOWS_GUI` (2) = application, `IMAGE_SUBSYSTEM_WINDOWS_CUI` (3) = CLI tool/runtime. Used by the Start Menu scan, both registry scans, the classifier, and the runtime session gate. Works on every Windows version, every language, every department.
+2. **Filesystem structure** — C:\Windows\* (System32/SystemApps/WinSxS…) = OS component; Start Menu `.lnk` presence = user-facing; `.desktop` presence (Linux) / `.app` bundle (macOS) = GUI application. `ExecutableMetadata.IsWindowsSystemTree` + `IsUninstallerFileName` are the structural helpers.
+3. **Registry flags** — `SystemComponent`, `ParentKeyName`, `ReleaseType` mark installer churn/updates; `URLAssociations` http/https marks browsers; `DisplayIcon`/`InstallLocation` resolve the exe that decides app-vs-package.
+4. **Driver Store** — drivers are inventoried from `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverDatabase\DriverPackages`, never from name patterns.
+5. **Package managers are the source of truth** — winget/npm/pip/choco/scoop/apt/snap/flatpak/brew report what they installed; dedup is by identity/fingerprint, not by filtering names.
+
+**Allowed exceptions (OS-shell constructs, NOT user software):** Linux GNOME/session daemon prefixes in `NonAppProcesses`/`NonAppProcessPrefixes` (gnome-*, gsd-*, gvfsd-*, ibus-*, evolution-*), Windows shell display names (`DisplayNameOverrides`: explorer→File Explorer, svchost→Windows Services…), and the Windows Update `KB`-prefix naming convention. These are OS-provided labels for OS processes; user-installed software detection must stay 100% metadata-driven. When a fix is tempting as a name list, it must be implemented as metadata first (probe the OS), and the resulting rule documented here.
+
+### Branding-Single-Source Rule (mandatory)
+
+**Every visible product name and version comes from `client/APP_IDENTIFIERS` + `client/VERSION`.** Neither value is duplicated anywhere else. Edit either file, rebuild, and the rail wordmark, window title, splash, footer, tray tooltip, log banners, installer filenames and package metadata all follow — with no other source edit. This is a structural guarantee, not a convention to remember:
+
+| File                    | Build-time consumers                                                                                    | Runtime consumer                                                          |
+| ----------------------- | ------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `APP_IDENTIFIERS` | `build-deb.sh`, `build-dmg.sh`, `generate-windows-vars.sh` → `installer-windows.iss`, `release.sh` (sourced as shell) | `client.csproj` embeds it as `client.APP_IDENTIFIERS`; `Core/AppInfo.cs` parses it |
+| `VERSION`         | same scripts — package/artifact filenames and installer version fields                                   | `client.csproj` → `Version` / `InformationalVersion`; `AppInfo.Version` reads it back |
+
+**Runtime path.** `Core/AppInfo.cs` reads the embedded resource with `Assembly.GetManifestResourceStream()` and parses it with a **strict regex — the file is read as data, never executed** — exposing `DisplayName`, `Publisher`, `AppUrl`, `PackageName`, `BundleId`, `ExecutableName`, `AppMutex`, `WmClass`, `Tagline`, `Initials`, `Copyright`, `Version`, `VersionDisplay`, `TitleWithVersion`. Every accessor has a fallback default and the loader swallows exceptions — **branding must never take the app down**. `MainViewModel` re-exposes these as `AppDisplayName` / `AppTagline` / `AppInitials` / `AppVersionDisplay` / `AppCopyright` / `AppTitleWithVersion` so XAML binds to them; `App.axaml.cs` uses `AppInfo.DisplayName` directly for the tray tooltip and menu.
+
+**Three consequences worth knowing before you "fix" something:**
+
+1. **Re-branding needs NO installer-script change.** The embedded resource lives inside `client.dll`, and hero images are swept in by the existing `<AvaloniaResource Include="Assets\**" />` glob — both ride the publish output automatically. The Installer-Parity Rule still applies to *new file-based* runtime assets; it does not apply to branding strings or to anything under `Assets/`.
+2. **`client.csproj` reads `VERSION` at project-evaluation time, not in a `BeforeBuild` target.** This is deliberate — a target-based read leaves IDE design-time builds silently falling back to `1.0.0`. Trade-off: after editing `VERSION`, run `dotnet clean` (or restart the IDE) so the cached project graph is flushed.
+3. ⚠️ **`Core/EncryptedConfigService.cs` `TransportKeySeed` / `MachineKeyPrefix` are NOT branding.** They read like product names (`"AlphaAITracker:TransportKey:v1"`) but are cryptographic key-derivation seeds. Templatizing them from `APP_IDENTIFIERS` would make **every `config.enc` already deployed in the field undecryptable**. Leave them byte-for-byte alone during any re-brand.
+
+**Acceptance proof (re-brand smoke test):** change `DISPLAY_NAME` in `APP_IDENTIFIERS`, bump `VERSION`, `dotnet clean && bash publish/build-installer.sh -b linux`, install the artifact, and confirm the rail, window title, splash, footer, tray tooltip and installer filename all changed with no other edit. Details: [client/APP_IDENTIFIERS_README.md](./client/APP_IDENTIFIERS_README.md), [client/VERSION_README.md](./client/VERSION_README.md).
 
 ---
 

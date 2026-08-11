@@ -1,7 +1,22 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-08-01 (docs re-synced with code — routes, migrations 001–016, 12 tables, staleness job)
+> **Last audited:** 2026-08-11 (employee detail endpoint + web user-detail page)
 > **Changelog:**
+> - 2026-08-11: **Employee detail aggregate endpoint** — `GET /api/v1/employees/:id/detail` (protected)
+>   returns the full machine picture for one employee in a single response: `employee` (UUID-resolved,
+>   then all sync-table reads keyed on the `EMP-XXXXX` id), latest `deviceHardware` + `storageDevices`
+>   + `networkInfo`, currently-installed `applications`/`packages` (active junction links joined with
+>   catalog rows — version/path/date from the junction, identity from the catalog), `hardwareDevices`
+>   peripherals, `permissions` checks, `appStatus` key/value map and activity `stats`
+>   (sessions/items/last-activity). New repo read methods in `new_schema_repo.go`, service method
+>   `GetEmployeeDetail`, handler `GetEmployeeDetail`, route 31 → 32. The web dashboard consumes it
+>   from the new `/users/[id]` page.
+> - 2026-08-10: **Employee disconnect endpoint removed** — `POST /api/v1/auth/employee-disconnect`
+>   (handler `EmployeeDisconnect`, DTO `EmployeeDisconnectRequest`, route) was deleted along with the
+>   client-side Disconnect button. The web admin `POST /api/v1/auth/logout` is unrelated and
+>   unchanged. Route count 31 → 30. Client consequence: no `logout` session event is emitted anymore
+>   (only `login`, from `StartTracking`) and the Windows anti-sleep state now persists for the whole
+>   process lifetime (the OS clears it at process exit — no leak).
 > - 2026-08-01: **Docs audit** — removed stale `activity_logs` / `shell_commands` references (both dropped server-side), corrected migration inventory to 001–016 (15 files), added `jobs/staleness_sweep.go`, added `employee_app_link.go` junction models, corrected the API surface (7 sync endpoints + 2 list endpoints, no `/activity-logs`, no `/shell-commands`), and documented all 12 Postgres tables including the app/package catalogs.
 > - 2026-07-31: Migrations 013–016 + catalog/link sync rewrite. 013 adds `installed_app_id`/`installed_package_id`/`grouped_by`/`cgroup_scope`/`context_label` to `app_sessions`. 014 adds `process_id` + 9 journey fields to `app_items`. 015/016 build company-global app/package catalogs (`app_fingerprint = desktop_id|binary_name`, `package_fingerprint = package_name|source_manager`) with per-employee junction tables `employee_installed_applications`/`employee_installed_packages` (version/path/install_date + first/last_seen_at + is_active) — two employees with the same app now share ONE catalog row. `SyncInstalledApps`/`SyncInstalledPackages` rewritten to upsert-catalog-then-link inside one tx. New `internal/jobs/staleness_sweep.go` hourly deactivates links idle > `LINK_STALE_DAYS` (default 7, configurable). `NewSchemaRepo` gains `Begin()` + 4 upsert methods. App-session/item bulk inserts + list queries extended with the new fields.
 > - 2026-07-29: Browser/terminal/headless filtering arrived client-side only; server DTOs extended with `url`/`domain` (migration 011) and installed-application identity columns (migration 012).
@@ -93,7 +108,7 @@ server/
     │
     ├── dto/                     # Request/Response DTOs
     │   ├── user_dto.go          # LoginRequest, CreateUserRequest, UserResponse, etc.
-    │   ├── employee_dto.go      # EmployeeLoginRequest, EmployeeDisconnectRequest, GenerateSecretResponse, etc.
+    │   ├── employee_dto.go      # EmployeeLoginRequest, GenerateSecretResponse, etc.
     │   └── new_schema_dto.go    # Sync DTOs for all 7 tables + AppSessionListResponse + AppItemListResponse
     │                             # (still contains unused legacy DTOs: BrowserContext/FileExplorerContext/Url/UrlVisit/ShellCommand)
     │
@@ -112,7 +127,7 @@ server/
     │   └── redis_interface.go   # Interface for Redis operations (decouples auth handler)
     │
     ├── handlers/                # HTTP handlers (Echo context)
-    │   ├── auth_handler.go      # Login, Logout, Me, CheckAuth, EmployeeLogin, EmployeeDisconnect
+    │   ├── auth_handler.go      # Login, Logout, Me, CheckAuth, EmployeeLogin
     │   ├── user_handler.go      # List, Get, Create, Update, Delete users
     │   ├── employee_handler.go  # List, Get, Create, Update, Delete, GenerateSecret
     │   ├── department_handler.go # List, Create, Update, Delete departments
@@ -143,7 +158,7 @@ server/
 
 ## 4. API Surface
 
-All endpoints are under `/api/v1`. Full route inventory (31 routes):
+All endpoints are under `/api/v1`. Full route inventory (30 routes):
 
 ### Health
 
@@ -157,7 +172,6 @@ All endpoints are under `/api/v1`. Full route inventory (31 routes):
 |---|---|---|---|
 | POST | `/auth/login` | None | Web admin login. Sets httpOnly cookie. |
 | POST | `/auth/employee-login` | None | Employee desktop login. Returns JWT. |
-| POST | `/auth/employee-disconnect` | None | Employee disconnect. Sets untracked + offline. |
 
 ### Auth (Semi-Protected — validates token if present)
 
@@ -188,6 +202,7 @@ All endpoints are under `/api/v1`. Full route inventory (31 routes):
 |---|---|---|
 | GET | `/employees` | List employees (paginated, filterable, JOIN department) |
 | GET | `/employees/:id` | Get employee by ID |
+| GET | `/employees/:id/detail` | Aggregate machine picture (hardware, storage, network, apps, packages, peripherals, permissions, stats) |
 | POST | `/employees` | Create employee |
 | PUT | `/employees/:id` | Update employee |
 | DELETE | `/employees/:id` | Soft-delete employee |
@@ -215,6 +230,10 @@ Employee token is carried in the request body (`{employeeId, token, entries: [..
 | POST | `/session-events/sync` | `session_events` | Bulk upsert |
 | POST | `/app-sessions/sync` | `app_sessions` | Bulk upsert |
 | POST | `/app-items/sync` | `app_items` | Bulk upsert |
+| POST | `/app-status/sync` | `app_status` | Upsert by (employee_id, key) |
+| POST | `/hardware-devices/sync` | `hardware_devices` | Bulk upsert |
+| POST | `/permission-status/sync` | `permission_status` | Bulk upsert by check_id |
+| POST | `/storage-devices/sync` | `storage_devices` | Bulk upsert |
 
 ### App Sessions & App Items (Protected — web admin reads)
 
@@ -223,21 +242,31 @@ Employee token is carried in the request body (`{employeeId, token, entries: [..
 | GET | `/app-sessions` | List sessions (paginated, filterable, replaces old activity-logs listing) |
 | GET | `/app-items` | List items (paginated, filterable by session/itemType/search) |
 
-### Missing Endpoints (sync-only tables with no listing API)
+### Employee Detail (Protected)
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/employees/:id/detail` | **Aggregate machine picture** for one employee: employee record, latest `device_hardware_info`, `storage_devices`, latest `network_info`, currently-installed apps/packages (active junction links), `hardware_devices` peripherals, `permission_status`, `app_status` map and activity stats. Consumed by the web `/users/[id]` page. |
+
+### Missing Endpoints (sync-only tables with no standalone listing API)
 
 | Expected Endpoint | Purpose | Status |
 |---|---|---|
-| `GET /installed-apps` | List installed apps | ❌ Sync only |
-| `GET /installed-packages` | List installed packages | ❌ Sync only |
-| `GET /device-hardware` | List device hardware | ❌ Sync only |
-| `GET /network-info` | List network info | ❌ Sync only |
+| `GET /installed-apps` | List installed apps (all employees) | ❌ Sync only — per-employee view available via `/employees/:id/detail` |
+| `GET /installed-packages` | List installed packages (all employees) | ❌ Sync only — per-employee view via `/employees/:id/detail` |
+| `GET /device-hardware` | List device hardware (all employees) | ❌ Sync only — latest-per-employee via `/employees/:id/detail` |
+| `GET /network-info` | List network info (all employees) | ❌ Sync only — latest-per-employee via `/employees/:id/detail` |
 | `GET /session-events` | List session events | ❌ Sync only |
 
 ---
 
 ## 5. Database Schema
 
-### Tables (12 tracked tables + `schema_migrations`)
+### Tables (16 tracked tables + `schema_migrations`)
+
+> 2026-08-11: +4 sync tables — `app_status` (key/value per employee), `hardware_devices`
+> (USB/peripheral hotplug), `permission_status` (one row per permission method), and
+> `storage_devices` (children of `device_hardware_info`). Migration 017.
 
 **`users`** — Web admin users (company_admin role)
 ```
@@ -338,7 +367,7 @@ id TEXT PK · employee_id FK · public_ip · private_ip · mac_address
 network_interface_name · collected_at / synced_at / created_at / deleted_at
 ```
 
-**`session_events`** — Login/logout/lock/unlock events (migration 006)
+**`session_events`** — Login/logout/lock/unlock events (migration 006). The client now emits only `login` (via `StartTracking`); `logout` stopped being emitted when the employee-disconnect flow was removed 2026-08-10.
 ```
 id TEXT PK · employee_id FK · event_type · os_username
 event_at / synced_at / created_at / deleted_at

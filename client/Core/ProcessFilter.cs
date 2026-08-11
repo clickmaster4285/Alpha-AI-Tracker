@@ -5,6 +5,59 @@ namespace client.Core;
 
 public static partial class ProcessFilter
 {
+    /// <summary>
+    /// Run a CLI probe with a HARD timeout and concurrent stream draining — the pattern that
+    /// cannot deadlock. The old inline pattern (StandardOutput.ReadToEnd() then WaitForExit(ms))
+    /// blocked forever when a grandchild inherited the stdout pipe after the direct child exited:
+    /// ReadToEnd waits for an EOF that never comes, and the WaitForExit timeout is unreachable.
+    /// That hang froze the inventory watcher's rescan; because the rescan never returned, its
+    /// in-flight flag stayed set and EVERY later install/uninstall event was coalesced away —
+    /// the DB looked stale until the app was restarted. This helper:
+    ///   • drains stdout + stderr CONCURRENTLY (a chatty stderr can never fill its pipe buffer),
+    ///   • hard-time-boxes the whole probe (exit wait AND stream drain),
+    ///   • kills the process tree on timeout so no orphaned probe lingers.
+    /// Returns the stdout text, or null on failure/timeout/empty process.
+    /// </summary>
+    public static string? RunProbe(ProcessStartInfo psi, int timeoutMs = 10000)
+    {
+        try
+        {
+            using var proc = Process.Start(psi);
+            if (proc == null) return null;
+
+            var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+            // Only touch StandardError when the psi actually redirects it (snap/flatpak/brew
+            // probes do not — reading a non-redirected stream would throw).
+            var stderrTask = psi.RedirectStandardError
+                ? proc.StandardError.ReadToEndAsync()
+                : Task.FromResult(string.Empty);
+            var exitTask = proc.WaitForExitAsync();
+
+            // Hard time-box the whole probe.
+            if (Task.WhenAny(exitTask, Task.Delay(timeoutMs)).GetAwaiter().GetResult() != exitTask)
+            {
+                try { proc.Kill(entireProcessTree: true); } catch { /* already gone */ }
+                try { Task.WaitAll(new[] { stdoutTask, stderrTask }, 2000); } catch { }
+                return null;
+            }
+
+            // Direct child exited — but a grandchild may still hold the stdout pipe open, so
+            // bound the stream drain too instead of blocking on ReadToEnd forever.
+            if (!Task.WaitAll(new[] { stdoutTask, stderrTask }, timeoutMs))
+            {
+                try { proc.Kill(entireProcessTree: true); } catch { }
+                return null;
+            }
+            return stdoutTask.Result;
+        }
+        catch (Exception)
+        {
+            // Any failure (stream read, kill, spawn) is a failed probe — the caller
+            // simply skips that source. Never let a probe take the scan down.
+            return null;
+        }
+    }
+
     private static readonly HashSet<string> KernelNames =
         new(StringComparer.OrdinalIgnoreCase)
         {

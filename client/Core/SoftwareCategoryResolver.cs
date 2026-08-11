@@ -67,6 +67,8 @@ public static class SoftwareCategoryResolver
             return Runtime;
         if (string.Equals(existingCategory, "library", StringComparison.OrdinalIgnoreCase))
             return Library;
+        if (string.Equals(existingCategory, "driver", StringComparison.OrdinalIgnoreCase))
+            return Driver;
         return CliTool;
     }
 

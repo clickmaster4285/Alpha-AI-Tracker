@@ -4,6 +4,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using client.Configuration;
 using System.Collections.ObjectModel;
+using client.Core;
 using client.Core.Abstractions;
 using client.Core.Models;
 using client.Services;
@@ -18,12 +19,128 @@ public partial class MainViewModel : ViewModelBase
     private readonly IInstalledAppDetector _appDetector;
     private readonly AutoStartService _autoStart;
     private readonly LogCollectorService _logCollector;
+    private readonly SyncService _syncService;
+
+    // ─── Branding (APP_IDENTIFIERS + VERSION) ───
+    // Bound by every view instead of literals, so editing client/APP_IDENTIFIERS or
+    // client/VERSION and rebuilding is all it takes to re-brand the whole GUI.
+
+    public string AppDisplayName => AppInfo.DisplayName;
+    public string AppTagline => AppInfo.Tagline;
+    public string AppVersionDisplay => AppInfo.VersionDisplay;
+    public string AppCopyright => AppInfo.Copyright;
+    public string AppInitials => AppInfo.Initials;
+    public string AppTitleWithVersion => AppInfo.TitleWithVersion;
+
+    /// <summary>
+    /// Environment pill on the splash/login screens. Derived from the configured
+    /// server rather than hardcoded, so a dev build never claims to be production.
+    /// </summary>
+    public string EnvironmentLabel
+    {
+        get
+        {
+            var url = _config.ServerUrl;
+            if (string.IsNullOrWhiteSpace(url)) return "NOT CONFIGURED";
+            return url.Contains("localhost", StringComparison.OrdinalIgnoreCase)
+                || url.Contains("127.0.0.1", StringComparison.Ordinal)
+                || url.Contains("::1", StringComparison.Ordinal)
+                ? "ENVIRONMENT: DEVELOPMENT"
+                : "ENVIRONMENT: PRODUCTION";
+        }
+    }
+
+    // ─── Splash Screen State ───
+
+    /// <summary>True while the splash/loading screen is shown.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(Step1Active))]
+    [NotifyPropertyChangedFor(nameof(Step1Done))]
+    [NotifyPropertyChangedFor(nameof(Step2Active))]
+    [NotifyPropertyChangedFor(nameof(Step2Done))]
+    [NotifyPropertyChangedFor(nameof(Step3Active))]
+    [NotifyPropertyChangedFor(nameof(Step3Done))]
+    private bool _isSplashVisible = true;
+
+    /// <summary>Current splash step: 0 = checking auth, 1 = loading config, 2 = starting service, 3 = complete.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(Step1Active))]
+    [NotifyPropertyChangedFor(nameof(Step1Done))]
+    [NotifyPropertyChangedFor(nameof(Step2Active))]
+    [NotifyPropertyChangedFor(nameof(Step2Done))]
+    [NotifyPropertyChangedFor(nameof(Step2Pending))]
+    [NotifyPropertyChangedFor(nameof(Step3Active))]
+    [NotifyPropertyChangedFor(nameof(Step3Done))]
+    [NotifyPropertyChangedFor(nameof(Step3Pending))]
+    private int _splashStep;
+
+    /// <summary>Progress bar fill percentage (0–100).</summary>
+    [ObservableProperty]
+    private double _splashProgress;
+
+    public bool Step1Active => IsSplashVisible && SplashStep == 0;
+    public bool Step1Done => IsSplashVisible && SplashStep > 0;
+    public bool Step2Active => IsSplashVisible && SplashStep == 1;
+    public bool Step2Done => IsSplashVisible && SplashStep > 1;
+    public bool Step2Pending => IsSplashVisible && SplashStep < 1;
+    public bool Step3Active => IsSplashVisible && SplashStep == 2;
+    public bool Step3Done => IsSplashVisible && SplashStep > 2;
+    public bool Step3Pending => IsSplashVisible && SplashStep < 2;
+
+    /// <summary>
+    /// Plays the splash sequence (PDF page 1):
+    /// checking authentication → loading configuration → starting monitoring service,
+    /// with a smooth progress bar, then hands off to the login/main UI.
+    /// </summary>
+    public async Task RunSplashSequenceAsync(CancellationToken ct = default)
+    {
+        if (!IsSplashVisible) return;
+
+        // Step 0: Checking authentication
+        SplashStep = 0;
+        await AnimateSplashProgressAsync(0, 25, 700, ct);
+        await Task.Delay(400, ct);
+
+        // Step 1: Loading configuration
+        SplashStep = 1;
+        await AnimateSplashProgressAsync(25, 55, 800, ct);
+        await Task.Delay(400, ct);
+
+        // Step 2: Starting monitoring service
+        SplashStep = 2;
+        await AnimateSplashProgressAsync(55, 90, 900, ct);
+        await Task.Delay(500, ct);
+
+        // Complete
+        SplashStep = 3;
+        await AnimateSplashProgressAsync(90, 100, 350, ct);
+        await Task.Delay(250, ct);
+
+        IsSplashVisible = false;
+    }
+
+    private async Task AnimateSplashProgressAsync(double from, double to, int durationMs, CancellationToken ct)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < durationMs)
+        {
+            ct.ThrowIfCancellationRequested();
+            var t = Math.Min(1.0, sw.ElapsedMilliseconds / (double)durationMs);
+            SplashProgress = from + (to - from) * EaseInOut(t);
+            await Task.Delay(16, ct);
+        }
+        SplashProgress = to;
+    }
+
+    private static double EaseInOut(double t)
+        => t < 0.5 ? 2 * t * t : 1 - Math.Pow(-2 * t + 2, 2) / 2;
 
     // ─── Auth State ───
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsAutoStartStep))]
     [NotifyPropertyChangedFor(nameof(IsBackgroundStep))]
+    [NotifyPropertyChangedFor(nameof(IsDependencyStep))]
     [NotifyPropertyChangedFor(nameof(IsPermissionStep))]
     [NotifyPropertyChangedFor(nameof(IsProfile))]
     [NotifyPropertyChangedFor(nameof(RequiresPermissionAction))]
@@ -64,6 +181,7 @@ public partial class MainViewModel : ViewModelBase
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsAutoStartStep))]
+    [NotifyPropertyChangedFor(nameof(IsBackgroundStep))]
     [NotifyPropertyChangedFor(nameof(IsDependencyStep))]
     [NotifyPropertyChangedFor(nameof(IsPermissionStep))]
     [NotifyPropertyChangedFor(nameof(IsProfile))]
@@ -73,6 +191,7 @@ public partial class MainViewModel : ViewModelBase
     [NotifyPropertyChangedFor(nameof(StepButtonText))]
     [NotifyPropertyChangedFor(nameof(CurrentPermissionStepNumber))]
     [NotifyPropertyChangedFor(nameof(TotalPermissionSteps))]
+    [NotifyPropertyChangedFor(nameof(SetupProgressPercent))]
     private PermissionStep _currentPermissionStep = PermissionStep.None;
 
     public int CurrentPermissionStepNumber => CurrentPermissionStep switch
@@ -86,26 +205,17 @@ public partial class MainViewModel : ViewModelBase
 
     public int TotalPermissionSteps => OperatingSystem.IsLinux() ? 4 : 3;
 
+    /// <summary>Wizard progress 0–100, for the stepper track on the setup page.</summary>
+    public double SetupProgressPercent => TotalPermissionSteps == 0
+        ? 0
+        : Math.Clamp((CurrentPermissionStepNumber - 1) * 100.0 / TotalPermissionSteps, 0, 100);
+
     public bool IsAutoStartStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.AutoStart;
     public bool IsBackgroundStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.BackgroundRunning;
     public bool IsDependencyStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.Dependencies;
     public bool IsPermissionStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.OtherPermissions;
     public bool IsProfile => IsLoggedIn && CurrentPermissionStep == PermissionStep.None;
     public bool RequiresPermissionAction => IsLoggedIn && CurrentPermissionStep != PermissionStep.None;
-
-    private bool _isBrowserTracking;
-    public bool IsBrowserTracking
-    {
-        get => _isBrowserTracking;
-        set => SetProperty(ref _isBrowserTracking, value);
-    }
-
-    private string _browserTrackingStatus = string.Empty;
-    public string BrowserTrackingStatus
-    {
-        get => _browserTrackingStatus;
-        set => SetProperty(ref _browserTrackingStatus, value);
-    }
 
     public string StepTitle => CurrentPermissionStep switch
     {
@@ -160,7 +270,11 @@ public partial class MainViewModel : ViewModelBase
         HttpClient httpClient,
         IInstalledAppDetector appDetector,
         AutoStartService autoStart,
-        LogCollectorService logCollector)
+        LogCollectorService logCollector,
+        SyncService syncService,
+        DashboardViewModel dashboard,
+        SystemSpecsViewModel systemSpecs,
+        InstalledAppsViewModel installedApps)
     {
         _config = config;
         _store = store;
@@ -168,6 +282,96 @@ public partial class MainViewModel : ViewModelBase
         _appDetector = appDetector;
         _autoStart = autoStart;
         _logCollector = logCollector;
+        _syncService = syncService;
+        Dashboard = dashboard;
+        SystemSpecs = systemSpecs;
+        InstalledApps = installedApps;
+    }
+
+    // ─── Post-setup navigation (pages 4–6) ───
+
+    public enum AppPage { Dashboard, SystemSpecs, InstalledApps }
+
+    /// <summary>Page 4 — Operational Overview.</summary>
+    public DashboardViewModel Dashboard { get; }
+
+    /// <summary>Page 5 — System Specifications.</summary>
+    public SystemSpecsViewModel SystemSpecs { get; }
+
+    /// <summary>Page 6 — Installed Applications.</summary>
+    public InstalledAppsViewModel InstalledApps { get; }
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsDashboardPage))]
+    [NotifyPropertyChangedFor(nameof(IsSystemSpecsPage))]
+    [NotifyPropertyChangedFor(nameof(IsInstalledAppsPage))]
+    [NotifyPropertyChangedFor(nameof(ActivePageTitle))]
+    [NotifyPropertyChangedFor(nameof(ActivePageSubtitle))]
+    private AppPage _activePage = AppPage.Dashboard;
+
+    public bool IsDashboardPage => ActivePage == AppPage.Dashboard;
+    public bool IsSystemSpecsPage => ActivePage == AppPage.SystemSpecs;
+    public bool IsInstalledAppsPage => ActivePage == AppPage.InstalledApps;
+
+    public string ActivePageTitle => ActivePage switch
+    {
+        AppPage.SystemSpecs => "System Specifications",
+        AppPage.InstalledApps => "Installed Applications",
+        _ => "Operational Overview"
+    };
+
+    public string ActivePageSubtitle => ActivePage switch
+    {
+        AppPage.SystemSpecs => "Hardware, network identity and attached peripherals for this machine",
+        AppPage.InstalledApps => "Software inventory reported to the compliance server",
+        _ => "Live monitoring status and device summary"
+    };
+
+    /// <summary>
+    /// Switches page and lazily refreshes its data. Each page VM guards re-entry with
+    /// its own IsBusy flag, so rapid nav clicks can't stack overlapping scans.
+    /// </summary>
+    [RelayCommand]
+    private async Task NavigateAsync(string page)
+    {
+        ActivePage = page switch
+        {
+            "specs" => AppPage.SystemSpecs,
+            "apps" => AppPage.InstalledApps,
+            _ => AppPage.Dashboard
+        };
+
+        await RefreshActivePageAsync();
+    }
+
+    /// <summary>Refreshes only the page currently on screen.</summary>
+    [RelayCommand]
+    private async Task RefreshActivePageAsync()
+    {
+        switch (ActivePage)
+        {
+            case AppPage.SystemSpecs:
+                await SystemSpecs.RefreshAsync();
+                break;
+            case AppPage.InstalledApps:
+                await InstalledApps.RefreshAsync();
+                break;
+            default:
+                await Dashboard.RefreshAsync();
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Loads the landing page once the wizard is done. Called at every point where the
+    /// user can arrive at the shell (startup, login, last permission granted) rather
+    /// than from a property-changed hook, so the load is never fired mid-wizard.
+    /// </summary>
+    private async Task EnterShellAsync()
+    {
+        if (!IsProfile) return;
+        ActivePage = AppPage.Dashboard;
+        await Dashboard.RefreshAsync();
     }
 
     public async Task InitializeAsync(CancellationToken ct)
@@ -185,6 +389,12 @@ public partial class MainViewModel : ViewModelBase
             _logCollector.SetEmployeeInfo(info.EmployeeId, info.Name, info.Token ?? string.Empty);
             _logCollector.StartTracking();
 
+            // Session restored — wake the sync engine NOW so any rows collected since the
+            // last run (device_hardware_info, installed apps/packages, network, storage,
+            // hardware devices, permission status, sessions/items) reach the server
+            // immediately instead of waiting out the idle poll.
+            _syncService.RequestImmediateSync();
+
             // Reset stale permission statuses so they get freshly re-evaluated
             // (GetNextPermissionStep() no longer reads stored statuses, but this
             //  ensures the stored values match reality for any other consumers)
@@ -199,8 +409,7 @@ public partial class MainViewModel : ViewModelBase
             // Forced auto-start — always ensure it's configured
             _autoStart.EnableAutoStartForced();
 
-            IsBrowserTracking = true;
-            BrowserTrackingStatus = "Active — browser journeys are captured automatically via the OS accessibility tree (no debugger, no extension).";
+            await EnterShellAsync();
         }
         else
         {
@@ -552,6 +761,13 @@ public partial class MainViewModel : ViewModelBase
             _logCollector.SetEmployeeInfo(emp.EmployeeId, emp.Name, loginResp.Token ?? string.Empty);
             _logCollector.StartTracking();
 
+            // Login succeeded — fire an IMMEDIATE sync pass so this machine's full picture
+            // (device_hardware_info, employee profile, installed apps/packages, network,
+            // storage_devices, hardware_devices, session_events, permission_status, …) is
+            // on the server right now, not on the next 60s idle tick. The SyncService loop
+            // picks up the signal and drains every unsent table in byte-bounded chunks.
+            _syncService.RequestImmediateSync();
+
             IsLoggedIn = true;
             EmployeeName = emp.Name;
             EmployeeDepartment = emp.Department;
@@ -565,6 +781,8 @@ public partial class MainViewModel : ViewModelBase
 
             // Scan for browsers and enable auto-start after GUI login too
             _autoStart.EnableAutoStartForced();
+
+            await EnterShellAsync();
         }
         catch (HttpRequestException ex)
         {
@@ -582,42 +800,6 @@ public partial class MainViewModel : ViewModelBase
         {
             IsLoading = false;
         }
-    }
-
-    [RelayCommand]
-    private async Task LogoutAsync()
-    {
-        try
-        {
-            var info = await _store.GetEmployeeInfoAsync(CancellationToken.None);
-            if (info != null)
-            {
-                var serverUrl = _config.ServerUrl ?? "http://localhost:8080";
-                var payload = new { employeeId = info.EmployeeId, token = info.Token ?? "" };
-                var json = JsonSerializer.Serialize(payload);
-                var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
-                await _httpClient.PostAsync($"{serverUrl}/api/v1/auth/employee-disconnect", content);
-            }
-        }
-        catch { }
-
-        _logCollector.StopTracking();
-
-        // Clear permission progress
-        await _store.SetStatusAsync("perm_auto_start", "false", CancellationToken.None);
-        await _store.SetStatusAsync("perm_background", "false", CancellationToken.None);
-        await _store.SetStatusAsync("perm_other", "false", CancellationToken.None);
-
-        await _store.ClearEmployeeInfoAsync(CancellationToken.None);
-        IsLoggedIn = false;
-        CurrentPermissionStep = PermissionStep.None;
-        EmployeeName = string.Empty;
-        EmployeeDepartment = string.Empty;
-        EmployeeRole = string.Empty;
-        EmployeeAvatar = string.Empty;
-        EmployeeAvatarColor = string.Empty;
-        StatusMessage = string.Empty;
-        StepStatusText = string.Empty;
     }
 
     // ─── Permission Step Execution ───
@@ -651,6 +833,7 @@ public partial class MainViewModel : ViewModelBase
             if (IsProfile)
             {
                 StepStatusText = string.Empty;
+                await EnterShellAsync();
             }
         }
         catch (Exception ex)

@@ -92,7 +92,7 @@ Download the appropriate installer for your platform:
 | Platform | File |
 |----------|------|
 | Windows  | \`$WINDOWS_INSTALLER_NAME-Setup-$VERSION.exe\` |
-| Linux    | \`$PACKAGE_NAME_${VERSION#v}_amd64.deb\` |
+| Linux    | \`${PACKAGE_NAME}_${VERSION#v}_amd64.deb\` |
 | macOS    | \`$MACOS_BUNDLE_NAME.dmg\` |
 
 See [client/build.md](./client/build.md) for installation instructions.

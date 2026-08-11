@@ -28,6 +28,14 @@ func Setup(
 	}))
 	e.Use(middleware.Recover())
 
+	// Sync ingestion (2026-08-11): the desktop client now sends adaptive byte-bounded
+	// batches (up to ~1MB raw, gzip-compressed) on its dedicated SyncService loop.
+	// 1) BodyLimit — raise Echo's default 2MB body cap so larger batches aren't rejected
+	//    (a 500-row app_items batch with URLs/metadata can exceed 2MB raw).
+	// 2) Decompress — transparently accept gzip-encoded request bodies (Content-Encoding: gzip).
+	e.Use(middleware.BodyLimit("20M"))
+	e.Use(middleware.Decompress())
+
 	// CORS — allow frontend origin with credentials
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
 		AllowOrigins:     cfg.CORS.AllowedOrigins,
@@ -53,7 +61,6 @@ func Setup(
 	a := e.Group("/api/v1/auth")
 	a.POST("/login", authHandler.Login)
 	a.POST("/employee-login", authHandler.EmployeeLogin)
-	a.POST("/employee-disconnect", authHandler.EmployeeDisconnect)
 
 	// Phase 1 sync endpoints — authenticated by employee token in body (not cookie)
 	e.POST("/api/v1/device-hardware/sync", newSchemaHandler.SyncDeviceHardware)
@@ -65,6 +72,12 @@ func Setup(
 	// Phase 2 sync endpoints
 	e.POST("/api/v1/app-sessions/sync", newSchemaHandler.SyncAppSessions)
 	e.POST("/api/v1/app-items/sync", newSchemaHandler.SyncAppItems)
+
+	// Phase 3 sync endpoints (2026-08-11 — previously local-only tables now synced)
+	e.POST("/api/v1/app-status/sync", newSchemaHandler.SyncAppStatus)
+	e.POST("/api/v1/hardware-devices/sync", newSchemaHandler.SyncHardwareDevices)
+	e.POST("/api/v1/permission-status/sync", newSchemaHandler.SyncPermissionStatus)
+	e.POST("/api/v1/storage-devices/sync", newSchemaHandler.SyncStorageDevices)
 
 	// ─────────────────────────────
 	// Semi-Protected Routes (optional auth)
@@ -95,6 +108,10 @@ func Setup(
 	// Employees
 	employees := protected.Group("/employees")
 	employees.GET("", employeeHandler.ListEmployees)
+	// Aggregate machine picture (hardware, apps, packages, peripherals, permissions, stats)
+	// for a single employee — consumed by the web user-detail page. Registered BEFORE /:id is
+	// irrelevant to Echo (static segments win), but kept next to it for readability.
+	employees.GET("/:id/detail", newSchemaHandler.GetEmployeeDetail)
 	employees.GET("/:id", employeeHandler.GetEmployee)
 	employees.POST("", employeeHandler.CreateEmployee)
 	employees.PUT("/:id", employeeHandler.UpdateEmployee)

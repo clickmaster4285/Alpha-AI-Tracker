@@ -15,6 +15,24 @@ public class LogCollectorService : BackgroundService
     [DllImport("kernel32.dll")]
     private static extern uint SetThreadExecutionState(uint esFlags);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MEMORYSTATUSEX
+    {
+        public uint dwLength;
+        public uint dwMemoryLoad;
+        public ulong ullTotalPhys;
+        public ulong ullAvailPhys;
+        public ulong ullTotalPageFile;
+        public ulong ullAvailPageFile;
+        public ulong ullTotalVirtual;
+        public ulong ullAvailVirtual;
+        public ulong ullAvailExtendedVirtual;
+    }
+
     private const uint ES_CONTINUOUS = 0x80000000;
     private const uint ES_SYSTEM_REQUIRED = 0x00000001;
 
@@ -30,11 +48,12 @@ public class LogCollectorService : BackgroundService
     private string? _currentEmployeeName;
     private string? _currentToken;
     private bool _trackingEnabled;
-    private bool _previousTrackingState;
     private readonly object _trackingLock = new();
+    // Serializes on-demand inventory rescans (GUI Rescan button vs InstalledSoftwareWatcher)
+    // so two full OS walks never overlap.
+    private readonly SemaphoreSlim _inventoryScanGate = new(1, 1);
     private DateTime _lastHardwareCollection = DateTime.MinValue;
     private DateTime _lastNetworkCollection = DateTime.MinValue;
-    private DateTime _lastInstalledAppScan = DateTime.MinValue;
     private string? _lastNetworkPublicIp;
     private string? _lastNetworkPrivateIp;
     private string? _lastHardwareFingerprint;
@@ -115,6 +134,13 @@ public class LogCollectorService : BackgroundService
     private HashSet<string> _knownAppBinaryNames = new(StringComparer.OrdinalIgnoreCase);
     private DateTime _lastKnownNamesRefresh = DateTime.MinValue;
 
+    // Cached executable paths per process name (Windows structural gate). Resolving a path
+    // via Process.GetProcessesByName enumerates the whole process table, so the result is
+    // memoized per name with a 5-minute TTL — the path of a running exe is stable.
+    private readonly Dictionary<string, (string path, DateTime at)> _execPathCache =
+        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan ExecPathCacheTtl = TimeSpan.FromMinutes(5);
+
     public LogCollectorService(
         AppConfig config,
         IActivityCollector collector,
@@ -137,7 +163,6 @@ public class LogCollectorService : BackgroundService
     {
         lock (_trackingLock)
         {
-            _previousTrackingState = _trackingEnabled;
             _trackingEnabled = true;
             _cycleCount = 0;
             _logger.LogInformation("Tracking started");
@@ -159,28 +184,6 @@ public class LogCollectorService : BackgroundService
             {
                 _logger.LogDebug(ex, "Failed to set Windows execution state");
             }
-        }
-    }
-
-    public void StopTracking()
-    {
-        lock (_trackingLock)
-        {
-            _previousTrackingState = _trackingEnabled;
-            _trackingEnabled = false;
-            _currentEmployeeId = null;
-            _currentEmployeeName = null;
-            _currentToken = null;
-            _logger.LogInformation("Tracking stopped");
-        }
-
-        // Record logout session event
-        _ = RecordSessionEventAsync("logout", stoppingToken: default);
-
-        if (OperatingSystem.IsWindows())
-        {
-            try { SetThreadExecutionState(ES_CONTINUOUS); }
-            catch { }
         }
     }
 
@@ -224,11 +227,31 @@ public class LogCollectorService : BackgroundService
         // that put anything in /usr/bin/ into the DB without checking for a .desktop file.
         await CleanupNonGuiAppEntriesAsync(stoppingToken);
 
+        // ─── Phase 0b: Windows runtime-auto-registration junk sweep ───
+        // Removes installed_applications rows with an empty desktop_id (the structural signature
+        // of runtime auto-registration — svchost → "Windows Services", dllhost, conhost, Video.UI,
+        // SearchApp…) and closes the sessions they produced. Real inventory rows always carry a
+        // Start Menu shortcut name / registry key / .desktop filename as desktop_id.
+        await CleanupWindowsJunkSessionsAsync(stoppingToken);
+
         var interval = TimeSpan.FromSeconds(Math.Max(5, _config.CollectIntervalSec));
 
         // Collect hardware and network info immediately on startup
         await CollectDeviceHardwareAsync(stoppingToken);
         await CollectNetworkInfoAsync(stoppingToken);
+
+        // Collect the installed app/package inventory immediately too — otherwise a fresh
+        // DB shows empty installed_* tables for the first ~15 minutes (the periodic scan
+        // runs every 30 collection cycles). Long-lived Linux DBs never hit this; fresh
+        // Windows DBs did, which read as "the tables are missing".
+        try
+        {
+            await CollectInstalledApplicationsAsync(stoppingToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Initial installed software scan failed");
+        }
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -479,23 +502,24 @@ public class LogCollectorService : BackgroundService
                     await CollectNetworkInfoAsync(stoppingToken);
                 }
 
-                // ─── Scan installed applications (every 30 cycles ~15 min) ───
-                if (_cycleCount % 30 == 0)
-                {
-                    await CollectInstalledApplicationsAsync(stoppingToken);
-                }
+                // ─── NO periodic installed-software scan ───
+                // Install/uninstall detection is 100% EVENT-DRIVEN by InstalledSoftwareWatcher:
+                // it watches the OS install locations (.desktop dirs, dpkg state, Start Menu,
+                // /Applications, package-manager dirs) and calls RescanInventoryAsync the
+                // moment anything changes — so an uninstall/install through terminal, software
+                // center, control panel, cmd/powershell or manual file delete updates the DB
+                // within seconds. There is intentionally NO every-N-minutes scan (user rule
+                // 2026-08-10: no minute-based inventory polling). The only other scan is the
+                // one-time startup scan at boot.
 
-                // ─── Scan installed packages (every 60 cycles ~30 min) ───
-                if (_cycleCount % 60 == 0)
-                {
-                    await CollectInstalledPackagesAsync(stoppingToken);
-                }
-
-                // ─── Periodic sync & cleanup ───
+                // ─── Periodic cleanup ───
+                // NOTE: network sync moved to the dedicated SyncService background loop
+                // (2026-08-11) — collection NEVER blocks on the network anymore. Huge
+                // backlogs (50k+ rows) drain there in byte-bounded chunks without adding
+                // latency to this loop.
                 _cycleCount++;
                 if (_cycleCount % 10 == 0)
                 {
-                    await SyncUnsentData(stoppingToken);
                     await StorePermissionStatus(stoppingToken);
                 }
 
@@ -694,8 +718,18 @@ public class LogCollectorService : BackgroundService
             if (app != null)
             {
                 // Skip non-GUI apps that happen to be in the DB from before the GUI gate.
-                // A GUI app has non-empty Categories OR is flagged as a browser.
-                if (!app.IsBrowser && string.IsNullOrWhiteSpace(app.Categories))
+                // A GUI app has non-empty Categories OR is flagged as a browser. On Windows,
+                // Categories is only ever set for browsers — Start Menu/registry entries have
+                // no .desktop-Categories equivalent — so the gate is Linux-only.
+                if (!OperatingSystem.IsWindows() && !app.IsBrowser && string.IsNullOrWhiteSpace(app.Categories))
+                    return (false, null, null, null, false);
+
+                // Windows junk guard: a real inventory row always carries a desktop_id
+                // (Start Menu shortcut name / registry key / .desktop filename). Rows with
+                // an empty desktop_id are the runtime auto-registered junk (svchost,
+                // dllhost, conhost, Video.UI…) — refuse them even before the cleanup sweep
+                // deletes them, so no new junk session can ever attach to one.
+                if (OperatingSystem.IsWindows() && string.IsNullOrWhiteSpace(app.DesktopId))
                     return (false, null, null, null, false);
 
                 if (app.IsBrowser && string.IsNullOrWhiteSpace(windowTitle) && isHeadlessSubProcess)
@@ -704,7 +738,33 @@ public class LogCollectorService : BackgroundService
             }
         }
 
-        // 2. Fuzzy match: process may exist in DB under a similar binary name
+        // 2b. Windows structural gate (no product names) — runs BEFORE the fuzzy match so a
+        // CUI/system-tree binary can never fuzzy-match its way into an app row (powershell.exe
+        // was matching the "Windows PowerShell ISE" row and produced 7 junk console sessions).
+        // Resolve the running executable and let the OS's own metadata decide:
+        //   - Anything inside C:\Windows (System32 / SystemApps / WinSxS / …) is an OS-provided
+        //     component (RuntimeBroker, GameBar, Video.UI, conhost, SearchApp…) — never a user app.
+        //   - A console-subsystem executable (node, git, dotnet, cmd…) is a CLI tool/runtime
+        //     that belongs in installed_packages, not installed_applications.
+        //
+        // ⚠️ LOAD-BEARING ORDER: the gate stays AFTER the known-binary fast path above. The
+        // inventory scan registers inbox System32 GUI apps (Notepad, WordPad, mspaint…) as
+        // installed_applications, so their binary names hit the fast path and are never
+        // rejected here. Moving this gate above the fast path would silently stop tracking
+        // every inbox Windows tool.
+        if (OperatingSystem.IsWindows())
+        {
+            var gatePath = GetCachedExecutablePath(processName);
+            if (!string.IsNullOrEmpty(gatePath))
+            {
+                if (ExecutableMetadata.IsWindowsSystemTree(gatePath))
+                    return (false, null, null, null, false);
+                if (ExecutableMetadata.GetSubsystem(gatePath) == ExecutableMetadata.SubsystemWindowsCui)
+                    return (false, null, null, null, false);
+            }
+        }
+
+        // 2c. Fuzzy match: process may exist in DB under a similar binary name
         // 🟡 Phase 0a: Only consider fuzzy matches that could plausibly be the same app.
         // Reject matches where the process name is very short (≤3 chars) because short
         // SQL LIKE patterns like '%sh%' or '%go%' are too broad and match unrelated processes.
@@ -713,18 +773,33 @@ public class LogCollectorService : BackgroundService
             : null;
         if (existingFuzzy != null)
         {
-            // Also verify the fuzzy match is actually a GUI app
-            if (!existingFuzzy.IsBrowser && string.IsNullOrWhiteSpace(existingFuzzy.Categories))
+            // Also verify the fuzzy match is actually a GUI app (Linux-only gate — see above).
+            if (!OperatingSystem.IsWindows() && !existingFuzzy.IsBrowser && string.IsNullOrWhiteSpace(existingFuzzy.Categories))
+                return (false, null, null, null, false);
+
+            // Same Windows junk guard as the fast path: only inventory rows (desktop_id
+            // set) can be fuzzy-matched into a session.
+            if (OperatingSystem.IsWindows() && string.IsNullOrWhiteSpace(existingFuzzy.DesktopId))
                 return (false, null, null, null, false);
 
             _knownAppBinaryNames.Add(processName);
             return (true, existingFuzzy.AppName, existingFuzzy.Id, null, existingFuzzy.IsBrowser);
         }
 
-        // 3. Auto-detect: is this a GUI application? (has .desktop / .app bundle / Start Menu)
+        // 3. Windows: NO runtime auto-registration. Tracking is driven STRICTLY by the
+        // installed_applications inventory (Start Menu shortcut + registry Uninstall scan —
+        // the Windows analog of the .desktop scan). Runtime auto-registration was the source
+        // of every junk row: it registered system components (svchost → "Windows Services",
+        // conhost → "Windows Console Host", Video.UI, SearchApp, …) that have no GUI of their
+        // own. The inventory scan re-runs every ~15 min, so a genuinely new app is picked up
+        // there within minutes — no runtime fallback needed.
+        if (OperatingSystem.IsWindows())
+            return (false, null, null, null, false);
+
+        // 3b. Auto-detect (non-Windows): is this a GUI application? (has .desktop / .app bundle)
         // Only GUI applications get registered into installed_applications and tracked.
         // CLI-only tools, shells, build tools, runtimes, and daemons are all skipped.
-        var execPath = GetExecutablePath(processName);
+        var execPath = GetCachedExecutablePath(processName);
         if (_appDetector.IsGuiApplication(processName, execPath))
         {
             if (!string.IsNullOrEmpty(execPath))
@@ -773,6 +848,18 @@ public class LogCollectorService : BackgroundService
         }
         catch { }
         return null;
+    }
+
+    /// <summary>Memoized executable-path lookup (5-min TTL) so the Windows structural gate never
+    /// enumerates the process table for the same name on every collection cycle.</summary>
+    private string? GetCachedExecutablePath(string processName)
+    {
+        if (_execPathCache.TryGetValue(processName, out var entry) &&
+            DateTime.UtcNow - entry.at < ExecPathCacheTtl)
+            return entry.path;
+        var path = GetExecutablePath(processName) ?? "";
+        _execPathCache[processName] = (path, DateTime.UtcNow);
+        return path.Length == 0 ? null : path;
     }
 
     private async Task<string?> ResolveDisplayNameFromPath(string processName, string? execPath, CancellationToken ct)
@@ -905,17 +992,21 @@ public class LogCollectorService : BackgroundService
             }
             else if (OperatingSystem.IsWindows())
             {
-                // Executable in standard Windows paths → likely an app
+                // Executable in standard Windows paths → likely an app. Browsers get flagged so
+                // they resolve as real browser apps (not raw binary names / window titles).
                 if (execPath.Contains("Program Files", StringComparison.OrdinalIgnoreCase) ||
                     execPath.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase) ||
                     execPath.Contains("\\Microsoft\\", StringComparison.OrdinalIgnoreCase))
                 {
+                    var isBrowser = BrowserAccessibilityHelpers.IsBrowserProcess(processName);
                     return new InstalledApplication
                     {
-                        AppName = processName,
+                        AppName = _appDetector.ResolveDisplayName(processName) ?? processName,
                         BinaryName = processName,
                         InstallPath = execPath,
                         ChangeType = "seen",
+                        IsBrowser = isBrowser,
+                        Categories = isBrowser ? "WebBrowser" : "",
                         DetectedAt = DateTime.UtcNow,
                     };
                 }
@@ -1208,6 +1299,35 @@ public class LogCollectorService : BackgroundService
         return 0;
     }
 
+    private static (string model, long vramMb) GetWindowsGpuInfo()
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "powershell",
+                Arguments = "-NoProfile -NonInteractive -Command \"Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Select-Object -First 1 Name, AdapterRAM | ConvertTo-Json -Compress\"",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            using var proc = System.Diagnostics.Process.Start(psi);
+            if (proc == null) return ("", 0);
+
+            var output = proc.StandardOutput.ReadToEnd();
+            proc.WaitForExit(10000);
+
+            using var doc = JsonDocument.Parse(output);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return ("", 0);
+
+            var model = doc.RootElement.TryGetProperty("Name", out var n) ? n.GetString() ?? "" : "";
+            var ram = doc.RootElement.TryGetProperty("AdapterRAM", out var r) ? r.GetInt64() : 0;
+            return (model, ram > 0 ? ram / (1024 * 1024) : 0);
+        }
+        catch { return ("", 0); }
+    }
+
     private static (string model, long vramMb) GetGpuInfo()
     {
         try
@@ -1248,8 +1368,8 @@ public class LogCollectorService : BackgroundService
             }
             if (OperatingSystem.IsWindows())
             {
-                // On Windows, return empty as WMI would require System.Management package
-                return ("", 0);
+                // PowerShell + Win32_VideoController (no System.Management package needed).
+                return GetWindowsGpuInfo();
             }
         }
         catch { }
@@ -1300,7 +1420,12 @@ public class LogCollectorService : BackgroundService
                 }
             }
             if (OperatingSystem.IsWindows())
-                return Environment.Is64BitProcess ? 16384 : 4096;
+            {
+                // Real physical RAM via GlobalMemoryStatusEx (no fake hardcoded value).
+                var status = new MEMORYSTATUSEX { dwLength = (uint)Marshal.SizeOf<MEMORYSTATUSEX>() };
+                if (GlobalMemoryStatusEx(ref status))
+                    return (long)(status.ullTotalPhys / (1024 * 1024));
+            }
         }
         catch { }
         return 0;
@@ -1442,6 +1567,29 @@ public class LogCollectorService : BackgroundService
     // NOT from running processes. Collects metadata (version, publisher, etc.)
     // ────────────────────────────────────────────
 
+    /// <summary>
+    /// On-demand OS inventory rescan — used by the Installed Applications page's
+    /// Rescan button AND the InstalledSoftwareWatcher background service. Re-runs
+    /// the SAME joint app+package scan the periodic loop uses (deduped + classified
+    /// via SoftwareClassifier) and stores the result into SQLite; the GUI then
+    /// re-reads the tables. The OS scan stays here in the collector — the UI never
+    /// scans the OS for display.
+    /// </summary>
+    public async Task RescanInventoryAsync(CancellationToken ct = default)
+    {
+        // Serialize with the background watcher: if an event-driven rescan is already
+        // running, wait for it rather than stacking a second full OS walk.
+        await _inventoryScanGate.WaitAsync(ct);
+        try
+        {
+            await CollectInstalledApplicationsAsync(ct);
+        }
+        finally
+        {
+            _inventoryScanGate.Release();
+        }
+    }
+
     private async Task CollectInstalledApplicationsAsync(CancellationToken ct)
     {
         try
@@ -1462,6 +1610,19 @@ public class LogCollectorService : BackgroundService
                 await _store.StoreInstalledApplicationsAsync(apps, ct);
             if (packages.Count > 0)
                 await _store.StoreInstalledPackagesAsync(packages, ct);
+
+            // Inventory lifecycle: rows are never deleted — ONE ROW PER INSTALL CYCLE. After
+            // this completed scan, open cycles no longer found close (is_installed=0 +
+            // uninstall_date = the uninstall event). A reinstall opens a NEW cycle row with a
+            // fresh install_date in the Store* pass above, so install→uninstall→reinstall is
+            // visible as separate records. The store skips a pass when its seen-set is empty
+            // and applies a 50% confidence guard, so a failed/partial scan can't falsely
+            // uninstall the whole inventory.
+            await _store.ApplyInventoryLifecycleAsync(
+                apps.Select(a => a.AppName).ToHashSet(StringComparer.OrdinalIgnoreCase),
+                packages.Select(p => $"{p.PackageName}|{p.SourceManager}").ToHashSet(StringComparer.OrdinalIgnoreCase),
+                DateTime.UtcNow,
+                ct);
 
             _logger.LogDebug("Software inventory: {Apps} applications, {Packages} packages (pre-classify: {RawApps}/{RawPkgs})",
                 apps.Count, packages.Count, rawApps.Count, rawPackages.Count);
@@ -1715,6 +1876,96 @@ public class LogCollectorService : BackgroundService
     /// processes that were incorrectly registered into installed_applications by the old
     /// AutoDetectInstalledApp code (which put anything in /usr/bin/ into the DB).
     /// </summary>
+    /// <summary>
+    /// Windows boot sweep that removes the junk produced by the old runtime auto-registration
+    /// path (which registered ANY process whose exe lived in Program Files/WindowsApps or whose
+    /// display name could be resolved — svchost → "Windows Services", dllhost → "Windows DCOM
+    /// Host", conhost → "Windows Console Host", Video.UI, WebPluginService, SDXHelper,
+    /// SearchApp, M365Copilot…).
+    ///
+    /// Structural signal (no product names): real inventory rows ALWAYS carry a desktop_id
+    /// (Start Menu shortcut name / registry Uninstall key / .desktop filename). Runtime
+    /// auto-registered rows have an empty desktop_id, so they are safe to delete, and the
+    /// sessions that reference them are closed (their process is a background system component
+    /// that is not a user application).
+    /// </summary>
+    private async Task CleanupWindowsJunkSessionsAsync(CancellationToken ct)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        try
+        {
+            var junkApps = await _store.GetInstalledAppsWithEmptyDesktopIdAsync(ct);
+            var junkIds = junkApps.Select(a => a.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            // Runtime-registered junk has no desktop_id; its BINARY names mark the sessions it
+            // produced, so also close any open session whose process name matches one of them
+            // (covers sessions whose installed_app_id was never linked).
+            var junkBinaries = new HashSet<string>(
+                junkApps.Select(a => a.BinaryName).Where(b => !string.IsNullOrWhiteSpace(b)),
+                StringComparer.OrdinalIgnoreCase);
+
+            var openRecords = await _store.GetAllOpenSessionRecordsAsync(ct);
+            var closeSessions = new List<AppSession>();
+
+            foreach (var rec in openRecords)
+            {
+                var processName = AppProcessClassifier.ExtractBaseProcessName(rec.ProcessName);
+
+                // Sessions that reference a SURVIVING legit app row (desktop_id set, e.g.
+                // inbox GUI apps like Notepad/Task Manager whose exe lives in C:\Windows)
+                // are NEVER junk — the structural check below must not touch them.
+                var hasLegitApp = rec.InstalledAppId != null && !junkIds.Contains(rec.InstalledAppId);
+
+                // Linked to a deleted junk row, OR the process binary is a deleted junk binary,
+                // OR (only for sessions with NO legit app link) the executable is structurally
+                // not an app (system tree / console subsystem).
+                var linkedToJunk = rec.InstalledAppId != null && junkIds.Contains(rec.InstalledAppId);
+                var junkBinary = junkBinaries.Contains(processName);
+                var structuralJunk = false;
+                if (!hasLegitApp && !linkedToJunk && !junkBinary &&
+                    !BrowserAccessibilityHelpers.IsBrowserProcess(processName))
+                {
+                    var path = GetCachedExecutablePath(processName);
+                    if (!string.IsNullOrEmpty(path))
+                    {
+                        structuralJunk = ExecutableMetadata.IsWindowsSystemTree(path) ||
+                                         ExecutableMetadata.GetSubsystem(path) == ExecutableMetadata.SubsystemWindowsCui;
+                    }
+                }
+
+                if (linkedToJunk || junkBinary || structuralJunk)
+                {
+                    closeSessions.Add(new AppSession
+                    {
+                        Id = rec.AppSessionId,
+                        ProcessName = string.Empty,
+                        EndedAt = DateTime.UtcNow,
+                    });
+                }
+            }
+
+            if (closeSessions.Count > 0)
+            {
+                await _store.CloseSessionsAndAppItemsAsync(closeSessions, DateTime.UtcNow, ct);
+            }
+
+            foreach (var app in junkApps)
+            {
+                await _store.DeleteInstalledAppAsync(app.Id, ct);
+            }
+
+            if (junkApps.Count > 0 || closeSessions.Count > 0)
+            {
+                _logger.LogWarning(
+                    "🧹 Windows junk sweep: removed {Apps} runtime-auto-registered app entries (empty desktop_id) and closed {Sessions} junk session(s)",
+                    junkApps.Count, closeSessions.Count);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to clean Windows junk app entries");
+        }
+    }
+
     private async Task CleanupNonGuiAppEntriesAsync(CancellationToken ct)
     {
         try
@@ -1763,318 +2014,6 @@ public class LogCollectorService : BackgroundService
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Failed to clean up non-GUI app entries");
-        }
-    }
-
-    // ────────────────────────────────────────────
-    // Sync Engine — sends unsent data for all tables
-    // Uses app_items instead of old child tables
-    // ────────────────────────────────────────────
-
-    private const int BATCH_SIZE = 500;
-
-    private async Task SyncUnsentData(CancellationToken ct)
-    {
-        if (string.IsNullOrEmpty(_currentEmployeeId) || string.IsNullOrEmpty(_currentToken))
-            return;
-
-        var serverUrl = _config.ServerUrl ?? "http://localhost:8080";
-
-        // Phase 1 tables (no FK dependencies)
-        await SyncTableBatch<DeviceHardwareInfo>(
-            () => _store.GetUnsentDeviceHardwareInfoAsync(BATCH_SIZE, ct),
-            entries => SerializeAndSend(
-                serverUrl, "/api/v1/device-hardware/sync",
-                entries, e => new
-                {
-                    id = e.Id,
-                    macAddress = e.MacAddress,
-                    hostname = e.Hostname,
-                    osName = e.OsName,
-                    osVersion = e.OsVersion,
-                    cpuModel = e.CpuModel,
-                    cpuCores = e.CpuCores,
-                    ramTotalMb = e.RamTotalMb,
-                    gpuModel = e.GpuModel,
-                    gpuVramMb = e.GpuVramMb,
-                    storageDevices = e.StorageDevices,
-                    collectedAt = e.CollectedAt.ToString("O"),
-                },
-                ids => _store.MarkDeviceHardwareInfoSentAsync(ids, ct),
-                ct),
-            ct);
-
-        await SyncTableBatch<InstalledApplication>(
-            () => _store.GetUnsentInstalledApplicationsAsync(BATCH_SIZE, ct),
-            entries => SerializeAndSend(
-                serverUrl, "/api/v1/installed-apps/sync",
-                entries, e => new
-                {
-                    id = e.Id,
-                    appName = e.AppName,
-                    appVersion = e.AppVersion,
-                    publisher = e.Publisher,
-                    installPath = e.InstallPath,
-                    installDate = e.InstallDate?.ToString("O"),
-                    uninstallString = e.UninstallString,
-                    changeType = e.ChangeType,
-                    detectedAt = e.DetectedAt.ToString("O"),
-                    binaryName = e.BinaryName,
-                    isBrowser = e.IsBrowser,
-                    desktopId = e.DesktopId,
-                    categories = e.Categories,
-                },
-                ids => _store.MarkInstalledApplicationsSentAsync(ids, ct),
-                ct),
-            ct);
-
-        await SyncTableBatch<InstalledPackage>(
-            () => _store.GetUnsentInstalledPackagesAsync(BATCH_SIZE, ct),
-            entries => SerializeAndSend(
-                serverUrl, "/api/v1/installed-packages/sync",
-                entries, e => new
-                {
-                    id = e.Id,
-                    packageName = e.PackageName,
-                    version = e.Version,
-                    category = e.Category,
-                    sourceManager = e.SourceManager,
-                    installPath = e.InstallPath,
-                    publisher = e.Publisher,
-                    description = e.Description,
-                    detectedAt = e.DetectedAt.ToString("O"),
-                },
-                ids => _store.MarkInstalledPackagesSentAsync(ids, ct),
-                ct),
-            ct);
-
-        await SyncTableBatch<NetworkInfo>(
-            () => _store.GetUnsentNetworkInfoAsync(BATCH_SIZE, ct),
-            entries => SerializeAndSend(
-                serverUrl, "/api/v1/network-info/sync",
-                entries, e => new
-                {
-                    id = e.Id,
-                    publicIp = e.PublicIp,
-                    privateIp = e.PrivateIp,
-                    networkInterfaceName = e.NetworkInterfaceName,
-                    collectedAt = e.CollectedAt.ToString("O"),
-                },
-                ids => _store.MarkNetworkInfoSentAsync(ids, ct),
-                ct),
-            ct);
-
-        await SyncTableBatch<SessionEvent>(
-            () => _store.GetUnsentSessionEventsAsync(BATCH_SIZE, ct),
-            entries => SerializeAndSend(
-                serverUrl, "/api/v1/session-events/sync",
-                entries, e => new
-                {
-                    id = e.Id,
-                    eventType = e.EventType,
-                    osUsername = e.OsUsername,
-                    eventAt = e.EventAt.ToString("O"),
-                },
-                ids => _store.MarkSessionEventsSentAsync(ids, ct),
-                ct),
-            ct);
-
-        // App sessions first (parents)
-        await SyncAppSessions(serverUrl, ct);
-
-        // App items (generic children — replaces browser_contexts, file_explorer_contexts, urls, url_visits)
-        await SyncTableBatch<AppItem>(
-            () => _store.GetUnsentAppItemsAsync(BATCH_SIZE, ct),
-            entries => SerializeAndSend(
-                serverUrl, "/api/v1/app-items/sync",
-                entries, e => new
-                {
-                    id = e.Id,
-                    appSessionId = e.AppSessionId,
-                    parentItemId = e.ParentItemId,
-                    itemType = e.ItemType,
-                    title = e.Title,
-                    identifier = e.Identifier,
-                    url = e.Url,
-                    domain = e.Domain,
-                    openedAt = e.OpenedAt.ToString("O"),
-                    closedAt = e.ClosedAt?.ToString("O"),
-                    processId = e.ProcessId,
-                    objectType = e.ObjectType,
-                    action = e.Action,
-                    journeyId = e.JourneyId,
-                    sequence = e.Sequence,
-                    previousPath = e.PreviousPath,
-                    currentPath = e.CurrentPath,
-                    windowId = e.WindowId,
-                    tabId = e.TabId,
-                    metadataJson = e.MetadataJson,
-                },
-                ids => _store.MarkAppItemsSentAsync(ids, ct),
-                ct),
-            ct);
-    }
-
-    private async Task SyncAppSessions(string serverUrl, CancellationToken ct)
-    {
-        var unsent = await _store.GetUnsentAppSessionsAsync(BATCH_SIZE, ct);
-        if (unsent.Count == 0) return;
-
-        var payload = new
-        {
-            employeeId = _currentEmployeeId,
-            token = _currentToken,
-            entries = unsent.Select(e => new
-            {
-                id = e.Id,
-                processName = e.ProcessName,
-                appDisplayName = e.AppDisplayName,
-                startedAt = e.StartedAt.ToString("O"),
-                endedAt = e.EndedAt?.ToString("O"),
-                machineId = e.MachineId,
-                employeeId = _currentEmployeeId,
-                employeeName = _currentEmployeeName,
-                sessionId = e.SessionId,
-                platform = e.Platform,
-                installedAppId = e.InstalledAppId,
-                installedPackageId = e.InstalledPackageId,
-                processId = e.ProcessId,
-                parentProcessId = e.ParentProcessId,
-                groupedBy = e.GroupedBy,
-                cgroupScope = e.CgroupScope,
-                contextLabel = e.ContextLabel,
-            }).ToList()
-        };
-
-        try
-        {
-            var json = JsonSerializer.Serialize(payload);
-            var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
-            var response = await _httpClient.PostAsync($"{serverUrl}/api/v1/app-sessions/sync", content, ct);
-
-            if (response.IsSuccessStatusCode)
-            {
-                var syncedIds = unsent.Select(e => e.Id).ToList();
-                await _store.MarkAppSessionsSentAsync(syncedIds, ct);
-                _logger.LogDebug("Synced {Count} app sessions", unsent.Count);
-            }
-            else if ((int)response.StatusCode == 401 || (int)response.StatusCode == 403)
-            {
-                _logger.LogWarning("Auth failed (status {Status}) during app session sync", (int)response.StatusCode);
-            }
-            else
-            {
-                var body = await response.Content.ReadAsStringAsync(ct);
-                _logger.LogWarning("App session sync failed (status {Status}): {Body}", (int)response.StatusCode, body);
-            }
-        }
-        catch (HttpRequestException ex)
-        {
-            _logger.LogDebug(ex, "App session sync failed (server unreachable)");
-        }
-        catch (TaskCanceledException)
-        {
-            _logger.LogDebug("App session sync timed out");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to sync app sessions");
-        }
-    }
-
-    /// <summary>
-    /// Generic sync helper: fetches unsent rows, sends in batches of up to 500,
-    /// marks sent after each successful batch, stops on failure, retries next cycle.
-    /// </summary>
-    private async Task SyncTableBatch<T>(
-        Func<Task<IReadOnlyList<T>>> fetchFn,
-        Func<IReadOnlyList<T>, Task<bool>> sendFn,
-        CancellationToken ct)
-    {
-        try
-        {
-            var entries = await fetchFn();
-            if (entries.Count == 0) return;
-
-            for (int i = 0; i < entries.Count; i += BATCH_SIZE)
-            {
-                ct.ThrowIfCancellationRequested();
-                var batch = entries.Skip(i).Take(BATCH_SIZE).ToList();
-
-                var success = await sendFn(batch);
-                if (!success)
-                {
-                    _logger.LogDebug("Sync batch failed, retrying next cycle");
-                    return;
-                }
-            }
-        }
-        catch (OperationCanceledException) { }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Error syncing table batch");
-        }
-    }
-
-    private async Task<bool> SerializeAndSend<T>(
-        string serverUrl, string endpoint,
-        IReadOnlyList<T> entries,
-        Func<T, object> mapper,
-        Func<IReadOnlyList<string>, Task> markSentFn,
-        CancellationToken ct)
-    {
-        var payload = new
-        {
-            employeeId = _currentEmployeeId,
-            token = _currentToken,
-            entries = entries.Select(mapper).ToList()
-        };
-
-        var json = JsonSerializer.Serialize(payload);
-        var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
-
-        try
-        {
-            var response = await _httpClient.PostAsync($"{serverUrl}{endpoint}", content, ct);
-
-            if (response.IsSuccessStatusCode)
-            {
-                var ids = entries.Select(e =>
-                {
-                    var prop = typeof(T).GetProperty("Id");
-                    return prop?.GetValue(e)?.ToString() ?? string.Empty;
-                }).Where(id => !string.IsNullOrEmpty(id)).ToList();
-
-                await markSentFn(ids);
-                _logger.LogDebug("Synced {Count} rows to {Endpoint}", ids.Count, endpoint);
-                return true;
-            }
-            else if ((int)response.StatusCode == 401 || (int)response.StatusCode == 403)
-            {
-                _logger.LogWarning("Auth failed (status {Status}) for {Endpoint}", (int)response.StatusCode, endpoint);
-                return false;
-            }
-            else
-            {
-                var body = await response.Content.ReadAsStringAsync(ct);
-                _logger.LogWarning("Sync failed for {Endpoint} (status {Status}): {Body}", endpoint, (int)response.StatusCode, body);
-                return false;
-            }
-        }
-        catch (HttpRequestException ex)
-        {
-            _logger.LogDebug(ex, "Sync failed for {Endpoint} (server unreachable)", endpoint);
-            return false;
-        }
-        catch (TaskCanceledException)
-        {
-            _logger.LogDebug("Sync timed out for {Endpoint}", endpoint);
-            return false;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to sync {Endpoint}", endpoint);
-            return false;
         }
     }
 

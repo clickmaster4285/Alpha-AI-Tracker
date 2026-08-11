@@ -50,6 +50,11 @@ if (args.Contains("--print-config"))
     Console.WriteLine($"BrowserHistoryPollSec={cfg.BrowserHistoryPollSec}");
     Console.WriteLine($"DbPath={cfg.DbPath}");
     Console.WriteLine($"ApiKeySet={!string.IsNullOrEmpty(cfg.ApiKey)}");
+    Console.WriteLine($"SyncIntervalSec={cfg.SyncIntervalSec}");
+    Console.WriteLine($"SyncMaxRows={cfg.SyncMaxRows}");
+    Console.WriteLine($"SyncMaxBytes={cfg.SyncMaxBytes}");
+    Console.WriteLine($"SyncCompression={cfg.SyncCompression}");
+    Console.WriteLine($"SyncRetentionHours={cfg.SyncRetentionHours}");
     return;
 }
 
@@ -163,6 +168,21 @@ builder.Services.AddHostedService<BackgroundGuardService>();
 builder.Services.AddSingleton<LogCollectorService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<LogCollectorService>());
 
+// Dedicated sync engine — runs on its OWN loop so collection never blocks on the network.
+// Drains unsent rows in adaptive byte-bounded chunks (gzip, polite pauses, backoff); a
+// 50k+ row backlog drains in minutes without spiking CPU or adding collection latency.
+// Registered as a singleton + hosted so the login flow can inject it and trigger an
+// IMMEDIATE drain the moment credentials are persisted (RequestImmediateSync).
+builder.Services.AddSingleton<SyncService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<SyncService>());
+
+// Near-real-time install/uninstall detection: watches .desktop/dpkg/Start Menu//Applications
+// and triggers an immediate inventory rescan on change — no GUI interaction needed.
+if (config.InventoryWatchEnabled)
+{
+    builder.Services.AddHostedService<InstalledSoftwareWatcher>();
+}
+
 // Browser Journey (Option B — accessibility-based: reads the OS accessibility tree.
 // No debugger, no extension, no browser catalog dependency; works on every browser
 // and every Chrome version, including install→use→uninstall-in-5-min scenarios.)
@@ -177,10 +197,14 @@ if (config.BrowserTrackingEnabled)
     builder.Services.AddHostedService<AccessibilityBrowserTracker>();
 }
 
-// Desktop Event Bus (File Explorer tracking via AT-SPI + FileSystemWatcher)
+// Desktop Event Bus (File Explorer tracking via AT-SPI on Linux, Shell COM on Windows,
+// plus FileSystemWatcher + recent-files sources on every platform)
 builder.Services.AddSingleton<EventCoordinator>();
 builder.Services.AddSingleton<JourneyEngine>();
 builder.Services.AddSingleton<ATSPIEventWatcher>();
+builder.Services.AddSingleton<WindowsExplorerWatcher>();
+builder.Services.AddSingleton<IExplorerWindowProvider>(
+    sp => sp.GetRequiredService<WindowsExplorerWatcher>());
 builder.Services.AddSingleton<FileSystemEventWatcher>();
 builder.Services.AddSingleton<RecentFilesWatcher>();
 builder.Services.AddHostedService<DesktopEventService>();
@@ -191,7 +215,11 @@ if (config.HardwareDevicesEnabled)
     builder.Services.AddHostedService<HardwareDeviceWatcherService>();
 }
 
-// Main ViewModel
+// Main ViewModel + the per-page ViewModels it composes (pages 4–6).
+// Transient alongside MainViewModel so each window gets its own page state.
+builder.Services.AddTransient<DashboardViewModel>();
+builder.Services.AddTransient<SystemSpecsViewModel>();
+builder.Services.AddTransient<InstalledAppsViewModel>();
 builder.Services.AddTransient<MainViewModel>();
 
 var host = builder.Build();

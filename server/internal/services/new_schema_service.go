@@ -86,6 +86,18 @@ func (s *NewSchemaService) SyncInstalledApps(ctx context.Context, req *dto.SyncI
 
 	now := time.Now()
 	inserted := 0
+
+	// ONE transaction per request (2026-08-11) — the old code opened and committed a
+	// separate transaction per entry (500 transactions for a 500-row batch), which was
+	// the dominant server-side bottleneck under large-backlog syncs. Catalog upserts
+	// conflict on app_fingerprint, so duplicate rows in one batch collapse to one
+	// catalog row while every entry still gets its employee link.
+	tx, err := s.repo.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	for _, e := range req.Entries {
 		dets, _ := time.Parse(time.RFC3339, e.DetectedAt)
 		var installDate *time.Time
@@ -114,14 +126,8 @@ func (s *NewSchemaService) SyncInstalledApps(ctx context.Context, req *dto.SyncI
 			AppFingerprint:  appFingerprint(e.DesktopID, e.BinaryName),
 		}
 
-		tx, err := s.repo.Begin(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("begin tx: %w", err)
-		}
-
 		catalogID, err := s.repo.UpsertApplicationCatalog(ctx, tx, cat)
 		if err != nil {
-			tx.Rollback(ctx)
 			return nil, err
 		}
 
@@ -134,14 +140,14 @@ func (s *NewSchemaService) SyncInstalledApps(ctx context.Context, req *dto.SyncI
 			InstallDate:            installDate,
 		})
 		if err != nil {
-			tx.Rollback(ctx)
 			return nil, err
 		}
 
-		if err := tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("commit tx: %w", err)
-		}
 		inserted++
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
 	}
 	return &dto.SyncBatchResponse{Synced: inserted, Message: fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries))}, nil
 }
@@ -177,32 +183,36 @@ func (s *NewSchemaService) SyncInstalledPackages(ctx context.Context, req *dto.S
 
 	now := time.Now()
 	inserted := 0
+
+	// ONE transaction per request (2026-08-11) — same rationale as SyncInstalledApps:
+	// the old per-entry Begin/Upsert/Commit pattern opened 500 transactions for a
+	// 500-row batch.
+	tx, err := s.repo.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	for _, e := range req.Entries {
 		dets, _ := time.Parse(time.RFC3339, e.DetectedAt)
 
 		cat := models.InstalledPackage{
-			ID:                e.ID,
-			EmployeeID:        req.EmployeeID,
-			PackageName:       e.PackageName,
-			Version:           e.Version,
-			Category:          e.Category,
-			SourceManager:     e.SourceManager,
-			InstallPath:       e.InstallPath,
-			Publisher:         e.Publisher,
-			Description:       e.Description,
-			DetectedAt:        dets,
-			SyncedAt:          &now,
+			ID:                 e.ID,
+			EmployeeID:         req.EmployeeID,
+			PackageName:        e.PackageName,
+			Version:            e.Version,
+			Category:           e.Category,
+			SourceManager:      e.SourceManager,
+			InstallPath:        e.InstallPath,
+			Publisher:          e.Publisher,
+			Description:        e.Description,
+			DetectedAt:         dets,
+			SyncedAt:           &now,
 			PackageFingerprint: packageFingerprint(e.PackageName, e.SourceManager),
-		}
-
-		tx, err := s.repo.Begin(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("begin tx: %w", err)
 		}
 
 		catalogID, err := s.repo.UpsertPackageCatalog(ctx, tx, cat)
 		if err != nil {
-			tx.Rollback(ctx)
 			return nil, err
 		}
 
@@ -214,14 +224,14 @@ func (s *NewSchemaService) SyncInstalledPackages(ctx context.Context, req *dto.S
 			InstallPath:        e.InstallPath,
 		})
 		if err != nil {
-			tx.Rollback(ctx)
 			return nil, err
 		}
 
-		if err := tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("commit tx: %w", err)
-		}
 		inserted++
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
 	}
 	return &dto.SyncBatchResponse{Synced: inserted, Message: fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries))}, nil
 }
@@ -505,4 +515,348 @@ func (s *NewSchemaService) ListAppItems(ctx context.Context, params repository.A
 		PerPage:    result.PerPage,
 		TotalPages: result.TotalPages,
 	}, nil
+}
+
+// ── app_status (key/value status rows; natural key employee_id+key) ──
+
+func (s *NewSchemaService) SyncAppStatus(ctx context.Context, req *dto.SyncAppStatusRequest) (*dto.SyncBatchResponse, error) {
+	emp, err := s.employeeRepo.GetByEmployeeID(ctx, req.EmployeeID)
+	if err != nil {
+		return nil, fmt.Errorf("verify employee: %w", err)
+	}
+	if emp == nil {
+		return nil, fmt.Errorf("employee not found")
+	}
+	if len(req.Entries) == 0 {
+		return &dto.SyncBatchResponse{Synced: 0, Message: "No entries to sync"}, nil
+	}
+
+	now := time.Now()
+	tx, err := s.repo.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	inserted := 0
+	for _, e := range req.Entries {
+		updatedAt := now
+		if t, err := time.Parse(time.RFC3339, e.UpdatedAt); err == nil {
+			updatedAt = t
+		}
+		if err := s.repo.UpsertAppStatus(ctx, tx, models.AppStatus{
+			EmployeeID: req.EmployeeID,
+			Key:        e.Key,
+			Value:      e.Value,
+			UpdatedAt:  updatedAt,
+		}); err != nil {
+			return nil, err
+		}
+		inserted++
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
+	return &dto.SyncBatchResponse{Synced: inserted, Message: fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries))}, nil
+}
+
+// ── hardware_devices (USB / peripheral hotplug) ──
+
+func (s *NewSchemaService) SyncHardwareDevices(ctx context.Context, req *dto.SyncHardwareDevicesRequest) (*dto.SyncBatchResponse, error) {
+	emp, err := s.employeeRepo.GetByEmployeeID(ctx, req.EmployeeID)
+	if err != nil {
+		return nil, fmt.Errorf("verify employee: %w", err)
+	}
+	if emp == nil {
+		return nil, fmt.Errorf("employee not found")
+	}
+	if len(req.Entries) == 0 {
+		return &dto.SyncBatchResponse{Synced: 0, Message: "No entries to sync"}, nil
+	}
+
+	entries := make([]models.HardwareDevice, 0, len(req.Entries))
+	for _, e := range req.Entries {
+		plugged, _ := time.Parse(time.RFC3339, e.PluggedAt)
+		var unplugged *time.Time
+		if e.UnpluggedAt != nil {
+			if t, err := time.Parse(time.RFC3339, *e.UnpluggedAt); err == nil {
+				unplugged = &t
+			}
+		}
+		entries = append(entries, models.HardwareDevice{
+			ID:          e.ID,
+			EmployeeID:  req.EmployeeID,
+			DeviceClass: e.DeviceClass,
+			Vendor:      e.Vendor,
+			Product:     e.Product,
+			Serial:      e.Serial,
+			BusPath:     e.BusPath,
+			DeviceNode:  e.DeviceNode,
+			PluggedAt:   plugged,
+			UnpluggedAt: unplugged,
+		})
+	}
+
+	inserted, err := s.repo.BulkUpsertHardwareDevices(ctx, entries)
+	if err != nil {
+		return nil, fmt.Errorf("bulk upsert hardware_devices: %w", err)
+	}
+	return &dto.SyncBatchResponse{Synced: inserted, Message: fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries))}, nil
+}
+
+// ── permission_status (one row per permission method; keyed by check_id) ──
+
+func (s *NewSchemaService) SyncPermissionStatus(ctx context.Context, req *dto.SyncPermissionStatusRequest) (*dto.SyncBatchResponse, error) {
+	emp, err := s.employeeRepo.GetByEmployeeID(ctx, req.EmployeeID)
+	if err != nil {
+		return nil, fmt.Errorf("verify employee: %w", err)
+	}
+	if emp == nil {
+		return nil, fmt.Errorf("employee not found")
+	}
+	if len(req.Entries) == 0 {
+		return &dto.SyncBatchResponse{Synced: 0, Message: "No entries to sync"}, nil
+	}
+
+	entries := make([]models.PermissionStatus, 0, len(req.Entries))
+	for _, e := range req.Entries {
+		checkedAt, _ := time.Parse(time.RFC3339, e.CheckedAt)
+		entries = append(entries, models.PermissionStatus{
+			CheckID:     e.CheckID,
+			EmployeeID:  req.EmployeeID,
+			SessionID:   e.SessionID,
+			SessionType: e.SessionType,
+			Platform:    e.Platform,
+			CheckedAt:   checkedAt,
+			Method:      e.Method,
+			Works:       e.Works,
+			Details:     e.Details,
+		})
+	}
+
+	inserted, err := s.repo.BulkUpsertPermissionStatus(ctx, entries)
+	if err != nil {
+		return nil, fmt.Errorf("bulk upsert permission_status: %w", err)
+	}
+	return &dto.SyncBatchResponse{Synced: inserted, Message: fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries))}, nil
+}
+
+// ── storage_devices (children of device_hardware_info) ──
+
+func (s *NewSchemaService) SyncStorageDevices(ctx context.Context, req *dto.SyncStorageDevicesRequest) (*dto.SyncBatchResponse, error) {
+	emp, err := s.employeeRepo.GetByEmployeeID(ctx, req.EmployeeID)
+	if err != nil {
+		return nil, fmt.Errorf("verify employee: %w", err)
+	}
+	if emp == nil {
+		return nil, fmt.Errorf("employee not found")
+	}
+	if len(req.Entries) == 0 {
+		return &dto.SyncBatchResponse{Synced: 0, Message: "No entries to sync"}, nil
+	}
+
+	entries := make([]models.StorageDevice, 0, len(req.Entries))
+	for _, e := range req.Entries {
+		entries = append(entries, models.StorageDevice{
+			ID:               e.ID,
+			EmployeeID:       req.EmployeeID,
+			DeviceHardwareID: e.DeviceHardwareID,
+			DeviceType:       e.DeviceType,
+			Model:            e.Model,
+			CapacityMB:       e.CapacityMB,
+		})
+	}
+
+	inserted, err := s.repo.BulkUpsertStorageDevices(ctx, entries)
+	if err != nil {
+		return nil, fmt.Errorf("bulk upsert storage_devices: %w", err)
+	}
+	return &dto.SyncBatchResponse{Synced: inserted, Message: fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries))}, nil
+}
+
+// ────────────────────────────────
+// EMPLOYEE DETAIL (web dashboard — GET /employees/:id/detail)
+// Aggregates every synced machine-data surface for one employee into a single response.
+// ────────────────────────────────
+
+// GetEmployeeDetail builds the full machine picture for an employee by UUID.
+// The sync tables are keyed by employee_id (EMP-XXXXX), so the UUID from the route is
+// resolved to the employee record first, then every read uses emp.EmployeeID.
+func (s *NewSchemaService) GetEmployeeDetail(ctx context.Context, id string) (*dto.EmployeeDetailResponse, error) {
+	emp, err := s.employeeRepo.GetByID(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("get employee: %w", err)
+	}
+	if emp == nil {
+		return nil, fmt.Errorf("employee not found")
+	}
+
+	employeeID := emp.EmployeeID
+	resp := &dto.EmployeeDetailResponse{
+		Employee:        employeeToResponse(emp),
+		StorageDevices:  []dto.StorageDeviceDetail{},
+		Applications:    []dto.InstalledApplicationDetail{},
+		Packages:        []dto.InstalledPackageDetail{},
+		HardwareDevices: []dto.HardwareDeviceDetail{},
+		Permissions:     []dto.PermissionStatusDetail{},
+		AppStatus:       map[string]string{},
+	}
+
+	// Latest device hardware snapshot.
+	hw, err := s.repo.GetLatestDeviceHardware(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	if hw != nil {
+		resp.DeviceHardware = &dto.DeviceHardwareDetail{
+			ID:             hw.ID,
+			MacAddress:     hw.MacAddress,
+			Hostname:       hw.Hostname,
+			OsName:         hw.OsName,
+			OsVersion:      hw.OsVersion,
+			CpuModel:       hw.CpuModel,
+			CpuCores:       hw.CpuCores,
+			RamTotalMb:     hw.RamTotalMB,
+			StorageDevices: hw.StorageDevices,
+			GpuModel:       hw.GpuModel,
+			GpuVramMb:      hw.GpuVramMB,
+			CollectedAt:    hw.CollectedAt,
+			SyncedAt:       hw.SyncedAt,
+		}
+	}
+
+	// Storage devices (children of device_hardware_info).
+	storage, err := s.repo.ListStorageDevices(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range storage {
+		resp.StorageDevices = append(resp.StorageDevices, dto.StorageDeviceDetail{
+			ID:         d.ID,
+			DeviceType: d.DeviceType,
+			Model:      d.Model,
+			CapacityMb: d.CapacityMB,
+			CreatedAt:  d.CreatedAt,
+		})
+	}
+
+	// Latest network snapshot.
+	net, err := s.repo.GetLatestNetworkInfo(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	if net != nil {
+		resp.NetworkInfo = &dto.NetworkInfoResponse{
+			ID:                   net.ID,
+			EmployeeID:           net.EmployeeID,
+			PublicIP:             net.PublicIP,
+			PrivateIP:            net.PrivateIP,
+			MacAddress:           net.MacAddress,
+			NetworkInterfaceName: net.NetworkInterfaceName,
+			CollectedAt:          net.CollectedAt,
+			SyncedAt:             net.SyncedAt,
+		}
+	}
+
+	// Currently-installed applications (active junction links).
+	apps, err := s.repo.ListEmployeeApplications(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range apps {
+		resp.Applications = append(resp.Applications, dto.InstalledApplicationDetail{
+			ID:          a.ID,
+			AppName:     a.AppName,
+			BinaryName:  a.BinaryName,
+			Version:     a.Version,
+			Publisher:   a.Publisher,
+			InstallPath: a.InstallPath,
+			InstallDate: a.InstallDate,
+			IsBrowser:   a.IsBrowser,
+			Categories:  a.Categories,
+			DesktopID:   a.DesktopID,
+			FirstSeenAt: a.FirstSeenAt,
+			LastSeenAt:  a.LastSeenAt,
+		})
+	}
+
+	// Currently-installed packages (active junction links).
+	pkgs, err := s.repo.ListEmployeePackages(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range pkgs {
+		resp.Packages = append(resp.Packages, dto.InstalledPackageDetail{
+			ID:            p.ID,
+			PackageName:   p.PackageName,
+			Version:       p.Version,
+			Category:      p.Category,
+			SourceManager: p.SourceManager,
+			InstallPath:   p.InstallPath,
+			Publisher:     p.Publisher,
+			Description:   p.Description,
+			FirstSeenAt:   p.FirstSeenAt,
+			LastSeenAt:    p.LastSeenAt,
+		})
+	}
+
+	// Peripherals (USB hotplug history).
+	devices, err := s.repo.ListHardwareDevices(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range devices {
+		resp.HardwareDevices = append(resp.HardwareDevices, dto.HardwareDeviceDetail{
+			ID:          d.ID,
+			DeviceClass: d.DeviceClass,
+			Vendor:      d.Vendor,
+			Product:     d.Product,
+			Serial:      d.Serial,
+			BusPath:     d.BusPath,
+			PluggedAt:   d.PluggedAt,
+			UnpluggedAt: d.UnpluggedAt,
+		})
+	}
+
+	// Key/value app status.
+	statuses, err := s.repo.ListAppStatus(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	for _, st := range statuses {
+		resp.AppStatus[st.Key] = st.Value
+	}
+
+	// Permission-method checks.
+	perms, err := s.repo.ListPermissionStatus(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range perms {
+		resp.Permissions = append(resp.Permissions, dto.PermissionStatusDetail{
+			CheckID:     p.CheckID,
+			SessionID:   p.SessionID,
+			SessionType: p.SessionType,
+			Platform:    p.Platform,
+			CheckedAt:   p.CheckedAt,
+			Method:      p.Method,
+			Works:       p.Works,
+			Details:     p.Details,
+		})
+	}
+
+	// Activity stats over sessions/items.
+	stats, err := s.repo.GetEmployeeActivityStats(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	resp.Stats = dto.EmployeeActivityStats{
+		TotalSessions:  stats.TotalSessions,
+		OpenSessions:   stats.OpenSessions,
+		TotalItems:     stats.TotalItems,
+		LastActivityAt: stats.LastActivityAt,
+	}
+
+	return resp, nil
 }

@@ -56,10 +56,10 @@ public partial class App : Application
             var trayIcon = new Avalonia.Controls.TrayIcon
             {
                 Icon = new Avalonia.Controls.WindowIcon(Avalonia.Platform.AssetLoader.Open(new Uri("avares://client/Assets/avalonia-logo.ico"))),
-                ToolTipText = "Alpha AI Tracker"
+                ToolTipText = AppInfo.DisplayName
             };
 
-            var showItem = new Avalonia.Controls.NativeMenuItem("Show Alpha AI Tracker");
+            var showItem = new Avalonia.Controls.NativeMenuItem($"Show {AppInfo.DisplayName}");
             showItem.Click += (s, e) =>
             {
                 mainWindow.Show();

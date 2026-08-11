@@ -26,6 +26,7 @@ public sealed class WindowsUiaBrowserReader : IAccessibilityBrowserReader
     private const int UIA_ValuePatternId = 10002;
     private const int UIA_WindowControlTypeId = 50032;
     private const int UIA_EditControlTypeId = 50004;
+    private const int UIA_ButtonControlTypeId = 50000;
 
     private readonly ILogger<WindowsUiaBrowserReader> _logger;
 
@@ -84,7 +85,11 @@ public sealed class WindowsUiaBrowserReader : IAccessibilityBrowserReader
                         ProcessName = processName,
                         WindowTitle = title,
                         Url = BrowserAccessibilityHelpers.NormalizeUrl(ReadAddressBar(element, uia)),
-                        IsIncognito = BrowserAccessibilityHelpers.TitleSuggestsIncognito(title),
+                        // Chrome/Edge never put "incognito" in the window TITLE on Windows —
+                        // the only reliable signal is the dedicated toggle BUTTON that the
+                        // browsers expose in their accessibility tree ("Incognito"/"InPrivate").
+                        IsIncognito = BrowserAccessibilityHelpers.TitleSuggestsIncognito(title)
+                                     || DetectIncognito(element, uia),
                     });
                 }
                 catch { }
@@ -110,6 +115,51 @@ public sealed class WindowsUiaBrowserReader : IAccessibilityBrowserReader
         }
 
         return Task.FromResult<IReadOnlyList<AccessibilitySnapshot>>(result);
+    }
+
+    /// <summary>
+    /// Detect an incognito/private window by looking for the browser's dedicated
+    /// incognito toggle button in the window's accessibility tree. Chrome exposes a
+    /// button named "Incognito", Edge one named "InPrivate" (verified live via UIA).
+    /// Firefox on Windows shows "Private Browsing" chrome that has no button; its
+    /// window title heuristic is handled by <see cref="BrowserAccessibilityHelpers.TitleSuggestsIncognito"/>.
+    /// The search is intentionally cheap: one descendant scan restricted to buttons.
+    /// </summary>
+private static bool DetectIncognito(IUIAutomationElement window, IUIAutomation uia)
+    {
+        try
+        {
+            // The browser's own incognito toggle lives in the toolbar CHROME at the top of
+            // the window. Restricting the scan to that zone avoids false positives from
+            // PAGE CONTENT buttons (a webpage rendering an "Incognito" button would otherwise
+            // flag a normal window — and the incognito flag gates URL capture downstream).
+            var windowRect = window.CurrentBoundingRectangle;
+            var toolbarBottom = windowRect.top + Math.Max(140, (int)((windowRect.bottom - windowRect.top) * 0.3));
+
+            var buttonCondition = uia.CreatePropertyCondition(UIA_ControlTypePropertyId, UIA_ButtonControlTypeId);
+            var buttons = window.FindAll(TreeScope.TreeScope_Descendants, buttonCondition);
+            for (var i = 0; i < buttons.Length; i++)
+            {
+                try
+                {
+                    var button = buttons.GetElement(i);
+                    var rect = button.CurrentBoundingRectangle;
+                    if (rect.top >= windowRect.top && rect.bottom <= toolbarBottom)
+                    {
+                        var name = button.CurrentName ?? string.Empty;
+                        var autoId = button.CurrentAutomationId ?? string.Empty;
+                        if (name.Contains("incognito", StringComparison.OrdinalIgnoreCase) ||
+                            name.Contains("inprivate", StringComparison.OrdinalIgnoreCase) ||
+                            autoId.Contains("incognito", StringComparison.OrdinalIgnoreCase) ||
+                            autoId.Contains("inprivate", StringComparison.OrdinalIgnoreCase))
+                            return true;
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return false;
     }
 
     private static string ReadAddressBar(IUIAutomationElement window, IUIAutomation uia)

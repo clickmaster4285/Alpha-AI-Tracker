@@ -40,9 +40,14 @@ internal static class DatabaseSchema
         CREATE INDEX IF NOT EXISTS idx_device_hw_unsent
             ON device_hardware_info(is_synced, collected_at);
 
+        -- Inventory lifecycle v2 (2026-08-10): ONE ROW PER INSTALL CYCLE.
+        -- app_name is NOT unique — a reinstall opens a NEW row so install→uninstall→reinstall
+        -- history is visible as multiple records. A row with uninstall_date IS NULL is the
+        -- currently-installed cycle; install_date is NULL when the OS did not report it
+        -- (Linux) and only newly detected installs get stamped with the detection time.
         CREATE TABLE IF NOT EXISTS installed_applications (
             id               TEXT PRIMARY KEY,
-            app_name         TEXT NOT NULL UNIQUE,
+            app_name         TEXT NOT NULL,
             binary_name      TEXT NOT NULL DEFAULT '',
             app_version      TEXT NOT NULL DEFAULT '',
             publisher        TEXT NOT NULL DEFAULT '',
@@ -50,6 +55,8 @@ internal static class DatabaseSchema
             install_date     TEXT,
             uninstall_string TEXT NOT NULL DEFAULT '',
             change_type      TEXT NOT NULL DEFAULT 'seen',
+            is_installed     INTEGER NOT NULL DEFAULT 1,
+            uninstall_date   TEXT,
             is_browser       INTEGER NOT NULL DEFAULT 0,
             desktop_id       TEXT NOT NULL DEFAULT '',
             categories       TEXT NOT NULL DEFAULT '',
@@ -80,6 +87,9 @@ internal static class DatabaseSchema
             install_path     TEXT NOT NULL DEFAULT '',
             publisher        TEXT NOT NULL DEFAULT '',
             description      TEXT NOT NULL DEFAULT '',
+            install_date     TEXT,
+            is_installed     INTEGER NOT NULL DEFAULT 1,
+            uninstall_date   TEXT,
             detected_at      TEXT NOT NULL,
             is_synced        INTEGER NOT NULL DEFAULT 0,
             synced_at        TEXT,
@@ -237,7 +247,9 @@ internal static class DatabaseSchema
         CREATE TABLE IF NOT EXISTS app_status (
             key             TEXT PRIMARY KEY,
             value           TEXT NOT NULL,
-            updated_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+            updated_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')),
+            is_synced       INTEGER NOT NULL DEFAULT 0,
+            synced_at       TEXT
         );
 
         CREATE TABLE IF NOT EXISTS permission_status (
@@ -250,7 +262,9 @@ internal static class DatabaseSchema
             works           INTEGER NOT NULL DEFAULT 0,
             details         TEXT,
             employee_id     TEXT,
-            employee_name   TEXT
+            employee_name   TEXT,
+            is_synced       INTEGER NOT NULL DEFAULT 0,
+            synced_at       TEXT
         );
 
         CREATE TABLE IF NOT EXISTS employee_info (
@@ -294,6 +308,19 @@ internal static class DatabaseSchema
         ALTER TABLE network_info ADD COLUMN first_seen_at TEXT;
         ALTER TABLE network_info ADD COLUMN last_seen_at TEXT;
         ALTER TABLE network_info ADD COLUMN is_current INTEGER NOT NULL DEFAULT 1;
+        -- Sync of app_status / permission_status to the server (2026-08-11): both tables
+        -- gain is_synced so changed rows are re-sent on the next sync roundtrip.
+        ALTER TABLE app_status ADD COLUMN is_synced INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE app_status ADD COLUMN synced_at TEXT;
+        ALTER TABLE permission_status ADD COLUMN is_synced INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE permission_status ADD COLUMN synced_at TEXT;
+        -- Inventory lifecycle v2 is applied by RebuildInventoryTablesIfLegacyAsync (SqliteLogStore):
+        -- legacy tables carry install_count / UNIQUE(app_name) from the v1 design and are rebuilt
+        -- once into the rows-per-cycle shape (install_date reset to NULL — unknown).
+        -- The packages fingerprint index must be NON-unique so a reinstall can open a new row.
+        DROP INDEX IF EXISTS idx_installed_packages_fingerprint;
+        CREATE INDEX IF NOT EXISTS idx_installed_packages_fingerprint
+            ON installed_packages(package_name, source_manager);
         -- Backfill dedup: legacy databases have MULTIPLE is_current=1 rows per IP identity
         -- (one per launch — the pre-fix bug). Collapse them to the most recent per identity
         -- so the current-row contract holds going forward without a manual DB wipe.
@@ -311,19 +338,9 @@ internal static class DatabaseSchema
             ON hardware_devices(unplugged_at, bus_path);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_hardware_devices_open_path
             ON hardware_devices(bus_path) WHERE unplugged_at IS NULL AND bus_path != '';
-        DELETE FROM installed_packages
-            WHERE id NOT IN (
-                SELECT id FROM (
-                    SELECT id, ROW_NUMBER() OVER (
-                        PARTITION BY package_name, source_manager
-                        ORDER BY detected_at DESC, id DESC
-                    ) AS rn
-                    FROM installed_packages
-                )
-                WHERE rn = 1
-            );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_installed_packages_fingerprint
-            ON installed_packages(package_name, source_manager);
+        -- NOTE: the v1 dedup DELETE + UNIQUE fingerprint index were REMOVED here — the
+        -- rows-per-cycle lifecycle model deliberately allows multiple rows per package
+        -- (one per install cycle) and a UNIQUE constraint would break reinstall history.
     ";
 
     // PHASE 1: INSERT STATEMENTS
@@ -359,21 +376,15 @@ internal static class DatabaseSchema
     internal const string InsertInstalledApplicationSql = @"
         INSERT INTO installed_applications
             (id, app_name, binary_name, app_version, publisher, install_path, install_date,
-             uninstall_string, change_type, is_browser, desktop_id, categories, detected_at)
+             uninstall_string, change_type, is_installed, uninstall_date,
+             is_browser, desktop_id, categories, detected_at)
         VALUES
             ($id, $app_name, $binary_name, $app_version, $publisher, $install_path, $install_date,
-             $uninstall_string, $change_type, $is_browser, $desktop_id, $categories, $detected_at)
-        ON CONFLICT(app_name) DO UPDATE SET
-            binary_name = COALESCE(NULLIF(excluded.binary_name, ''), installed_applications.binary_name),
-            app_version = excluded.app_version,
-            publisher = COALESCE(NULLIF(excluded.publisher, ''), installed_applications.publisher),
-            install_path = COALESCE(NULLIF(excluded.install_path, ''), installed_applications.install_path),
-            change_type = CASE WHEN installed_applications.change_type = 'installed' THEN 'installed' ELSE excluded.change_type END,
-            is_browser = MAX(installed_applications.is_browser, excluded.is_browser),
-            desktop_id = COALESCE(NULLIF(excluded.desktop_id, ''), installed_applications.desktop_id),
-            categories = COALESCE(NULLIF(excluded.categories, ''), installed_applications.categories),
-            detected_at = excluded.detected_at,
-            is_synced = 0
+             $uninstall_string, $change_type, $is_installed, $uninstall_date,
+             $is_browser, $desktop_id, $categories, $detected_at)
+        -- NOTE: app_name is NOT unique (rows-per-cycle model). Upsert-vs-insert is decided in
+        -- SqliteLogStore.StoreInstalledApplicationsAsync: an open cycle (uninstall_date IS NULL)
+        -- is updated in place; otherwise a NEW cycle row is inserted.
     ";
 
     internal const string MarkInstalledAppsSentSql = @"
@@ -385,15 +396,11 @@ internal static class DatabaseSchema
     internal const string InsertInstalledPackageSql = @"
         INSERT INTO installed_packages
             (id, package_name, version, category, source_manager, install_path,
-             publisher, description, detected_at)
+             publisher, description, install_date, is_installed, uninstall_date, detected_at)
         VALUES
             ($id, $package_name, $version, $category, $source_manager, $install_path,
-             $publisher, $description, $detected_at)
-        ON CONFLICT(package_name, source_manager) DO UPDATE SET
-            version = excluded.version,
-            category = CASE WHEN excluded.category = 'tool' THEN installed_packages.category ELSE excluded.category END,
-            detected_at = excluded.detected_at,
-            is_synced = 0
+             $publisher, $description, $install_date, $is_installed, $uninstall_date, $detected_at)
+        -- NOTE: (package_name, source_manager) is NOT unique (rows-per-cycle model).
     ";
 
     internal const string MarkInstalledPackagesSentSql = @"
@@ -510,17 +517,23 @@ internal static class DatabaseSchema
     // UTILITY STATEMENTS
 
     internal const string UpsertStatusSql = @"
-        INSERT INTO app_status (key, value, updated_at)
-        VALUES ($key, $value, strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+        INSERT INTO app_status (key, value, updated_at, is_synced)
+        VALUES ($key, $value, strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'), 0)
         ON CONFLICT(key) DO UPDATE SET
             value = excluded.value,
-            updated_at = excluded.updated_at
+            updated_at = excluded.updated_at,
+            is_synced = 0
     ";
 
     internal const string InsertPermissionSql = @"
         INSERT INTO permission_status
-            (check_id, session_id, session_type, platform, checked_at, method, works, details, employee_id, employee_name)
+            (check_id, session_id, session_type, platform, checked_at, method, works, details, employee_id, employee_name, is_synced)
         VALUES
-            ($check_id, $session_id, $session_type, $platform, $checked_at, $method, $works, $details, $employee_id, $employee_name)
+            ($check_id, $session_id, $session_type, $platform, $checked_at, $method, $works, $details, $employee_id, $employee_name, 0)
+        ON CONFLICT(check_id) DO UPDATE SET
+            works = excluded.works,
+            details = excluded.details,
+            checked_at = excluded.checked_at,
+            is_synced = 0
     ";
 }

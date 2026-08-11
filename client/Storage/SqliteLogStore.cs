@@ -73,19 +73,174 @@ public class SqliteLogStore : ILogStore, IDisposable
                 cmd.CommandText = sql;
                 await cmd.ExecuteNonQueryAsync(ct);
             }
-            catch (SqliteException ex) when (ex.SqliteErrorCode == 1 && ex.Message.Contains("duplicate column", StringComparison.OrdinalIgnoreCase))
+            catch (SqliteException ex) when (ex.SqliteErrorCode == 1 &&
+                (ex.Message.Contains("duplicate column", StringComparison.OrdinalIgnoreCase)
+                 || ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase)))
             {
-                // Column already exists from a prior migration
+                // duplicate column: column already exists from a prior migration
+                // already exists: index/table already created (idempotent migration fragments)
             }
         }
+
+        // Inventory lifecycle v2: one-time rebuild of the inventory tables into the
+        // rows-per-install-cycle shape (see RebuildInventoryTablesIfLegacyAsync).
+        await RebuildInventoryTablesIfLegacyAsync(ct);
 
         var indexCmd = _connection.CreateCommand();
         indexCmd.CommandText = @"
             CREATE INDEX IF NOT EXISTS idx_app_sessions_process_id ON app_sessions(process_id);
             CREATE INDEX IF NOT EXISTS idx_app_sessions_open ON app_sessions(ended_at, process_id);
             CREATE INDEX IF NOT EXISTS idx_app_items_context ON app_items(app_session_id, item_type, identifier);
+            -- Sync engine (2026-08-11): keep WHERE is_synced = 0 ORDER BY ... LIMIT cheap even at
+            -- 50k+ queued rows. Fresh DBs already get these via DatabaseSchema; existing DBs need
+            -- them here (app_sessions/app_items were the only big tables without an is_synced index).
+            CREATE INDEX IF NOT EXISTS idx_app_sessions_unsent ON app_sessions(is_synced, started_at);
+            CREATE INDEX IF NOT EXISTS idx_app_items_unsent ON app_items(is_synced, opened_at);
         ";
         await indexCmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// One-time migration to the inventory lifecycle v2 shape (rows-per-install-cycle).
+    /// Detects a legacy table (v1 lifecycle: has install_count, or lacks is_installed) and
+    /// rebuilds installed_applications / installed_packages: app_name and the package
+    /// fingerprint lose their UNIQUE constraints (a reinstall opens a NEW row), install_count
+    /// is dropped, and install_date is reset to NULL — the OS did not report it, so
+    /// pre-existing software shows as "Unknown" until a fresh install is detected.
+    ///
+    /// ⚠️ GATE-CONTRACT: this runs from RunMigrationsAsync which is already inside
+    /// InitializeAsync's _connectionGate — SemaphoreSlim(1,1) is NOT reentrant, so this
+    /// method MUST NOT acquire the gate itself (acquiring it here deadlocks startup and the
+    /// rebuild silently never runs). It is only ever called while the gate is held.
+    /// </summary>
+    private async Task RebuildInventoryTablesIfLegacyAsync(CancellationToken ct)
+    {
+        if (_connection == null) return;
+
+        var probe = _connection.CreateCommand();
+        probe.CommandText = @"
+            SELECT (SELECT COUNT(*) FROM pragma_table_info('installed_applications') WHERE name = 'install_count')
+                 + CASE WHEN (SELECT COUNT(*) FROM pragma_table_info('installed_applications') WHERE name = 'is_installed') = 0 THEN 1 ELSE 0 END";
+        var legacy = Convert.ToInt32(await probe.ExecuteScalarAsync(ct)) > 0;
+        if (!legacy) return;
+
+        var hasLifecycle = true;
+        var probe2 = _connection.CreateCommand();
+        probe2.CommandText = "SELECT COUNT(*) FROM pragma_table_info('installed_applications') WHERE name = 'uninstall_date'";
+        hasLifecycle = Convert.ToInt32(await probe2.ExecuteScalarAsync(ct)) > 0;
+
+        // install_date is deliberately NOT carried over: v1 backfilled it with detected_at,
+        // which was wrong (unknown ≠ first-seen). Reset to NULL for all pre-existing rows.
+        // is_installed is DERIVED from uninstall_date (NULL = open/installed) rather than
+        // copied — v1 could carry is_installed=1 together with an uninstall_date (reinstall
+        // artifact), which would wrongly render a closed cycle as installed.
+        var appSelect = hasLifecycle
+            ? "SELECT id, app_name, binary_name, app_version, publisher, install_path, NULL, uninstall_string, change_type, CASE WHEN uninstall_date IS NULL THEN 1 ELSE 0 END, uninstall_date, is_browser, desktop_id, categories, detected_at, is_synced, synced_at, created_at FROM installed_applications"
+            : "SELECT id, app_name, binary_name, app_version, publisher, install_path, NULL, uninstall_string, change_type, 1, NULL, is_browser, desktop_id, categories, detected_at, is_synced, synced_at, created_at FROM installed_applications";
+        var pkgSelect = hasLifecycle
+            ? "SELECT id, package_name, version, category, source_manager, install_path, publisher, description, NULL, CASE WHEN uninstall_date IS NULL THEN 1 ELSE 0 END, uninstall_date, detected_at, is_synced, synced_at, created_at FROM installed_packages"
+            : "SELECT id, package_name, version, category, source_manager, install_path, publisher, description, NULL, 1, NULL, detected_at, is_synced, synced_at, created_at FROM installed_packages";
+
+        // No gate acquisition here — the gate is already held by the caller (see doc).
+        // The rebuild DROPs + RENAMEs tables that app_sessions FKs reference (installed_app_id /
+        // installed_package_id), so foreign_keys must be OFF for the duration (SQLite's standard
+        // table-rebuild procedure). Ids are preserved by the rebuild, so the FK references stay
+        // valid after the rename. PRAGMA foreign_keys is a no-op INSIDE a transaction — it must
+        // be toggled outside the tx (we hold the connection gate, so this is exclusive).
+        var fkOff = _connection.CreateCommand();
+        fkOff.CommandText = "PRAGMA foreign_keys = OFF";
+        await fkOff.ExecuteNonQueryAsync(ct);
+        try
+        {
+            await using var tx = await _connection.BeginTransactionAsync(ct);
+
+            // ── installed_applications: no UNIQUE(app_name), no install_count ──
+            await ExecTxAsync("DROP TABLE IF EXISTS installed_applications_new", tx, ct);
+            await ExecTxAsync(@"
+                CREATE TABLE installed_applications_new (
+                    id               TEXT PRIMARY KEY,
+                    app_name         TEXT NOT NULL,
+                    binary_name      TEXT NOT NULL DEFAULT '',
+                    app_version      TEXT NOT NULL DEFAULT '',
+                    publisher        TEXT NOT NULL DEFAULT '',
+                    install_path     TEXT NOT NULL DEFAULT '',
+                    install_date     TEXT,
+                    uninstall_string TEXT NOT NULL DEFAULT '',
+                    change_type      TEXT NOT NULL DEFAULT 'seen',
+                    is_installed     INTEGER NOT NULL DEFAULT 1,
+                    uninstall_date   TEXT,
+                    is_browser       INTEGER NOT NULL DEFAULT 0,
+                    desktop_id       TEXT NOT NULL DEFAULT '',
+                    categories       TEXT NOT NULL DEFAULT '',
+                    detected_at      TEXT NOT NULL,
+                    is_synced        INTEGER NOT NULL DEFAULT 0,
+                    synced_at        TEXT,
+                    created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+                )", tx, ct);
+            await ExecTxAsync(@"
+                INSERT INTO installed_applications_new
+                    (id, app_name, binary_name, app_version, publisher, install_path, install_date,
+                     uninstall_string, change_type, is_installed, uninstall_date,
+                     is_browser, desktop_id, categories, detected_at, is_synced, synced_at, created_at)
+                " + appSelect, tx, ct);
+            await ExecTxAsync("DROP TABLE installed_applications", tx, ct);
+            await ExecTxAsync("ALTER TABLE installed_applications_new RENAME TO installed_applications", tx, ct);
+            await ExecTxAsync(@"
+                CREATE INDEX IF NOT EXISTS idx_installed_apps_unsent ON installed_applications(is_synced, detected_at);
+                CREATE INDEX IF NOT EXISTS idx_installed_apps_name ON installed_applications(app_name);
+                CREATE INDEX IF NOT EXISTS idx_installed_apps_binary ON installed_applications(binary_name);
+                CREATE INDEX IF NOT EXISTS idx_installed_apps_desktop_id ON installed_applications(desktop_id);", tx, ct);
+
+            // ── installed_packages: no install_count ──
+            await ExecTxAsync("DROP TABLE IF EXISTS installed_packages_new", tx, ct);
+            await ExecTxAsync(@"
+                CREATE TABLE installed_packages_new (
+                    id               TEXT PRIMARY KEY,
+                    package_name     TEXT NOT NULL,
+                    version          TEXT NOT NULL DEFAULT '',
+                    category         TEXT NOT NULL DEFAULT 'tool',
+                    source_manager   TEXT NOT NULL DEFAULT '',
+                    install_path     TEXT NOT NULL DEFAULT '',
+                    publisher        TEXT NOT NULL DEFAULT '',
+                    description      TEXT NOT NULL DEFAULT '',
+                    install_date     TEXT,
+                    is_installed     INTEGER NOT NULL DEFAULT 1,
+                    uninstall_date   TEXT,
+                    detected_at      TEXT NOT NULL,
+                    is_synced        INTEGER NOT NULL DEFAULT 0,
+                    synced_at        TEXT,
+                    created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+                )", tx, ct);
+            await ExecTxAsync(@"
+                INSERT INTO installed_packages_new
+                    (id, package_name, version, category, source_manager, install_path,
+                     publisher, description, install_date, is_installed, uninstall_date,
+                     detected_at, is_synced, synced_at, created_at)
+                " + pkgSelect, tx, ct);
+            await ExecTxAsync("DROP TABLE installed_packages", tx, ct);
+            await ExecTxAsync("ALTER TABLE installed_packages_new RENAME TO installed_packages", tx, ct);
+            await ExecTxAsync(@"
+                CREATE INDEX IF NOT EXISTS idx_installed_packages_unsent ON installed_packages(is_synced, detected_at);
+                CREATE INDEX IF NOT EXISTS idx_installed_packages_source ON installed_packages(source_manager);
+                CREATE INDEX IF NOT EXISTS idx_installed_packages_category ON installed_packages(category);
+                CREATE INDEX IF NOT EXISTS idx_installed_packages_fingerprint ON installed_packages(package_name, source_manager);", tx, ct);
+
+            await tx.CommitAsync(ct);
+        }
+        finally
+        {
+            var fkOn = _connection.CreateCommand();
+            fkOn.CommandText = "PRAGMA foreign_keys = ON";
+            await fkOn.ExecuteNonQueryAsync(ct);
+        }
+    }
+
+    private async Task ExecTxAsync(string sql, System.Data.Common.DbTransaction tx, CancellationToken ct)
+    {
+        var cmd = _connection!.CreateCommand();
+        cmd.CommandText = sql;
+        ((System.Data.Common.DbCommand)cmd).Transaction = tx;
+        await cmd.ExecuteNonQueryAsync(ct);
     }
 
     // ────────────────────────────────────────
@@ -177,22 +332,37 @@ public class SqliteLogStore : ILogStore, IDisposable
 
     public async Task MarkDeviceHardwareInfoSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
+        await MarkSentCoreAsync("device_hardware_info", "id", ids, ct);
+    }
+
+    /// <summary>
+    /// Shared batched mark-sent: ONE UPDATE ... WHERE id IN (...) per chunk instead of one
+    /// UPDATE per row (the old loop ran 50k individual statements when draining a big
+    /// backlog). Chunks of 400 stay safely under SQLite's SQLITE_MAX_VARIABLE_NUMBER.
+    /// </summary>
+    private async Task MarkSentCoreAsync(string table, string idColumn, IReadOnlyList<string> ids, CancellationToken ct)
+    {
         if (_connection == null || ids.Count == 0) return;
         await _connectionGate.WaitAsync(ct);
         try
         {
-            await using var tx = await _connection.BeginTransactionAsync(ct);
-            var cmd = _connection.CreateCommand();
-            cmd.CommandText = "UPDATE device_hardware_info SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
-            var p = cmd.Parameters.Add("$id", SqliteType.Text);
-            foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
-            await tx.CommitAsync(ct);
+            foreach (var chunk in ids.Chunk(400))
+            {
+                var inClause = string.Join(",", chunk.Select((_, i) => $"$id{i}"));
+                var cmd = _connection.CreateCommand();
+                cmd.CommandText =
+                    $"UPDATE {table} SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE {idColumn} IN ({inClause})";
+                for (int i = 0; i < chunk.Length; i++)
+                    cmd.Parameters.AddWithValue($"$id{i}", chunk[i]);
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
         }
         finally
         {
             _connectionGate.Release();
         }
     }
+
 
     // ────────────────────────────────────────
     // Installed Applications
@@ -204,40 +374,107 @@ public class SqliteLogStore : ILogStore, IDisposable
         await _connectionGate.WaitAsync(ct);
         try
         {
-            var cmd = _connection.CreateCommand();
-            cmd.CommandText = DatabaseSchema.InsertInstalledApplicationSql;
-            var pId = cmd.Parameters.Add("$id", SqliteType.Text);
-            var pName = cmd.Parameters.Add("$app_name", SqliteType.Text);
-            var pBinary = cmd.Parameters.Add("$binary_name", SqliteType.Text);
-            var pVer = cmd.Parameters.Add("$app_version", SqliteType.Text);
-            var pPub = cmd.Parameters.Add("$publisher", SqliteType.Text);
-            var pPath = cmd.Parameters.Add("$install_path", SqliteType.Text);
-            var pDate = cmd.Parameters.Add("$install_date", SqliteType.Text);
-            var pUninst = cmd.Parameters.Add("$uninstall_string", SqliteType.Text);
-            var pChange = cmd.Parameters.Add("$change_type", SqliteType.Text);
-            var pDetected = cmd.Parameters.Add("$detected_at", SqliteType.Text);
-            var pIsBrowser = cmd.Parameters.Add("$is_browser", SqliteType.Integer);
-            var pDesktopId = cmd.Parameters.Add("$desktop_id", SqliteType.Text);
-            var pCategories = cmd.Parameters.Add("$categories", SqliteType.Text);
+            // Baseline scan: when no open (currently-installed) rows exist yet, this is the
+            // tracker's FIRST inventory scan — everything it finds was already installed, so
+            // install_date stays NULL ("Unknown"). On later scans a name without an open row
+            // is a NEW install (or reinstall) and gets the current time stamped on it.
+            var baseline = !await HasOpenAppRowsCoreAsync(ct);
+            var nowIso = DateTime.UtcNow.ToString("O");
+
+            var updCmd = _connection.CreateCommand();
+            updCmd.CommandText = @"
+                UPDATE installed_applications
+                SET binary_name = COALESCE(NULLIF($binary_name, ''), binary_name),
+                    app_version = $app_version,
+                    publisher = COALESCE(NULLIF($publisher, ''), publisher),
+                    install_path = COALESCE(NULLIF($install_path, ''), install_path),
+                    change_type = CASE WHEN change_type = 'installed' THEN 'installed' ELSE $change_type END,
+                    is_browser = MAX(is_browser, $is_browser),
+                    desktop_id = COALESCE(NULLIF($desktop_id, ''), desktop_id),
+                    categories = COALESCE(NULLIF($categories, ''), categories),
+                    detected_at = $detected_at,
+                    is_synced = 0
+                WHERE app_name = $app_name AND uninstall_date IS NULL";
+            var pNameU = updCmd.Parameters.Add("$app_name", SqliteType.Text);
+            var pBinaryU = updCmd.Parameters.Add("$binary_name", SqliteType.Text);
+            var pVerU = updCmd.Parameters.Add("$app_version", SqliteType.Text);
+            var pPubU = updCmd.Parameters.Add("$publisher", SqliteType.Text);
+            var pPathU = updCmd.Parameters.Add("$install_path", SqliteType.Text);
+            var pChangeU = updCmd.Parameters.Add("$change_type", SqliteType.Text);
+            var pBrowserU = updCmd.Parameters.Add("$is_browser", SqliteType.Integer);
+            var pDesktopU = updCmd.Parameters.Add("$desktop_id", SqliteType.Text);
+            var pCatsU = updCmd.Parameters.Add("$categories", SqliteType.Text);
+            var pDetectedU = updCmd.Parameters.Add("$detected_at", SqliteType.Text);
+
+            var insCmd = _connection.CreateCommand();
+            insCmd.CommandText = DatabaseSchema.InsertInstalledApplicationSql;
+            var pId = insCmd.Parameters.Add("$id", SqliteType.Text);
+            var pName = insCmd.Parameters.Add("$app_name", SqliteType.Text);
+            var pBinary = insCmd.Parameters.Add("$binary_name", SqliteType.Text);
+            var pVer = insCmd.Parameters.Add("$app_version", SqliteType.Text);
+            var pPub = insCmd.Parameters.Add("$publisher", SqliteType.Text);
+            var pPath = insCmd.Parameters.Add("$install_path", SqliteType.Text);
+            var pDate = insCmd.Parameters.Add("$install_date", SqliteType.Text);
+            var pUninst = insCmd.Parameters.Add("$uninstall_string", SqliteType.Text);
+            var pChange = insCmd.Parameters.Add("$change_type", SqliteType.Text);
+            var pIsInstalled = insCmd.Parameters.Add("$is_installed", SqliteType.Integer);
+            var pUninstallDate = insCmd.Parameters.Add("$uninstall_date", SqliteType.Text);
+            var pDetected = insCmd.Parameters.Add("$detected_at", SqliteType.Text);
+            var pIsBrowser = insCmd.Parameters.Add("$is_browser", SqliteType.Integer);
+            var pDesktopId = insCmd.Parameters.Add("$desktop_id", SqliteType.Text);
+            var pCategories = insCmd.Parameters.Add("$categories", SqliteType.Text);
+
+            var findCmd = _connection.CreateCommand();
+            findCmd.CommandText = "SELECT id FROM installed_applications WHERE app_name = $app_name AND uninstall_date IS NULL LIMIT 1";
+            var pFindName = findCmd.Parameters.Add("$app_name", SqliteType.Text);
 
             await using var tx = await _connection.BeginTransactionAsync(ct);
-            ((DbCommand)cmd).Transaction = tx;
+            ((DbCommand)updCmd).Transaction = tx;
+            ((DbCommand)insCmd).Transaction = tx;
+            ((DbCommand)findCmd).Transaction = tx;
+
             foreach (var e in entries)
             {
+                pFindName.Value = e.AppName;
+                var openId = await findCmd.ExecuteScalarAsync(ct) as string;
+
+                if (openId != null)
+                {
+                    // Open cycle exists — refresh metadata in place, keep install_date.
+                    pNameU.Value = e.AppName;
+                    pBinaryU.Value = e.BinaryName;
+                    pVerU.Value = e.AppVersion;
+                    pPubU.Value = e.Publisher;
+                    pPathU.Value = e.InstallPath;
+                    pChangeU.Value = e.ChangeType;
+                    pBrowserU.Value = e.IsBrowser ? 1 : 0;
+                    pDesktopU.Value = e.DesktopId;
+                    pCatsU.Value = e.Categories;
+                    pDetectedU.Value = e.DetectedAt.ToString("O");
+                    await updCmd.ExecuteNonQueryAsync(ct);
+                    continue;
+                }
+
+                // New install / reinstall → open a NEW cycle row. install_date = the OS
+                // reported date if any; on the baseline scan (first ever) NULL (unknown);
+                // otherwise the detection time (this is a brand-new install).
                 pId.Value = e.Id;
                 pName.Value = e.AppName;
                 pBinary.Value = e.BinaryName;
                 pVer.Value = e.AppVersion;
                 pPub.Value = e.Publisher;
                 pPath.Value = e.InstallPath;
-                pDate.Value = (object?)e.InstallDate?.ToString("O") ?? DBNull.Value;
+                pDate.Value = e.InstallDate?.ToString("O")
+                    ?? (baseline ? (object)DBNull.Value : nowIso);
                 pUninst.Value = e.UninstallString;
                 pChange.Value = e.ChangeType;
+                pIsInstalled.Value = 1;
+                pUninstallDate.Value = DBNull.Value;
+                pDetected.Value = e.DetectedAt.ToString("O");
                 pIsBrowser.Value = e.IsBrowser ? 1 : 0;
                 pDesktopId.Value = e.DesktopId;
                 pCategories.Value = e.Categories;
-                pDetected.Value = e.DetectedAt.ToString("O");
-                await cmd.ExecuteNonQueryAsync(ct);
+                await insCmd.ExecuteNonQueryAsync(ct);
             }
             await tx.CommitAsync(ct);
         }
@@ -245,6 +482,15 @@ public class SqliteLogStore : ILogStore, IDisposable
         {
             _connectionGate.Release();
         }
+    }
+
+    /// <summary>Ungated: any currently-installed app cycle exists (baseline detection).</summary>
+    private async Task<bool> HasOpenAppRowsCoreAsync(CancellationToken ct)
+    {
+        if (_connection == null) return false;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM installed_applications WHERE uninstall_date IS NULL";
+        return Convert.ToInt32(await cmd.ExecuteScalarAsync(ct)) > 0;
     }
 
     public async Task<IReadOnlyList<InstalledApplication>> GetUnsentInstalledApplicationsAsync(int limit, CancellationToken ct)
@@ -269,16 +515,22 @@ public class SqliteLogStore : ILogStore, IDisposable
 
     public async Task MarkInstalledApplicationsSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
-        if (_connection == null || ids.Count == 0) return;
+        await MarkSentCoreAsync("installed_applications", "id", ids, ct);
+    }
+
+    /// <summary>Every installed_applications row — the full inventory the Installed Applications page renders.</summary>
+    public async Task<IReadOnlyList<InstalledApplication>> GetAllInstalledAppsAsync(CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<InstalledApplication>();
         await _connectionGate.WaitAsync(ct);
         try
         {
-            await using var tx = await _connection.BeginTransactionAsync(ct);
             var cmd = _connection.CreateCommand();
-            cmd.CommandText = "UPDATE installed_applications SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
-            var p = cmd.Parameters.Add("$id", SqliteType.Text);
-            foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
-            await tx.CommitAsync(ct);
+            cmd.CommandText = "SELECT * FROM installed_applications ORDER BY app_name COLLATE NOCASE ASC";
+            var results = new List<InstalledApplication>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct)) results.Add(MapInstalledAppReader(reader));
+            return results;
         }
         finally
         {
@@ -296,22 +548,82 @@ public class SqliteLogStore : ILogStore, IDisposable
         await _connectionGate.WaitAsync(ct);
         try
         {
-            var cmd = _connection.CreateCommand();
-            cmd.CommandText = DatabaseSchema.InsertInstalledPackageSql;
-            var pId = cmd.Parameters.Add("$id", SqliteType.Text);
-            var pName = cmd.Parameters.Add("$package_name", SqliteType.Text);
-            var pVer = cmd.Parameters.Add("$version", SqliteType.Text);
-            var pCat = cmd.Parameters.Add("$category", SqliteType.Text);
-            var pSrc = cmd.Parameters.Add("$source_manager", SqliteType.Text);
-            var pPath = cmd.Parameters.Add("$install_path", SqliteType.Text);
-            var pPub = cmd.Parameters.Add("$publisher", SqliteType.Text);
-            var pDesc = cmd.Parameters.Add("$description", SqliteType.Text);
-            var pDetected = cmd.Parameters.Add("$detected_at", SqliteType.Text);
+            // Baseline scan: first inventory scan → everything found was already installed →
+            // install_date NULL (unknown). Later scans: a package without an open cycle row is
+            // a NEW install (or reinstall) and gets the current time stamped on it.
+            var baseline = !await HasOpenPackageRowsCoreAsync(ct);
+            var nowIso = DateTime.UtcNow.ToString("O");
+
+            var updCmd = _connection.CreateCommand();
+            updCmd.CommandText = @"
+                UPDATE installed_packages
+                SET version = $version,
+                    category = CASE WHEN category = 'tool' THEN $category ELSE category END,
+                    install_path = COALESCE(NULLIF($install_path, ''), install_path),
+                    publisher = COALESCE(NULLIF($publisher, ''), publisher),
+                    description = COALESCE(NULLIF($description, ''), description),
+                    detected_at = $detected_at,
+                    is_synced = 0
+                WHERE package_name = $package_name AND source_manager = $source_manager AND uninstall_date IS NULL";
+            var pNameU = updCmd.Parameters.Add("$package_name", SqliteType.Text);
+            var pSrcU = updCmd.Parameters.Add("$source_manager", SqliteType.Text);
+            var pVerU = updCmd.Parameters.Add("$version", SqliteType.Text);
+            var pCatU = updCmd.Parameters.Add("$category", SqliteType.Text);
+            var pPathU = updCmd.Parameters.Add("$install_path", SqliteType.Text);
+            var pPubU = updCmd.Parameters.Add("$publisher", SqliteType.Text);
+            var pDescU = updCmd.Parameters.Add("$description", SqliteType.Text);
+            var pDetectedU = updCmd.Parameters.Add("$detected_at", SqliteType.Text);
+
+            var insCmd = _connection.CreateCommand();
+            insCmd.CommandText = DatabaseSchema.InsertInstalledPackageSql;
+            var pId = insCmd.Parameters.Add("$id", SqliteType.Text);
+            var pName = insCmd.Parameters.Add("$package_name", SqliteType.Text);
+            var pVer = insCmd.Parameters.Add("$version", SqliteType.Text);
+            var pCat = insCmd.Parameters.Add("$category", SqliteType.Text);
+            var pSrc = insCmd.Parameters.Add("$source_manager", SqliteType.Text);
+            var pPath = insCmd.Parameters.Add("$install_path", SqliteType.Text);
+            var pPub = insCmd.Parameters.Add("$publisher", SqliteType.Text);
+            var pDesc = insCmd.Parameters.Add("$description", SqliteType.Text);
+            var pInstallDate = insCmd.Parameters.Add("$install_date", SqliteType.Text);
+            var pIsInstalled = insCmd.Parameters.Add("$is_installed", SqliteType.Integer);
+            var pUninstallDate = insCmd.Parameters.Add("$uninstall_date", SqliteType.Text);
+            var pDetected = insCmd.Parameters.Add("$detected_at", SqliteType.Text);
+
+            var findCmd = _connection.CreateCommand();
+            findCmd.CommandText = @"
+                SELECT id FROM installed_packages
+                WHERE package_name = $package_name AND source_manager = $source_manager AND uninstall_date IS NULL
+                LIMIT 1";
+            var pFindName = findCmd.Parameters.Add("$package_name", SqliteType.Text);
+            var pFindSrc = findCmd.Parameters.Add("$source_manager", SqliteType.Text);
 
             await using var tx = await _connection.BeginTransactionAsync(ct);
-            ((DbCommand)cmd).Transaction = tx;
+            ((DbCommand)updCmd).Transaction = tx;
+            ((DbCommand)insCmd).Transaction = tx;
+            ((DbCommand)findCmd).Transaction = tx;
+
             foreach (var e in entries)
             {
+                pFindName.Value = e.PackageName;
+                pFindSrc.Value = e.SourceManager;
+                var openId = await findCmd.ExecuteScalarAsync(ct) as string;
+
+                if (openId != null)
+                {
+                    // Open cycle exists — refresh metadata in place, keep install_date.
+                    pNameU.Value = e.PackageName;
+                    pSrcU.Value = e.SourceManager;
+                    pVerU.Value = e.Version;
+                    pCatU.Value = e.Category;
+                    pPathU.Value = e.InstallPath;
+                    pPubU.Value = e.Publisher;
+                    pDescU.Value = e.Description;
+                    pDetectedU.Value = e.DetectedAt.ToString("O");
+                    await updCmd.ExecuteNonQueryAsync(ct);
+                    continue;
+                }
+
+                // New install / reinstall → open a NEW cycle row (see apps store for semantics).
                 pId.Value = e.Id;
                 pName.Value = e.PackageName;
                 pVer.Value = e.Version;
@@ -320,8 +632,12 @@ public class SqliteLogStore : ILogStore, IDisposable
                 pPath.Value = e.InstallPath;
                 pPub.Value = e.Publisher;
                 pDesc.Value = e.Description;
+                pInstallDate.Value = e.InstallDate?.ToString("O")
+                    ?? (baseline ? (object)DBNull.Value : nowIso);
+                pIsInstalled.Value = 1;
+                pUninstallDate.Value = DBNull.Value;
                 pDetected.Value = e.DetectedAt.ToString("O");
-                await cmd.ExecuteNonQueryAsync(ct);
+                await insCmd.ExecuteNonQueryAsync(ct);
             }
             await tx.CommitAsync(ct);
         }
@@ -329,6 +645,15 @@ public class SqliteLogStore : ILogStore, IDisposable
         {
             _connectionGate.Release();
         }
+    }
+
+    /// <summary>Ungated: any currently-installed package cycle exists (baseline detection).</summary>
+    private async Task<bool> HasOpenPackageRowsCoreAsync(CancellationToken ct)
+    {
+        if (_connection == null) return false;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM installed_packages WHERE uninstall_date IS NULL";
+        return Convert.ToInt32(await cmd.ExecuteScalarAsync(ct)) > 0;
     }
 
     public async Task<IReadOnlyList<InstalledPackage>> GetUnsentInstalledPackagesAsync(int limit, CancellationToken ct)
@@ -353,15 +678,116 @@ public class SqliteLogStore : ILogStore, IDisposable
 
     public async Task MarkInstalledPackagesSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
-        if (_connection == null || ids.Count == 0) return;
+        await MarkSentCoreAsync("installed_packages", "id", ids, ct);
+    }
+
+    /// <summary>Every installed_packages row — the full inventory the Installed Applications page renders.</summary>
+    public async Task<IReadOnlyList<InstalledPackage>> GetAllInstalledPackagesAsync(CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<InstalledPackage>();
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT * FROM installed_packages ORDER BY package_name COLLATE NOCASE ASC";
+            var results = new List<InstalledPackage>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct)) results.Add(MapInstalledPackageReader(reader));
+            return results;
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    // ────────────────────────────────────────
+    // Inventory Lifecycle (install / uninstall / reinstall tracking)
+    // ────────────────────────────────────────
+
+    /// <summary>
+    /// Close install cycles that are no longer present in a completed OS scan (rows-per-cycle
+    /// model). Every OPEN row (uninstall_date IS NULL) whose key is missing from the scan gets
+    /// closed: uninstall_date=now, is_installed=0 — that row is the finished install cycle and
+    /// stays as history. A reinstall is NOT handled here: the next scan's Store* method opens a
+    /// brand-new cycle row (with the new install_date). A pass is skipped when its seen-set is
+    /// empty, and the 50% confidence guard skips closing when a scan looks partial (returned
+    /// fewer than half the open rows) — a failed scan must not uninstall everything.
+    /// </summary>
+    public async Task ApplyInventoryLifecycleAsync(
+        IReadOnlySet<string> seenAppNames,
+        IReadOnlySet<string> seenPackageKeys,
+        DateTime now,
+        CancellationToken ct)
+    {
+        if (_connection == null) return;
+        if (seenAppNames.Count == 0 && seenPackageKeys.Count == 0) return;
+
         await _connectionGate.WaitAsync(ct);
         try
         {
             await using var tx = await _connection.BeginTransactionAsync(ct);
-            var cmd = _connection.CreateCommand();
-            cmd.CommandText = "UPDATE installed_packages SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
-            var p = cmd.Parameters.Add("$id", SqliteType.Text);
-            foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
+            var nowIso = now.ToString("O");
+
+            if (seenAppNames.Count > 0)
+            {
+                // Open cycles currently recorded.
+                var openCmd = _connection.CreateCommand();
+                openCmd.CommandText = "SELECT app_name FROM installed_applications WHERE uninstall_date IS NULL";
+                ((DbCommand)openCmd).Transaction = tx;
+                var open = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                await using (var r = await openCmd.ExecuteReaderAsync(ct))
+                    while (await r.ReadAsync(ct)) open.Add(r.GetString(0));
+
+                // Confidence guard: a partial scan (one .desktop/registry walk failed) must
+                // not close the cycles its failed source would have reported.
+                if (seenAppNames.Count >= open.Count * 0.5)
+                {
+                    foreach (var name in open)
+                    {
+                        if (seenAppNames.Contains(name)) continue;
+                        var upd = _connection.CreateCommand();
+                        upd.CommandText = @"
+                            UPDATE installed_applications
+                            SET is_installed = 0, uninstall_date = $at, is_synced = 0
+                            WHERE app_name = $name AND uninstall_date IS NULL";
+                        upd.Parameters.AddWithValue("$name", name);
+                        upd.Parameters.AddWithValue("$at", nowIso);
+                        await upd.ExecuteNonQueryAsync(ct);
+                    }
+                }
+            }
+
+            if (seenPackageKeys.Count > 0)
+            {
+                // Same close pass for packages, keyed on package_name|source_manager.
+                var openCmd = _connection.CreateCommand();
+                openCmd.CommandText = "SELECT package_name, source_manager FROM installed_packages WHERE uninstall_date IS NULL";
+                ((DbCommand)openCmd).Transaction = tx;
+                var open = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                await using (var r = await openCmd.ExecuteReaderAsync(ct))
+                    while (await r.ReadAsync(ct))
+                        open.Add(r.GetString(0) + "|" + r.GetString(1));
+
+                if (seenPackageKeys.Count >= open.Count * 0.5)
+                {
+                    foreach (var key in open)
+                    {
+                        if (seenPackageKeys.Contains(key)) continue;
+                        var sep = key.IndexOf('|');
+                        var upd = _connection.CreateCommand();
+                        upd.CommandText = @"
+                            UPDATE installed_packages
+                            SET is_installed = 0, uninstall_date = $at, is_synced = 0
+                            WHERE package_name = $name AND source_manager = $source AND uninstall_date IS NULL";
+                        upd.Parameters.AddWithValue("$name", key[..sep]);
+                        upd.Parameters.AddWithValue("$source", key[(sep + 1)..]);
+                        upd.Parameters.AddWithValue("$at", nowIso);
+                        await upd.ExecuteNonQueryAsync(ct);
+                    }
+                }
+            }
+
             await tx.CommitAsync(ct);
         }
         finally
@@ -381,7 +807,9 @@ public class SqliteLogStore : ILogStore, IDisposable
         try
         {
             var cmd = _connection.CreateCommand();
-            cmd.CommandText = "SELECT * FROM installed_applications WHERE binary_name = $binary_name LIMIT 1";
+            // Prefer the currently-installed cycle (uninstall_date IS NULL) over history rows.
+            cmd.CommandText = @"SELECT * FROM installed_applications WHERE binary_name = $binary_name
+                ORDER BY (uninstall_date IS NULL) DESC, detected_at DESC LIMIT 1";
             cmd.Parameters.AddWithValue("$binary_name", binaryName);
             await using var reader = await cmd.ExecuteReaderAsync(ct);
             if (await reader.ReadAsync(ct))
@@ -411,7 +839,7 @@ public class SqliteLogStore : ILogStore, IDisposable
                        AND (binary_name LIKE '%' || $name || '%'
                             OR $name LIKE '%' || binary_name || '%'))
                    OR (binary_name != '' AND app_name LIKE '%' || $name || '%')
-                ORDER BY is_browser DESC, length(binary_name) ASC
+                ORDER BY (uninstall_date IS NULL) DESC, is_browser DESC, length(binary_name) ASC
                 LIMIT 1";
             cmd.Parameters.AddWithValue("$name", processName);
             await using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -432,7 +860,9 @@ public class SqliteLogStore : ILogStore, IDisposable
         try
         {
             var cmd = _connection.CreateCommand();
-            cmd.CommandText = "SELECT * FROM installed_packages WHERE package_name = $package_name LIMIT 1";
+            // Prefer the currently-installed cycle (uninstall_date IS NULL) over history rows.
+            cmd.CommandText = @"SELECT * FROM installed_packages WHERE package_name = $package_name
+                ORDER BY (uninstall_date IS NULL) DESC, detected_at DESC LIMIT 1";
             cmd.Parameters.AddWithValue("$package_name", packageName);
             await using var reader = await cmd.ExecuteReaderAsync(ct);
             if (await reader.ReadAsync(ct))
@@ -497,6 +927,33 @@ public class SqliteLogStore : ILogStore, IDisposable
         await _connectionGate.WaitAsync(ct);
         try
         {
+            // Rows-per-cycle: an open cycle (uninstall_date IS NULL) is reused; otherwise a
+            // NEW cycle row opens (a reinstall detected at runtime also opens a new row).
+            var findCmd = _connection.CreateCommand();
+            findCmd.CommandText = "SELECT id FROM installed_applications WHERE app_name = $app_name AND uninstall_date IS NULL LIMIT 1";
+            findCmd.Parameters.AddWithValue("$app_name", entry.AppName);
+            var openId = await findCmd.ExecuteScalarAsync(ct) as string;
+            if (openId != null)
+            {
+                var upd = _connection.CreateCommand();
+                upd.CommandText = @"
+                    UPDATE installed_applications
+                    SET binary_name = COALESCE(NULLIF($binary_name, ''), binary_name),
+                        app_version = $app_version,
+                        install_path = COALESCE(NULLIF($install_path, ''), install_path),
+                        detected_at = $detected_at,
+                        is_synced = 0
+                    WHERE id = $id";
+                upd.Parameters.AddWithValue("$id", openId);
+                upd.Parameters.AddWithValue("$binary_name", entry.BinaryName);
+                upd.Parameters.AddWithValue("$app_version", entry.AppVersion);
+                upd.Parameters.AddWithValue("$install_path", entry.InstallPath);
+                upd.Parameters.AddWithValue("$detected_at", entry.DetectedAt.ToString("O"));
+                await upd.ExecuteNonQueryAsync(ct);
+                return openId;
+            }
+
+            var baseline = !await HasOpenAppRowsCoreAsync(ct);
             var cmd = _connection.CreateCommand();
             cmd.CommandText = DatabaseSchema.InsertInstalledApplicationSql;
             cmd.Parameters.AddWithValue("$id", entry.Id);
@@ -505,23 +962,18 @@ public class SqliteLogStore : ILogStore, IDisposable
             cmd.Parameters.AddWithValue("$app_version", entry.AppVersion);
             cmd.Parameters.AddWithValue("$publisher", entry.Publisher);
             cmd.Parameters.AddWithValue("$install_path", entry.InstallPath);
-            cmd.Parameters.AddWithValue("$install_date", (object?)entry.InstallDate?.ToString("O") ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$install_date", entry.InstallDate?.ToString("O")
+                ?? (baseline ? (object)DBNull.Value : DateTime.UtcNow.ToString("O")));
             cmd.Parameters.AddWithValue("$uninstall_string", entry.UninstallString);
             cmd.Parameters.AddWithValue("$change_type", entry.ChangeType);
+            cmd.Parameters.AddWithValue("$is_installed", 1);
+            cmd.Parameters.AddWithValue("$uninstall_date", DBNull.Value);
             cmd.Parameters.AddWithValue("$is_browser", entry.IsBrowser ? 1 : 0);
             cmd.Parameters.AddWithValue("$desktop_id", entry.DesktopId);
             cmd.Parameters.AddWithValue("$categories", entry.Categories);
             cmd.Parameters.AddWithValue("$detected_at", entry.DetectedAt.ToString("O"));
             await cmd.ExecuteNonQueryAsync(ct);
-
-            // CRITICAL: After upsert, look up the actual stored ID.
-            // InsertInstalledApplicationSql uses ON CONFLICT(app_name) DO UPDATE SET
-            // which preserves the existing row's ID when app_name already exists.
-            var lookupCmd = _connection.CreateCommand();
-            lookupCmd.CommandText = "SELECT id FROM installed_applications WHERE app_name = $app_name LIMIT 1";
-            lookupCmd.Parameters.AddWithValue("$app_name", entry.AppName);
-            var actualId = await lookupCmd.ExecuteScalarAsync(ct);
-            return actualId as string ?? entry.Id;
+            return entry.Id;
         }
         finally
         {
@@ -546,12 +998,55 @@ public class SqliteLogStore : ILogStore, IDisposable
         }
     }
 
+    public async Task<IReadOnlyList<InstalledApplication>> GetInstalledAppsWithEmptyDesktopIdAsync(CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<InstalledApplication>();
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT * FROM installed_applications WHERE desktop_id IS NULL OR desktop_id = ''";
+            var results = new List<InstalledApplication>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct)) results.Add(MapInstalledAppReader(reader));
+            return results;
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
     public async Task<string> StoreInstalledPackageAsync(InstalledPackage entry, CancellationToken ct)
     {
         if (_connection == null) return entry.Id;
         await _connectionGate.WaitAsync(ct);
         try
         {
+            // Rows-per-cycle: reuse the open cycle, else open a NEW one.
+            var findCmd = _connection.CreateCommand();
+            findCmd.CommandText = @"
+                SELECT id FROM installed_packages
+                WHERE package_name = $package_name AND source_manager = $source_manager AND uninstall_date IS NULL
+                LIMIT 1";
+            findCmd.Parameters.AddWithValue("$package_name", entry.PackageName);
+            findCmd.Parameters.AddWithValue("$source_manager", entry.SourceManager);
+            var openId = await findCmd.ExecuteScalarAsync(ct) as string;
+            if (openId != null)
+            {
+                var upd = _connection.CreateCommand();
+                upd.CommandText = @"
+                    UPDATE installed_packages
+                    SET version = $version, detected_at = $detected_at, is_synced = 0
+                    WHERE id = $id";
+                upd.Parameters.AddWithValue("$id", openId);
+                upd.Parameters.AddWithValue("$version", entry.Version);
+                upd.Parameters.AddWithValue("$detected_at", entry.DetectedAt.ToString("O"));
+                await upd.ExecuteNonQueryAsync(ct);
+                return openId;
+            }
+
+            var baseline = !await HasOpenPackageRowsCoreAsync(ct);
             var cmd = _connection.CreateCommand();
             cmd.CommandText = DatabaseSchema.InsertInstalledPackageSql;
             cmd.Parameters.AddWithValue("$id", entry.Id);
@@ -562,11 +1057,12 @@ public class SqliteLogStore : ILogStore, IDisposable
             cmd.Parameters.AddWithValue("$install_path", entry.InstallPath);
             cmd.Parameters.AddWithValue("$publisher", entry.Publisher);
             cmd.Parameters.AddWithValue("$description", entry.Description);
+            cmd.Parameters.AddWithValue("$install_date", entry.InstallDate?.ToString("O")
+                ?? (baseline ? (object)DBNull.Value : DateTime.UtcNow.ToString("O")));
+            cmd.Parameters.AddWithValue("$is_installed", 1);
+            cmd.Parameters.AddWithValue("$uninstall_date", DBNull.Value);
             cmd.Parameters.AddWithValue("$detected_at", entry.DetectedAt.ToString("O"));
             await cmd.ExecuteNonQueryAsync(ct);
-
-            // InsertInstalledPackageSql uses ON CONFLICT(id) which won't conflict
-            // with our new GUID. The stored ID always matches entry.Id.
             return entry.Id;
         }
         finally
@@ -640,21 +1136,7 @@ public class SqliteLogStore : ILogStore, IDisposable
 
     public async Task MarkNetworkInfoSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
-        if (_connection == null || ids.Count == 0) return;
-        await _connectionGate.WaitAsync(ct);
-        try
-        {
-            await using var tx = await _connection.BeginTransactionAsync(ct);
-            var cmd = _connection.CreateCommand();
-            cmd.CommandText = "UPDATE network_info SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
-            var p = cmd.Parameters.Add("$id", SqliteType.Text);
-            foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
-            await tx.CommitAsync(ct);
-        }
-        finally
-        {
-            _connectionGate.Release();
-        }
+        await MarkSentCoreAsync("network_info", "id", ids, ct);
     }
 
     public async Task<NetworkInfo?> GetLastNetworkInfoAsync(CancellationToken ct)
@@ -802,21 +1284,7 @@ public class SqliteLogStore : ILogStore, IDisposable
 
     public async Task MarkSessionEventsSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
-        if (_connection == null || ids.Count == 0) return;
-        await _connectionGate.WaitAsync(ct);
-        try
-        {
-            await using var tx = await _connection.BeginTransactionAsync(ct);
-            var cmd = _connection.CreateCommand();
-            cmd.CommandText = "UPDATE session_events SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
-            var p = cmd.Parameters.Add("$id", SqliteType.Text);
-            foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
-            await tx.CommitAsync(ct);
-        }
-        finally
-        {
-            _connectionGate.Release();
-        }
+        await MarkSentCoreAsync("session_events", "id", ids, ct);
     }
 
     public async Task<SessionEvent?> GetLastSessionEventAsync(CancellationToken ct)
@@ -944,21 +1412,7 @@ public class SqliteLogStore : ILogStore, IDisposable
 
     public async Task MarkAppSessionsSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
-        if (_connection == null || ids.Count == 0) return;
-        await _connectionGate.WaitAsync(ct);
-        try
-        {
-            await using var tx = await _connection.BeginTransactionAsync(ct);
-            var cmd = _connection.CreateCommand();
-            cmd.CommandText = "UPDATE app_sessions SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
-            var p = cmd.Parameters.Add("$id", SqliteType.Text);
-            foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
-            await tx.CommitAsync(ct);
-        }
-        finally
-        {
-            _connectionGate.Release();
-        }
+        await MarkSentCoreAsync("app_sessions", "id", ids, ct);
     }
 
     // ────────────────────────────────────────
@@ -1050,21 +1504,7 @@ public class SqliteLogStore : ILogStore, IDisposable
 
     public async Task MarkAppItemsSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
-        if (_connection == null || ids.Count == 0) return;
-        await _connectionGate.WaitAsync(ct);
-        try
-        {
-            await using var tx = await _connection.BeginTransactionAsync(ct);
-            var cmd = _connection.CreateCommand();
-            cmd.CommandText = "UPDATE app_items SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
-            var p = cmd.Parameters.Add("$id", SqliteType.Text);
-            foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
-            await tx.CommitAsync(ct);
-        }
-        finally
-        {
-            _connectionGate.Release();
-        }
+        await MarkSentCoreAsync("app_items", "id", ids, ct);
     }
 
     public async Task UpdateAppItemParentAsync(string itemId, string parentItemId, CancellationToken ct)
@@ -1437,23 +1877,36 @@ public class SqliteLogStore : ILogStore, IDisposable
         }
     }
 
-    public async Task MarkStorageDevicesSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    public async Task<IReadOnlyList<StorageDevice>> GetLatestStorageDevicesAsync(CancellationToken ct)
     {
-        if (_connection == null || ids.Count == 0) return;
+        if (_connection == null) return Array.Empty<StorageDevice>();
         await _connectionGate.WaitAsync(ct);
         try
         {
-            await using var tx = await _connection.BeginTransactionAsync(ct);
+            // Scope to the newest hardware snapshot so re-collections don't stack duplicates
+            // in the UI. Falls back to nothing when no hardware row exists yet.
             var cmd = _connection.CreateCommand();
-            cmd.CommandText = "UPDATE storage_devices SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
-            var p = cmd.Parameters.Add("$id", SqliteType.Text);
-            foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
-            await tx.CommitAsync(ct);
+            cmd.CommandText = """
+                SELECT * FROM storage_devices
+                WHERE device_hardware_id = (
+                    SELECT id FROM device_hardware_info ORDER BY collected_at DESC LIMIT 1
+                )
+                ORDER BY capacity_mb DESC
+                """;
+            var results = new List<StorageDevice>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct)) results.Add(MapStorageDeviceReader(reader));
+            return results;
         }
         finally
         {
             _connectionGate.Release();
         }
+    }
+
+    public async Task MarkStorageDevicesSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        await MarkSentCoreAsync("storage_devices", "id", ids, ct);
     }
 
     // ────────────────────────────────────────
@@ -1554,6 +2007,172 @@ public class SqliteLogStore : ILogStore, IDisposable
             _connectionGate.Release();
         }
     }
+    // ────────────────────────────────────────
+    // Sync: hardware devices (sent to server; never deleted client-side)
+    // ────────────────────────────────────────
+
+    public async Task<IReadOnlyList<HardwareDevice>> GetUnsentHardwareDevicesAsync(int limit, CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<HardwareDevice>();
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT * FROM hardware_devices WHERE is_synced = 0 ORDER BY plugged_at ASC LIMIT $limit";
+            cmd.Parameters.AddWithValue("$limit", limit);
+            var results = new List<HardwareDevice>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct)) results.Add(MapHardwareDeviceReader(reader));
+            return results;
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task MarkHardwareDevicesSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        await MarkSentCoreAsync("hardware_devices", "id", ids, ct);
+    }
+
+    // ────────────────────────────────────────
+    // Sync: app_status + permission_status (sent to server; never deleted client-side)
+    // ────────────────────────────────────────
+
+    public async Task<IReadOnlyList<AppStatus>> GetUnsentAppStatusAsync(int limit, CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<AppStatus>();
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT key, value, updated_at, is_synced, synced_at FROM app_status WHERE is_synced = 0 ORDER BY updated_at ASC LIMIT $limit";
+            cmd.Parameters.AddWithValue("$limit", limit);
+            var results = new List<AppStatus>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                results.Add(new AppStatus
+                {
+                    Key = reader.GetString(reader.GetOrdinal("key")),
+                    Value = reader.GetString(reader.GetOrdinal("value")),
+                    UpdatedAt = reader.IsDBNull(reader.GetOrdinal("updated_at")) ? "" : reader.GetString(reader.GetOrdinal("updated_at")),
+                    IsSynced = reader.GetInt32(reader.GetOrdinal("is_synced")) == 1,
+                    SyncedAt = reader.IsDBNull(reader.GetOrdinal("synced_at")) ? null : reader.GetString(reader.GetOrdinal("synced_at")),
+                });
+            }
+            return results;
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task MarkAppStatusSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        await MarkSentCoreAsync("app_status", "key", ids, ct);
+    }
+
+    public async Task<IReadOnlyList<PermissionStatus>> GetUnsentPermissionStatusAsync(int limit, CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<PermissionStatus>();
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT * FROM permission_status WHERE is_synced = 0 ORDER BY checked_at ASC LIMIT $limit";
+            cmd.Parameters.AddWithValue("$limit", limit);
+            var results = new List<PermissionStatus>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                results.Add(new PermissionStatus
+                {
+                    CheckId = reader.GetString(reader.GetOrdinal("check_id")),
+                    SessionId = reader.IsDBNull(reader.GetOrdinal("session_id")) ? "" : reader.GetString(reader.GetOrdinal("session_id")),
+                    SessionType = reader.IsDBNull(reader.GetOrdinal("session_type")) ? "" : reader.GetString(reader.GetOrdinal("session_type")),
+                    Platform = reader.IsDBNull(reader.GetOrdinal("platform")) ? "" : reader.GetString(reader.GetOrdinal("platform")),
+                    CheckedAt = reader.IsDBNull(reader.GetOrdinal("checked_at")) ? "" : reader.GetString(reader.GetOrdinal("checked_at")),
+                    Method = reader.IsDBNull(reader.GetOrdinal("method")) ? "" : reader.GetString(reader.GetOrdinal("method")),
+                    Works = reader.GetInt32(reader.GetOrdinal("works")) == 1,
+                    Details = reader.IsDBNull(reader.GetOrdinal("details")) ? null : reader.GetString(reader.GetOrdinal("details")),
+                    EmployeeId = reader.IsDBNull(reader.GetOrdinal("employee_id")) ? null : reader.GetString(reader.GetOrdinal("employee_id")),
+                    EmployeeName = reader.IsDBNull(reader.GetOrdinal("employee_name")) ? null : reader.GetString(reader.GetOrdinal("employee_name")),
+                    IsSynced = reader.GetInt32(reader.GetOrdinal("is_synced")) == 1,
+                });
+            }
+            return results;
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task MarkPermissionStatusSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        await MarkSentCoreAsync("permission_status", "check_id", ids, ct);
+    }
+
+    /// <summary>
+    /// Retention cleanup (24h default): deletes SYNCED rows the server already has that are no
+    /// longer needed locally — old app_items, CLOSED old app_sessions (open sessions and sessions
+    /// that still have items are never deleted), uninstalled inventory cycles (is_installed = 0),
+    /// and superseded network rows (is_current = 0). Everything else is retained forever. Runs in
+    /// ONE transaction so a crash mid-cleanup can't partially apply.
+    /// </summary>
+    public async Task<SyncedDataDeletionCounts> DeleteSyncedDataOlderThanAsync(DateTime cutoff, CancellationToken ct)
+    {
+        if (_connection == null) return SyncedDataDeletionCounts.Empty;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cutoffIso = cutoff.ToString("O");
+            await using var tx = await _connection.BeginTransactionAsync(ct);
+
+            var itemsCmd = _connection.CreateCommand();
+            ((DbCommand)itemsCmd).Transaction = tx;
+            itemsCmd.CommandText = "DELETE FROM app_items WHERE is_synced = 1 AND opened_at < $cutoff";
+            itemsCmd.Parameters.AddWithValue("$cutoff", cutoffIso);
+            var itemsDeleted = await itemsCmd.ExecuteNonQueryAsync(ct);
+
+            var sessionsCmd = _connection.CreateCommand();
+            ((DbCommand)sessionsCmd).Transaction = tx;
+            sessionsCmd.CommandText = @"
+                DELETE FROM app_sessions
+                WHERE is_synced = 1
+                  AND ended_at IS NOT NULL
+                  AND started_at < $cutoff
+                  AND NOT EXISTS (SELECT 1 FROM app_items WHERE app_items.app_session_id = app_sessions.id)";
+            sessionsCmd.Parameters.AddWithValue("$cutoff", cutoffIso);
+            var sessionsDeleted = await sessionsCmd.ExecuteNonQueryAsync(ct);
+
+            var appsCmd = _connection.CreateCommand();
+            ((DbCommand)appsCmd).Transaction = tx;
+            appsCmd.CommandText = "DELETE FROM installed_applications WHERE is_installed = 0 AND is_synced = 1";
+            var appsDeleted = await appsCmd.ExecuteNonQueryAsync(ct);
+
+            var pkgsCmd = _connection.CreateCommand();
+            ((DbCommand)pkgsCmd).Transaction = tx;
+            pkgsCmd.CommandText = "DELETE FROM installed_packages WHERE is_installed = 0 AND is_synced = 1";
+            var pkgsDeleted = await pkgsCmd.ExecuteNonQueryAsync(ct);
+
+            var netCmd = _connection.CreateCommand();
+            ((DbCommand)netCmd).Transaction = tx;
+            netCmd.CommandText = "DELETE FROM network_info WHERE is_current = 0 AND is_synced = 1";
+            var netDeleted = await netCmd.ExecuteNonQueryAsync(ct);
+
+            await tx.CommitAsync(ct);
+            return new SyncedDataDeletionCounts(itemsDeleted, sessionsDeleted, appsDeleted, pkgsDeleted, netDeleted);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
 
     // ────────────────────────────────────────
     // Status & Employee Info
@@ -1654,7 +2273,10 @@ public class SqliteLogStore : ILogStore, IDisposable
             cmd.CommandText = DatabaseSchema.InsertPermissionSql;
             ((DbCommand)cmd).Transaction = tx;
 
-            var checkId = Guid.NewGuid().ToString("N");
+            // Dedup fix (2026-08-11): the check_id was "{newGuid}_{method}" — a FRESH GUID on
+            // every call (~every 5 min) inserted new rows instead of updating, flooding the
+            // table with thousands of duplicates/day. Now keyed on the STABLE "{platform}_{method}"
+            // and upserted (ON CONFLICT(check_id) DO UPDATE) — one row per permission method.
             var platform = "Linux";
             if (OperatingSystem.IsWindows()) platform = "Windows";
             else if (OperatingSystem.IsMacOS()) platform = "macOS";
@@ -1664,10 +2286,14 @@ public class SqliteLogStore : ILogStore, IDisposable
             var empId = empInfo?.EmployeeId;
             var empName = empInfo?.Name;
 
+            // Bookmark id for the last-checked status (NOT the row key — rows are keyed on
+            // "{platform}_{method}" so they upsert in place instead of duplicating).
+            var checkId = Guid.NewGuid().ToString("N");
+
             foreach (var kvp in permissions)
             {
                 cmd.Parameters.Clear();
-                cmd.Parameters.AddWithValue("$check_id", $"{checkId}_{kvp.Key}");
+                cmd.Parameters.AddWithValue("$check_id", $"{platform}_{kvp.Key}");
                 cmd.Parameters.AddWithValue("$session_id", SessionInfo.SessionId);
                 cmd.Parameters.AddWithValue("$session_type", sessionType);
                 cmd.Parameters.AddWithValue("$platform", platform);
@@ -1814,6 +2440,8 @@ public class SqliteLogStore : ILogStore, IDisposable
             InstallDate = r.IsDBNull(r.GetOrdinal("install_date")) ? null : DateTime.Parse(r.GetString(r.GetOrdinal("install_date"))),
             UninstallString = r.GetString(r.GetOrdinal("uninstall_string")),
             ChangeType = r.GetString(r.GetOrdinal("change_type")),
+            IsInstalled = TryGetInt(r, "is_installed") == 1,
+            UninstallDate = r.IsDBNull(r.GetOrdinal("uninstall_date")) ? null : DateTime.Parse(r.GetString(r.GetOrdinal("uninstall_date"))),
             IsBrowser = r.GetInt32(r.GetOrdinal("is_browser")) == 1,
             DesktopId = r.IsDBNull(r.GetOrdinal("desktop_id")) ? string.Empty : r.GetString(r.GetOrdinal("desktop_id")),
             Categories = r.IsDBNull(r.GetOrdinal("categories")) ? string.Empty : r.GetString(r.GetOrdinal("categories")),
@@ -1836,6 +2464,9 @@ public class SqliteLogStore : ILogStore, IDisposable
             InstallPath = r.GetString(r.GetOrdinal("install_path")),
             Publisher = r.GetString(r.GetOrdinal("publisher")),
             Description = r.GetString(r.GetOrdinal("description")),
+            InstallDate = r.IsDBNull(r.GetOrdinal("install_date")) ? null : DateTime.Parse(r.GetString(r.GetOrdinal("install_date"))),
+            IsInstalled = TryGetInt(r, "is_installed") == 1,
+            UninstallDate = r.IsDBNull(r.GetOrdinal("uninstall_date")) ? null : DateTime.Parse(r.GetString(r.GetOrdinal("uninstall_date"))),
             DetectedAt = DateTime.Parse(r.GetString(r.GetOrdinal("detected_at"))),
             IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
             SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),

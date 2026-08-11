@@ -16,13 +16,35 @@ public static class BrowserAccessibilityHelpers
     };
 
     /// <summary>True if the process name/command line looks like a browser.</summary>
+    /// <remarks>
+    /// Matches each hint as a STANDALONE word: "arc" must not match "SearchApp",
+    /// "edge" must not match "medged" — a 3-letter hint inside a longer unrelated
+    /// process name was leaking non-browser processes (SearchApp) into the browser
+    /// tracker, which then wrote fake browser sessions + history URLs for them.
+    /// </remarks>
     public static bool IsBrowserProcess(string processName, string? commandLine = null)
     {
         var name = processName ?? string.Empty;
-        if (BrowserProcessHints.Any(h => name.Contains(h, StringComparison.OrdinalIgnoreCase)))
+        if (BrowserProcessHints.Any(h => ContainsStandaloneWord(name, h)))
             return true;
         if (!string.IsNullOrWhiteSpace(commandLine))
-            return BrowserProcessHints.Any(h => commandLine.Contains(h, StringComparison.OrdinalIgnoreCase));
+            return BrowserProcessHints.Any(h => ContainsStandaloneWord(commandLine, h));
+        return false;
+    }
+
+    /// <summary>True when <paramref name="word"/> appears in <paramref name="text"/> as a
+    /// standalone token (not as a substring of a longer word, e.g. "arc" inside "SearchApp").</summary>
+    private static bool ContainsStandaloneWord(string text, string word)
+    {
+        var idx = text.IndexOf(word, StringComparison.OrdinalIgnoreCase);
+        while (idx >= 0)
+        {
+            var beforeOk = idx == 0 || !char.IsLetterOrDigit(text[idx - 1]);
+            var end = idx + word.Length;
+            var afterOk = end >= text.Length || !char.IsLetterOrDigit(text[end]);
+            if (beforeOk && afterOk) return true;
+            idx = text.IndexOf(word, idx + 1, StringComparison.OrdinalIgnoreCase);
+        }
         return false;
     }
 

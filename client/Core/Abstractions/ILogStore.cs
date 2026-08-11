@@ -19,6 +19,22 @@ public interface ILogStore
     Task<IReadOnlyList<InstalledApplication>> GetUnsentInstalledApplicationsAsync(int limit, CancellationToken ct);
     Task MarkInstalledApplicationsSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
 
+    /// <summary>
+    /// Inventory lifecycle reconciliation, called after every completed OS scan (rows are
+    /// NEVER deleted — one row per install cycle). OPEN cycles (uninstall_date IS NULL)
+    /// missing from the scan are CLOSED: is_installed=0 + uninstall_date=now (the uninstall
+    /// event). A reinstall is NOT handled here — the next Store* pass opens a brand-new
+    /// cycle row with the new install_date, so install→uninstall→reinstall yields one record
+    /// per cycle. Each pass is skipped when its seen-set is empty, and a 50% confidence guard
+    /// skips closing when a scan looks partial (failed/partial scan must not uninstall
+    /// everything).
+    /// </summary>
+    Task ApplyInventoryLifecycleAsync(
+        IReadOnlySet<string> seenAppNames,
+        IReadOnlySet<string> seenPackageKeys,
+        DateTime now,
+        CancellationToken ct);
+
     Task StoreInstalledPackagesAsync(IReadOnlyList<InstalledPackage> entries, CancellationToken ct);
     Task<IReadOnlyList<InstalledPackage>> GetUnsentInstalledPackagesAsync(int limit, CancellationToken ct);
     Task MarkInstalledPackagesSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
@@ -39,12 +55,43 @@ public interface ILogStore
     Task<IReadOnlyList<StorageDevice>> GetUnsentStorageDevicesAsync(int limit, CancellationToken ct);
     Task MarkStorageDevicesSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
 
+    /// <summary>
+    /// Storage devices belonging to the most recent device_hardware_info row, for display.
+    /// Unlike GetUnsentStorageDevicesAsync this ignores is_synced — the System Specifications
+    /// page needs the current inventory, not the sync backlog.
+    /// </summary>
+    Task<IReadOnlyList<StorageDevice>> GetLatestStorageDevicesAsync(CancellationToken ct);
+
     // ── Hardware Devices (USB / peripheral hotplug tracking) ──
 
     Task StoreHardwareDevicesAsync(IReadOnlyList<HardwareDevice> entries, CancellationToken ct);
     Task<IReadOnlyList<HardwareDevice>> GetOpenHardwareDevicesAsync(CancellationToken ct);
     Task<HardwareDevice?> GetOpenHardwareDeviceByBusPathAsync(string busPath, CancellationToken ct);
     Task CloseHardwareDeviceAsync(string id, DateTime unpluggedAt, CancellationToken ct);
+
+    // ── Sync (2026-08-11): hardware devices are sent to the server; never deleted client-side ──
+    Task<IReadOnlyList<HardwareDevice>> GetUnsentHardwareDevicesAsync(int limit, CancellationToken ct);
+    Task MarkHardwareDevicesSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
+
+    // ── Sync (2026-08-11): app_status + permission_status are sent to the server; never
+    //    deleted client-side. app_status rows re-sync on change (is_synced reset by upsert).
+    Task<IReadOnlyList<AppStatus>> GetUnsentAppStatusAsync(int limit, CancellationToken ct);
+    Task MarkAppStatusSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
+    Task<IReadOnlyList<PermissionStatus>> GetUnsentPermissionStatusAsync(int limit, CancellationToken ct);
+    Task MarkPermissionStatusSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
+
+    /// <summary>
+    /// Retention cleanup (2026-08-11, default 24h): deletes rows that were already synced to
+    /// the server and are no longer needed locally:
+    ///   • app_items — synced + data older than the cutoff
+    ///   • app_sessions — synced + CLOSED + started before the cutoff (open sessions are
+    ///     NEVER deleted; a session is only deleted once all its app_items are gone)
+    ///   • installed_applications / installed_packages — synced rows with is_installed = 0
+    ///     (closed/uninstalled install cycles; the GUI hides them anyway)
+    ///   • network_info — synced rows that were superseded (is_current = 0)
+    /// Everything else is retained forever. Returns per-table deleted counts.
+    /// </summary>
+    Task<SyncedDataDeletionCounts> DeleteSyncedDataOlderThanAsync(DateTime cutoff, CancellationToken ct);
 
     // ── Installed App/Package Lookup (binary name → display name mapping) ──
 
@@ -65,6 +112,12 @@ public interface ILogStore
     /// <summary>Get all installed package names for fast in-memory filtering</summary>
     Task<HashSet<string>> GetAllInstalledPackageNamesAsync(CancellationToken ct);
 
+    /// <summary>ALL installed_applications rows (the full inventory, for the Installed Applications page).</summary>
+    Task<IReadOnlyList<InstalledApplication>> GetAllInstalledAppsAsync(CancellationToken ct);
+
+    /// <summary>ALL installed_packages rows (the full inventory, for the Installed Applications page).</summary>
+    Task<IReadOnlyList<InstalledPackage>> GetAllInstalledPackagesAsync(CancellationToken ct);
+
     /// <summary>Store a single auto-detected installed app (called when a running process is not yet in the DB).
     /// Returns the actual stored ID (may differ from entry.Id if app_name already existed via ON CONFLICT).</summary>
     Task<string> StoreInstalledAppAsync(InstalledApplication entry, CancellationToken ct);
@@ -72,6 +125,11 @@ public interface ILogStore
     /// <summary>Delete a non-GUI installed_applications entry that was incorrectly auto-registered.
     /// Used by Phase 0a cleanup to remove shell/system entries (sh, snap) from the DB.</summary>
     Task DeleteInstalledAppAsync(string id, CancellationToken ct);
+
+    /// <summary>Rows with an EMPTY desktop_id — the structural signature of runtime auto-registered
+    /// junk (svchost, dllhost, conhost, Video.UI…). Real inventory rows always carry a Start Menu
+    /// shortcut name / registry key / .desktop filename as their desktop_id.</summary>
+    Task<IReadOnlyList<InstalledApplication>> GetInstalledAppsWithEmptyDesktopIdAsync(CancellationToken ct);
 
     /// <summary>Store a single auto-detected installed package (called when a running process is not yet in the DB).
     /// Returns the actual stored ID.</summary>

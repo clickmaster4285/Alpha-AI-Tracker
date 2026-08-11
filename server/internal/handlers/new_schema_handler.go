@@ -5,10 +5,10 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/labstack/echo/v4"
 	"github.com/alpha-ai-tracker/server/internal/dto"
 	"github.com/alpha-ai-tracker/server/internal/repository"
 	"github.com/alpha-ai-tracker/server/internal/services"
+	"github.com/labstack/echo/v4"
 )
 
 // NewSchemaHandler handles ingestion and listing endpoints for Phase 1 & 2 tables.
@@ -263,4 +263,132 @@ func (h *NewSchemaHandler) ListAppItems(c echo.Context) error {
 		})
 	}
 	return c.JSON(http.StatusOK, result)
+}
+
+// ────────────────────────────────
+// Phase 3: App Status
+// ────────────────────────────────
+
+func (h *NewSchemaHandler) SyncAppStatus(c echo.Context) error {
+	var req dto.SyncAppStatusRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Invalid request body"})
+	}
+	if req.EmployeeID == "" || req.Token == "" {
+		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Employee ID and token are required"})
+	}
+	claims, err := h.authService.ValidateToken(req.Token)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid or expired token"})
+	}
+	if claims.UserID == "" {
+		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid token claims"})
+	}
+	resp, err := h.service.SyncAppStatus(c.Request().Context(), &req)
+	if err != nil {
+		log.Printf("[new_schema] SyncAppStatus error: %v", err)
+		return c.JSON(http.StatusInternalServerError, dto.APIError{Code: http.StatusInternalServerError, Message: "Failed to sync", Detail: err.Error()})
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// ────────────────────────────────
+// Phase 3: Hardware Devices
+// ────────────────────────────────
+
+func (h *NewSchemaHandler) SyncHardwareDevices(c echo.Context) error {
+	var req dto.SyncHardwareDevicesRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Invalid request body"})
+	}
+	if req.EmployeeID == "" || req.Token == "" {
+		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Employee ID and token are required"})
+	}
+	claims, err := h.authService.ValidateToken(req.Token)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid or expired token"})
+	}
+	if claims.UserID == "" {
+		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid token claims"})
+	}
+	resp, err := h.service.SyncHardwareDevices(c.Request().Context(), &req)
+	if err != nil {
+		log.Printf("[new_schema] SyncHardwareDevices error: %v", err)
+		return c.JSON(http.StatusInternalServerError, dto.APIError{Code: http.StatusInternalServerError, Message: "Failed to sync", Detail: err.Error()})
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// ────────────────────────────────
+// Phase 3: Permission Status
+// ────────────────────────────────
+
+func (h *NewSchemaHandler) SyncPermissionStatus(c echo.Context) error {
+	var req dto.SyncPermissionStatusRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Invalid request body"})
+	}
+	if req.EmployeeID == "" || req.Token == "" {
+		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Employee ID and token are required"})
+	}
+	claims, err := h.authService.ValidateToken(req.Token)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid or expired token"})
+	}
+	if claims.UserID == "" {
+		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid token claims"})
+	}
+	resp, err := h.service.SyncPermissionStatus(c.Request().Context(), &req)
+	if err != nil {
+		log.Printf("[new_schema] SyncPermissionStatus error: %v", err)
+		return c.JSON(http.StatusInternalServerError, dto.APIError{Code: http.StatusInternalServerError, Message: "Failed to sync", Detail: err.Error()})
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// ────────────────────────────────
+// Phase 3: Storage Devices
+// ────────────────────────────────
+
+func (h *NewSchemaHandler) SyncStorageDevices(c echo.Context) error {
+	var req dto.SyncStorageDevicesRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Invalid request body"})
+	}
+	if req.EmployeeID == "" || req.Token == "" {
+		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Employee ID and token are required"})
+	}
+	claims, err := h.authService.ValidateToken(req.Token)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid or expired token"})
+	}
+	if claims.UserID == "" {
+		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid token claims"})
+	}
+	resp, err := h.service.SyncStorageDevices(c.Request().Context(), &req)
+	if err != nil {
+		log.Printf("[new_schema] SyncStorageDevices error: %v", err)
+		return c.JSON(http.StatusInternalServerError, dto.APIError{Code: http.StatusInternalServerError, Message: "Failed to sync", Detail: err.Error()})
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// ────────────────────────────────
+// Employee Detail (web dashboard — GET /employees/:id/detail)
+// ────────────────────────────────
+
+func (h *NewSchemaHandler) GetEmployeeDetail(c echo.Context) error {
+	detail, err := h.service.GetEmployeeDetail(c.Request().Context(), c.Param("id"))
+	if err != nil {
+		if err.Error() == "employee not found" {
+			return c.JSON(http.StatusNotFound, dto.APIError{Code: http.StatusNotFound, Message: "Employee not found"})
+		}
+		log.Printf("[new_schema] GetEmployeeDetail error: %v", err)
+		return c.JSON(http.StatusInternalServerError, dto.APIError{
+			Code:    http.StatusInternalServerError,
+			Message: "Failed to load employee detail",
+			Detail:  err.Error(),
+		})
+	}
+	return c.JSON(http.StatusOK, detail)
 }

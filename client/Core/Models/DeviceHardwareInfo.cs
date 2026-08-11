@@ -35,6 +35,15 @@ public class InstalledApplication
     public string UninstallString { get; set; } = string.Empty;
     /// <summary>"installed" | "uninstalled" | "seen"</summary>
     public string ChangeType { get; set; } = "seen";
+    /// <summary>
+    /// Lifecycle state — ONE ROW PER INSTALL CYCLE. A row is opened when the app is first
+    /// seen (install_date = NULL when the OS reports none, else the reported date; newly
+    /// detected installs get the detection time) and closed with uninstall_date when the
+    /// app disappears from a scan. A reinstall opens a NEW row. Closed rows are history.
+    /// </summary>
+    public bool IsInstalled { get; set; } = true;
+    /// <summary>When this install cycle ended (NULL while currently installed).</summary>
+    public DateTime? UninstallDate { get; set; }
     /// <summary>True if this app is a web browser (detected from .desktop Categories/MimeType)</summary>
     public bool IsBrowser { get; set; }
     /// <summary>
@@ -101,6 +110,16 @@ public class InstalledPackage
     public string Publisher { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
     public DateTime DetectedAt { get; set; } = DateTime.UtcNow;
+    /// <summary>
+    /// When this package cycle was installed. Linux package managers (dpkg) expose no true
+    /// install date — NULL means unknown (pre-existing software); a package first detected
+    /// while the tracker runs gets the detection time stamped here.
+    /// </summary>
+    public DateTime? InstallDate { get; set; }
+    /// <summary>Lifecycle state — ONE ROW PER INSTALL CYCLE (see InstalledApplication).</summary>
+    public bool IsInstalled { get; set; } = true;
+    /// <summary>When this install cycle ended (NULL while currently installed).</summary>
+    public DateTime? UninstallDate { get; set; }
     public bool IsSynced { get; set; }
     public string? SyncedAt { get; set; }
     public string CreatedAt { get; set; } = string.Empty;
