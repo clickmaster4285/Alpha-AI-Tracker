@@ -213,6 +213,10 @@ export const employeesApi = {
 
   get: (id: string) => request<Employee>('/employees/' + id),
 
+  // Aggregate machine picture: latest hardware, storage, network, installed apps/packages,
+  // peripherals, permission checks, app status and activity stats.
+  detail: (id: string) => request<EmployeeDetail>('/employees/' + id + '/detail'),
+
   create: (data: CreateEmployeePayload) =>
     request<Employee>('/employees', { method: 'POST', body: data }),
 
@@ -225,6 +229,115 @@ export const employeesApi = {
   generateSecret: (id: string) =>
     request<GenerateSecretResponse>('/employees/' + id + '/generate-secret', { method: 'POST' }),
 };
+
+// ──────────────────────────
+// Employee Detail API (machine picture for the user detail page)
+// ──────────────────────────
+
+export interface DeviceHardwareDetail {
+  id: string;
+  macAddress: string;
+  hostname: string;
+  osName: string;
+  osVersion: string;
+  cpuModel: string;
+  cpuCores: number;
+  ramTotalMb: number;
+  storageDevices: string;
+  gpuModel: string;
+  gpuVramMb: number;
+  collectedAt: string;
+  syncedAt?: string;
+}
+
+export interface StorageDeviceDetail {
+  id: string;
+  deviceType: string;
+  model: string;
+  capacityMb: number;
+  createdAt: string;
+}
+
+export interface NetworkInfoDetail {
+  id: string;
+  employeeId: string;
+  publicIp: string;
+  privateIp: string;
+  macAddress: string;
+  networkInterfaceName: string;
+  collectedAt: string;
+  syncedAt?: string;
+}
+
+export interface InstalledApplicationDetail {
+  id: string;
+  appName: string;
+  binaryName?: string;
+  version: string;
+  publisher: string;
+  installPath: string;
+  installDate?: string;
+  isBrowser: boolean;
+  categories?: string;
+  desktopId?: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
+export interface InstalledPackageDetail {
+  id: string;
+  packageName: string;
+  version: string;
+  category: string;
+  sourceManager: string;
+  installPath: string;
+  publisher: string;
+  description: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
+export interface HardwareDeviceDetail {
+  id: string;
+  deviceClass: string;
+  vendor: string;
+  product: string;
+  serial: string;
+  busPath?: string;
+  pluggedAt: string;
+  unpluggedAt?: string;
+}
+
+export interface PermissionStatusDetail {
+  checkId: string;
+  sessionId: string;
+  sessionType: string;
+  platform: string;
+  checkedAt: string;
+  method: string;
+  works: boolean;
+  details: string;
+}
+
+export interface EmployeeActivityStats {
+  totalSessions: number;
+  openSessions: number;
+  totalItems: number;
+  lastActivityAt?: string;
+}
+
+export interface EmployeeDetail {
+  employee: Employee;
+  deviceHardware?: DeviceHardwareDetail;
+  storageDevices: StorageDeviceDetail[];
+  networkInfo?: NetworkInfoDetail;
+  applications: InstalledApplicationDetail[];
+  packages: InstalledPackageDetail[];
+  hardwareDevices: HardwareDeviceDetail[];
+  appStatus: Record<string, string>;
+  permissions: PermissionStatusDetail[];
+  stats: EmployeeActivityStats;
+}
 
 // ──────────────────────────
 // Employee Auth API (for desktop client)

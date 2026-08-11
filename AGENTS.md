@@ -3,6 +3,25 @@
 > **Last audited:** 2026-08-11
 > **Changelog:**
 >
+> - 2026-08-11: **Web user-detail page + employee detail endpoint.** The HR → List of Users page
+>   dropdown was clipped by the table's `overflow-x-auto` scroll container whenever the list was
+>   short (the custom absolute-positioned menu) — replaced with the Radix `DropdownMenu` (portal-
+>   rendered, can never be clipped), and each row now links to a new **`/users/[id]`** page.
+>   Server: new aggregate endpoint **`GET /employees/:id/detail`** (protected) returns one
+>   employee's full machine picture in a single response — employee record, latest
+>   `device_hardware_info`, `storage_devices`, latest `network_info`, currently-installed
+>   applications/packages (active `employee_installed_*` junction links joined with the catalog
+>   rows), `hardware_devices` peripherals, `permission_status` checks, `app_status` key/value map
+>   and activity stats (session/item counts + last activity). UUID route param is resolved to the
+>   `EMP-XXXXX` id first (sync tables are keyed by it). New repo read methods in `new_schema_repo.go`
+>   (`GetLatestDeviceHardware`, `ListStorageDevices`, `GetLatestNetworkInfo`,
+>   `ListEmployeeApplications`, `ListEmployeePackages`, `ListHardwareDevices`, `ListAppStatus`,
+>   `ListPermissionStatus`, `GetEmployeeActivityStats`), `NewSchemaService.GetEmployeeDetail`,
+>   handler + route. The page shows identity/status, six stat tiles, and tabbed sections for
+>   Hardware (specs + storage + network + device status), Applications, Packages, Peripherals and
+>   Permissions — all real API data, with loading/empty/error states and a Generate-Secret dialog.
+>   Verified: `go build`/`go vet` clean, `tsc --noEmit` clean, `next build` succeeds with
+>   `/users/[id]` registered as a dynamic route.
 > - 2026-08-11: **Instant sync on login — full machine picture lands on the server the moment an employee logs in.**
 >   `SyncService` gained a wake-up signal (`RequestImmediateSync()` — `SemaphoreSlim(0,1)` released by the caller;
 >   the inter-pass wait is now `WaitAsync(wait, ct)` so a release ends the wait at once and runs a full drain pass
@@ -600,7 +619,8 @@ flowchart LR
 - ~45 page routes exist with polished UI
 - Login page with animated hero section
 - Auth check on mount (Redux + server cookie)
-- Users page — real API calls via TanStack Query (CRUD + generate secret)
+- Users page — real API calls via TanStack Query (CRUD + generate secret, portal-rendered Radix action menu)
+- **User detail page (`/users/[id]`)** — real API calls via new aggregate `GET /employees/:id/detail`: identity + status, stat tiles, hardware/storage/network, installed apps, packages, peripherals, permissions
 - Departments page — real API calls (CRUD)
 - Logs/Comprehensive page — real API calls (now using new app_sessions API)
 - Sidebar with permission-based filtering (client-side only)

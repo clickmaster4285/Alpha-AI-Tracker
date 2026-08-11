@@ -4,12 +4,14 @@ import "time"
 
 // AppStatus — key/value status rows (heartbeat, login state, permission bookmarks).
 // Natural key per employee: (employee_id, key). Ephemeral status.
+// NOTE: the app_status table has NO synced_at column (migration 017) — the SyncedAt field is
+// kept for API symmetry but must never be scanned (db:"-" prevents RowToStructByName traps).
 type AppStatus struct {
 	EmployeeID string     `json:"employeeId" db:"employee_id"`
 	Key        string     `json:"key" db:"key"`
 	Value      string     `json:"value" db:"value"`
 	UpdatedAt  time.Time  `json:"updatedAt" db:"updated_at"`
-	SyncedAt   *time.Time `json:"syncedAt,omitempty" db:"synced_at"`
+	SyncedAt   *time.Time `json:"syncedAt,omitempty" db:"-"`
 	CreatedAt  time.Time  `json:"createdAt" db:"created_at"`
 }
 

@@ -1,7 +1,16 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-08-11 (sync surfaces expanded — migrations 001–017, 16 tables, 11 sync endpoints, client retention)
+> **Last audited:** 2026-08-11 (employee detail endpoint + web user-detail page)
 > **Changelog:**
+> - 2026-08-11: **Employee detail aggregate endpoint** — `GET /api/v1/employees/:id/detail` (protected)
+>   returns the full machine picture for one employee in a single response: `employee` (UUID-resolved,
+>   then all sync-table reads keyed on the `EMP-XXXXX` id), latest `deviceHardware` + `storageDevices`
+>   + `networkInfo`, currently-installed `applications`/`packages` (active junction links joined with
+>   catalog rows — version/path/date from the junction, identity from the catalog), `hardwareDevices`
+>   peripherals, `permissions` checks, `appStatus` key/value map and activity `stats`
+>   (sessions/items/last-activity). New repo read methods in `new_schema_repo.go`, service method
+>   `GetEmployeeDetail`, handler `GetEmployeeDetail`, route 31 → 32. The web dashboard consumes it
+>   from the new `/users/[id]` page.
 > - 2026-08-10: **Employee disconnect endpoint removed** — `POST /api/v1/auth/employee-disconnect`
 >   (handler `EmployeeDisconnect`, DTO `EmployeeDisconnectRequest`, route) was deleted along with the
 >   client-side Disconnect button. The web admin `POST /api/v1/auth/logout` is unrelated and
@@ -193,6 +202,7 @@ All endpoints are under `/api/v1`. Full route inventory (30 routes):
 |---|---|---|
 | GET | `/employees` | List employees (paginated, filterable, JOIN department) |
 | GET | `/employees/:id` | Get employee by ID |
+| GET | `/employees/:id/detail` | Aggregate machine picture (hardware, storage, network, apps, packages, peripherals, permissions, stats) |
 | POST | `/employees` | Create employee |
 | PUT | `/employees/:id` | Update employee |
 | DELETE | `/employees/:id` | Soft-delete employee |
@@ -232,14 +242,20 @@ Employee token is carried in the request body (`{employeeId, token, entries: [..
 | GET | `/app-sessions` | List sessions (paginated, filterable, replaces old activity-logs listing) |
 | GET | `/app-items` | List items (paginated, filterable by session/itemType/search) |
 
-### Missing Endpoints (sync-only tables with no listing API)
+### Employee Detail (Protected)
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/employees/:id/detail` | **Aggregate machine picture** for one employee: employee record, latest `device_hardware_info`, `storage_devices`, latest `network_info`, currently-installed apps/packages (active junction links), `hardware_devices` peripherals, `permission_status`, `app_status` map and activity stats. Consumed by the web `/users/[id]` page. |
+
+### Missing Endpoints (sync-only tables with no standalone listing API)
 
 | Expected Endpoint | Purpose | Status |
 |---|---|---|
-| `GET /installed-apps` | List installed apps | ❌ Sync only |
-| `GET /installed-packages` | List installed packages | ❌ Sync only |
-| `GET /device-hardware` | List device hardware | ❌ Sync only |
-| `GET /network-info` | List network info | ❌ Sync only |
+| `GET /installed-apps` | List installed apps (all employees) | ❌ Sync only — per-employee view available via `/employees/:id/detail` |
+| `GET /installed-packages` | List installed packages (all employees) | ❌ Sync only — per-employee view via `/employees/:id/detail` |
+| `GET /device-hardware` | List device hardware (all employees) | ❌ Sync only — latest-per-employee via `/employees/:id/detail` |
+| `GET /network-info` | List network info (all employees) | ❌ Sync only — latest-per-employee via `/employees/:id/detail` |
 | `GET /session-events` | List session events | ❌ Sync only |
 
 ---

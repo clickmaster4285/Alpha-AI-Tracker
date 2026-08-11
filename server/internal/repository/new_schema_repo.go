@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -912,4 +913,256 @@ func (r *NewSchemaRepo) BulkUpsertStorageDevices(ctx context.Context, entries []
 		inserted += int(tag.RowsAffected())
 	}
 	return inserted, nil
+}
+
+// ────────────────────────────────
+// EMPLOYEE DETAIL READ VIEWS
+// (web dashboard — GET /employees/:id/detail)
+// ────────────────────────────────
+
+// GetLatestDeviceHardware returns the most recent device_hardware_info snapshot for an employee.
+func (r *NewSchemaRepo) GetLatestDeviceHardware(ctx context.Context, employeeID string) (*models.DeviceHardwareInfo, error) {
+	query := `
+		SELECT id, employee_id, COALESCE(device_id, '') AS device_id, COALESCE(mac_address, '') AS mac_address,
+		       COALESCE(hostname, '') AS hostname, COALESCE(os_name, '') AS os_name, COALESCE(os_version, '') AS os_version,
+		       COALESCE(cpu_model, '') AS cpu_model, cpu_cores, ram_total_mb,
+		       COALESCE(storage_devices::TEXT, '[]') AS storage_devices,
+		       COALESCE(gpu_model, '') AS gpu_model, gpu_vram_mb, collected_at, synced_at, created_at
+		FROM device_hardware_info
+		WHERE employee_id = $1 AND deleted_at IS NULL
+		ORDER BY collected_at DESC
+		LIMIT 1
+	`
+	var hw models.DeviceHardwareInfo
+	err := r.pool.QueryRow(ctx, query, employeeID).Scan(
+		&hw.ID, &hw.EmployeeID, &hw.DeviceID, &hw.MacAddress, &hw.Hostname, &hw.OsName, &hw.OsVersion,
+		&hw.CpuModel, &hw.CpuCores, &hw.RamTotalMB, &hw.StorageDevices, &hw.GpuModel, &hw.GpuVramMB,
+		&hw.CollectedAt, &hw.SyncedAt, &hw.CreatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get latest device_hardware_info: %w", err)
+	}
+	return &hw, nil
+}
+
+// ListStorageDevices returns the storage_devices rows for an employee.
+func (r *NewSchemaRepo) ListStorageDevices(ctx context.Context, employeeID string) ([]models.StorageDevice, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, employee_id, device_hardware_id, COALESCE(device_type, '') AS device_type,
+		       COALESCE(model, '') AS model, capacity_mb, synced_at, created_at
+		FROM storage_devices
+		WHERE employee_id = $1 AND deleted_at IS NULL
+		ORDER BY capacity_mb DESC
+	`, employeeID)
+	if err != nil {
+		return nil, fmt.Errorf("list storage_devices: %w", err)
+	}
+	defer rows.Close()
+
+	var devices []models.StorageDevice
+	for rows.Next() {
+		var d models.StorageDevice
+		if err := rows.Scan(
+			&d.ID, &d.EmployeeID, &d.DeviceHardwareID, &d.DeviceType, &d.Model, &d.CapacityMB,
+			&d.SyncedAt, &d.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan storage_device row: %w", err)
+		}
+		devices = append(devices, d)
+	}
+	return devices, rows.Err()
+}
+
+// GetLatestNetworkInfo returns the most recent network_info snapshot for an employee.
+func (r *NewSchemaRepo) GetLatestNetworkInfo(ctx context.Context, employeeID string) (*models.NetworkInfo, error) {
+	query := `
+		SELECT id, employee_id, COALESCE(public_ip, '') AS public_ip, COALESCE(private_ip, '') AS private_ip,
+		       COALESCE(mac_address, '') AS mac_address, COALESCE(network_interface_name, '') AS network_interface_name,
+		       collected_at, synced_at, created_at
+		FROM network_info
+		WHERE employee_id = $1 AND deleted_at IS NULL
+		ORDER BY collected_at DESC
+		LIMIT 1
+	`
+	var n models.NetworkInfo
+	err := r.pool.QueryRow(ctx, query, employeeID).Scan(
+		&n.ID, &n.EmployeeID, &n.PublicIP, &n.PrivateIP, &n.MacAddress, &n.NetworkInterfaceName,
+		&n.CollectedAt, &n.SyncedAt, &n.CreatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get latest network_info: %w", err)
+	}
+	return &n, nil
+}
+
+// ListEmployeeApplications returns the employee's currently-installed applications
+// (catalog row joined with the per-employee junction row, active links only).
+func (r *NewSchemaRepo) ListEmployeeApplications(ctx context.Context, employeeID string) ([]models.EmployeeApplicationDetail, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT ia.id, ia.app_name, COALESCE(ia.binary_name, '') AS binary_name,
+		       COALESCE(eia.app_version, '') AS app_version,
+		       COALESCE(eia.publisher, '') AS publisher,
+		       COALESCE(eia.install_path, '') AS install_path,
+		       eia.install_date, ia.is_browser, COALESCE(ia.categories, '') AS categories,
+		       COALESCE(ia.desktop_id, '') AS desktop_id, eia.first_seen_at, eia.last_seen_at
+		FROM employee_installed_applications eia
+		JOIN installed_applications ia ON ia.id = eia.installed_application_id
+		WHERE eia.employee_id = $1 AND eia.is_active = true AND ia.deleted_at IS NULL
+		ORDER BY ia.app_name ASC
+	`, employeeID)
+	if err != nil {
+		return nil, fmt.Errorf("list employee applications: %w", err)
+	}
+	defer rows.Close()
+
+	var apps []models.EmployeeApplicationDetail
+	for rows.Next() {
+		var a models.EmployeeApplicationDetail
+		if err := rows.Scan(
+			&a.ID, &a.AppName, &a.BinaryName, &a.Version, &a.Publisher, &a.InstallPath,
+			&a.InstallDate, &a.IsBrowser, &a.Categories, &a.DesktopID, &a.FirstSeenAt, &a.LastSeenAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan employee application row: %w", err)
+		}
+		apps = append(apps, a)
+	}
+	return apps, rows.Err()
+}
+
+// ListEmployeePackages returns the employee's currently-installed packages
+// (catalog row joined with the per-employee junction row, active links only).
+func (r *NewSchemaRepo) ListEmployeePackages(ctx context.Context, employeeID string) ([]models.EmployeePackageDetail, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT ip.id, ip.package_name, COALESCE(eip.version, '') AS version,
+		       COALESCE(ip.category, '') AS category, COALESCE(ip.source_manager, '') AS source_manager,
+		       COALESCE(eip.install_path, '') AS install_path,
+		       COALESCE(eip.publisher, '') AS publisher, COALESCE(ip.description, '') AS description,
+		       eip.first_seen_at, eip.last_seen_at
+		FROM employee_installed_packages eip
+		JOIN installed_packages ip ON ip.id = eip.installed_package_id
+		WHERE eip.employee_id = $1 AND eip.is_active = true AND ip.deleted_at IS NULL
+		ORDER BY ip.package_name ASC
+	`, employeeID)
+	if err != nil {
+		return nil, fmt.Errorf("list employee packages: %w", err)
+	}
+	defer rows.Close()
+
+	var pkgs []models.EmployeePackageDetail
+	for rows.Next() {
+		var p models.EmployeePackageDetail
+		if err := rows.Scan(
+			&p.ID, &p.PackageName, &p.Version, &p.Category, &p.SourceManager,
+			&p.InstallPath, &p.Publisher, &p.Description, &p.FirstSeenAt, &p.LastSeenAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan employee package row: %w", err)
+		}
+		pkgs = append(pkgs, p)
+	}
+	return pkgs, rows.Err()
+}
+
+// ListHardwareDevices returns the peripheral (USB hotplug) history for an employee.
+func (r *NewSchemaRepo) ListHardwareDevices(ctx context.Context, employeeID string) ([]models.HardwareDevice, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, employee_id, COALESCE(device_class, '') AS device_class, COALESCE(vendor, '') AS vendor,
+		       COALESCE(product, '') AS product, COALESCE(serial, '') AS serial, COALESCE(bus_path, '') AS bus_path,
+		       COALESCE(device_node, '') AS device_node, plugged_at, unplugged_at, synced_at, created_at
+		FROM hardware_devices
+		WHERE employee_id = $1 AND deleted_at IS NULL
+		ORDER BY plugged_at DESC
+	`, employeeID)
+	if err != nil {
+		return nil, fmt.Errorf("list hardware_devices: %w", err)
+	}
+	defer rows.Close()
+
+	var devices []models.HardwareDevice
+	for rows.Next() {
+		var d models.HardwareDevice
+		if err := rows.Scan(
+			&d.ID, &d.EmployeeID, &d.DeviceClass, &d.Vendor, &d.Product, &d.Serial, &d.BusPath,
+			&d.DeviceNode, &d.PluggedAt, &d.UnpluggedAt, &d.SyncedAt, &d.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan hardware_device row: %w", err)
+		}
+		devices = append(devices, d)
+	}
+	return devices, rows.Err()
+}
+
+// ListAppStatus returns the key/value status rows for an employee (heartbeat, etc.).
+// Note: app_status has no deleted_at column (ephemeral key/value store).
+func (r *NewSchemaRepo) ListAppStatus(ctx context.Context, employeeID string) ([]models.AppStatus, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT employee_id, key, value, updated_at, created_at
+		FROM app_status
+		WHERE employee_id = $1
+		ORDER BY key ASC
+	`, employeeID)
+	if err != nil {
+		return nil, fmt.Errorf("list app_status: %w", err)
+	}
+	defer rows.Close()
+
+	var statuses []models.AppStatus
+	for rows.Next() {
+		var s models.AppStatus
+		if err := rows.Scan(&s.EmployeeID, &s.Key, &s.Value, &s.UpdatedAt, &s.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan app_status row: %w", err)
+		}
+		statuses = append(statuses, s)
+	}
+	return statuses, rows.Err()
+}
+
+// ListPermissionStatus returns the permission-method check rows for an employee.
+func (r *NewSchemaRepo) ListPermissionStatus(ctx context.Context, employeeID string) ([]models.PermissionStatus, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT check_id, employee_id, COALESCE(session_id, '') AS session_id, COALESCE(session_type, '') AS session_type,
+		       COALESCE(platform, '') AS platform, checked_at, COALESCE(method, '') AS method, works, COALESCE(details, '') AS details,
+		       synced_at, created_at
+		FROM permission_status
+		WHERE employee_id = $1 AND deleted_at IS NULL
+		ORDER BY checked_at DESC
+	`, employeeID)
+	if err != nil {
+		return nil, fmt.Errorf("list permission_status: %w", err)
+	}
+	defer rows.Close()
+
+	var perms []models.PermissionStatus
+	for rows.Next() {
+		var p models.PermissionStatus
+		if err := rows.Scan(
+			&p.CheckID, &p.EmployeeID, &p.SessionID, &p.SessionType, &p.Platform,
+			&p.CheckedAt, &p.Method, &p.Works, &p.Details, &p.SyncedAt, &p.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan permission_status row: %w", err)
+		}
+		perms = append(perms, p)
+	}
+	return perms, rows.Err()
+}
+
+// GetEmployeeActivityStats returns derived counts over app_sessions / app_items.
+func (r *NewSchemaRepo) GetEmployeeActivityStats(ctx context.Context, employeeID string) (*models.ActivityStats, error) {
+	var s models.ActivityStats
+	err := r.pool.QueryRow(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM app_sessions WHERE employee_id = $1 AND deleted_at IS NULL),
+			(SELECT COUNT(*) FROM app_sessions WHERE employee_id = $1 AND deleted_at IS NULL AND ended_at IS NULL),
+			(SELECT COUNT(*) FROM app_items WHERE employee_id = $1 AND deleted_at IS NULL),
+			(SELECT MAX(started_at) FROM app_sessions WHERE employee_id = $1 AND deleted_at IS NULL)
+	`, employeeID).Scan(&s.TotalSessions, &s.OpenSessions, &s.TotalItems, &s.LastActivityAt)
+	if err != nil {
+		return nil, fmt.Errorf("get employee activity stats: %w", err)
+	}
+	return &s, nil
 }

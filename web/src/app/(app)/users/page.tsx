@@ -1,12 +1,20 @@
 'use client';
 
 import { useState } from 'react';
+import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check } from 'lucide-react';
+import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check, Eye } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { employeesApi, departmentsApi, type Employee, type CreateEmployeePayload, type UpdateEmployeePayload } from '@/lib/api';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+} from '@/components/ui/dropdown-menu';
 
 export default function UsersList() {
   const queryClient = useQueryClient();
@@ -15,7 +23,6 @@ export default function UsersList() {
   const [page, setPage] = useState(1);
   const [showAdd, setShowAdd] = useState(false);
   const [showEdit, setShowEdit] = useState<string | null>(null);
-  const [openAction, setOpenAction] = useState<string | null>(null);
   const [showSecret, setShowSecret] = useState<string | null>(null);
   const [secretValue, setSecretValue] = useState('');
   const [copied, setCopied] = useState(false);
@@ -73,7 +80,6 @@ export default function UsersList() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['employees'] });
       toast.success('Employee deleted', { description: 'The employee has been removed.' });
-      setOpenAction(null);
     },
     onError: (err: Error) => {
       toast.error('Failed to delete employee', { description: err.message });
@@ -135,11 +141,9 @@ export default function UsersList() {
 
   const handleDelete = (id: string) => {
     deleteMutation.mutate(id);
-    setOpenAction(null);
   };
 
   const handleGenerateSecret = (id: string) => {
-    setOpenAction(null);
     setShowSecret(id);
     setSecretValue('');
     setCopied(false);
@@ -248,7 +252,12 @@ export default function UsersList() {
                       >
                         {emp.avatar || emp.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)}
                       </div>
-                      <span className="text-sm font-medium text-foreground">{emp.name}</span>
+                      <Link
+                        href={`/users/${emp.id}`}
+                        className="text-sm font-medium text-foreground hover:text-primary hover:underline underline-offset-4 transition-colors"
+                      >
+                        {emp.name}
+                      </Link>
                     </div>
                   </td>
                   <td className="px-4 py-3 text-sm font-mono font-medium text-foreground">{emp.employeeId}</td>
@@ -268,37 +277,37 @@ export default function UsersList() {
                       {emp.trackingStatus === 'tracked' ? 'Tracked' : 'Untracked'}
                     </span>
                   </td>
-                  <td className="px-4 py-3 relative">
-                    <button
-                      onClick={() => setOpenAction(openAction === emp.id ? null : emp.id)}
-                      className="p-1.5 rounded hover:bg-muted transition-colors"
-                    >
-                      <MoreVertical className="w-4 h-4 text-muted-foreground" />
-                    </button>
-                    {openAction === emp.id && (
-                      <div className="absolute right-4 top-12 bg-card border border-border rounded-lg shadow-lg z-10 py-1 min-w-[160px]">
-                        <button
-                          onClick={() => { handleEdit(emp); setOpenAction(null); }}
-                          className="w-full text-left px-4 py-2 text-sm hover:bg-muted transition-colors text-foreground"
-                        >
-                          Edit
+                  <td className="px-4 py-3">
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button className="p-1.5 rounded hover:bg-muted transition-colors" aria-label="Employee actions">
+                          <MoreVertical className="w-4 h-4 text-muted-foreground" />
                         </button>
-                        <button
-                          onClick={() => handleGenerateSecret(emp.id)}
-                          className="w-full text-left px-4 py-2 text-sm hover:bg-muted transition-colors text-foreground flex items-center gap-2"
-                        >
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="bg-card border-border rounded-lg min-w-[180px]">
+                        <DropdownMenuItem asChild className="cursor-pointer">
+                          <Link href={`/users/${emp.id}`} className="flex items-center gap-2">
+                            <Eye className="w-3.5 h-3.5" />
+                            View Details
+                          </Link>
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => handleEdit(emp)} className="cursor-pointer">
+                          Edit
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => handleGenerateSecret(emp.id)} className="cursor-pointer flex items-center gap-2">
                           <Key className="w-3.5 h-3.5" />
                           Generate Login Secret
-                        </button>
-                        <button
-                          onClick={() => handleDelete(emp.id)}
-                          className="w-full text-left px-4 py-2 text-sm hover:bg-muted transition-colors text-destructive"
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          onSelect={() => handleDelete(emp.id)}
                           disabled={deleteMutation.isPending}
+                          className="cursor-pointer text-destructive focus:text-destructive focus:bg-destructive/10"
                         >
                           {deleteMutation.isPending ? 'Deleting...' : 'Delete'}
-                        </button>
-                      </div>
-                    )}
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </td>
                 </motion.tr>
               ))

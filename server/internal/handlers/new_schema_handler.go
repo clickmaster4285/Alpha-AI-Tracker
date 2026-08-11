@@ -372,3 +372,23 @@ func (h *NewSchemaHandler) SyncStorageDevices(c echo.Context) error {
 	}
 	return c.JSON(http.StatusOK, resp)
 }
+
+// ────────────────────────────────
+// Employee Detail (web dashboard — GET /employees/:id/detail)
+// ────────────────────────────────
+
+func (h *NewSchemaHandler) GetEmployeeDetail(c echo.Context) error {
+	detail, err := h.service.GetEmployeeDetail(c.Request().Context(), c.Param("id"))
+	if err != nil {
+		if err.Error() == "employee not found" {
+			return c.JSON(http.StatusNotFound, dto.APIError{Code: http.StatusNotFound, Message: "Employee not found"})
+		}
+		log.Printf("[new_schema] GetEmployeeDetail error: %v", err)
+		return c.JSON(http.StatusInternalServerError, dto.APIError{
+			Code:    http.StatusInternalServerError,
+			Message: "Failed to load employee detail",
+			Detail:  err.Error(),
+		})
+	}
+	return c.JSON(http.StatusOK, detail)
+}

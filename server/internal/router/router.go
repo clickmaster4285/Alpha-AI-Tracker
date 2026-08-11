@@ -108,6 +108,10 @@ func Setup(
 	// Employees
 	employees := protected.Group("/employees")
 	employees.GET("", employeeHandler.ListEmployees)
+	// Aggregate machine picture (hardware, apps, packages, peripherals, permissions, stats)
+	// for a single employee — consumed by the web user-detail page. Registered BEFORE /:id is
+	// irrelevant to Echo (static segments win), but kept next to it for readability.
+	employees.GET("/:id/detail", newSchemaHandler.GetEmployeeDetail)
 	employees.GET("/:id", employeeHandler.GetEmployee)
 	employees.POST("", employeeHandler.CreateEmployee)
 	employees.PUT("/:id", employeeHandler.UpdateEmployee)

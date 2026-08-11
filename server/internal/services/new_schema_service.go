@@ -674,3 +674,189 @@ func (s *NewSchemaService) SyncStorageDevices(ctx context.Context, req *dto.Sync
 	}
 	return &dto.SyncBatchResponse{Synced: inserted, Message: fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries))}, nil
 }
+
+// ────────────────────────────────
+// EMPLOYEE DETAIL (web dashboard — GET /employees/:id/detail)
+// Aggregates every synced machine-data surface for one employee into a single response.
+// ────────────────────────────────
+
+// GetEmployeeDetail builds the full machine picture for an employee by UUID.
+// The sync tables are keyed by employee_id (EMP-XXXXX), so the UUID from the route is
+// resolved to the employee record first, then every read uses emp.EmployeeID.
+func (s *NewSchemaService) GetEmployeeDetail(ctx context.Context, id string) (*dto.EmployeeDetailResponse, error) {
+	emp, err := s.employeeRepo.GetByID(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("get employee: %w", err)
+	}
+	if emp == nil {
+		return nil, fmt.Errorf("employee not found")
+	}
+
+	employeeID := emp.EmployeeID
+	resp := &dto.EmployeeDetailResponse{
+		Employee:        employeeToResponse(emp),
+		StorageDevices:  []dto.StorageDeviceDetail{},
+		Applications:    []dto.InstalledApplicationDetail{},
+		Packages:        []dto.InstalledPackageDetail{},
+		HardwareDevices: []dto.HardwareDeviceDetail{},
+		Permissions:     []dto.PermissionStatusDetail{},
+		AppStatus:       map[string]string{},
+	}
+
+	// Latest device hardware snapshot.
+	hw, err := s.repo.GetLatestDeviceHardware(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	if hw != nil {
+		resp.DeviceHardware = &dto.DeviceHardwareDetail{
+			ID:             hw.ID,
+			MacAddress:     hw.MacAddress,
+			Hostname:       hw.Hostname,
+			OsName:         hw.OsName,
+			OsVersion:      hw.OsVersion,
+			CpuModel:       hw.CpuModel,
+			CpuCores:       hw.CpuCores,
+			RamTotalMb:     hw.RamTotalMB,
+			StorageDevices: hw.StorageDevices,
+			GpuModel:       hw.GpuModel,
+			GpuVramMb:      hw.GpuVramMB,
+			CollectedAt:    hw.CollectedAt,
+			SyncedAt:       hw.SyncedAt,
+		}
+	}
+
+	// Storage devices (children of device_hardware_info).
+	storage, err := s.repo.ListStorageDevices(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range storage {
+		resp.StorageDevices = append(resp.StorageDevices, dto.StorageDeviceDetail{
+			ID:         d.ID,
+			DeviceType: d.DeviceType,
+			Model:      d.Model,
+			CapacityMb: d.CapacityMB,
+			CreatedAt:  d.CreatedAt,
+		})
+	}
+
+	// Latest network snapshot.
+	net, err := s.repo.GetLatestNetworkInfo(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	if net != nil {
+		resp.NetworkInfo = &dto.NetworkInfoResponse{
+			ID:                   net.ID,
+			EmployeeID:           net.EmployeeID,
+			PublicIP:             net.PublicIP,
+			PrivateIP:            net.PrivateIP,
+			MacAddress:           net.MacAddress,
+			NetworkInterfaceName: net.NetworkInterfaceName,
+			CollectedAt:          net.CollectedAt,
+			SyncedAt:             net.SyncedAt,
+		}
+	}
+
+	// Currently-installed applications (active junction links).
+	apps, err := s.repo.ListEmployeeApplications(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range apps {
+		resp.Applications = append(resp.Applications, dto.InstalledApplicationDetail{
+			ID:          a.ID,
+			AppName:     a.AppName,
+			BinaryName:  a.BinaryName,
+			Version:     a.Version,
+			Publisher:   a.Publisher,
+			InstallPath: a.InstallPath,
+			InstallDate: a.InstallDate,
+			IsBrowser:   a.IsBrowser,
+			Categories:  a.Categories,
+			DesktopID:   a.DesktopID,
+			FirstSeenAt: a.FirstSeenAt,
+			LastSeenAt:  a.LastSeenAt,
+		})
+	}
+
+	// Currently-installed packages (active junction links).
+	pkgs, err := s.repo.ListEmployeePackages(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range pkgs {
+		resp.Packages = append(resp.Packages, dto.InstalledPackageDetail{
+			ID:            p.ID,
+			PackageName:   p.PackageName,
+			Version:       p.Version,
+			Category:      p.Category,
+			SourceManager: p.SourceManager,
+			InstallPath:   p.InstallPath,
+			Publisher:     p.Publisher,
+			Description:   p.Description,
+			FirstSeenAt:   p.FirstSeenAt,
+			LastSeenAt:    p.LastSeenAt,
+		})
+	}
+
+	// Peripherals (USB hotplug history).
+	devices, err := s.repo.ListHardwareDevices(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range devices {
+		resp.HardwareDevices = append(resp.HardwareDevices, dto.HardwareDeviceDetail{
+			ID:          d.ID,
+			DeviceClass: d.DeviceClass,
+			Vendor:      d.Vendor,
+			Product:     d.Product,
+			Serial:      d.Serial,
+			BusPath:     d.BusPath,
+			PluggedAt:   d.PluggedAt,
+			UnpluggedAt: d.UnpluggedAt,
+		})
+	}
+
+	// Key/value app status.
+	statuses, err := s.repo.ListAppStatus(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	for _, st := range statuses {
+		resp.AppStatus[st.Key] = st.Value
+	}
+
+	// Permission-method checks.
+	perms, err := s.repo.ListPermissionStatus(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range perms {
+		resp.Permissions = append(resp.Permissions, dto.PermissionStatusDetail{
+			CheckID:     p.CheckID,
+			SessionID:   p.SessionID,
+			SessionType: p.SessionType,
+			Platform:    p.Platform,
+			CheckedAt:   p.CheckedAt,
+			Method:      p.Method,
+			Works:       p.Works,
+			Details:     p.Details,
+		})
+	}
+
+	// Activity stats over sessions/items.
+	stats, err := s.repo.GetEmployeeActivityStats(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	resp.Stats = dto.EmployeeActivityStats{
+		TotalSessions:  stats.TotalSessions,
+		OpenSessions:   stats.OpenSessions,
+		TotalItems:     stats.TotalItems,
+		LastActivityAt: stats.LastActivityAt,
+	}
+
+	return resp, nil
+}
