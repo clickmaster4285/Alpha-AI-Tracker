@@ -9,6 +9,7 @@ import { useAuth } from '@/lib/auth';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
+import DownloadAppSection from '@/components/DownloadAppSection';
 
 const floatingIcons = [
   { icon: Activity, x: '10%', y: '15%', delay: 0, size: 20 },
@@ -91,7 +92,13 @@ function LoginForm() {
   }
 
   return (
-    <div className="min-h-screen flex bg-background overflow-hidden">
+    <div className="min-h-screen flex flex-col bg-background overflow-hidden">
+      {/* Download Alpha AI Tracker — top strip */}
+      <div className="relative z-20 px-4 pt-4 lg:px-8 lg:pt-6">
+        <DownloadAppSection compact />
+      </div>
+
+      <div className="flex flex-1 overflow-y-auto">
       {/* Left panel - Hero */}
       <div className="hidden lg:flex lg:w-[48%] relative items-center justify-center">
         <div className="absolute inset-0" style={{
@@ -211,6 +218,7 @@ function LoginForm() {
           </form>
           <p className="mt-8 text-center text-xs text-muted-foreground">&copy; {new Date().getFullYear()} {APP_NAME}. All rights reserved.</p>
         </motion.div>
+      </div>
       </div>
     </div>
   );
