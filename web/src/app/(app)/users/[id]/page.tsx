@@ -138,11 +138,11 @@ export default function UserDetailPage() {
 
       {/* ── Profile hero ── */}
       <div className="rounded-xl border border-border bg-card overflow-hidden shadow-card">
-        <div className="h-24 gradient-primary relative">
-          <div className="absolute inset-0 opacity-20 bg-[radial-gradient(circle_at_70%_20%,white,transparent_60%)]" />
-        </div>
-        <div className="px-6 pb-6">
-          <div className="flex flex-col sm:flex-row sm:items-end gap-4 -mt-10">
+        {/* <div className="h-24 gradient-primary "> */}
+          {/* <div className="absolute inset-0 opacity-20 bg-[radial-gradient(circle_at_70%_20%,white,transparent_60%)]" /> */}
+        {/* </div> */}
+        <div className="p-6 ">
+          <div className="flex flex-col sm:flex-row sm:items-end gap-4 ">
             <div
               className="w-20 h-20 rounded-2xl flex items-center justify-center text-2xl font-bold text-primary-foreground ring-4 ring-card shadow-card-hover flex-shrink-0"
               style={{ backgroundColor: employee.avatarColor || '#7C3AED' }}

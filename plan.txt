@@ -1,9 +1,0 @@
-perfect now everything is perfectly running 
-but the install/uninstall cann't deduct realtime why ???
-why need to click reload btn from gui or close and reopen the gui of tracker tool why???
-i want completely background runner
-
-
-i don't want to set minute every minute scan after 
-i want when i uninstall the package/application throguh terminal/software center/control pennal/cmd/powser shell/manually file delete/ or other source i remove the package/application 
-then instant update my db
