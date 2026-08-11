@@ -111,6 +111,13 @@ public partial class InstalledAppDetector : Abstractions.IInstalledAppDetector
             _knownApps.Clear();
             _missingPerms.Clear();
             _permInstructions.Clear();
+            // CRITICAL: _installedApps must also be cleared — the platform scanners only
+            // APPEND, so without this a recheck keeps every stale entry forever. An app
+            // uninstalled since the last scan stays in the list, the lifecycle pass never
+            // closes its open cycle, and the DB appears frozen until the app restarts.
+            // (PackageDetector.ForceRecheck already clears its _packages list.)
+            _installedApps.Clear();
+            _binaryToDisplayName.Clear();
         }
         EnsureInitialized();
     }
@@ -501,12 +508,8 @@ foreach ($d in $dirs) {
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
-            using var proc = Process.Start(psi);
-            if (proc == null) return;
-
-            var output = proc.StandardOutput.ReadToEnd();
-            proc.WaitForExit(20000);
-            _ = proc.StandardError.ReadToEnd();
+            var output = ProcessFilter.RunProbe(psi, 20000);
+            if (output == null) return;
 
             foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
             {

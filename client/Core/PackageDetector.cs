@@ -159,11 +159,8 @@ public partial class PackageDetector : Abstractions.IPackageDetector
         try
         {
             var psi = BuildCliStartInfo("npm", "list -g --json --depth=0");
-            using var proc = Process.Start(psi);
-            if (proc == null) return;
-
-            var output = proc.StandardOutput.ReadToEnd();
-            proc.WaitForExit(5000);
+            var output = ProcessFilter.RunProbe(psi, 15000);
+            if (output == null) return;
 
             using var doc = JsonDocument.Parse(output);
             if (!doc.RootElement.TryGetProperty("dependencies", out var deps)) return;
@@ -222,11 +219,8 @@ public partial class PackageDetector : Abstractions.IPackageDetector
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
-            using var proc = Process.Start(psi);
-            if (proc == null) return;
-
-            var output = proc.StandardOutput.ReadToEnd();
-            proc.WaitForExit(5000);
+            var output = ProcessFilter.RunProbe(psi, 15000);
+            if (output == null) return;
 
             using var doc = JsonDocument.Parse(output);
             foreach (var item in doc.RootElement.EnumerateArray())
@@ -282,13 +276,8 @@ public partial class PackageDetector : Abstractions.IPackageDetector
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
-            using var proc = Process.Start(psi);
-            if (proc == null) return;
-
-            var output = proc.StandardOutput.ReadToEnd();
-            proc.WaitForExit(3000);
-            // Drain stderr (dpkg-query warnings) so they never pollute the app log.
-            _ = proc.StandardError.ReadToEnd();
+            var output = ProcessFilter.RunProbe(psi, 10000);
+            if (output == null) return;
 
             foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
             {
@@ -341,11 +330,8 @@ public partial class PackageDetector : Abstractions.IPackageDetector
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
-            using var proc = Process.Start(psi);
-            if (proc == null) return;
-
-            var output = proc.StandardOutput.ReadToEnd();
-            proc.WaitForExit(3000);
+            var output = ProcessFilter.RunProbe(psi, 10000);
+            if (output == null) return;
 
             // Snap .desktop files live here (e.g. firefox_firefox.desktop).
             // Any snap that has a desktop entry is a GUI application discovered by
@@ -402,11 +388,8 @@ public partial class PackageDetector : Abstractions.IPackageDetector
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
-            using var proc = Process.Start(psi);
-            if (proc == null) return;
-
-            var output = proc.StandardOutput.ReadToEnd();
-            proc.WaitForExit(3000);
+            var output = ProcessFilter.RunProbe(psi, 10000);
+            if (output == null) return;
 
             // Flatpak app .desktop files are exported to the flatpak share dir and surfaced
             // via $XDG_DATA_DIRS (e.g. /var/lib/flatpak/exports/share/applications).
@@ -478,11 +461,8 @@ public partial class PackageDetector : Abstractions.IPackageDetector
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
-            using var proc = Process.Start(psi);
-            if (proc == null) return;
-
-            var output = proc.StandardOutput.ReadToEnd();
-            proc.WaitForExit(5000);
+            var output = ProcessFilter.RunProbe(psi, 15000);
+            if (output == null) return;
 
             foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
             {
@@ -515,11 +495,8 @@ public partial class PackageDetector : Abstractions.IPackageDetector
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
-            using var proc = Process.Start(psi);
-            if (proc == null) return;
-
-            var output = proc.StandardOutput.ReadToEnd();
-            proc.WaitForExit(5000);
+            var output = ProcessFilter.RunProbe(psi, 15000);
+            if (output == null) return;
 
             foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
             {
@@ -556,11 +533,8 @@ public partial class PackageDetector : Abstractions.IPackageDetector
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
-            using var proc = Process.Start(psi);
-            if (proc == null) return;
-
-            var output = proc.StandardOutput.ReadToEnd();
-            proc.WaitForExit(10000);
+            var output = ProcessFilter.RunProbe(psi, 15000);
+            if (output == null) return;
 
             foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
             {
@@ -606,13 +580,8 @@ public partial class PackageDetector : Abstractions.IPackageDetector
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
-            using var proc = Process.Start(psi);
-            if (proc == null) return;
-
-            var output = proc.StandardOutput.ReadToEnd();
-            proc.WaitForExit(15000);
-            // Drain stderr (first-run agreements / progress) so it never pollutes the app log.
-            _ = proc.StandardError.ReadToEnd();
+            var output = ProcessFilter.RunProbe(psi, 20000);
+            if (output == null) return;
 
             var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
             if (lines.Length == 0) return;
@@ -696,11 +665,8 @@ public partial class PackageDetector : Abstractions.IPackageDetector
         try
         {
             var psi = BuildCliStartInfo("scoop", "list");
-            using var proc = Process.Start(psi);
-            if (proc == null) return;
-
-            var output = proc.StandardOutput.ReadToEnd();
-            proc.WaitForExit(10000);
+            var output = ProcessFilter.RunProbe(psi, 15000);
+            if (output == null) return;
 
             foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
             {

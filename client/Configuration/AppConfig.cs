@@ -27,6 +27,13 @@ public class AppConfig
     // USB / peripheral hotplug tracking (local SQLite only; no server sync yet)
     public bool HardwareDevicesEnabled { get; init; } = true;
 
+    // Software inventory — 100% EVENT-DRIVEN detection via InstalledSoftwareWatcher: it watches
+    // the OS install locations (.desktop dirs, dpkg state, Start Menu, /Applications, package-
+    // manager dirs) and triggers an instant rescan when software is installed/uninstalled through
+    // terminal / software center / control panel / cmd / powershell / manual file delete. NO
+    // minute-based periodic scan (user rule 2026-08-10).
+    public bool InventoryWatchEnabled { get; init; } = true;
+
     public static AppConfig FromEnv()
     {
         return new AppConfig
@@ -45,6 +52,7 @@ public class AppConfig
             BrowserHistoryEnabled = GetEnv("ALPHA_BROWSER_HISTORY_ENABLED") is not ("0" or "false" or "False"),
             BrowserHistoryPollSec = int.TryParse(GetEnv("ALPHA_BROWSER_HISTORY_POLL_SECONDS"), out var histPoll) ? histPoll : 10,
             HardwareDevicesEnabled = GetEnv("ALPHA_HARDWARE_DEVICES_ENABLED") is not ("0" or "false" or "False"),
+            InventoryWatchEnabled = GetEnv("ALPHA_INVENTORY_WATCH_ENABLED") is not ("0" or "false" or "False"),
         };
     }
 

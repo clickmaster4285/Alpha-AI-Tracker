@@ -123,6 +123,24 @@ public partial class InstalledAppsViewModel : ViewModelBase
     }
 
     /// <summary>
+    /// Lightweight live poll — re-reads the stored SQLite inventory only (no OS scan),
+    /// so the page stays current while the background watcher/collector update the DB.
+    /// Called by the page's visibility timer while the page is on screen.
+    /// </summary>
+    public async Task PollAsync(CancellationToken ct = default)
+    {
+        if (IsBusy) return;
+        try
+        {
+            await LoadFromStoreAsync(ct);
+        }
+        catch (OperationCanceledException)
+        {
+            // Navigated away mid-poll.
+        }
+    }
+
+    /// <summary>
     /// Rescan — asks the collector to re-scan the OS (deduped + classified) and store
     /// into SQLite, then re-reads the freshly written inventory. The only path on this
     /// page that touches the OS; normal refreshes never do.

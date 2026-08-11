@@ -163,6 +163,13 @@ builder.Services.AddHostedService<BackgroundGuardService>();
 builder.Services.AddSingleton<LogCollectorService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<LogCollectorService>());
 
+// Near-real-time install/uninstall detection: watches .desktop/dpkg/Start Menu//Applications
+// and triggers an immediate inventory rescan on change — no GUI interaction needed.
+if (config.InventoryWatchEnabled)
+{
+    builder.Services.AddHostedService<InstalledSoftwareWatcher>();
+}
+
 // Browser Journey (Option B — accessibility-based: reads the OS accessibility tree.
 // No debugger, no extension, no browser catalog dependency; works on every browser
 // and every Chrome version, including install→use→uninstall-in-5-min scenarios.)

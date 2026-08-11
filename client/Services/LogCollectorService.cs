@@ -49,9 +49,11 @@ public class LogCollectorService : BackgroundService
     private string? _currentToken;
     private bool _trackingEnabled;
     private readonly object _trackingLock = new();
+    // Serializes on-demand inventory rescans (GUI Rescan button vs InstalledSoftwareWatcher)
+    // so two full OS walks never overlap.
+    private readonly SemaphoreSlim _inventoryScanGate = new(1, 1);
     private DateTime _lastHardwareCollection = DateTime.MinValue;
     private DateTime _lastNetworkCollection = DateTime.MinValue;
-    private DateTime _lastInstalledAppScan = DateTime.MinValue;
     private string? _lastNetworkPublicIp;
     private string? _lastNetworkPrivateIp;
     private string? _lastHardwareFingerprint;
@@ -500,17 +502,15 @@ public class LogCollectorService : BackgroundService
                     await CollectNetworkInfoAsync(stoppingToken);
                 }
 
-                // ─── Scan installed applications (every 30 cycles ~15 min) ───
-                if (_cycleCount % 30 == 0)
-                {
-                    await CollectInstalledApplicationsAsync(stoppingToken);
-                }
-
-                // ─── Scan installed packages (every 60 cycles ~30 min) ───
-                if (_cycleCount % 60 == 0)
-                {
-                    await CollectInstalledPackagesAsync(stoppingToken);
-                }
+                // ─── NO periodic installed-software scan ───
+                // Install/uninstall detection is 100% EVENT-DRIVEN by InstalledSoftwareWatcher:
+                // it watches the OS install locations (.desktop dirs, dpkg state, Start Menu,
+                // /Applications, package-manager dirs) and calls RescanInventoryAsync the
+                // moment anything changes — so an uninstall/install through terminal, software
+                // center, control panel, cmd/powershell or manual file delete updates the DB
+                // within seconds. There is intentionally NO every-N-minutes scan (user rule
+                // 2026-08-10: no minute-based inventory polling). The only other scan is the
+                // one-time startup scan at boot.
 
                 // ─── Periodic sync & cleanup ───
                 _cycleCount++;
@@ -1566,13 +1566,26 @@ public class LogCollectorService : BackgroundService
 
     /// <summary>
     /// On-demand OS inventory rescan — used by the Installed Applications page's
-    /// Rescan button. Re-runs the SAME joint app+package scan the periodic loop
-    /// uses (deduped + classified via SoftwareClassifier) and stores the result
-    /// into SQLite; the GUI then re-reads the tables. The OS scan stays here in
-    /// the collector — the UI never scans the OS for display.
+    /// Rescan button AND the InstalledSoftwareWatcher background service. Re-runs
+    /// the SAME joint app+package scan the periodic loop uses (deduped + classified
+    /// via SoftwareClassifier) and stores the result into SQLite; the GUI then
+    /// re-reads the tables. The OS scan stays here in the collector — the UI never
+    /// scans the OS for display.
     /// </summary>
-    public Task RescanInventoryAsync(CancellationToken ct = default)
-        => CollectInstalledApplicationsAsync(ct);
+    public async Task RescanInventoryAsync(CancellationToken ct = default)
+    {
+        // Serialize with the background watcher: if an event-driven rescan is already
+        // running, wait for it rather than stacking a second full OS walk.
+        await _inventoryScanGate.WaitAsync(ct);
+        try
+        {
+            await CollectInstalledApplicationsAsync(ct);
+        }
+        finally
+        {
+            _inventoryScanGate.Release();
+        }
+    }
 
     private async Task CollectInstalledApplicationsAsync(CancellationToken ct)
     {
