@@ -1,22 +1,27 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using client.Core;
 
 namespace client.Services.Watchers;
 
 /// <summary>
-/// Near-real-time install/uninstall detection. Watches the OS locations where software
-/// installation artifacts appear/disappear (.desktop files, dpkg state, Start Menu
-/// shortcuts, /Applications bundles) and triggers an immediate <see cref="LogCollectorService"/>
-/// inventory rescan when anything changes — so an install or uninstall is recorded within
-/// seconds WITHOUT any GUI interaction and WITHOUT any minute-based polling (user rule
-/// 2026-08-10: no periodic inventory scan — the watcher is the ONLY runtime trigger; the
-/// one-time startup scan at boot is the only other scan).
+/// Near-real-time install/uninstall detection for BOTH applications and packages. Watches
+/// the OS locations where installation artifacts appear/disappear — app evidence
+/// (.desktop files, Start Menu shortcuts, /Applications bundles) AND package-manager state
+/// (dpkg status, npm global root, pip user site, snap db, flatpak runtimes, brew Cellar,
+/// Windows %APPDATA%\npm) — and triggers an immediate <see cref="LogCollectorService"/>
+/// inventory rescan when anything changes. So an app OR package install/uninstall through
+/// terminal, software center, control panel, cmd/powershell, npm/pip/apt, or manual file
+/// delete is recorded within seconds WITHOUT any GUI interaction and WITHOUT any
+/// minute-based polling (user rule 2026-08-10: no periodic inventory scan — the watcher is
+/// the ONLY runtime trigger; the one-time startup scan at boot is the only other scan).
 ///
 /// Why file watching and not polling: install/uninstall is a discrete filesystem event
-/// (.desktop created/deleted, dpkg status rewritten, .lnk created/deleted, .app moved into
-/// /Applications) — a watcher reacts instantly, a poll can only be as fast as its interval.
-/// Events are debounced (an apt transaction rewrites dpkg status several times) and
-/// coalesced (a rescan already running is not stacked).
+/// (.desktop created/deleted, dpkg status rewritten, npm package dir created/deleted,
+/// .lnk created/deleted, .app moved into /Applications) — a watcher reacts instantly, a
+/// poll can only be as fast as its interval. Events are debounced (an apt transaction
+/// rewrites dpkg status several times) and coalesced (a rescan already running is not
+/// stacked).
 /// </summary>
 public sealed class InstalledSoftwareWatcher : BackgroundService
 {
@@ -91,24 +96,105 @@ public sealed class InstalledSoftwareWatcher : BackgroundService
         return dirs.Where(d => !string.IsNullOrWhiteSpace(d)).Distinct().ToArray();
     }
 
+    /// <summary>
+    /// The trees where PACKAGE installs leave filesystem evidence, per platform. Watched in
+    /// addition to <see cref="GetWatchDirectories"/> so npm/pip/snap/flatpak/brew/winget
+    /// installs and uninstalls trigger the same instant rescan as GUI-app installs.
+    /// All locations are structural (package-manager conventions) — no product names.
+    /// </summary>
+    private static string[] GetPackageWatchDirectories()
+    {
+        var dirs = new List<string>();
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+        if (OperatingSystem.IsLinux())
+        {
+            // npm global installs: the package dir is created/deleted as a DIRECT child of
+            // the global node_modules root, so one non-recursive watcher there sees
+            // `npm install -g` / `npm uninstall -g` instantly. Resolved at runtime because
+            // the global root varies per setup (nvm/fnm/user prefix/deb node).
+            foreach (var root in ResolveNpmGlobalRoots())
+                if (!string.IsNullOrWhiteSpace(root) && Directory.Exists(root))
+                    dirs.Add(root);
+            // pip --user installs land under ~/.local/lib/python3.x/site-packages (PEP 370).
+            // Watched recursively — the versioned site-packages dir is a grandchild.
+            dirs.Add(Path.Combine(home, ".local", "lib"));
+            // snap state DB — rewritten in place on every `snap install`/`snap remove`.
+            dirs.Add("/var/lib/snapd/db");
+            // flatpak runtimes; new runtime dirs are direct children of these roots (and the
+            // trees contain full runtime filesystems, so they are watched top-level only).
+            dirs.Add("/var/lib/flatpak/runtime");
+            dirs.Add(Path.Combine(home, ".local", "share", "flatpak", "runtime"));
+        }
+        else if (OperatingSystem.IsWindows())
+        {
+            // npm global on Windows: %APPDATA%\npm\node_modules (direct child = package dir).
+            var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            if (!string.IsNullOrWhiteSpace(appData))
+                dirs.Add(Path.Combine(appData, "npm", "node_modules"));
+        }
+        else if (OperatingSystem.IsMacOS())
+        {
+            // npm global installs (same runtime resolution as Linux — npm is a shell script
+            // here) plus Homebrew: each formula gets a top-level dir in the Cellar.
+            foreach (var root in ResolveNpmGlobalRoots())
+                if (!string.IsNullOrWhiteSpace(root) && Directory.Exists(root))
+                    dirs.Add(root);
+            dirs.Add("/usr/local/Cellar");
+            dirs.Add("/opt/homebrew/Cellar");
+        }
+
+        return dirs.Where(d => !string.IsNullOrWhiteSpace(d)).Distinct().ToArray();
+    }
+
+    /// <summary>
+    /// Resolve the npm global root via `npm root -g` (time-boxed probe), falling back to the
+    /// two standard system roots when npm itself isn't on PATH. Never blocks long: the probe
+    /// is hard-capped by <see cref="ProcessFilter.RunProbe"/>.
+    /// </summary>
+    private static IEnumerable<string> ResolveNpmGlobalRoots()
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "npm",
+            Arguments = "root -g",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        var output = ProcessFilter.RunProbe(psi, 5000)?.Trim();
+        if (!string.IsNullOrWhiteSpace(output))
+            yield return output;
+        // Standard system npm global roots (used when npm is installed but not on PATH).
+        yield return "/usr/local/lib/node_modules";
+        yield return "/usr/lib/node_modules";
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var watched = 0;
-        foreach (var dir in GetWatchDirectories())
+        var dirs = GetWatchDirectories().Concat(GetPackageWatchDirectories()).Distinct().ToArray();
+        foreach (var dir in dirs)
         {
             if (!Directory.Exists(dir)) continue;
             try
             {
                 // LastWrite is only needed where state is REWRITTEN in place rather than
-                // recreated — /var/lib/dpkg status. Applying it to every tree (e.g. Program
-                // Files, where apps/AV write files in place constantly) would turn every
-                // write into a rescan trigger.
-                var needsInPlaceRewrite = dir.IndexOf("dpkg", StringComparison.OrdinalIgnoreCase) >= 0;
-                // Program Files is watched top-level only: install/uninstall creates/removes
-                // a top-level app folder there, and the recursive Start Menu watcher is the
-                // primary Windows signal anyway — recursion would only add noise.
-                var recurse = !(OperatingSystem.IsWindows()
-                    && dir.IndexOf("Program Files", StringComparison.OrdinalIgnoreCase) >= 0);
+                // recreated — /var/lib/dpkg status and /var/lib/snapd/db. Applying it to
+                // every tree (e.g. Program Files, where apps/AV write files in place
+                // constantly) would turn every write into a rescan trigger.
+                var needsInPlaceRewrite = dir.Contains("dpkg", StringComparison.OrdinalIgnoreCase)
+                    || dir.Contains("snapd", StringComparison.OrdinalIgnoreCase);
+                // Program Files, node_modules and flatpak runtime trees are watched
+                // top-level only: install/uninstall creates/removes a top-level entry there,
+                // and the recursive app watcher (Start Menu / .desktop dirs) is the primary
+                // GUI signal anyway — recursion inside package trees only adds noise (every
+                // file of every package would fire events; a flatpak runtime tree is a full
+                // filesystem).
+                var recurse = !(dir.Contains("Program Files", StringComparison.OrdinalIgnoreCase)
+                    || dir.Contains("node_modules", StringComparison.OrdinalIgnoreCase)
+                    || dir.EndsWith("flatpak/runtime", StringComparison.OrdinalIgnoreCase));
                 var watcher = new FileSystemWatcher(dir)
                 {
                     IncludeSubdirectories = recurse,
