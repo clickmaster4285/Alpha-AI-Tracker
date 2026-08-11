@@ -91,6 +91,11 @@ public class SqliteLogStore : ILogStore, IDisposable
             CREATE INDEX IF NOT EXISTS idx_app_sessions_process_id ON app_sessions(process_id);
             CREATE INDEX IF NOT EXISTS idx_app_sessions_open ON app_sessions(ended_at, process_id);
             CREATE INDEX IF NOT EXISTS idx_app_items_context ON app_items(app_session_id, item_type, identifier);
+            -- Sync engine (2026-08-11): keep WHERE is_synced = 0 ORDER BY ... LIMIT cheap even at
+            -- 50k+ queued rows. Fresh DBs already get these via DatabaseSchema; existing DBs need
+            -- them here (app_sessions/app_items were the only big tables without an is_synced index).
+            CREATE INDEX IF NOT EXISTS idx_app_sessions_unsent ON app_sessions(is_synced, started_at);
+            CREATE INDEX IF NOT EXISTS idx_app_items_unsent ON app_items(is_synced, opened_at);
         ";
         await indexCmd.ExecuteNonQueryAsync(ct);
     }
@@ -327,22 +332,37 @@ public class SqliteLogStore : ILogStore, IDisposable
 
     public async Task MarkDeviceHardwareInfoSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
+        await MarkSentCoreAsync("device_hardware_info", "id", ids, ct);
+    }
+
+    /// <summary>
+    /// Shared batched mark-sent: ONE UPDATE ... WHERE id IN (...) per chunk instead of one
+    /// UPDATE per row (the old loop ran 50k individual statements when draining a big
+    /// backlog). Chunks of 400 stay safely under SQLite's SQLITE_MAX_VARIABLE_NUMBER.
+    /// </summary>
+    private async Task MarkSentCoreAsync(string table, string idColumn, IReadOnlyList<string> ids, CancellationToken ct)
+    {
         if (_connection == null || ids.Count == 0) return;
         await _connectionGate.WaitAsync(ct);
         try
         {
-            await using var tx = await _connection.BeginTransactionAsync(ct);
-            var cmd = _connection.CreateCommand();
-            cmd.CommandText = "UPDATE device_hardware_info SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
-            var p = cmd.Parameters.Add("$id", SqliteType.Text);
-            foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
-            await tx.CommitAsync(ct);
+            foreach (var chunk in ids.Chunk(400))
+            {
+                var inClause = string.Join(",", chunk.Select((_, i) => $"$id{i}"));
+                var cmd = _connection.CreateCommand();
+                cmd.CommandText =
+                    $"UPDATE {table} SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE {idColumn} IN ({inClause})";
+                for (int i = 0; i < chunk.Length; i++)
+                    cmd.Parameters.AddWithValue($"$id{i}", chunk[i]);
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
         }
         finally
         {
             _connectionGate.Release();
         }
     }
+
 
     // ────────────────────────────────────────
     // Installed Applications
@@ -495,21 +515,7 @@ public class SqliteLogStore : ILogStore, IDisposable
 
     public async Task MarkInstalledApplicationsSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
-        if (_connection == null || ids.Count == 0) return;
-        await _connectionGate.WaitAsync(ct);
-        try
-        {
-            await using var tx = await _connection.BeginTransactionAsync(ct);
-            var cmd = _connection.CreateCommand();
-            cmd.CommandText = "UPDATE installed_applications SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
-            var p = cmd.Parameters.Add("$id", SqliteType.Text);
-            foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
-            await tx.CommitAsync(ct);
-        }
-        finally
-        {
-            _connectionGate.Release();
-        }
+        await MarkSentCoreAsync("installed_applications", "id", ids, ct);
     }
 
     /// <summary>Every installed_applications row — the full inventory the Installed Applications page renders.</summary>
@@ -672,21 +678,7 @@ public class SqliteLogStore : ILogStore, IDisposable
 
     public async Task MarkInstalledPackagesSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
-        if (_connection == null || ids.Count == 0) return;
-        await _connectionGate.WaitAsync(ct);
-        try
-        {
-            await using var tx = await _connection.BeginTransactionAsync(ct);
-            var cmd = _connection.CreateCommand();
-            cmd.CommandText = "UPDATE installed_packages SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
-            var p = cmd.Parameters.Add("$id", SqliteType.Text);
-            foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
-            await tx.CommitAsync(ct);
-        }
-        finally
-        {
-            _connectionGate.Release();
-        }
+        await MarkSentCoreAsync("installed_packages", "id", ids, ct);
     }
 
     /// <summary>Every installed_packages row — the full inventory the Installed Applications page renders.</summary>
@@ -1144,21 +1136,7 @@ public class SqliteLogStore : ILogStore, IDisposable
 
     public async Task MarkNetworkInfoSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
-        if (_connection == null || ids.Count == 0) return;
-        await _connectionGate.WaitAsync(ct);
-        try
-        {
-            await using var tx = await _connection.BeginTransactionAsync(ct);
-            var cmd = _connection.CreateCommand();
-            cmd.CommandText = "UPDATE network_info SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
-            var p = cmd.Parameters.Add("$id", SqliteType.Text);
-            foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
-            await tx.CommitAsync(ct);
-        }
-        finally
-        {
-            _connectionGate.Release();
-        }
+        await MarkSentCoreAsync("network_info", "id", ids, ct);
     }
 
     public async Task<NetworkInfo?> GetLastNetworkInfoAsync(CancellationToken ct)
@@ -1306,21 +1284,7 @@ public class SqliteLogStore : ILogStore, IDisposable
 
     public async Task MarkSessionEventsSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
-        if (_connection == null || ids.Count == 0) return;
-        await _connectionGate.WaitAsync(ct);
-        try
-        {
-            await using var tx = await _connection.BeginTransactionAsync(ct);
-            var cmd = _connection.CreateCommand();
-            cmd.CommandText = "UPDATE session_events SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
-            var p = cmd.Parameters.Add("$id", SqliteType.Text);
-            foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
-            await tx.CommitAsync(ct);
-        }
-        finally
-        {
-            _connectionGate.Release();
-        }
+        await MarkSentCoreAsync("session_events", "id", ids, ct);
     }
 
     public async Task<SessionEvent?> GetLastSessionEventAsync(CancellationToken ct)
@@ -1448,21 +1412,7 @@ public class SqliteLogStore : ILogStore, IDisposable
 
     public async Task MarkAppSessionsSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
-        if (_connection == null || ids.Count == 0) return;
-        await _connectionGate.WaitAsync(ct);
-        try
-        {
-            await using var tx = await _connection.BeginTransactionAsync(ct);
-            var cmd = _connection.CreateCommand();
-            cmd.CommandText = "UPDATE app_sessions SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
-            var p = cmd.Parameters.Add("$id", SqliteType.Text);
-            foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
-            await tx.CommitAsync(ct);
-        }
-        finally
-        {
-            _connectionGate.Release();
-        }
+        await MarkSentCoreAsync("app_sessions", "id", ids, ct);
     }
 
     // ────────────────────────────────────────
@@ -1554,21 +1504,7 @@ public class SqliteLogStore : ILogStore, IDisposable
 
     public async Task MarkAppItemsSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
-        if (_connection == null || ids.Count == 0) return;
-        await _connectionGate.WaitAsync(ct);
-        try
-        {
-            await using var tx = await _connection.BeginTransactionAsync(ct);
-            var cmd = _connection.CreateCommand();
-            cmd.CommandText = "UPDATE app_items SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
-            var p = cmd.Parameters.Add("$id", SqliteType.Text);
-            foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
-            await tx.CommitAsync(ct);
-        }
-        finally
-        {
-            _connectionGate.Release();
-        }
+        await MarkSentCoreAsync("app_items", "id", ids, ct);
     }
 
     public async Task UpdateAppItemParentAsync(string itemId, string parentItemId, CancellationToken ct)
@@ -1970,21 +1906,7 @@ public class SqliteLogStore : ILogStore, IDisposable
 
     public async Task MarkStorageDevicesSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
-        if (_connection == null || ids.Count == 0) return;
-        await _connectionGate.WaitAsync(ct);
-        try
-        {
-            await using var tx = await _connection.BeginTransactionAsync(ct);
-            var cmd = _connection.CreateCommand();
-            cmd.CommandText = "UPDATE storage_devices SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now') WHERE id = $id";
-            var p = cmd.Parameters.Add("$id", SqliteType.Text);
-            foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
-            await tx.CommitAsync(ct);
-        }
-        finally
-        {
-            _connectionGate.Release();
-        }
+        await MarkSentCoreAsync("storage_devices", "id", ids, ct);
     }
 
     // ────────────────────────────────────────
@@ -2085,6 +2007,172 @@ public class SqliteLogStore : ILogStore, IDisposable
             _connectionGate.Release();
         }
     }
+    // ────────────────────────────────────────
+    // Sync: hardware devices (sent to server; never deleted client-side)
+    // ────────────────────────────────────────
+
+    public async Task<IReadOnlyList<HardwareDevice>> GetUnsentHardwareDevicesAsync(int limit, CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<HardwareDevice>();
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT * FROM hardware_devices WHERE is_synced = 0 ORDER BY plugged_at ASC LIMIT $limit";
+            cmd.Parameters.AddWithValue("$limit", limit);
+            var results = new List<HardwareDevice>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct)) results.Add(MapHardwareDeviceReader(reader));
+            return results;
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task MarkHardwareDevicesSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        await MarkSentCoreAsync("hardware_devices", "id", ids, ct);
+    }
+
+    // ────────────────────────────────────────
+    // Sync: app_status + permission_status (sent to server; never deleted client-side)
+    // ────────────────────────────────────────
+
+    public async Task<IReadOnlyList<AppStatus>> GetUnsentAppStatusAsync(int limit, CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<AppStatus>();
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT key, value, updated_at, is_synced, synced_at FROM app_status WHERE is_synced = 0 ORDER BY updated_at ASC LIMIT $limit";
+            cmd.Parameters.AddWithValue("$limit", limit);
+            var results = new List<AppStatus>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                results.Add(new AppStatus
+                {
+                    Key = reader.GetString(reader.GetOrdinal("key")),
+                    Value = reader.GetString(reader.GetOrdinal("value")),
+                    UpdatedAt = reader.IsDBNull(reader.GetOrdinal("updated_at")) ? "" : reader.GetString(reader.GetOrdinal("updated_at")),
+                    IsSynced = reader.GetInt32(reader.GetOrdinal("is_synced")) == 1,
+                    SyncedAt = reader.IsDBNull(reader.GetOrdinal("synced_at")) ? null : reader.GetString(reader.GetOrdinal("synced_at")),
+                });
+            }
+            return results;
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task MarkAppStatusSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        await MarkSentCoreAsync("app_status", "key", ids, ct);
+    }
+
+    public async Task<IReadOnlyList<PermissionStatus>> GetUnsentPermissionStatusAsync(int limit, CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<PermissionStatus>();
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT * FROM permission_status WHERE is_synced = 0 ORDER BY checked_at ASC LIMIT $limit";
+            cmd.Parameters.AddWithValue("$limit", limit);
+            var results = new List<PermissionStatus>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                results.Add(new PermissionStatus
+                {
+                    CheckId = reader.GetString(reader.GetOrdinal("check_id")),
+                    SessionId = reader.IsDBNull(reader.GetOrdinal("session_id")) ? "" : reader.GetString(reader.GetOrdinal("session_id")),
+                    SessionType = reader.IsDBNull(reader.GetOrdinal("session_type")) ? "" : reader.GetString(reader.GetOrdinal("session_type")),
+                    Platform = reader.IsDBNull(reader.GetOrdinal("platform")) ? "" : reader.GetString(reader.GetOrdinal("platform")),
+                    CheckedAt = reader.IsDBNull(reader.GetOrdinal("checked_at")) ? "" : reader.GetString(reader.GetOrdinal("checked_at")),
+                    Method = reader.IsDBNull(reader.GetOrdinal("method")) ? "" : reader.GetString(reader.GetOrdinal("method")),
+                    Works = reader.GetInt32(reader.GetOrdinal("works")) == 1,
+                    Details = reader.IsDBNull(reader.GetOrdinal("details")) ? null : reader.GetString(reader.GetOrdinal("details")),
+                    EmployeeId = reader.IsDBNull(reader.GetOrdinal("employee_id")) ? null : reader.GetString(reader.GetOrdinal("employee_id")),
+                    EmployeeName = reader.IsDBNull(reader.GetOrdinal("employee_name")) ? null : reader.GetString(reader.GetOrdinal("employee_name")),
+                    IsSynced = reader.GetInt32(reader.GetOrdinal("is_synced")) == 1,
+                });
+            }
+            return results;
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task MarkPermissionStatusSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        await MarkSentCoreAsync("permission_status", "check_id", ids, ct);
+    }
+
+    /// <summary>
+    /// Retention cleanup (24h default): deletes SYNCED rows the server already has that are no
+    /// longer needed locally — old app_items, CLOSED old app_sessions (open sessions and sessions
+    /// that still have items are never deleted), uninstalled inventory cycles (is_installed = 0),
+    /// and superseded network rows (is_current = 0). Everything else is retained forever. Runs in
+    /// ONE transaction so a crash mid-cleanup can't partially apply.
+    /// </summary>
+    public async Task<SyncedDataDeletionCounts> DeleteSyncedDataOlderThanAsync(DateTime cutoff, CancellationToken ct)
+    {
+        if (_connection == null) return SyncedDataDeletionCounts.Empty;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cutoffIso = cutoff.ToString("O");
+            await using var tx = await _connection.BeginTransactionAsync(ct);
+
+            var itemsCmd = _connection.CreateCommand();
+            ((DbCommand)itemsCmd).Transaction = tx;
+            itemsCmd.CommandText = "DELETE FROM app_items WHERE is_synced = 1 AND opened_at < $cutoff";
+            itemsCmd.Parameters.AddWithValue("$cutoff", cutoffIso);
+            var itemsDeleted = await itemsCmd.ExecuteNonQueryAsync(ct);
+
+            var sessionsCmd = _connection.CreateCommand();
+            ((DbCommand)sessionsCmd).Transaction = tx;
+            sessionsCmd.CommandText = @"
+                DELETE FROM app_sessions
+                WHERE is_synced = 1
+                  AND ended_at IS NOT NULL
+                  AND started_at < $cutoff
+                  AND NOT EXISTS (SELECT 1 FROM app_items WHERE app_items.app_session_id = app_sessions.id)";
+            sessionsCmd.Parameters.AddWithValue("$cutoff", cutoffIso);
+            var sessionsDeleted = await sessionsCmd.ExecuteNonQueryAsync(ct);
+
+            var appsCmd = _connection.CreateCommand();
+            ((DbCommand)appsCmd).Transaction = tx;
+            appsCmd.CommandText = "DELETE FROM installed_applications WHERE is_installed = 0 AND is_synced = 1";
+            var appsDeleted = await appsCmd.ExecuteNonQueryAsync(ct);
+
+            var pkgsCmd = _connection.CreateCommand();
+            ((DbCommand)pkgsCmd).Transaction = tx;
+            pkgsCmd.CommandText = "DELETE FROM installed_packages WHERE is_installed = 0 AND is_synced = 1";
+            var pkgsDeleted = await pkgsCmd.ExecuteNonQueryAsync(ct);
+
+            var netCmd = _connection.CreateCommand();
+            ((DbCommand)netCmd).Transaction = tx;
+            netCmd.CommandText = "DELETE FROM network_info WHERE is_current = 0 AND is_synced = 1";
+            var netDeleted = await netCmd.ExecuteNonQueryAsync(ct);
+
+            await tx.CommitAsync(ct);
+            return new SyncedDataDeletionCounts(itemsDeleted, sessionsDeleted, appsDeleted, pkgsDeleted, netDeleted);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
 
     // ────────────────────────────────────────
     // Status & Employee Info
@@ -2185,7 +2273,10 @@ public class SqliteLogStore : ILogStore, IDisposable
             cmd.CommandText = DatabaseSchema.InsertPermissionSql;
             ((DbCommand)cmd).Transaction = tx;
 
-            var checkId = Guid.NewGuid().ToString("N");
+            // Dedup fix (2026-08-11): the check_id was "{newGuid}_{method}" — a FRESH GUID on
+            // every call (~every 5 min) inserted new rows instead of updating, flooding the
+            // table with thousands of duplicates/day. Now keyed on the STABLE "{platform}_{method}"
+            // and upserted (ON CONFLICT(check_id) DO UPDATE) — one row per permission method.
             var platform = "Linux";
             if (OperatingSystem.IsWindows()) platform = "Windows";
             else if (OperatingSystem.IsMacOS()) platform = "macOS";
@@ -2195,10 +2286,14 @@ public class SqliteLogStore : ILogStore, IDisposable
             var empId = empInfo?.EmployeeId;
             var empName = empInfo?.Name;
 
+            // Bookmark id for the last-checked status (NOT the row key — rows are keyed on
+            // "{platform}_{method}" so they upsert in place instead of duplicating).
+            var checkId = Guid.NewGuid().ToString("N");
+
             foreach (var kvp in permissions)
             {
                 cmd.Parameters.Clear();
-                cmd.Parameters.AddWithValue("$check_id", $"{checkId}_{kvp.Key}");
+                cmd.Parameters.AddWithValue("$check_id", $"{platform}_{kvp.Key}");
                 cmd.Parameters.AddWithValue("$session_id", SessionInfo.SessionId);
                 cmd.Parameters.AddWithValue("$session_type", sessionType);
                 cmd.Parameters.AddWithValue("$platform", platform);

@@ -3,6 +3,55 @@
 > **Last audited:** 2026-08-11
 > **Changelog:**
 >
+> - 2026-08-11: **Instant sync on login — full machine picture lands on the server the moment an employee logs in.**
+>   `SyncService` gained a wake-up signal (`RequestImmediateSync()` — `SemaphoreSlim(0,1)` released by the caller;
+>   the inter-pass wait is now `WaitAsync(wait, ct)` so a release ends the wait at once and runs a full drain pass
+>   instead of waiting out the 60s idle tick). `MainViewModel` injects the singleton `SyncService` (now registered
+>   `AddSingleton` + `AddHostedService(GetRequiredService)` — same pattern as `LogCollectorService`) and fires it in
+>   BOTH login paths: `LoginAsync` (after `SaveEmployeeInfoAsync`, so the token is persisted before the sync reads it)
+>   and `InitializeAsync` (session restore on launch). The instant pass drains every unsent table —
+>   `device_hardware_info`, `installed_applications`, `installed_packages`, `network_info`, `storage_devices`,
+>   `hardware_devices`, `session_events`, `permission_status`, `app_status`, `app_sessions`, `app_items` — in the same
+>   byte-bounded/gzip/backoff pipeline as the idle passes. `employee_info` itself needs no sync: the login endpoint
+>   response already carries the employee record server-side (the client table is its offline cache). Semantics: a
+>   request while a pass is running or while one is already pending is a single no-op release (one drain covers it),
+>   so login never stacks passes. Verified: `dotnet build` 0/0, code review clean (no races; credentials persisted
+>   before signal; DI resolves the same singleton).
+> - 2026-08-11: **Client retention + 4 new server sync surfaces.** The client now DELETES synced
+>   data the server already has: `app_items`/`app_sessions` older than `ALPHA_SYNC_RETENTION_HOURS`
+>   (24h default; OPEN sessions are NEVER deleted, and a session is only deleted once all its
+>   app_items are gone), `installed_applications`/`installed_packages` rows with `is_installed=0`
+>   (closed install cycles), and superseded `network_info` rows (`is_current=0`). Everything else
+>   is retained forever. Runs in `SyncService` after each clean drain pass, one SQLite transaction.
+>   **Four previously local-only tables now sync to the server** (migration 017): `app_status`
+>   (key/value; a value change resets is_synced so the server learns it next roundtrip),
+>   `hardware_devices`, `permission_status`, `storage_devices` — new DTO/service/repo/handler/routes
+>   (11 sync endpoints total). **permission_status duplication root-caused & fixed:**
+>   `SetPermissionStatusAsync` minted a FRESH GUID per check (~every 5 min) and inserted new rows
+>   instead of updating → ~2,800 rows/day; now keyed on the stable `"{platform}_{method}"` with
+>   `ON CONFLICT(check_id) DO UPDATE` (one row per permission method). Client: `is_synced`/`synced_at`
+>   columns added to `app_status`/`permission_status` (idempotent MigrateSql ALTERs);
+>   `MarkSentCoreAsync` generalized to a configurable id column. Server DB wiped as requested
+>   (all data tables emptied; users/employees/departments/schema_migrations kept — verified).
+>   Verified: `dotnet build` 0/0, `go build`/`go vet` clean, migrations 001–017 applied.
+> - 2026-08-11: **Sync engine decoupled — collection NEVER blocks on the network; 50k+ backlogs drain in minutes.**
+>   The old inline sync ran inside the collection loop every 10 cycles (~5 min) and fetched a FIXED 500 rows/table/cycle
+>   (50k queued rows → ~8 h to drain, while collection paused and CPU spiked). New dedicated `client/Services/SyncService.cs`
+>   (BackgroundService, registered in `Program.cs`) drains unsent SQLite rows on its own loop: chunks bounded by BOTH row
+>   count (`ALPHA_SYNC_MAX_ROWS`, 1000) and serialized payload bytes (`ALPHA_SYNC_MAX_BYTES`, ~1 MB, oversized slices
+>   auto-split by binary halving), ~150 ms politeness pause between chunks, a 5-min per-pass budget
+>   (`ALPHA_SYNC_MAX_DURATION_SEC`) so a huge backlog never monopolizes CPU, and **exponential backoff** on failure
+>   (5s→10s→…→`ALPHA_SYNC_BACKOFF_MAX_SEC` 5 min). Request bodies are **gzip-compressed** (`ALPHA_SYNC_COMPRESSION`,
+>   server side: `middleware.BodyLimit("20M")` + `middleware.Decompress()` added in `server/internal/router/router.go` —
+>   Echo's default 2 MB body cap could reject big raw batches). SQLite mark-sent is now batched
+>   (`UPDATE … WHERE id IN (…)`, 400 ids/statement — was one UPDATE per row), and existing DBs gained
+>   `(is_synced, started_at)` / `(is_synced, opened_at)` indexes on the two big tables (fresh DBs already had them).
+>   Server: `SyncInstalledApps`/`SyncInstalledPackages` now use **ONE transaction per request** (was 1 tx per entry =
+>   500 tx per batch). New env knobs: `ALPHA_SYNC_INTERVAL_SEC / MAX_ROWS / MAX_BYTES / CHUNK_DELAY_MS /
+>   MAX_DURATION_SEC / BACKOFF_MAX_SEC / COMPRESSION` (`.env` + `.env.example` + `AppConfig`). The collection loop now
+>   only does `StorePermissionStatus` + heartbeat. Docs: `client/ARCHITECTURE.md` §13 + env table. Verified: `dotnet build`
+>   0/0, `go build`/`go vet` clean. ⚠️ Installer-Parity: not "done" until verified from an installed build (re-bake
+>   `config.enc` — the new vars must be in `.env` before `encrypt-config.sh`).
 > - 2026-08-11: **Inventory GUI shows ONLY currently-installed software — uninstall history hidden.** The Installed Applications page (Applications/Packages tabs) no longer lists closed install cycles: `InstalledAppsViewModel.ApplyFilter` skips `IsInstalled == false` rows, and the table's **UNINSTALLED column was removed** (header + cell) along with the dimmed `RowOpacity` history treatment — the `RowOpacity` property is gone from `InventoryRow` (closed-cycle rows still live in SQLite and sync upstream unchanged; page + dashboard badges already counted only installed cycles). The lifecycle data model is untouched — this is display-only, client-only (no server/web change).
 > - 2026-08-11: **Package install/uninstall is now real-time too — `InstalledSoftwareWatcher` gained package-manager watch locations.** The round-3 watcher only watched APP evidence (`.desktop` dirs + `/var/lib/dpkg` on Linux), so `npm install -g`/`npm uninstall -g` (e.g. cline) changed nothing the watcher saw — the DB only updated when the GUI Rescan button manually called `RescanInventoryAsync`. New `GetPackageWatchDirectories()` watches the trees where PACKAGE installs leave filesystem evidence: **Linux** — npm global root (resolved at runtime via a time-boxed `npm root -g` probe, since the root varies per setup: nvm/fnm/user-prefix/deb node, plus `/usr/local/lib/node_modules` + `/usr/lib/node_modules` fallbacks; a package dir is a DIRECT child, so one non-recursive watcher sees install/uninstall instantly), `~/.local/lib` (PEP 370 pip `--user` site, recursive — the versioned site-packages dir is a grandchild), `/var/lib/snapd/db` (snap state, rewritten in place → LastWrite), flatpak runtime roots; **Windows** — `%APPDATA%\npm\node_modules` (npm global); **macOS** — Homebrew Cellars. node_modules/Program Files trees are watched top-level only (recursion inside package trees only adds noise); `RescanInventoryAsync` already re-scans apps AND packages, so one event covers both. Verified live on this DB, one process lifetime, no GUI: `npm install -g cline` → new open `installed_packages` row in **~2 s**; `npm uninstall -g cline` → that cycle closed in **~3 s**; rescan count stays flat while idle (2 total, no loop); cline restored to its pre-test (uninstalled) state; build 0/0, client healthy.
 > - 2026-08-10 (round 3): **Install/uninstall detection is now 100% EVENT-DRIVEN — no minute-based polling (user rule 2026-08-10: no periodic inventory scan).** New `InstalledSoftwareWatcher` (BackgroundService) watches the OS install locations — Linux `.desktop` dirs (user + system + flatpak + snap exports) and `/var/lib/dpkg`; Windows Start Menu (user + common) and Program Files (top-level only); macOS `/Applications` — and triggers an instant `LogCollectorService.RescanInventoryAsync` whenever software is installed/uninstalled through terminal, software center, control panel, cmd/powershell or manual file delete. Events are debounced (1.5s anchored to the FIRST event of the burst, so a constant event stream can never starve the rescan), min-gapped (5s) and coalesced (an in-flight rescan is never stacked; a change arriving mid-scan re-arms the burst so nothing is lost). The collector's `_cycleCount % 30/60` periodic app/package scans were REMOVED entirely — the one-time startup scan is the only other scan — and `ALPHA_INVENTORY_SCAN_MINUTES` was deleted (only `ALPHA_INVENTORY_WATCH_ENABLED` remains). The GUI Installed Apps page runs a 5s `DispatcherTimer → PollAsync` (pure SQLite re-read, no OS scan) while visible, so changes appear live without clicking Rescan or restarting. **Two root-cause bugs were found and fixed live:** (1) **probe deadlock froze the watcher** — the old `StandardOutput.ReadToEnd() → WaitForExit(ms)` pattern blocked forever when a grandchild inherited the stdout pipe (observed `wait_for_partner`/`anon_pipe_read`); because the rescan never returned, its in-flight flag stayed set and EVERY later install/uninstall event was coalesced away — the DB looked frozen until an app restart. All 11 CLI probes (10 in `PackageDetector`, 1 in `InstalledAppDetector`) now go through the new `ProcessFilter.RunProbe`: concurrent stdout+stderr drain (a chatty stderr can never fill its pipe), a hard time-box on BOTH exit and stream drain, and `Kill(entireProcessTree)` on timeout; (2) **uninstall was invisible after the first rescan** — `InstalledAppDetector.ForceRecheck()` cleared `_knownApps` but NEVER `_installedApps`, and the platform scanners only APPEND, so an uninstalled app stayed in every scan result forever and the lifecycle pass never closed its cycle (it only looked correct in earlier tests because each test cycle restarted the client). `ForceRecheck` now clears `_installedApps` + `_binaryToDisplayName` (PackageDetector already cleared its `_packages`). Verified live on this DB, one process lifetime, no restart: copyq install → new open row in **~2–5 s**; copyq uninstall → that row closed in **~2–5 s**; rescan count stays flat while idle (no loop); client healthy, build 0/0. Installer note: the watcher is compiled into `client.dll` (no packaging change); the `ALPHA_INVENTORY_WATCH_ENABLED` knob ships via the normal `config.enc` pipeline (`.env` before `encrypt-config.sh`).
@@ -398,7 +447,7 @@ flowchart LR
     style note_ws fill:#5a3a3a,color:#fff,stroke-dasharray: 5 5
 ```
 
-> All 7 sync endpoints exist on the server. `activity-logs/sync` and `shell-commands/sync` were removed from the product entirely (client + server).
+> All 11 sync endpoints exist on the server (7 original + app-status/hardware-devices/permission-status/storage-devices, 2026-08-11). `activity-logs/sync` and `shell-commands/sync` were removed from the product entirely (client + server).
 
 ---
 
@@ -437,6 +486,10 @@ flowchart LR
 | Session events sync (client → server)     | REST POST`/api/v1/session-events/sync`      | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
 | App sessions sync (client → server)       | REST POST`/api/v1/app-sessions/sync`        | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
 | App items sync (client → server)          | REST POST`/api/v1/app-items/sync`           | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
+| App status sync (client → server)          | REST POST`/api/v1/app-status/sync`          | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
+| Hardware devices sync (client → server)    | REST POST`/api/v1/hardware-devices/sync`    | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
+| Permission status sync (client → server)   | REST POST`/api/v1/permission-status/sync`   | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
+| Storage devices sync (client → server)     | REST POST`/api/v1/storage-devices/sync`     | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
 
 ### Server ↔ Web
 
@@ -465,11 +518,11 @@ flowchart LR
 
 **What works:**
 
-- Migrations 001-016 run on startup (15 files; 010 adds `process_id`/`parent_process_id`, 013 adds session identity, 014 adds journey fields, 015/016 add app/package catalogs + junction tables)
+- Migrations 001-017 run on startup (16 files; 010 adds `process_id`/`parent_process_id`, 013 adds session identity, 014 adds journey fields, 015/016 add app/package catalogs + junction tables, 017 adds app_status/hardware_devices/permission_status/storage_devices)
 - Full CRUD for users, employees, departments
 - Web admin auth (email/password → httpOnly cookie with encrypted JWT)
 - Employee auth (Redis one-time secret → JWT token)
-- 7 sync endpoints: device_hardware, installed_apps, installed_packages, network_info, session_events, app_sessions, app_items (+ synced_at for all)
+- 11 sync endpoints: device_hardware, installed_apps, installed_packages, network_info, session_events, app_sessions, app_items, app_status, hardware_devices, permission_status, storage_devices (+ synced_at for all; 2026-08-11 added the last four)
 - Catalog dedup: apps keyed by `app_fingerprint` (desktop_id|binary_name), packages by `package_fingerprint` (package_name|source_manager), per-employee junction tables with `first_seen_at`/`last_seen_at`/`is_active`
 - Hourly `jobs/staleness_sweep.go` deactivates junction links idle > `LINK_STALE_DAYS=7`
 - App sessions + app items listing (`GET /app-sessions`, `GET /app-items`) with filtering/pagination
@@ -508,7 +561,7 @@ flowchart LR
 - Models: DeviceHardwareInfo (with mac/gpu/storage), InstalledApplication (with metadata + binary_name), NetworkInfo (with public IP), SessionEvent, AppSession (with FK to installed_apps/packages), AppItem (self-referencing via parent_item_id)
 - Encrypted config system (AES-256-GCM, transport→machine key migration)
 - Login flow with server
-- Batched sync engine (every ~5 min, FK-ordered, 500-row batches, stop-on-failure per table)
+- **Dedicated sync engine** (2026-08-11) — `SyncService` background loop decoupled from collection: drains unsent rows in byte-bounded chunks (1000 rows / ~1MB), gzip-compressed, ~150ms polite pauses, 5-min per-pass budget, exponential backoff; FK-ordered (sessions before items). Collection never blocks on the network.
 - **Device hardware**: now collects mac_address, storage_devices, gpu_model from OS
 - **Installed apps**: scans actual OS databases (registry, .desktop files, .app bundles) — GUI apps only, not running processes; binary_name mapping extracted from Exec= line
 - **Installed packages**: detects CLI tools/runtimes/libraries from npm/pip/apt/brew/choco/winget/scoop/cargo/snap/flatpak — separate table from installed_applications

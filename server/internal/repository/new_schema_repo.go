@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alpha-ai-tracker/server/internal/models"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/alpha-ai-tracker/server/internal/models"
 )
 
 type NewSchemaRepo struct {
@@ -739,4 +739,177 @@ func (r *NewSchemaRepo) UpsertEmployeePackageLink(ctx context.Context, tx pgx.Tx
 		return fmt.Errorf("upsert employee package link: %w", err)
 	}
 	return nil
+}
+
+// ────────────────────────────────
+// App Status (key/value status rows; natural key employee_id+key)
+// ────────────────────────────────
+
+func (r *NewSchemaRepo) UpsertAppStatus(ctx context.Context, tx pgx.Tx, e models.AppStatus) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO app_status (employee_id, key, value, updated_at)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (employee_id, key) DO UPDATE SET
+			value = EXCLUDED.value,
+			updated_at = EXCLUDED.updated_at
+	`, e.EmployeeID, e.Key, e.Value, e.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("upsert app_status: %w", err)
+	}
+	return nil
+}
+
+// ────────────────────────────────
+// Hardware Devices (USB / peripheral hotplug)
+// ────────────────────────────────
+
+func (r *NewSchemaRepo) BulkUpsertHardwareDevices(ctx context.Context, entries []models.HardwareDevice) (int, error) {
+	if len(entries) == 0 {
+		return 0, nil
+	}
+	batchSize := 500
+	inserted := 0
+	for i := 0; i < len(entries); i += batchSize {
+		end := i + batchSize
+		if end > len(entries) {
+			end = len(entries)
+		}
+		batch := entries[i:end]
+		valueStrings := make([]string, 0, len(batch))
+		args := make([]interface{}, 0, len(batch)*10)
+		argIdx := 1
+
+		for _, e := range batch {
+			valueStrings = append(valueStrings, fmt.Sprintf(
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
+				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
+			))
+			args = append(args,
+				e.ID, e.EmployeeID, e.DeviceClass, e.Vendor, e.Product,
+				e.Serial, e.BusPath, e.DeviceNode, e.PluggedAt, e.UnpluggedAt,
+			)
+			argIdx += 10
+		}
+
+		query := fmt.Sprintf(`
+			INSERT INTO hardware_devices
+				(id, employee_id, device_class, vendor, product, serial, bus_path, device_node, plugged_at, unplugged_at)
+			VALUES %s
+			ON CONFLICT (id) DO UPDATE SET
+				unplugged_at = COALESCE(EXCLUDED.unplugged_at, hardware_devices.unplugged_at),
+				synced_at = NOW()
+		`, strings.Join(valueStrings, ", "))
+
+		tag, err := r.pool.Exec(ctx, query, args...)
+		if err != nil {
+			return inserted, fmt.Errorf("bulk upsert hardware_devices: %w", err)
+		}
+		inserted += int(tag.RowsAffected())
+	}
+	return inserted, nil
+}
+
+// ────────────────────────────────
+// Permission Status (one row per permission method; keyed by check_id)
+// ────────────────────────────────
+
+func (r *NewSchemaRepo) BulkUpsertPermissionStatus(ctx context.Context, entries []models.PermissionStatus) (int, error) {
+	if len(entries) == 0 {
+		return 0, nil
+	}
+	batchSize := 500
+	inserted := 0
+	for i := 0; i < len(entries); i += batchSize {
+		end := i + batchSize
+		if end > len(entries) {
+			end = len(entries)
+		}
+		batch := entries[i:end]
+		valueStrings := make([]string, 0, len(batch))
+		args := make([]interface{}, 0, len(batch)*9)
+		argIdx := 1
+
+		for _, e := range batch {
+			valueStrings = append(valueStrings, fmt.Sprintf(
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
+				argIdx+5, argIdx+6, argIdx+7, argIdx+8,
+			))
+			args = append(args,
+				e.CheckID, e.EmployeeID, e.SessionID, e.SessionType, e.Platform,
+				e.CheckedAt, e.Method, e.Works, e.Details,
+			)
+			argIdx += 9
+		}
+
+		query := fmt.Sprintf(`
+			INSERT INTO permission_status
+				(check_id, employee_id, session_id, session_type, platform, checked_at, method, works, details)
+			VALUES %s
+			ON CONFLICT (check_id) DO UPDATE SET
+				employee_id = EXCLUDED.employee_id,
+				session_id = EXCLUDED.session_id,
+				session_type = EXCLUDED.session_type,
+				platform = EXCLUDED.platform,
+				checked_at = EXCLUDED.checked_at,
+				works = EXCLUDED.works,
+				details = EXCLUDED.details,
+				synced_at = NOW()
+		`, strings.Join(valueStrings, ", "))
+
+		tag, err := r.pool.Exec(ctx, query, args...)
+		if err != nil {
+			return inserted, fmt.Errorf("bulk upsert permission_status: %w", err)
+		}
+		inserted += int(tag.RowsAffected())
+	}
+	return inserted, nil
+}
+
+// ────────────────────────────────
+// Storage Devices (children of device_hardware_info)
+// ────────────────────────────────
+
+func (r *NewSchemaRepo) BulkUpsertStorageDevices(ctx context.Context, entries []models.StorageDevice) (int, error) {
+	if len(entries) == 0 {
+		return 0, nil
+	}
+	batchSize := 500
+	inserted := 0
+	for i := 0; i < len(entries); i += batchSize {
+		end := i + batchSize
+		if end > len(entries) {
+			end = len(entries)
+		}
+		batch := entries[i:end]
+		valueStrings := make([]string, 0, len(batch))
+		args := make([]interface{}, 0, len(batch)*6)
+		argIdx := 1
+
+		for _, e := range batch {
+			valueStrings = append(valueStrings, fmt.Sprintf(
+				"($%d, $%d, $%d, $%d, $%d, $%d)",
+				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4, argIdx+5,
+			))
+			args = append(args,
+				e.ID, e.EmployeeID, e.DeviceHardwareID, e.DeviceType, e.Model, e.CapacityMB,
+			)
+			argIdx += 6
+		}
+
+		query := fmt.Sprintf(`
+			INSERT INTO storage_devices
+				(id, employee_id, device_hardware_id, device_type, model, capacity_mb)
+			VALUES %s
+			ON CONFLICT (id) DO NOTHING
+		`, strings.Join(valueStrings, ", "))
+
+		tag, err := r.pool.Exec(ctx, query, args...)
+		if err != nil {
+			return inserted, fmt.Errorf("bulk upsert storage_devices: %w", err)
+		}
+		inserted += int(tag.RowsAffected())
+	}
+	return inserted, nil
 }

@@ -24,7 +24,8 @@ public class AppConfig
     public bool BrowserHistoryEnabled { get; init; } = true;
     public int BrowserHistoryPollSec { get; init; } = 10;        // how often history DBs are re-scanned/re-read
 
-    // USB / peripheral hotplug tracking (local SQLite only; no server sync yet)
+    // USB / peripheral hotplug tracking (synced to the server since 2026-08-11;
+    // never deleted client-side)
     public bool HardwareDevicesEnabled { get; init; } = true;
 
     // Software inventory — 100% EVENT-DRIVEN detection via InstalledSoftwareWatcher: it watches
@@ -33,6 +34,20 @@ public class AppConfig
     // terminal / software center / control panel / cmd / powershell / manual file delete. NO
     // minute-based periodic scan (user rule 2026-08-10).
     public bool InventoryWatchEnabled { get; init; } = true;
+
+    // ─── Sync engine (dedicated SyncService background loop) ───
+    // Collection NEVER blocks on the network anymore: SyncService drains unsent SQLite rows on
+    // its own loop, in chunks bounded by BOTH row count and serialized payload bytes, with a
+    // politeness pause between chunks and exponential backoff on failure. A 50k+ row backlog
+    // drains in minutes without spiking CPU or adding latency to collection.
+    public int SyncIntervalSec { get; init; } = 60;          // min wait between drain passes when idle
+    public int SyncMaxRows { get; init; } = 1000;            // max rows per chunk
+    public int SyncMaxBytes { get; init; } = 1_000_000;      // max serialized payload bytes per chunk (~1MB)
+    public int SyncChunkDelayMs { get; init; } = 150;        // politeness pause between chunks
+    public int SyncMaxDurationSec { get; init; } = 300;      // per-pass time budget — a huge backlog never monopolizes CPU
+    public int SyncBackoffMaxSec { get; init; } = 300;       // exponential-backoff ceiling on failure (5 min)
+    public bool SyncCompression { get; init; } = true;       // gzip request bodies (server: middleware.Decompress)
+    public int SyncRetentionHours { get; init; } = 24;       // retention: synced app_items/app_sessions older than this are deleted client-side
 
     public static AppConfig FromEnv()
     {
@@ -53,6 +68,14 @@ public class AppConfig
             BrowserHistoryPollSec = int.TryParse(GetEnv("ALPHA_BROWSER_HISTORY_POLL_SECONDS"), out var histPoll) ? histPoll : 10,
             HardwareDevicesEnabled = GetEnv("ALPHA_HARDWARE_DEVICES_ENABLED") is not ("0" or "false" or "False"),
             InventoryWatchEnabled = GetEnv("ALPHA_INVENTORY_WATCH_ENABLED") is not ("0" or "false" or "False"),
+            SyncIntervalSec = Math.Max(1, int.TryParse(GetEnv("ALPHA_SYNC_INTERVAL_SEC"), out var syncInt) ? syncInt : 60),
+            SyncMaxRows = Math.Max(1, int.TryParse(GetEnv("ALPHA_SYNC_MAX_ROWS"), out var syncRows) ? syncRows : 1000),
+            SyncMaxBytes = Math.Max(16 * 1024, int.TryParse(GetEnv("ALPHA_SYNC_MAX_BYTES"), out var syncBytes) ? syncBytes : 1_000_000),
+            SyncChunkDelayMs = Math.Max(0, int.TryParse(GetEnv("ALPHA_SYNC_CHUNK_DELAY_MS"), out var syncDelay) ? syncDelay : 150),
+            SyncMaxDurationSec = Math.Max(10, int.TryParse(GetEnv("ALPHA_SYNC_MAX_DURATION_SEC"), out var syncDur) ? syncDur : 300),
+            SyncBackoffMaxSec = Math.Max(5, int.TryParse(GetEnv("ALPHA_SYNC_BACKOFF_MAX_SEC"), out var syncBack) ? syncBack : 300),
+            SyncCompression = GetEnv("ALPHA_SYNC_COMPRESSION") is not ("0" or "false" or "False"),
+            SyncRetentionHours = Math.Max(1, int.TryParse(GetEnv("ALPHA_SYNC_RETENTION_HOURS"), out var syncRet) ? syncRet : 24),
         };
     }
 

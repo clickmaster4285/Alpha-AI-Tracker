@@ -7,9 +7,9 @@ import "time"
 // ────────────────────────────────
 
 type SyncBatchRequest struct {
-	EmployeeID string          `json:"employeeId"`
-	Token      string          `json:"token"`
-	Entries    []any           `json:"entries"`
+	EmployeeID string `json:"employeeId"`
+	Token      string `json:"token"`
+	Entries    []any  `json:"entries"`
 }
 
 type SyncBatchResponse struct {
@@ -37,25 +37,25 @@ type DeviceHardwareInfoEntry struct {
 }
 
 type SyncDeviceHardwareRequest struct {
-	EmployeeID string                   `json:"employeeId"`
-	Token      string                   `json:"token"`
+	EmployeeID string                    `json:"employeeId"`
+	Token      string                    `json:"token"`
 	Entries    []DeviceHardwareInfoEntry `json:"entries"`
 }
 
 type DeviceHardwareInfoResponse struct {
-	ID             string    `json:"id"`
-	EmployeeID     string    `json:"employeeId"`
-	MacAddress     string    `json:"macAddress"`
-	Hostname       string    `json:"hostname"`
-	OsName         string    `json:"osName"`
-	OsVersion      string    `json:"osVersion"`
-	CpuModel       string    `json:"cpuModel"`
-	CpuCores       int       `json:"cpuCores"`
-	RamTotalMb     int64     `json:"ramTotalMb"`
-	StorageDevices string    `json:"storageDevices"`
-	GpuModel       string    `json:"gpuModel"`
-	GpuVramMb      int64     `json:"gpuVramMb"`
-	CollectedAt    time.Time `json:"collectedAt"`
+	ID             string     `json:"id"`
+	EmployeeID     string     `json:"employeeId"`
+	MacAddress     string     `json:"macAddress"`
+	Hostname       string     `json:"hostname"`
+	OsName         string     `json:"osName"`
+	OsVersion      string     `json:"osVersion"`
+	CpuModel       string     `json:"cpuModel"`
+	CpuCores       int        `json:"cpuCores"`
+	RamTotalMb     int64      `json:"ramTotalMb"`
+	StorageDevices string     `json:"storageDevices"`
+	GpuModel       string     `json:"gpuModel"`
+	GpuVramMb      int64      `json:"gpuVramMb"`
+	CollectedAt    time.Time  `json:"collectedAt"`
 	SyncedAt       *time.Time `json:"syncedAt,omitempty"`
 }
 
@@ -80,8 +80,8 @@ type InstalledApplicationEntry struct {
 }
 
 type SyncInstalledAppsRequest struct {
-	EmployeeID string                     `json:"employeeId"`
-	Token      string                     `json:"token"`
+	EmployeeID string                      `json:"employeeId"`
+	Token      string                      `json:"token"`
 	Entries    []InstalledApplicationEntry `json:"entries"`
 }
 
@@ -145,19 +145,19 @@ type InstalledPackageResponse struct {
 }
 
 type SyncNetworkInfoRequest struct {
-	EmployeeID string            `json:"employeeId"`
-	Token      string            `json:"token"`
+	EmployeeID string             `json:"employeeId"`
+	Token      string             `json:"token"`
 	Entries    []NetworkInfoEntry `json:"entries"`
 }
 
 type NetworkInfoResponse struct {
-	ID                   string    `json:"id"`
-	EmployeeID           string    `json:"employeeId"`
-	PublicIP             string    `json:"publicIp"`
-	PrivateIP            string    `json:"privateIp"`
-	MacAddress           string    `json:"macAddress"`
-	NetworkInterfaceName string    `json:"networkInterfaceName"`
-	CollectedAt          time.Time `json:"collectedAt"`
+	ID                   string     `json:"id"`
+	EmployeeID           string     `json:"employeeId"`
+	PublicIP             string     `json:"publicIp"`
+	PrivateIP            string     `json:"privateIp"`
+	MacAddress           string     `json:"macAddress"`
+	NetworkInterfaceName string     `json:"networkInterfaceName"`
+	CollectedAt          time.Time  `json:"collectedAt"`
 	SyncedAt             *time.Time `json:"syncedAt,omitempty"`
 }
 
@@ -173,17 +173,17 @@ type SessionEventEntry struct {
 }
 
 type SyncSessionEventsRequest struct {
-	EmployeeID string             `json:"employeeId"`
-	Token      string             `json:"token"`
+	EmployeeID string              `json:"employeeId"`
+	Token      string              `json:"token"`
 	Entries    []SessionEventEntry `json:"entries"`
 }
 
 type SessionEventResponse struct {
-	ID         string    `json:"id"`
-	EmployeeID string    `json:"employeeId"`
-	EventType  string    `json:"eventType"`
-	OsUsername string    `json:"osUsername"`
-	EventAt    time.Time `json:"eventAt"`
+	ID         string     `json:"id"`
+	EmployeeID string     `json:"employeeId"`
+	EventType  string     `json:"eventType"`
+	OsUsername string     `json:"osUsername"`
+	EventAt    time.Time  `json:"eventAt"`
 	SyncedAt   *time.Time `json:"syncedAt,omitempty"`
 }
 
@@ -192,50 +192,48 @@ type SessionEventResponse struct {
 // ────────────────────────────────
 
 type AppSessionEntry struct {
-	ID              string  `json:"id"`
-	ProcessName     string  `json:"processName"`
-	AppDisplayName  string  `json:"appDisplayName"`
-	StartedAt       string  `json:"startedAt"`
-	EndedAt         *string `json:"endedAt,omitempty"`
-	MachineID       string  `json:"machineId"`
-	SessionID       string  `json:"sessionId"`
-	Platform        string  `json:"platform"`
-	ProcessID       *int    `json:"processId,omitempty"`
-	ParentProcessID *int    `json:"parentProcessId,omitempty"`
-	InstalledAppID  *string `json:"installedAppId,omitempty"`
+	ID                 string  `json:"id"`
+	ProcessName        string  `json:"processName"`
+	AppDisplayName     string  `json:"appDisplayName"`
+	StartedAt          string  `json:"startedAt"`
+	EndedAt            *string `json:"endedAt,omitempty"`
+	MachineID          string  `json:"machineId"`
+	SessionID          string  `json:"sessionId"`
+	Platform           string  `json:"platform"`
+	ProcessID          *int    `json:"processId,omitempty"`
+	ParentProcessID    *int    `json:"parentProcessId,omitempty"`
+	InstalledAppID     *string `json:"installedAppId,omitempty"`
 	InstalledPackageID *string `json:"installedPackageId,omitempty"`
-	GroupedBy       *string `json:"groupedBy,omitempty"`
-	CgroupScope     *string `json:"cgroupScope,omitempty"`
-	ContextLabel    *string `json:"contextLabel,omitempty"`
+	GroupedBy          *string `json:"groupedBy,omitempty"`
+	CgroupScope        *string `json:"cgroupScope,omitempty"`
+	ContextLabel       *string `json:"contextLabel,omitempty"`
 }
 
 type SyncAppSessionsRequest struct {
-	EmployeeID string           `json:"employeeId"`
-	Token      string           `json:"token"`
+	EmployeeID string            `json:"employeeId"`
+	Token      string            `json:"token"`
 	Entries    []AppSessionEntry `json:"entries"`
 }
 
 type AppSessionResponse struct {
-	ID             string     `json:"id"`
-	EmployeeID     string     `json:"employeeId"`
-	ProcessName    string     `json:"processName"`
-	AppDisplayName string     `json:"appDisplayName"`
-	StartedAt      time.Time  `json:"startedAt"`
-	EndedAt        *time.Time `json:"endedAt,omitempty"`
-	MachineID       string     `json:"machineId"`
-	SessionID       string     `json:"sessionId"`
-	Platform        string     `json:"platform"`
-	ProcessID       *int       `json:"processId,omitempty"`
-	ParentProcessID *int       `json:"parentProcessId,omitempty"`
-	InstalledAppID  *string    `json:"installedAppId,omitempty"`
-	InstalledPackageID *string `json:"installedPackageId,omitempty"`
-	GroupedBy       *string    `json:"groupedBy,omitempty"`
-	CgroupScope     *string    `json:"cgroupScope,omitempty"`
-	ContextLabel    *string    `json:"contextLabel,omitempty"`
-	SyncedAt        *time.Time `json:"syncedAt,omitempty"`
+	ID                 string     `json:"id"`
+	EmployeeID         string     `json:"employeeId"`
+	ProcessName        string     `json:"processName"`
+	AppDisplayName     string     `json:"appDisplayName"`
+	StartedAt          time.Time  `json:"startedAt"`
+	EndedAt            *time.Time `json:"endedAt,omitempty"`
+	MachineID          string     `json:"machineId"`
+	SessionID          string     `json:"sessionId"`
+	Platform           string     `json:"platform"`
+	ProcessID          *int       `json:"processId,omitempty"`
+	ParentProcessID    *int       `json:"parentProcessId,omitempty"`
+	InstalledAppID     *string    `json:"installedAppId,omitempty"`
+	InstalledPackageID *string    `json:"installedPackageId,omitempty"`
+	GroupedBy          *string    `json:"groupedBy,omitempty"`
+	CgroupScope        *string    `json:"cgroupScope,omitempty"`
+	ContextLabel       *string    `json:"contextLabel,omitempty"`
+	SyncedAt           *time.Time `json:"syncedAt,omitempty"`
 }
-
-
 
 // ────────────────────────────────
 // App Items (replaces browser_contexts, file_explorer_contexts, urls, url_visits)
@@ -295,9 +293,6 @@ type AppItemResponse struct {
 	SyncedAt     *time.Time `json:"syncedAt,omitempty"`
 }
 
-
-
-
 // ────────────────────────────────
 // PHASE 2: LIST RESPONSES
 // ────────────────────────────────
@@ -316,4 +311,70 @@ type AppItemListResponse struct {
 	Page       int               `json:"page"`
 	PerPage    int               `json:"perPage"`
 	TotalPages int               `json:"totalPages"`
+}
+
+// ────────────────────────────────
+// PHASE 3: app_status / hardware_devices / permission_status / storage_devices
+// (2026-08-11 — previously local-only tables now synced; never deleted client-side)
+// ────────────────────────────────
+
+type AppStatusEntry struct {
+	Key       string `json:"key"`
+	Value     string `json:"value"`
+	UpdatedAt string `json:"updatedAt"`
+}
+
+type SyncAppStatusRequest struct {
+	EmployeeID string           `json:"employeeId"`
+	Token      string           `json:"token"`
+	Entries    []AppStatusEntry `json:"entries"`
+}
+
+type HardwareDeviceEntry struct {
+	ID          string  `json:"id"`
+	DeviceClass string  `json:"deviceClass"`
+	Vendor      string  `json:"vendor"`
+	Product     string  `json:"product"`
+	Serial      string  `json:"serial"`
+	BusPath     string  `json:"busPath"`
+	DeviceNode  string  `json:"deviceNode"`
+	PluggedAt   string  `json:"pluggedAt"`
+	UnpluggedAt *string `json:"unpluggedAt,omitempty"`
+}
+
+type SyncHardwareDevicesRequest struct {
+	EmployeeID string                `json:"employeeId"`
+	Token      string                `json:"token"`
+	Entries    []HardwareDeviceEntry `json:"entries"`
+}
+
+type PermissionStatusEntry struct {
+	CheckID     string `json:"checkId"`
+	SessionID   string `json:"sessionId"`
+	SessionType string `json:"sessionType"`
+	Platform    string `json:"platform"`
+	CheckedAt   string `json:"checkedAt"`
+	Method      string `json:"method"`
+	Works       bool   `json:"works"`
+	Details     string `json:"details"`
+}
+
+type SyncPermissionStatusRequest struct {
+	EmployeeID string                  `json:"employeeId"`
+	Token      string                  `json:"token"`
+	Entries    []PermissionStatusEntry `json:"entries"`
+}
+
+type StorageDeviceEntry struct {
+	ID               string `json:"id"`
+	DeviceHardwareID string `json:"deviceHardwareId"`
+	DeviceType       string `json:"deviceType"`
+	Model            string `json:"model"`
+	CapacityMB       int64  `json:"capacityMb"`
+}
+
+type SyncStorageDevicesRequest struct {
+	EmployeeID string               `json:"employeeId"`
+	Token      string               `json:"token"`
+	Entries    []StorageDeviceEntry `json:"entries"`
 }

@@ -247,7 +247,9 @@ internal static class DatabaseSchema
         CREATE TABLE IF NOT EXISTS app_status (
             key             TEXT PRIMARY KEY,
             value           TEXT NOT NULL,
-            updated_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+            updated_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')),
+            is_synced       INTEGER NOT NULL DEFAULT 0,
+            synced_at       TEXT
         );
 
         CREATE TABLE IF NOT EXISTS permission_status (
@@ -260,7 +262,9 @@ internal static class DatabaseSchema
             works           INTEGER NOT NULL DEFAULT 0,
             details         TEXT,
             employee_id     TEXT,
-            employee_name   TEXT
+            employee_name   TEXT,
+            is_synced       INTEGER NOT NULL DEFAULT 0,
+            synced_at       TEXT
         );
 
         CREATE TABLE IF NOT EXISTS employee_info (
@@ -304,6 +308,12 @@ internal static class DatabaseSchema
         ALTER TABLE network_info ADD COLUMN first_seen_at TEXT;
         ALTER TABLE network_info ADD COLUMN last_seen_at TEXT;
         ALTER TABLE network_info ADD COLUMN is_current INTEGER NOT NULL DEFAULT 1;
+        -- Sync of app_status / permission_status to the server (2026-08-11): both tables
+        -- gain is_synced so changed rows are re-sent on the next sync roundtrip.
+        ALTER TABLE app_status ADD COLUMN is_synced INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE app_status ADD COLUMN synced_at TEXT;
+        ALTER TABLE permission_status ADD COLUMN is_synced INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE permission_status ADD COLUMN synced_at TEXT;
         -- Inventory lifecycle v2 is applied by RebuildInventoryTablesIfLegacyAsync (SqliteLogStore):
         -- legacy tables carry install_count / UNIQUE(app_name) from the v1 design and are rebuilt
         -- once into the rows-per-cycle shape (install_date reset to NULL — unknown).
@@ -507,17 +517,23 @@ internal static class DatabaseSchema
     // UTILITY STATEMENTS
 
     internal const string UpsertStatusSql = @"
-        INSERT INTO app_status (key, value, updated_at)
-        VALUES ($key, $value, strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+        INSERT INTO app_status (key, value, updated_at, is_synced)
+        VALUES ($key, $value, strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'), 0)
         ON CONFLICT(key) DO UPDATE SET
             value = excluded.value,
-            updated_at = excluded.updated_at
+            updated_at = excluded.updated_at,
+            is_synced = 0
     ";
 
     internal const string InsertPermissionSql = @"
         INSERT INTO permission_status
-            (check_id, session_id, session_type, platform, checked_at, method, works, details, employee_id, employee_name)
+            (check_id, session_id, session_type, platform, checked_at, method, works, details, employee_id, employee_name, is_synced)
         VALUES
-            ($check_id, $session_id, $session_type, $platform, $checked_at, $method, $works, $details, $employee_id, $employee_name)
+            ($check_id, $session_id, $session_type, $platform, $checked_at, $method, $works, $details, $employee_id, $employee_name, 0)
+        ON CONFLICT(check_id) DO UPDATE SET
+            works = excluded.works,
+            details = excluded.details,
+            checked_at = excluded.checked_at,
+            is_synced = 0
     ";
 }

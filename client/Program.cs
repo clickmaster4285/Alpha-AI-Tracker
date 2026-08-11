@@ -50,6 +50,11 @@ if (args.Contains("--print-config"))
     Console.WriteLine($"BrowserHistoryPollSec={cfg.BrowserHistoryPollSec}");
     Console.WriteLine($"DbPath={cfg.DbPath}");
     Console.WriteLine($"ApiKeySet={!string.IsNullOrEmpty(cfg.ApiKey)}");
+    Console.WriteLine($"SyncIntervalSec={cfg.SyncIntervalSec}");
+    Console.WriteLine($"SyncMaxRows={cfg.SyncMaxRows}");
+    Console.WriteLine($"SyncMaxBytes={cfg.SyncMaxBytes}");
+    Console.WriteLine($"SyncCompression={cfg.SyncCompression}");
+    Console.WriteLine($"SyncRetentionHours={cfg.SyncRetentionHours}");
     return;
 }
 
@@ -162,6 +167,14 @@ builder.Services.AddSingleton<AutoStartService>();
 builder.Services.AddHostedService<BackgroundGuardService>();
 builder.Services.AddSingleton<LogCollectorService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<LogCollectorService>());
+
+// Dedicated sync engine — runs on its OWN loop so collection never blocks on the network.
+// Drains unsent rows in adaptive byte-bounded chunks (gzip, polite pauses, backoff); a
+// 50k+ row backlog drains in minutes without spiking CPU or adding collection latency.
+// Registered as a singleton + hosted so the login flow can inject it and trigger an
+// IMMEDIATE drain the moment credentials are persisted (RequestImmediateSync).
+builder.Services.AddSingleton<SyncService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<SyncService>());
 
 // Near-real-time install/uninstall detection: watches .desktop/dpkg/Start Menu//Applications
 // and triggers an immediate inventory rescan on change — no GUI interaction needed.

@@ -19,6 +19,7 @@ public partial class MainViewModel : ViewModelBase
     private readonly IInstalledAppDetector _appDetector;
     private readonly AutoStartService _autoStart;
     private readonly LogCollectorService _logCollector;
+    private readonly SyncService _syncService;
 
     // ─── Branding (APP_IDENTIFIERS + VERSION) ───
     // Bound by every view instead of literals, so editing client/APP_IDENTIFIERS or
@@ -270,6 +271,7 @@ public partial class MainViewModel : ViewModelBase
         IInstalledAppDetector appDetector,
         AutoStartService autoStart,
         LogCollectorService logCollector,
+        SyncService syncService,
         DashboardViewModel dashboard,
         SystemSpecsViewModel systemSpecs,
         InstalledAppsViewModel installedApps)
@@ -280,6 +282,7 @@ public partial class MainViewModel : ViewModelBase
         _appDetector = appDetector;
         _autoStart = autoStart;
         _logCollector = logCollector;
+        _syncService = syncService;
         Dashboard = dashboard;
         SystemSpecs = systemSpecs;
         InstalledApps = installedApps;
@@ -385,6 +388,12 @@ public partial class MainViewModel : ViewModelBase
 
             _logCollector.SetEmployeeInfo(info.EmployeeId, info.Name, info.Token ?? string.Empty);
             _logCollector.StartTracking();
+
+            // Session restored — wake the sync engine NOW so any rows collected since the
+            // last run (device_hardware_info, installed apps/packages, network, storage,
+            // hardware devices, permission status, sessions/items) reach the server
+            // immediately instead of waiting out the idle poll.
+            _syncService.RequestImmediateSync();
 
             // Reset stale permission statuses so they get freshly re-evaluated
             // (GetNextPermissionStep() no longer reads stored statuses, but this
@@ -751,6 +760,13 @@ public partial class MainViewModel : ViewModelBase
 
             _logCollector.SetEmployeeInfo(emp.EmployeeId, emp.Name, loginResp.Token ?? string.Empty);
             _logCollector.StartTracking();
+
+            // Login succeeded — fire an IMMEDIATE sync pass so this machine's full picture
+            // (device_hardware_info, employee profile, installed apps/packages, network,
+            // storage_devices, hardware_devices, session_events, permission_status, …) is
+            // on the server right now, not on the next 60s idle tick. The SyncService loop
+            // picks up the signal and drains every unsent table in byte-bounded chunks.
+            _syncService.RequestImmediateSync();
 
             IsLoggedIn = true;
             EmployeeName = emp.Name;

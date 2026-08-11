@@ -196,7 +196,8 @@ client/
 │   └── Linux/ProcessCollector.cs   # multi-strategy foreground + GNOME Shell Introspect / xprop window lists
 │
 ├── Services/
-│   ├── LogCollectorService.cs      # ⭐ main BackgroundService: collect → resolve → sessions/items → sync → heartbeat
+│   ├── LogCollectorService.cs      # ⭐ main BackgroundService: collect → resolve → sessions/items → heartbeat (no network I/O since 2026-08-11)
+│   ├── SyncService.cs              # ⭐ dedicated sync engine: drains unsent rows in byte-bounded chunks (gzip, polite pauses, exponential backoff)
 │   ├── DesktopEventService.cs      # ⭐ orchestrates file-explorer watchers → coordinator → JourneyEngine
 │   ├── BackgroundGuardService.cs   # watchdog: re-installs auto-start/systemd unit if removed (60s)
 │   ├── AutoStartService.cs         # Run key / ~/.config/autostart .desktop / launchd plist
@@ -349,8 +350,8 @@ log banners).
 
 ### Login
 
-- **Login:** `POST {serverUrl}/api/v1/auth/employee-login` with `{employeeId, secretKey}` → `{employee, token}`. Persists to `employee_info` (SQLite) and feeds `LogCollectorService.SetEmployeeInfo(employeeId, name, token)` + `StartTracking()` (which also records a `login` session event and arms Windows anti-sleep).
-- **Session restore:** on launch, `MainViewModel.InitializeAsync` reads `employee_info`; if present it re-authenticates the collector, resets stored `perm_*` statuses, and re-evaluates the permission steps from scratch.
+- **Login:** `POST {serverUrl}/api/v1/auth/employee-login` with `{employeeId, secretKey}` → `{employee, token}`. Persists to `employee_info` (SQLite) and feeds `LogCollectorService.SetEmployeeInfo(employeeId, name, token)` + `StartTracking()` (which also records a `login` session event and arms Windows anti-sleep). **Instant sync on login (2026-08-11):** `LoginAsync` then calls `SyncService.RequestImmediateSync()` — the dedicated sync engine's inter-pass wait is a `SemaphoreSlim` that the request releases, so a full drain pass starts right away instead of waiting out the idle interval. The employee record itself is already server-side (it IS the login response); the instant pass pushes everything else — device_hardware_info, installed apps/packages, network, storage_devices, hardware_devices, session_events, permission_status, app_status, sessions/items.
+- **Session restore:** on launch, `MainViewModel.InitializeAsync` reads `employee_info`; if present it re-authenticates the collector, **fires `RequestImmediateSync()`** (so rows buffered since the last run land immediately), resets stored `perm_*` statuses, and re-evaluates the permission steps from scratch.
 - **No logout:** the employee-disconnect flow (button, `LogoutCommand`, `StopTracking()`, `POST /api/v1/auth/employee-disconnect`) was **removed** 2026-08-10. Once logged in the client tracks until the process stops.
 
 ### Permission wizard (`GetNextPermissionStep`)
@@ -483,8 +484,10 @@ Per-platform `GetPermissionStatus()` (Linux: xprop/xdotool/gdbus/python3/portal/
 | Installed apps | Every 30 cycles (~15 min) |
 | Installed packages | Every 60 cycles (~30 min, delegates to joint scan) |
 | Network info | Every 10 cycles (~5 min) |
-| Sync + permission status | Every 10 cycles (~5 min) |
+| Permission status | Every 10 cycles (~5 min) |
 | Heartbeat `last_heartbeat_at` | Every cycle |
+
+> **Sync moved out of this loop (2026-08-11)** — the dedicated `SyncService` background loop (§13) drains unsent rows on its own schedule; the collection loop never performs network I/O.
 
 ---
 
@@ -560,10 +563,11 @@ Watchers (IObservableEventSource)          EventCoordinator                 Jour
 
 ## 13. Sync / Transport to Server
 
-- **Protocol:** REST over HTTP(S); JSON `{employeeId, token, entries: [...]}`; token = encrypted JWT from login, sent in the request body (not a header). No idempotency key, no retry header.
-- **Frequency:** every 10 cycles (~5 min); batches of **500**; **stop-on-failure** per table (retried next cycle; no exponential backoff).
-- **Order matters:** Phase-1 tables first (device-hardware → installed-apps → installed-packages → network-info → session-events), then **app-sessions (parents)**, then **app-items (children)**.
-- On success rows are marked `is_synced=1`; on 401/403 the batch is dropped until re-login; on network failure retried next cycle.
+- **Protocol:** REST over HTTP(S); JSON `{employeeId, token, entries: [...]}`; token = encrypted JWT from login, sent in the request body (not a header). Idempotent by design — the server upserts by client GUID (`ON CONFLICT (id) …`), so failed chunks are retried safely.
+- **Engine (2026-08-11):** dedicated `SyncService` background loop — collection **never blocks on the network**. Unsent rows drain in chunks bounded by **both** row count (`ALPHA_SYNC_MAX_ROWS`, default 1000) **and** serialized payload bytes (`ALPHA_SYNC_MAX_BYTES`, default ~1MB), with a politeness pause between chunks (`ALPHA_SYNC_CHUNK_DELAY_MS`, 150ms), a per-pass time budget (`ALPHA_SYNC_MAX_DURATION_SEC`, 5 min) so a backlog never monopolizes CPU, and **exponential backoff** on failure (5s → 10s → … → `ALPHA_SYNC_BACKOFF_MAX_SEC`, 5 min). A 50k+ backlog drains in minutes — the old inline sync moved a fixed 500 rows/table per 5-minute cycle while blocking collection (~8h to drain 50k).
+- **Compression:** request bodies are **gzip**-encoded when `ALPHA_SYNC_COMPRESSION=true` (server must run `middleware.Decompress()`); oversized slices are auto-split (binary halving) to stay under the byte cap.
+- **Order matters:** small/inventory tables first (device-hardware → network-info → session-events → installed-apps → installed-packages), then **app-sessions (parents)**, then **app-items (children)**.
+- On success rows are marked `is_synced=1` (batched `UPDATE … WHERE id IN (…)`, 400 ids/statement); on 401/403 the chunk is dropped until re-login; on network failure the chunk is retried next pass with backoff.
 
 | Endpoint | Payload extras |
 |---|---|
@@ -574,7 +578,25 @@ Watchers (IObservableEventSource)          EventCoordinator                 Jour
 | `POST /api/v1/session-events/sync` | eventType, osUsername |
 | `POST /api/v1/app-sessions/sync` | installedAppId, installedPackageId, processId, parentProcessId, groupedBy, cgroupScope, contextLabel |
 | `POST /api/v1/app-items/sync` | parentItemId, processId, url/domain, 9 journey fields, windowId/tabId, metadataJson |
+| `POST /api/v1/app-status/sync` | key, value, updatedAt (upserted by employee+key; re-sent when a value changes) |
+| `POST /api/v1/hardware-devices/sync` | deviceClass, vendor, product, serial, busPath, pluggedAt/unpluggedAt |
+| `POST /api/v1/permission-status/sync` | checkId, sessionId, sessionType, platform, method, works, details |
+| `POST /api/v1/storage-devices/sync` | deviceHardwareId, deviceType, model, capacityMb |
 | `POST /api/v1/auth/employee-login` | employeeId + secretKey → {employee, token} |
+
+> **Instant sync on login (2026-08-11):** `MainViewModel` (which injects the singleton
+> `SyncService` — registered `AddSingleton` + `AddHostedService(GetRequiredService)` like
+> `LogCollectorService`) calls `RequestImmediateSync()` after a successful login and on session
+> restore. That releases a `SemaphoreSlim(0,1)` the loop waits on, so a **full drain pass starts
+> immediately** — the machine's whole picture (hardware, inventory, network, permissions, sessions,
+> items) lands on the server right after login, not on the next 60s idle tick. A request while a
+> pass is already running/pending is a single no-op release (one drain covers it — never stacks).
+
+> **Retention (2026-08-11):** after each clean sync pass, `SyncService` deletes rows the server
+> already has and that are no longer needed locally — `app_items`/`app_sessions` older than
+> `ALPHA_SYNC_RETENTION_HOURS` (24h; **open sessions are never deleted**, sessions are only deleted
+> once their items are gone), `installed_applications`/`installed_packages` with `is_installed=0`,
+> and superseded `network_info` rows (`is_current=0`). All other tables are retained forever.
 
 > `activity-logs/sync` and `shell-commands/sync` are **removed** — no `activity_logs`/`shell_commands` tables or calls.
 
@@ -598,6 +620,13 @@ Watchers (IObservableEventSource)          EventCoordinator                 Jour
 | `ALPHA_BROWSER_JOURNEY_IDLE_MINUTES` | 15 | idle-close timeout |
 | `ALPHA_BROWSER_CAPTURE_INCOGNITO` | false | store incognito URLs (legal review required) |
 | `ALPHA_BROWSER_HISTORY_ENABLED` | true | profile-history URL fallback |
+| `ALPHA_SYNC_INTERVAL_SEC` | 60 | min wait between sync drain passes when idle |
+| `ALPHA_SYNC_MAX_ROWS` | 1000 | max rows per sync chunk |
+| `ALPHA_SYNC_MAX_BYTES` | 1000000 | max serialized payload bytes per chunk (~1MB) |
+| `ALPHA_SYNC_CHUNK_DELAY_MS` | 150 | politeness pause between chunks while draining a backlog |
+| `ALPHA_SYNC_MAX_DURATION_SEC` | 300 | per-pass time budget — a huge backlog never monopolizes CPU |
+| `ALPHA_SYNC_BACKOFF_MAX_SEC` | 300 | exponential-backoff ceiling on sync failure (5 min) |
+| `ALPHA_SYNC_COMPRESSION` | true | gzip request bodies (server: `middleware.Decompress()`) |
 | `ALPHA_BROWSER_HISTORY_POLL_SECONDS` | 10 | history re-read cadence |
 
 > `client/.env.example` also carries a `REPO=AlphaDev-7/Alpha-AI-Tracker` key that the client **never reads** — the web dashboard owns the GitHub download link.

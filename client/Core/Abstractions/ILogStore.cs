@@ -69,6 +69,30 @@ public interface ILogStore
     Task<HardwareDevice?> GetOpenHardwareDeviceByBusPathAsync(string busPath, CancellationToken ct);
     Task CloseHardwareDeviceAsync(string id, DateTime unpluggedAt, CancellationToken ct);
 
+    // ── Sync (2026-08-11): hardware devices are sent to the server; never deleted client-side ──
+    Task<IReadOnlyList<HardwareDevice>> GetUnsentHardwareDevicesAsync(int limit, CancellationToken ct);
+    Task MarkHardwareDevicesSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
+
+    // ── Sync (2026-08-11): app_status + permission_status are sent to the server; never
+    //    deleted client-side. app_status rows re-sync on change (is_synced reset by upsert).
+    Task<IReadOnlyList<AppStatus>> GetUnsentAppStatusAsync(int limit, CancellationToken ct);
+    Task MarkAppStatusSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
+    Task<IReadOnlyList<PermissionStatus>> GetUnsentPermissionStatusAsync(int limit, CancellationToken ct);
+    Task MarkPermissionStatusSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
+
+    /// <summary>
+    /// Retention cleanup (2026-08-11, default 24h): deletes rows that were already synced to
+    /// the server and are no longer needed locally:
+    ///   • app_items — synced + data older than the cutoff
+    ///   • app_sessions — synced + CLOSED + started before the cutoff (open sessions are
+    ///     NEVER deleted; a session is only deleted once all its app_items are gone)
+    ///   • installed_applications / installed_packages — synced rows with is_installed = 0
+    ///     (closed/uninstalled install cycles; the GUI hides them anyway)
+    ///   • network_info — synced rows that were superseded (is_current = 0)
+    /// Everything else is retained forever. Returns per-table deleted counts.
+    /// </summary>
+    Task<SyncedDataDeletionCounts> DeleteSyncedDataOlderThanAsync(DateTime cutoff, CancellationToken ct);
+
     // ── Installed App/Package Lookup (binary name → display name mapping) ──
 
     /// <summary>Look up an installed app by its executable binary name (e.g., \"code\" → Visual Studio Code)</summary>

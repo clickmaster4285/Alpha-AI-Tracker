@@ -1,6 +1,6 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-08-01 (docs re-synced with code — routes, migrations 001–016, 12 tables, staleness job)
+> **Last audited:** 2026-08-11 (sync surfaces expanded — migrations 001–017, 16 tables, 11 sync endpoints, client retention)
 > **Changelog:**
 > - 2026-08-10: **Employee disconnect endpoint removed** — `POST /api/v1/auth/employee-disconnect`
 >   (handler `EmployeeDisconnect`, DTO `EmployeeDisconnectRequest`, route) was deleted along with the
@@ -220,6 +220,10 @@ Employee token is carried in the request body (`{employeeId, token, entries: [..
 | POST | `/session-events/sync` | `session_events` | Bulk upsert |
 | POST | `/app-sessions/sync` | `app_sessions` | Bulk upsert |
 | POST | `/app-items/sync` | `app_items` | Bulk upsert |
+| POST | `/app-status/sync` | `app_status` | Upsert by (employee_id, key) |
+| POST | `/hardware-devices/sync` | `hardware_devices` | Bulk upsert |
+| POST | `/permission-status/sync` | `permission_status` | Bulk upsert by check_id |
+| POST | `/storage-devices/sync` | `storage_devices` | Bulk upsert |
 
 ### App Sessions & App Items (Protected — web admin reads)
 
@@ -242,7 +246,11 @@ Employee token is carried in the request body (`{employeeId, token, entries: [..
 
 ## 5. Database Schema
 
-### Tables (12 tracked tables + `schema_migrations`)
+### Tables (16 tracked tables + `schema_migrations`)
+
+> 2026-08-11: +4 sync tables — `app_status` (key/value per employee), `hardware_devices`
+> (USB/peripheral hotplug), `permission_status` (one row per permission method), and
+> `storage_devices` (children of `device_hardware_info`). Migration 017.
 
 **`users`** — Web admin users (company_admin role)
 ```
