@@ -64,6 +64,14 @@ if [ "$BUILD_ALL" = true ]; then
   BUILD_MAC=true
 fi
 
+# Fresh output — NEVER build into a folder with leftover installers from a previous
+# version. release.sh uploads every file it finds in installers/, so a stale
+# alpha-ai-tracker_1.1.0_amd64.deb sitting next to the new 1.1.1 one gets published
+# too, and the client's auto-updater (FirstOrDefault asset match) can then pick the
+# OLD installer — "the update" re-installs the same version (root cause of the
+# 2026-08-12 "still shows old version" bug). Deleting the whole folder makes stale
+# artifacts unrepresentable.
+rm -rf "$INSTALLER_DIR"
 mkdir -p "$INSTALLER_DIR"
 
 echo "=========================================="

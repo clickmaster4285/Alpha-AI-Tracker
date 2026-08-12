@@ -494,7 +494,7 @@ public class AppUpdateService : ObservableObject, IHostedService
         var version = UpdateInfo.NormalizeVersion(release.TagName);
         if (version is null) return (null, $"Latest release tag \"{release.TagName}\" carries no version.");
 
-        var asset = ResolvePlatformAsset(release.Assets);
+        var asset = ResolvePlatformAsset(release.Assets, version);
         if (asset is null)
         {
             _logger.LogDebug("No installer asset for this platform in release {Tag}", release.TagName);
@@ -512,25 +512,59 @@ public class AppUpdateService : ObservableObject, IHostedService
         }, null);
     }
 
-    private GitHubReleaseAsset? ResolvePlatformAsset(IReadOnlyList<GitHubReleaseAsset> assets)
+    /// <summary>
+    /// Picks the installer asset for this platform. When a release carries MULTIPLE
+    /// candidates for the same platform (e.g. a stale 1.1.0 .deb left next to the
+    /// new 1.1.1 one — see the installers/ folder cleanup in release.sh), the asset
+    /// whose name contains the RELEASE version wins, because that is the one this
+    /// check actually wants. Falls back to arch/extension matching for well-formed
+    /// releases (one installer per platform).
+    /// </summary>
+    private GitHubReleaseAsset? ResolvePlatformAsset(IReadOnlyList<GitHubReleaseAsset> assets, string version)
     {
         if (OperatingSystem.IsWindows())
-            return assets.FirstOrDefault(a => a.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase));
+        {
+            var exes = assets.Where(a => a.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)).ToList();
+            return PreferVersion(exes, version)
+                   ?? exes.FirstOrDefault();
+        }
 
         if (OperatingSystem.IsLinux())
         {
             var arch = RuntimeArchSuffix();
+            var debs = assets.Where(a => a.Name.EndsWith(".deb", StringComparison.OrdinalIgnoreCase)).ToList();
             // Prefer the native-arch .deb (e.g. _amd64.deb); fall back to any .deb.
-            return assets.FirstOrDefault(a =>
-                       a.Name.EndsWith(".deb", StringComparison.OrdinalIgnoreCase)
-                       && a.Name.Contains(arch, StringComparison.OrdinalIgnoreCase))
-                   ?? assets.FirstOrDefault(a => a.Name.EndsWith(".deb", StringComparison.OrdinalIgnoreCase));
+            var nativeArch = debs.Where(a => a.Name.Contains(arch, StringComparison.OrdinalIgnoreCase)).ToList();
+            return PreferVersion(nativeArch, version)
+                   ?? PreferVersion(debs, version)
+                   ?? nativeArch.FirstOrDefault()
+                   ?? debs.FirstOrDefault();
         }
 
         if (OperatingSystem.IsMacOS())
-            return assets.FirstOrDefault(a => a.Name.EndsWith(".dmg", StringComparison.OrdinalIgnoreCase));
+        {
+            var dmgs = assets.Where(a => a.Name.EndsWith(".dmg", StringComparison.OrdinalIgnoreCase)).ToList();
+            return PreferVersion(dmgs, version)
+                   ?? dmgs.FirstOrDefault();
+        }
 
         return null;
+    }
+
+    /// <summary>
+    /// Returns the first asset whose name embeds the release version ("1.1.1"), or
+    /// null when none does. This is what stops a stale same-extension installer from
+    /// being selected when a release accidentally contains several versions.
+    /// Boundary-aware: the version must sit between separators ("_1.1.1_", "-1.1.1."),
+    /// so "1.1.10" can never match a request for "1.1.1".
+    /// </summary>
+    private static GitHubReleaseAsset? PreferVersion(IReadOnlyList<GitHubReleaseAsset> candidates, string version)
+    {
+        if (string.IsNullOrWhiteSpace(version)) return null;
+        var rx = new System.Text.RegularExpressions.Regex(
+            @"(^|[\-_.])" + System.Text.RegularExpressions.Regex.Escape(version) + @"(?=$|[\-_.])",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return candidates.FirstOrDefault(a => rx.IsMatch(a.Name));
     }
 
     private static string RuntimeArchSuffix()
