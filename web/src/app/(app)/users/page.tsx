@@ -192,7 +192,7 @@ export default function UsersList() {
   return (
     <div className="space-y-4 animate-fade-in">
       {/* Filters */}
-      <div className="flex flex-col sm:flex-row gap-3">
+      <div className="flex justify-between">
         <div className="flex items-center bg-card border border-border rounded-lg px-3 py-2 gap-2 flex-1 max-w-sm">
           <Search className="w-4 h-4 text-muted-foreground" />
           <input
@@ -202,20 +202,22 @@ export default function UsersList() {
             className="bg-transparent border-none outline-none text-sm flex-1 text-foreground placeholder:text-muted-foreground"
           />
         </div>
-        <select
-          value={deptFilter}
-          onChange={e => { setDeptFilter(e.target.value); setPage(1); }}
-          className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground"
-        >
-          <option value="">All Departments</option>
-          {departments.map(d => <option key={d.id} value={d.name}>{d.name}</option>)}
-        </select>
-        <button
-          onClick={() => setShowAdd(true)}
-          className="gradient-primary text-primary-foreground px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 hover:opacity-90 transition-opacity"
-        >
-          <Plus className="w-4 h-4" /> Add Employee
-        </button>
+        <div className='flex space-x-3'>
+          <select
+            value={deptFilter}
+            onChange={e => { setDeptFilter(e.target.value); setPage(1); }}
+            className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground"
+          >
+            <option value="">All Departments</option>
+            {departments.map(d => <option key={d.id} value={d.name}>{d.name}</option>)}
+          </select>
+          <button
+            onClick={() => setShowAdd(true)}
+            className="gradient-primary text-primary-foreground px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 hover:opacity-90 transition-opacity"
+          >
+            <Plus className="w-4 h-4" /> Add Employee
+          </button>
+        </div>
       </div>
 
       {/* Table */}
