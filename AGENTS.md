@@ -1,7 +1,39 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-08-11
+> **Last audited:** 2026-08-12
 > **Changelog:**
+>
+> - 2026-08-12: **Self-update from GitHub Releases — auto-update + GUI "Check updates".** New
+>   `client/Services/AppUpdateService.cs` (ObservableObject + IHostedService singleton, same
+>   register-singleton-and-hosted pattern as SyncService): checks
+>   `https://api.github.com/repos/{repo}/releases/latest`, normalizes the tag (`v1.1.0` → `1.1.0`),
+>   picks the platform installer asset (Linux `_amd64.deb` by runtime arch, Windows `.exe`, macOS
+>   `.dmg`) and compares against `AppInfo.Version` (numeric three-part compare, `-beta`/`+sha`
+>   ignored). Quiet **auto-check loop** every 30 min that only fires when the persisted
+>   `update_last_check_at` (app_status) is older than `ALPHA_UPDATE_AUTO_CHECK_HOURS` (24h); with
+>   `ALPHA_UPDATE_AUTO_INSTALL=true` (default) it **auto-downloads and installs** with no click:
+>   Linux `pkexec dpkg -i` (the only human step is the polkit password dialog — the install dir is
+>   root-owned), Windows runs the Inno installer with `/VERYSILENT` (Inno `CloseApplications=force`
+>   terminates the app itself, so a detached `.cmd` waits then relaunches with `--restart`), macOS
+>   `open`s the dmg (manual drag). Downloads stream into the user data dir
+>   (`~/.local/share/alpha-ai-tracker/updates` / `%LocalAppData%\AlphaAITracker\updates`) — never the
+>   install dir. GUI: top bar gains **Check updates** (ghost), a **"Update to vX.Y.Z"** install
+>   button, a **Restart to apply** button (Linux dpkg replaces the binary while running) and a status
+>   line; the dashboard shows an **update banner** (version + release notes + progress bar + Later
+>   which persists `update_dismissed_version`). `Program.cs` handles the new `--restart` arg by
+>   retrying the single-instance mutex for 8s (post-update relaunch vs signal-and-exit). Config: new
+>   `ALPHA_UPDATE_REPO/ENABLED/AUTO_CHECK_HOURS/AUTO_INSTALL` keys in `.env` + `.env.example` +
+>   `AppConfig`. The repo ALWAYS comes from `.env` — `ALPHA_UPDATE_REPO`, falling back to the
+>   pre-existing `REPO=` key (now actually read); there is NO hardcoded repo anywhere, and when
+>   neither key is set the updater is disabled with a clear "No update repository configured"
+>   message on manual checks. Verified: `dotnet build` 0/0;
+>   live smoke test hit the real GitHub API (`You're up to date (1.0.0).` against the v1.0.0
+>   release with `alpha-ai-tracker_1.0.0_amd64.deb` + `AlphaAITracker-Setup-1.0.0.exe` assets).
+>   **Note:** `AppUpdateService` deliberately uses EXPLICIT properties + `RelayCommand` fields
+>   (no `[ObservableProperty]`/`[RelayCommand]` source generators) — generated members made IDEs
+>   show phantom "name does not exist" errors until the analyzer re-ran, even though the CLI build
+>   was always clean. Manual install/auto-install share one download path behind an atomic
+>   `_installGate` so the shared `.part` file can never be written by two threads at once.
 >
 > - 2026-08-12: **Client rule — any UPDATE on an already-synced row resets `is_synced=0` (server always learns changes).**
 >   Audited every write path in the client SQLite layer and found 8 that mutated rows without re-queueing them:
@@ -620,7 +652,7 @@ flowchart LR
 **What's missing:**
 
 - **No tests** (0 test files)
-- **No auto-update mechanism**
+- ~~**No auto-update mechanism**~~ (resolved 2026-08-12 — GitHub Releases self-updater with GUI Check updates; see changelog)
 - **No crash reporting** — unhandled exceptions crash silently
 - **No offline queue analysis** — if server is unreachable, logs buffer locally with no back-pressure handling
 - **No encryption at rest** — SQLite encryption (sqlcipher) is commented out
