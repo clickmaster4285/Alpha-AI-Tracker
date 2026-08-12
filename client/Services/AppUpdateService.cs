@@ -673,25 +673,130 @@ public class AppUpdateService : ObservableObject, IHostedService
 
         if (OperatingSystem.IsWindows())
         {
-            // Inno Setup: CloseApplications=force + AppMutex means the installer
-            // TERMINATES this process itself. A detached cmd script waits for the
-            // installer to finish, then relaunches the app with --restart.
+            // Inno Setup replaces the app's files under Program Files, so the
+            // RUNNING client.exe must be gone and the single-instance mutex
+            // released before the new binary can start. Flow:
+            //   1. Write a detached .cmd that (a) waits for THIS app to fully
+            //      exit, (b) waits for the installer process to appear (UAC
+            //      approval can take a while), (c) waits for it to finish,
+            //      (d) relaunches the app with --restart, (e) deletes itself.
+            //   2. Launch the script, then shut THIS app down gracefully (same
+            //      pattern as RestartApplication) — Program.cs's finally block
+            //      releases the mutex and the process exits, unlocking client.exe.
+            //   3. The installer therefore finds NOTHING to close: no reliance on
+            //      Inno's CloseApplications/taskkill, which previously used
+            //      `taskkill /F /IM client.exe /T` — a TREE-KILL that terminated
+            //      the updater's OWN cmd script and the installer itself (the
+            //      2026-08-12 "downloads but doesn't update" bug). The .iss no
+            //      longer passes /T (kills by image name only, as a manual-install
+            //      safety net).
             StatusText = "Installing — the app will close and reopen automatically…";
             try
             {
                 var exe = Environment.ProcessPath ?? string.Empty;
+                var exeName = string.IsNullOrEmpty(exe) ? "client.exe" : Path.GetFileName(exe);
+                var setupName = Path.GetFileName(installerPath);
                 var script = Path.Combine(Path.GetTempPath(), $"aat_update_{Guid.NewGuid():N}.cmd");
-                var content =
+                var scriptText =
                     "@echo off\r\n" +
-                    $"start /wait \"\" \"{installerPath}\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART\r\n" +
+                    "setlocal\r\n" +
+                    "REM ===== Phase 1: wait for the running app to exit (it launched us, then shuts down) =====\r\n" +
+                    "set /a attempts=0\r\n" +
+                    ":wait_exit\r\n" +
+                    $"tasklist /FI \"IMAGENAME eq {exeName}\" >nul 2>&1\r\n" +
+                    "if errorlevel 1 goto app_exited\r\n" +
+                    "set /a attempts+=1\r\n" +
+                    "REM after ~60s fall THROUGH to the installer anyway — the installer's\r\n" +
+                    "REM image-name taskkill (no /T) force-closes a still-running app.\r\n" +
+                    "if %attempts% GEQ 60 goto app_exited\r\n" +
+                    "ping 127.0.0.1 -n 2 -w 1000 >nul\r\n" +
+                    "goto wait_exit\r\n" +
+                    ":app_exited\r\n" +
+                    "REM ===== Phase 2: launch the silent installer (UAC may prompt) =====\r\n" +
+                    $"start \"\" \"{installerPath}\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART\r\n" +
+                    "REM ===== Phase 3: wait for setup to appear after UAC approval (~5 min) =====\r\n" +
+                    "REM setup.exe is only created AFTER the consent prompt is approved, so a\r\n" +
+                    "REM slow human click is expected — 300 attempts covers ~5 minutes.\r\n" +
+                    "set /a attempts=0\r\n" +
+                    ":wait_start\r\n" +
+                    $"tasklist /FI \"IMAGENAME eq {setupName}\" >nul 2>&1\r\n" +
+                    "if not errorlevel 1 goto started\r\n" +
+                    "set /a attempts+=1\r\n" +
+                    "REM UAC denied / setup never launched → relaunch the old app\r\n" +
+                    "if %attempts% GEQ 300 goto relaunch_old\r\n" +
+                    "ping 127.0.0.1 -n 2 -w 1000 >nul\r\n" +
+                    "goto wait_start\r\n" +
+                    ":started\r\n" +
+                    "REM ===== Phase 4: wait for setup to finish (~10 min) =====\r\n" +
+                    "set /a attempts=0\r\n" +
+                    ":wait_done\r\n" +
+                    $"tasklist /FI \"IMAGENAME eq {setupName}\" >nul 2>&1\r\n" +
+                    "if errorlevel 1 goto done\r\n" +
+                    "set /a attempts+=1\r\n" +
+                    "if %attempts% GEQ 600 goto relaunch_old\r\n" +
+                    "ping 127.0.0.1 -n 2 -w 1000 >nul\r\n" +
+                    "goto wait_done\r\n" +
+                    ":done\r\n" +
+                    "REM install finished — flush files, relaunch the NEW build\r\n" +
+                    "ping 127.0.0.1 -n 3 -w 1000 >nul\r\n" +
                     $"start \"\" \"{exe}\" --restart\r\n" +
+                    "goto finish\r\n" +
+                    ":relaunch_old\r\n" +
+                    "REM Setup never appeared (UAC denied / launch failed) or overran. Relaunch\r\n" +
+                    "REM the old app — but KEEP WATCHING: a slow UAC approval can still spawn\r\n" +
+                    "REM setup AFTER this relaunch. Setup force-closes the app it finds, so if\r\n" +
+                    "REM that happens we wait it out and relaunch the NEW build once more.\r\n" +
+                    $"start \"\" \"{exe}\" --restart\r\n" +
+                    "set /a attempts=0\r\n" +
+                    ":late_watch\r\n" +
+                    $"tasklist /FI \"IMAGENAME eq {setupName}\" >nul 2>&1\r\n" +
+                    "if not errorlevel 1 goto late_running\r\n" +
+                    "set /a attempts+=1\r\n" +
+                    "if %attempts% GEQ 60 goto finish\r\n" +
+                    "ping 127.0.0.1 -n 2 -w 1000 >nul\r\n" +
+                    "goto late_watch\r\n" +
+                    ":late_running\r\n" +
+                    "set /a attempts=0\r\n" +
+                    ":late_wait\r\n" +
+                    $"tasklist /FI \"IMAGENAME eq {setupName}\" >nul 2>&1\r\n" +
+                    "if errorlevel 1 goto late_done\r\n" +
+                    "set /a attempts+=1\r\n" +
+                    "if %attempts% GEQ 600 goto finish\r\n" +
+                    "ping 127.0.0.1 -n 2 -w 1000 >nul\r\n" +
+                    "goto late_wait\r\n" +
+                    ":late_done\r\n" +
+                    $"start \"\" \"{exe}\" --restart\r\n" +
+                    ":finish\r\n" +
                     "del \"%~f0\"\r\n";
-                await File.WriteAllTextAsync(script, content, ct);
+                await File.WriteAllTextAsync(script, scriptText, ct);
+
+                // ShellExecute runs the .cmd via cmd.exe (file association) — no
+                // `cmd.exe /c "..."` quoting pitfalls.
                 Process.Start(new ProcessStartInfo
                 {
-                    FileName = "cmd.exe",
-                    Arguments = $"/c \"{script}\"",
+                    FileName = script,
                     UseShellExecute = true
+                });
+
+                // Close this app cleanly: releases the mutex (Program.cs finally)
+                // and unlocks client.exe so the installer can replace it. The
+                // detached script survives us and relaunches after the install.
+                App.AllowShutdown = true;
+                Dispatcher.UIThread.Post(() =>
+                {
+                    try
+                    {
+                        if (Avalonia.Application.Current?.ApplicationLifetime
+                            is Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop)
+                        {
+                            desktop.Shutdown();
+                        }
+                        else
+                        {
+                            Environment.Exit(0);
+                        }
+                    }
+                    catch { Environment.Exit(0); }
                 });
                 return true;
             }
