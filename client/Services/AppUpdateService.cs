@@ -459,6 +459,9 @@ public class AppUpdateService : ObservableObject, IHostedService
         }
         catch (Exception ex)
         {
+            // Progress can hit 100% before the final rename — reset so the UI
+            // does not look "done" when install never started.
+            DownloadProgress = 0;
             // Keep the banner + install button available for a manual retry.
             StatusText = $"Update failed: {ex.Message}";
             _logger.LogWarning(ex, "Update install failed");
@@ -590,25 +593,35 @@ public class AppUpdateService : ObservableObject, IHostedService
         StatusText = $"Downloading {info.AssetName}…";
         try
         {
+            // Drop stale artifacts from a prior attempt so Move never fights a locked dest.
+            await DeleteFileWithRetryAsync(part, ct);
+            await DeleteFileWithRetryAsync(dest, ct);
+
             using var req = new HttpRequestMessage(HttpMethod.Get, info.DownloadUrl);
             using var resp = await _downloadHttp.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
             resp.EnsureSuccessStatusCode();
 
             var total = resp.Content.Headers.ContentLength ?? 0;
             await using var src = await resp.Content.ReadAsStreamAsync(ct);
-            await using var dst = new FileStream(part, FileMode.Create, FileAccess.Write, FileShare.None);
-            var buffer = new byte[81920];
-            long read = 0;
-            while (true)
+            // Write inside a nested block so the part stream is CLOSED before we rename
+            // it on Windows — File.Move fails with "used by another process" while the
+            // FileStream is still open (Linux rename is more permissive, which hid this).
             {
-                var n = await src.ReadAsync(buffer, ct);
-                if (n == 0) break;
-                await dst.WriteAsync(buffer.AsMemory(0, n), ct);
-                read += n;
-                if (total > 0) DownloadProgress = Math.Min(100, read * 100.0 / total);
+                await using var dst = new FileStream(part, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                var buffer = new byte[81920];
+                long read = 0;
+                while (true)
+                {
+                    var n = await src.ReadAsync(buffer, ct);
+                    if (n == 0) break;
+                    await dst.WriteAsync(buffer.AsMemory(0, n), ct);
+                    read += n;
+                    if (total > 0) DownloadProgress = Math.Min(100, read * 100.0 / total);
+                }
+                await dst.FlushAsync(ct);
             }
-            await dst.FlushAsync(ct);
-            File.Move(part, dest, overwrite: true);
+
+            await MoveInstallerPartAsync(part, dest, ct);
             StatusText = $"Downloaded {info.AssetName}";
             DownloadProgress = 100;
         }
@@ -620,6 +633,43 @@ public class AppUpdateService : ObservableObject, IHostedService
         finally
         {
             IsDownloading = false;
+        }
+    }
+
+    /// <summary>Renames the finished .part download to the final installer name.</summary>
+    private static async Task MoveInstallerPartAsync(string part, string dest, CancellationToken ct)
+    {
+        for (var attempt = 0; attempt < 6; attempt++)
+        {
+            try
+            {
+                if (File.Exists(dest))
+                    File.Delete(dest);
+                File.Move(part, dest);
+                return;
+            }
+            catch (IOException) when (attempt < 5)
+            {
+                // AV/indexer may briefly hold the dest from a prior download.
+                await Task.Delay(400, ct);
+            }
+        }
+    }
+
+    private static async Task DeleteFileWithRetryAsync(string path, CancellationToken ct)
+    {
+        if (!File.Exists(path)) return;
+        for (var attempt = 0; attempt < 4; attempt++)
+        {
+            try
+            {
+                File.Delete(path);
+                return;
+            }
+            catch (IOException) when (attempt < 3)
+            {
+                await Task.Delay(250, ct);
+            }
         }
     }
 
@@ -673,131 +723,82 @@ public class AppUpdateService : ObservableObject, IHostedService
 
         if (OperatingSystem.IsWindows())
         {
-            // Inno Setup replaces the app's files under Program Files, so the
-            // RUNNING client.exe must be gone and the single-instance mutex
-            // released before the new binary can start. Flow:
-            //   1. Write a detached .cmd that (a) waits for THIS app to fully
-            //      exit, (b) waits for the installer process to appear (UAC
-            //      approval can take a while), (c) waits for it to finish,
-            //      (d) relaunches the app with --restart, (e) deletes itself.
-            //   2. Launch the script, then shut THIS app down gracefully (same
-            //      pattern as RestartApplication) — Program.cs's finally block
-            //      releases the mutex and the process exits, unlocking client.exe.
-            //   3. The installer therefore finds NOTHING to close: no reliance on
-            //      Inno's CloseApplications/taskkill, which previously used
-            //      `taskkill /F /IM client.exe /T` — a TREE-KILL that terminated
-            //      the updater's OWN cmd script and the installer itself (the
-            //      2026-08-12 "downloads but doesn't update" bug). The .iss no
-            //      longer passes /T (kills by image name only, as a manual-install
-            //      safety net).
-            StatusText = "Installing — the app will close and reopen automatically…";
+            // Inno Setup replaces files under Program Files (admin). Linux uses pkexec
+            // and shows a clear password dialog; on Windows the old batch updater used
+            // `start setup.exe /VERYSILENT` from a non-elevated cmd — UAC often never
+            // got approved (prompt hidden behind the closing app), so the download
+            // finished but Program Files was never touched. The old .cmd also polled
+            // only the outer setup .exe in tasklist; Inno's inner .tmp worker can
+            // outlive it and the script relaunched too early.
+            //
+            // Fix: a detached PowerShell script that (1) waits for this process to
+            // exit, (2) runs the installer with Start-Process -Verb RunAs -Wait so
+            // UAC is explicit and we block until the full install completes, (3)
+            // relaunches with --restart. installer-windows.iss must NOT use taskkill
+            // /T (tree-kill) — that killed this script chain on the 2026-08-12 bug.
+            StatusText = "Installing — approve UAC when prompted; the app will reopen automatically…";
             try
             {
                 var exe = Environment.ProcessPath ?? string.Empty;
                 var exeName = string.IsNullOrEmpty(exe) ? "client.exe" : Path.GetFileName(exe);
-                var setupName = Path.GetFileName(installerPath);
-                var script = Path.Combine(Path.GetTempPath(), $"aat_update_{Guid.NewGuid():N}.cmd");
+                var procName = Path.GetFileNameWithoutExtension(exeName);
+                var logPath = Path.Combine(
+                    Path.GetDirectoryName(GetUpdatesDir())!,
+                    "update.log");
+                var script = Path.Combine(Path.GetTempPath(), $"aat_update_{Guid.NewGuid():N}.ps1");
+
+                // Single-quoted paths for PowerShell; embedded ' → ''.
+                static string PsQuote(string value) => value.Replace("'", "''");
+
                 var scriptText =
-                    "@echo off\r\n" +
-                    "setlocal\r\n" +
-                    "REM ===== Phase 1: wait for the running app to exit (it launched us, then shuts down) =====\r\n" +
-                    "set /a attempts=0\r\n" +
-                    ":wait_exit\r\n" +
-                    $"tasklist /FI \"IMAGENAME eq {exeName}\" >nul 2>&1\r\n" +
-                    "if errorlevel 1 goto app_exited\r\n" +
-                    "set /a attempts+=1\r\n" +
-                    "REM after ~60s fall THROUGH to the installer anyway — the installer's\r\n" +
-                    "REM image-name taskkill (no /T) force-closes a still-running app.\r\n" +
-                    "if %attempts% GEQ 60 goto app_exited\r\n" +
-                    "ping 127.0.0.1 -n 2 -w 1000 >nul\r\n" +
-                    "goto wait_exit\r\n" +
-                    ":app_exited\r\n" +
-                    "REM ===== Phase 2: launch the silent installer (UAC may prompt) =====\r\n" +
-                    $"start \"\" \"{installerPath}\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART\r\n" +
-                    "REM ===== Phase 3: wait for setup to appear after UAC approval (~5 min) =====\r\n" +
-                    "REM setup.exe is only created AFTER the consent prompt is approved, so a\r\n" +
-                    "REM slow human click is expected — 300 attempts covers ~5 minutes.\r\n" +
-                    "set /a attempts=0\r\n" +
-                    ":wait_start\r\n" +
-                    $"tasklist /FI \"IMAGENAME eq {setupName}\" >nul 2>&1\r\n" +
-                    "if not errorlevel 1 goto started\r\n" +
-                    "set /a attempts+=1\r\n" +
-                    "REM UAC denied / setup never launched → relaunch the old app\r\n" +
-                    "if %attempts% GEQ 300 goto relaunch_old\r\n" +
-                    "ping 127.0.0.1 -n 2 -w 1000 >nul\r\n" +
-                    "goto wait_start\r\n" +
-                    ":started\r\n" +
-                    "REM ===== Phase 4: wait for setup to finish (~10 min) =====\r\n" +
-                    "set /a attempts=0\r\n" +
-                    ":wait_done\r\n" +
-                    $"tasklist /FI \"IMAGENAME eq {setupName}\" >nul 2>&1\r\n" +
-                    "if errorlevel 1 goto done\r\n" +
-                    "set /a attempts+=1\r\n" +
-                    "if %attempts% GEQ 600 goto relaunch_old\r\n" +
-                    "ping 127.0.0.1 -n 2 -w 1000 >nul\r\n" +
-                    "goto wait_done\r\n" +
-                    ":done\r\n" +
-                    "REM install finished — flush files, relaunch the NEW build\r\n" +
-                    "ping 127.0.0.1 -n 3 -w 1000 >nul\r\n" +
-                    $"start \"\" \"{exe}\" --restart\r\n" +
-                    "goto finish\r\n" +
-                    ":relaunch_old\r\n" +
-                    "REM Setup never appeared (UAC denied / launch failed) or overran. Relaunch\r\n" +
-                    "REM the old app — but KEEP WATCHING: a slow UAC approval can still spawn\r\n" +
-                    "REM setup AFTER this relaunch. Setup force-closes the app it finds, so if\r\n" +
-                    "REM that happens we wait it out and relaunch the NEW build once more.\r\n" +
-                    $"start \"\" \"{exe}\" --restart\r\n" +
-                    "set /a attempts=0\r\n" +
-                    ":late_watch\r\n" +
-                    $"tasklist /FI \"IMAGENAME eq {setupName}\" >nul 2>&1\r\n" +
-                    "if not errorlevel 1 goto late_running\r\n" +
-                    "set /a attempts+=1\r\n" +
-                    "if %attempts% GEQ 60 goto finish\r\n" +
-                    "ping 127.0.0.1 -n 2 -w 1000 >nul\r\n" +
-                    "goto late_watch\r\n" +
-                    ":late_running\r\n" +
-                    "set /a attempts=0\r\n" +
-                    ":late_wait\r\n" +
-                    $"tasklist /FI \"IMAGENAME eq {setupName}\" >nul 2>&1\r\n" +
-                    "if errorlevel 1 goto late_done\r\n" +
-                    "set /a attempts+=1\r\n" +
-                    "if %attempts% GEQ 600 goto finish\r\n" +
-                    "ping 127.0.0.1 -n 2 -w 1000 >nul\r\n" +
-                    "goto late_wait\r\n" +
-                    ":late_done\r\n" +
-                    $"start \"\" \"{exe}\" --restart\r\n" +
-                    ":finish\r\n" +
-                    "del \"%~f0\"\r\n";
+                    "$ErrorActionPreference = 'Continue'\r\n" +
+                    $"$log = '{PsQuote(logPath)}'\r\n" +
+                    "function Write-UpdateLog([string]$Message) {\r\n" +
+                    "  Add-Content -LiteralPath $log -Value (\"[{0}] {1}\" -f (Get-Date -Format o), $Message)\r\n" +
+                    "}\r\n" +
+                    "Write-UpdateLog 'Windows update script started'\r\n" +
+                    $"$procName = '{PsQuote(procName)}'\r\n" +
+                    $"$installer = '{PsQuote(installerPath)}'\r\n" +
+                    $"$exe = '{PsQuote(exe)}'\r\n" +
+                    "for ($i = 0; $i -lt 90; $i++) {\r\n" +
+                    "  if (-not (Get-Process -Name $procName -ErrorAction SilentlyContinue)) { break }\r\n" +
+                    "  Start-Sleep -Seconds 1\r\n" +
+                    "}\r\n" +
+                    "Write-UpdateLog 'Launching elevated silent installer (UAC)'\r\n" +
+                    "$exitCode = 1\r\n" +
+                    "try {\r\n" +
+                    "  $setup = Start-Process -FilePath $installer `\r\n" +
+                    "    -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' `\r\n" +
+                    "    -Verb RunAs -Wait -PassThru\r\n" +
+                    "  if ($null -ne $setup) { $exitCode = $setup.ExitCode }\r\n" +
+                    "  Write-UpdateLog (\"Installer finished (exit {0})\" -f $exitCode)\r\n" +
+                    "} catch {\r\n" +
+                    "  Write-UpdateLog (\"Installer failed or UAC denied: {0}\" -f $_.Exception.Message)\r\n" +
+                    "  Start-Process -FilePath $exe -ArgumentList '--restart'\r\n" +
+                    "  Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue\r\n" +
+                    "  exit 1\r\n" +
+                    "}\r\n" +
+                    "Start-Sleep -Seconds 2\r\n" +
+                    "Write-UpdateLog 'Relaunching app with --restart'\r\n" +
+                    "Start-Process -FilePath $exe -ArgumentList '--restart'\r\n" +
+                    "Write-UpdateLog 'Update script done'\r\n" +
+                    "Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue\r\n";
+
                 await File.WriteAllTextAsync(script, scriptText, ct);
 
-                // ShellExecute runs the .cmd via cmd.exe (file association) — no
-                // `cmd.exe /c "..."` quoting pitfalls.
+                // Detach via `start` so neither cmd nor PowerShell stays a child of
+                // this process (survives our exit; immune to old tree-kill installers).
                 Process.Start(new ProcessStartInfo
                 {
-                    FileName = script,
-                    UseShellExecute = true
+                    FileName = "cmd.exe",
+                    Arguments =
+                        $"/c start \"\" /MIN powershell.exe -NoProfile -ExecutionPolicy Bypass " +
+                        $"-WindowStyle Hidden -File \"{script}\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true
                 });
 
-                // Close this app cleanly: releases the mutex (Program.cs finally)
-                // and unlocks client.exe so the installer can replace it. The
-                // detached script survives us and relaunches after the install.
-                App.AllowShutdown = true;
-                Dispatcher.UIThread.Post(() =>
-                {
-                    try
-                    {
-                        if (Avalonia.Application.Current?.ApplicationLifetime
-                            is Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop)
-                        {
-                            desktop.Shutdown();
-                        }
-                        else
-                        {
-                            Environment.Exit(0);
-                        }
-                    }
-                    catch { Environment.Exit(0); }
-                });
+                BeginShutdownForUpdate();
                 return true;
             }
             catch (Exception ex)
@@ -831,6 +832,40 @@ public class AppUpdateService : ObservableObject, IHostedService
 
         StatusText = "Unsupported platform for auto-update.";
         return false;
+    }
+
+    /// <summary>
+    /// After spawning the detached Windows update script, exit quickly so the
+    /// installer can replace client.exe. Graceful Avalonia shutdown alone can
+    /// take tens of seconds while hosted services stop; the update script only
+    /// waits ~90s before launching setup anyway.
+    /// </summary>
+    private void BeginShutdownForUpdate()
+    {
+        App.AllowShutdown = true;
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(400);
+            Dispatcher.UIThread.Post(() =>
+            {
+                try
+                {
+                    if (Avalonia.Application.Current?.ApplicationLifetime
+                        is Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop)
+                    {
+                        desktop.Shutdown();
+                    }
+                }
+                catch { /* fall through to hard exit */ }
+
+                // Program.cs finally releases the single-instance mutex on exit.
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(1500);
+                    Environment.Exit(0);
+                });
+            });
+        });
     }
 
     // ─── Path helpers (Installer-Parity: never write to the install dir) ───
