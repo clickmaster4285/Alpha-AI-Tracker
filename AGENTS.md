@@ -3,6 +3,22 @@
 > **Last audited:** 2026-08-11
 > **Changelog:**
 >
+> - 2026-08-12: **Client rule — any UPDATE on an already-synced row resets `is_synced=0` (server always learns changes).**
+>   Audited every write path in the client SQLite layer and found 8 that mutated rows without re-queueing them:
+>   (1) `UpdateAppSessionEndedSql` (session close) — CRITICAL: a session synced as OPEN never told the server it
+>   ended; the web dashboard showed it open forever. (2) `CloseHardwareDeviceAsync` — CRITICAL: a plugged-in device
+>   synced as connected never told the server it was unplugged. (3) `InsertAppSessionSql` + (4) `InsertAppItemSql`
+>   `ON CONFLICT` DO-UPDATE clauses — a re-stored session/item now re-syncs. (5–8) all four `network_info`
+>   mutators (`MarkNetworkInfoNotCurrentAsync`, `TouchNetworkInfoAsync`, `MarkAllNetworkInfoNotCurrentAsync`,
+>   `TouchCurrentNetworkInfoAsync`) + the `MigrateSql` current-row backfill — demoted/touched rows re-sync so the
+>   server can never show a superseded row as current. Server-side consumption verified: `app_sessions`/`app_items`/
+>   `hardware_devices` upsert on conflict (DO UPDATE), so re-sent rows propagate. ⚠️ `network_info` sync is
+>   `ON CONFLICT (id) DO NOTHING` server-side and has no `is_current`/`last_seen_at` columns — re-sent network rows
+>   are inert no-ops today (kept for rule consistency + future-proofing; the `TouchCurrentNetworkInfoAsync` reset
+>   re-queues one tiny row ~every 5 min on stable networks). All other update paths already reset `is_synced`.
+>   Verified: `dotnet build` 0/0, `go build`/`go vet` clean, all 8 edited statements executed cleanly against a
+>   copy of the real client DB.
+>
 > - 2026-08-11: **Web user-detail page + employee detail endpoint.** The HR → List of Users page
 >   dropdown was clipped by the table's `overflow-x-auto` scroll container whenever the list was
 >   short (the custom absolute-positioned menu) — replaced with the Radix `DropdownMenu` (portal-

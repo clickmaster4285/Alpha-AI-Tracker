@@ -1,1 +1,1 @@
-when any arrow update and same row hase already synced:1 then update to synced:0
+on @client side when any row update and same row has already synced:1 then also update to synced:0

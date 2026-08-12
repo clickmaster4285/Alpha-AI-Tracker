@@ -324,7 +324,8 @@ internal static class DatabaseSchema
         -- Backfill dedup: legacy databases have MULTIPLE is_current=1 rows per IP identity
         -- (one per launch — the pre-fix bug). Collapse them to the most recent per identity
         -- so the current-row contract holds going forward without a manual DB wipe.
-        UPDATE network_info SET is_current = 0 WHERE is_current = 1 AND id NOT IN (
+        -- Demoted rows re-sync so the server can never show a superseded row as current.
+        UPDATE network_info SET is_current = 0, is_synced = 0 WHERE is_current = 1 AND id NOT IN (
             SELECT id FROM (
                 SELECT id, ROW_NUMBER() OVER (PARTITION BY public_ip, private_ip ORDER BY collected_at DESC) AS rn
                 FROM network_info WHERE is_current = 1
@@ -458,12 +459,17 @@ internal static class DatabaseSchema
              $grouped_by, $cgroup_scope, $context_label)
         ON CONFLICT(id) DO UPDATE SET
             ended_at = COALESCE(excluded.ended_at, app_sessions.ended_at),
-            parent_process_id = COALESCE(excluded.parent_process_id, app_sessions.parent_process_id)
+            parent_process_id = COALESCE(excluded.parent_process_id, app_sessions.parent_process_id),
+            -- Any re-stored (updated) row must re-sync so the server learns the change
+            -- even when the row was already synced (user rule 2026-08-12).
+            is_synced = 0
     ";
 
     internal const string UpdateAppSessionEndedSql = @"
         UPDATE app_sessions
-        SET ended_at = $ended_at
+        SET ended_at = $ended_at,
+            -- Re-sync on close: a session synced as OPEN must tell the server it ended.
+            is_synced = 0
         WHERE id = $id
     ";
 
@@ -498,7 +504,9 @@ internal static class DatabaseSchema
             sequence = excluded.sequence,
             previous_path = COALESCE(NULLIF(excluded.previous_path, ''), app_items.previous_path),
             current_path = COALESCE(NULLIF(excluded.current_path, ''), app_items.current_path),
-            metadata_json = excluded.metadata_json
+            metadata_json = excluded.metadata_json,
+            -- Any re-stored (updated) item must re-sync (user rule 2026-08-12).
+            is_synced = 0
     ";
 
     internal const string MarkAppItemsSentSql = @"
