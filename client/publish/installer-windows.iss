@@ -33,7 +33,7 @@ SolidCompression=yes
 WizardStyle=modern
 SetupIconFile=avalonia-logo.ico
 CloseApplications=force
-AppMutex=AlphaAITracker
+AppMutex={#APP_MUTEX}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
 CreateUninstallRegKey=yes
@@ -69,6 +69,14 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: no
 // KillRunningInstance — Forcefully terminates any
 // running Alpha AI Tracker process before setup.
 // Uses taskkill to ensure the process is fully gone.
+//
+// ⚠️ NEVER pass /T (tree-kill) here. The self-updater launches this installer as a
+// DESCENDANT of the running app (app → cmd script → setup), so a tree-kill would
+// terminate the updater's OWN cmd script and this installer itself before any file
+// is written — the update silently never happens (root cause of the 2026-08-12
+// "Windows downloads but doesn't update" bug). The updater now exits the app
+// itself before the installer runs, so this is only a safety net for manual
+// installs over a running instance. Kill by image name ONLY.
 // ────────────────────────────────────────────────
 function KillRunningInstance: Boolean;
 var
@@ -78,11 +86,9 @@ begin
   Result := True;
   KillCount := 0;
 
-  // Try multiple possible executable names
-  if Exec('taskkill', '/F /IM client.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-    if ResultCode = 0 then KillCount := KillCount + 1;
-
-  if Exec('taskkill', '/F /IM AlphaAITracker.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  // Kill by image name ONLY (no /T — see warning above). The exe name is derived
+  // from APP_IDENTIFIERS via windows_vars.iss, never hardcoded here.
+  if Exec('taskkill', '/F /IM {#MyAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
     if ResultCode = 0 then KillCount := KillCount + 1;
 
   // Small pause to let OS release file handles

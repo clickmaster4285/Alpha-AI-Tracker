@@ -13,6 +13,16 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 INSTALLER_DIR="$PROJECT_DIR/installers"
 VERSION="${1:-v$(cat "$PROJECT_DIR/VERSION")}"
 
+# Fresh output — remove any installers left over from a PREVIOUS release. release.sh
+# uploads every file in installers/, so without this a stale
+# alpha-ai-tracker_1.1.0_amd64.deb / AlphaAITracker-Setup-1.1.0.exe would be attached
+# to the new release and the client's auto-updater (FirstOrDefault asset match)
+# could download the OLD installer — "the update" then re-installs the same version
+# (root cause of the 2026-08-12 "still shows old version" bug). build-installer.sh
+# also cleans, but deleting here first means even a failed build can never upload
+# stale artifacts (the upload glob below only sees files built by THIS run).
+rm -rf "$INSTALLER_DIR"
+
 # Load app identifiers from single source of truth
 # shellcheck disable=SC1090
 source "$PROJECT_DIR/APP_IDENTIFIERS"

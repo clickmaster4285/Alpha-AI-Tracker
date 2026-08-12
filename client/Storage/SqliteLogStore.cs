@@ -1165,7 +1165,9 @@ public class SqliteLogStore : ILogStore, IDisposable
         {
             await using var tx = await _connection.BeginTransactionAsync(ct);
             var cmd = _connection.CreateCommand();
-            cmd.CommandText = "UPDATE network_info SET is_current = 0 WHERE id = $id";
+            // is_synced = 0: an already-synced row must re-sync so the server never
+            // shows a superseded network row as current (user rule 2026-08-12).
+            cmd.CommandText = "UPDATE network_info SET is_current = 0, is_synced = 0 WHERE id = $id";
             var p = cmd.Parameters.Add("$id", SqliteType.Text);
             foreach (var id in ids) { p.Value = id; await cmd.ExecuteNonQueryAsync(ct); }
             await tx.CommitAsync(ct);
@@ -1183,7 +1185,7 @@ public class SqliteLogStore : ILogStore, IDisposable
         try
         {
             var cmd = _connection.CreateCommand();
-            cmd.CommandText = "UPDATE network_info SET last_seen_at = $last_seen WHERE id = $id";
+            cmd.CommandText = "UPDATE network_info SET last_seen_at = $last_seen, is_synced = 0 WHERE id = $id";
             cmd.Parameters.AddWithValue("$last_seen", lastSeenAt.ToString("O"));
             cmd.Parameters.AddWithValue("$id", id);
             await cmd.ExecuteNonQueryAsync(ct);
@@ -1201,7 +1203,9 @@ public class SqliteLogStore : ILogStore, IDisposable
         try
         {
             var cmd = _connection.CreateCommand();
-            cmd.CommandText = "UPDATE network_info SET is_current = 0 WHERE is_current = 1";
+            // is_synced = 0: every demoted row re-syncs once so the server can never
+            // show a superseded row as current (user rule 2026-08-12).
+            cmd.CommandText = "UPDATE network_info SET is_current = 0, is_synced = 0 WHERE is_current = 1";
             await cmd.ExecuteNonQueryAsync(ct);
         }
         finally
@@ -1217,7 +1221,7 @@ public class SqliteLogStore : ILogStore, IDisposable
         try
         {
             var cmd = _connection.CreateCommand();
-            cmd.CommandText = "UPDATE network_info SET last_seen_at = $last_seen WHERE is_current = 1";
+            cmd.CommandText = "UPDATE network_info SET last_seen_at = $last_seen, is_synced = 0 WHERE is_current = 1";
             cmd.Parameters.AddWithValue("$last_seen", lastSeenAt.ToString("O"));
             await cmd.ExecuteNonQueryAsync(ct);
         }
@@ -1997,7 +2001,9 @@ public class SqliteLogStore : ILogStore, IDisposable
         try
         {
             var cmd = _connection.CreateCommand();
-            cmd.CommandText = "UPDATE hardware_devices SET unplugged_at = $at WHERE id = $id";
+            // is_synced = 0: an already-synced device must re-sync its unplug so the
+            // server learns the device left (user rule 2026-08-12).
+            cmd.CommandText = "UPDATE hardware_devices SET unplugged_at = $at, is_synced = 0 WHERE id = $id";
             cmd.Parameters.AddWithValue("$at", unpluggedAt.ToString("O"));
             cmd.Parameters.AddWithValue("$id", id);
             await cmd.ExecuteNonQueryAsync(ct);

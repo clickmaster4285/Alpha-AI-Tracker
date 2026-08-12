@@ -1,7 +1,98 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-08-11
+> **Last audited:** 2026-08-12
 > **Changelog:**
+>
+> - 2026-08-12: **Windows auto-update "downloaded but never installed" root-caused — the installer was TREE-KILLING itself.**
+>   Linux updated fine, Windows did nothing after the download finished. Root cause: `installer-windows.iss`
+>   `KillRunningInstance` ran `taskkill /F /IM client.exe /T` — the **`/T` is a TREE-kill**. The self-updater
+>   launches the installer as a DESCENDANT of the running app (`client.exe → cmd.exe update script → setup.exe`),
+>   so that tree-kill terminated the updater's OWN cmd script AND the installer itself in `InitializeSetup` —
+>   before a single file was written, with the relaunch script dead too → old version stays. Linux works because
+>   `pkexec dpkg` is a separate elevated process, never in the app's kill-tree. Fix, both sides:
+>   **(1)** `installer-windows.iss` — `/T` removed from `KillRunningInstance` (kills by image name only as a
+>   manual-install safety net); exe name is no longer hardcoded either (`{#MyAppExeName}`) and `AppMutex` is now
+>   `{#APP_MUTEX}` — both from APP_IDENTIFIERS via `windows_vars.iss`. **(2)** `AppUpdateService.InstallAsync`
+>   (Windows) rewritten so the updater does NOT depend on the installer killing the app: it writes a detached
+>   `.cmd` to `%TEMP%` that (a) polls `tasklist /FI "IMAGENAME eq {exeName}"` (exit code 0 = running, 1 = gone —
+>   no `find` pipe, so the 25-char tasklist display truncation that broke the old `find`-based check is moot)
+>   until the app exits (max ~60s, then falls through — the installer's image-name taskkill is the net), (b)
+>   launches the silent installer (`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`), (c) waits for setup to APPEAR
+>   (UAC approval — setup.exe is only created AFTER the consent prompt is approved; ~5 min), (d) waits for it to
+>   finish (~10 min), (e) relaunches `{exe} --restart` and (f) deletes itself. The app shuts itself down
+>   gracefully via `Dispatcher` (Program.cs finally releases the mutex) right after spawning the script. **Slow-UAC
+>   self-heal:** if setup never appears (UAC denied / launch failed) the script relaunches the old app but KEEPS
+>   watching — a slow consent click can still spawn setup after that relaunch (setup force-closes the app it
+>   finds), so it waits that setup out and relaunches the NEW build once more. Bounded counters everywhere
+>   (60/300/600/60/600) — no loop can run away. Verified: `dotnet build` 0/0; two code reviews walked every
+>   batch line against real-Windows `tasklist`/UAC/Inno semantics; the exact rendered `.cmd` was extracted from
+>   the source and audited (every `goto` resolves, all five loops bounded, no executable `/T` anywhere). Wine
+>   cannot smoke-test the flow (its `tasklist` returns 0 for no-match, unlike Windows' 1), so the real test is a
+>   Windows machine: click Update → app closes → UAC → silent install → app reopens on the new version. Note:
+>   the previous 2026-08-12 release/installer-cleanup fix (no stale assets) must ship TOGETHER with this —
+>   rebuild the Windows installer so the new `.iss` (no `/T`) actually reaches machines.
+>
+> - 2026-08-12: **Auto-update "still shows old version" root cause fixed — stale installers can never be published or picked.**
+>   Live evidence: the GitHub `v1.1.1` release carried BOTH `alpha-ai-tracker_1.1.0_amd64.deb`/`AlphaAITracker-Setup-1.1.0.exe`
+>   AND the 1.1.1 ones, and the client's `updates/` dir held the downloaded **1.1.0** deb — because `release.sh` uploaded
+>   EVERY file left in `client/installers/` from the previous release, and `ResolvePlatformAsset` used `FirstOrDefault`,
+>   so the OLD installer won. "Update to v1.1.1" re-installed 1.1.0 over 1.1.0. Two-part fix: **(1)** `release.sh` and
+>   `build-installer.sh` now `rm -rf "$INSTALLER_DIR"` at the start (after arg parsing in build-installer so `-h` doesn't
+>   wipe; release.sh cleans before anything else so even a failed build can never upload stale artifacts) — stale assets are
+>   unrepresentable; **(2)** `AppUpdateService.ResolvePlatformAsset` now prefers the asset whose name embeds the RELEASE
+>   version (boundary-aware regex `(^|[\-_.])1\.1\.1(?=$|[\-_.])` — "1.1.10"/"1.11.1" can never match a request for "1.1.1"),
+>   falling back to the old arch/extension matching for well-formed releases. Verified: `bash -n` both scripts, `dotnet build`
+>   0/0, regex unit-checked against the real asset names (stale skipped / new matched / prefix-collisions rejected).
+>   Note: the ALREADY-published v1.1.1 release still contains the stale 1.1.0 assets — future releases won't, and the client
+>   now picks 1.1.1 even if they linger.
+>
+> - 2026-08-12: **Self-update from GitHub Releases — auto-update + GUI "Check updates".** New
+>   `client/Services/AppUpdateService.cs` (ObservableObject + IHostedService singleton, same
+>   register-singleton-and-hosted pattern as SyncService): checks
+>   `https://api.github.com/repos/{repo}/releases/latest`, normalizes the tag (`v1.1.0` → `1.1.0`),
+>   picks the platform installer asset (Linux `_amd64.deb` by runtime arch, Windows `.exe`, macOS
+>   `.dmg`) and compares against `AppInfo.Version` (numeric three-part compare, `-beta`/`+sha`
+>   ignored). Quiet **auto-check loop** every 30 min that only fires when the persisted
+>   `update_last_check_at` (app_status) is older than `ALPHA_UPDATE_AUTO_CHECK_HOURS` (24h); with
+>   `ALPHA_UPDATE_AUTO_INSTALL=true` (default) it **auto-downloads and installs** with no click:
+>   Linux `pkexec dpkg -i` (the only human step is the polkit password dialog — the install dir is
+>   root-owned), Windows runs the Inno installer with `/VERYSILENT` (Inno `CloseApplications=force`
+>   terminates the app itself, so a detached `.cmd` waits then relaunches with `--restart`), macOS
+>   `open`s the dmg (manual drag). Downloads stream into the user data dir
+>   (`~/.local/share/alpha-ai-tracker/updates` / `%LocalAppData%\AlphaAITracker\updates`) — never the
+>   install dir. GUI: top bar gains **Check updates** (ghost), a **"Update to vX.Y.Z"** install
+>   button, a **Restart to apply** button (Linux dpkg replaces the binary while running) and a status
+>   line; the dashboard shows an **update banner** (version + release notes + progress bar + Later
+>   which persists `update_dismissed_version`). `Program.cs` handles the new `--restart` arg by
+>   retrying the single-instance mutex for 8s (post-update relaunch vs signal-and-exit). Config: new
+>   `ALPHA_UPDATE_REPO/ENABLED/AUTO_CHECK_HOURS/AUTO_INSTALL` keys in `.env` + `.env.example` +
+>   `AppConfig`. The repo ALWAYS comes from `.env` — `ALPHA_UPDATE_REPO`, falling back to the
+>   pre-existing `REPO=` key (now actually read); there is NO hardcoded repo anywhere, and when
+>   neither key is set the updater is disabled with a clear "No update repository configured"
+>   message on manual checks. Verified: `dotnet build` 0/0;
+>   live smoke test hit the real GitHub API (`You're up to date (1.0.0).` against the v1.0.0
+>   release with `alpha-ai-tracker_1.0.0_amd64.deb` + `AlphaAITracker-Setup-1.0.0.exe` assets).
+>   **Note:** `AppUpdateService` deliberately uses EXPLICIT properties + `RelayCommand` fields
+>   (no `[ObservableProperty]`/`[RelayCommand]` source generators) — generated members made IDEs
+>   show phantom "name does not exist" errors until the analyzer re-ran, even though the CLI build
+>   was always clean. Manual install/auto-install share one download path behind an atomic
+>   `_installGate` so the shared `.part` file can never be written by two threads at once.
+>
+> - 2026-08-12: **Client rule — any UPDATE on an already-synced row resets `is_synced=0` (server always learns changes).**
+>   Audited every write path in the client SQLite layer and found 8 that mutated rows without re-queueing them:
+>   (1) `UpdateAppSessionEndedSql` (session close) — CRITICAL: a session synced as OPEN never told the server it
+>   ended; the web dashboard showed it open forever. (2) `CloseHardwareDeviceAsync` — CRITICAL: a plugged-in device
+>   synced as connected never told the server it was unplugged. (3) `InsertAppSessionSql` + (4) `InsertAppItemSql`
+>   `ON CONFLICT` DO-UPDATE clauses — a re-stored session/item now re-syncs. (5–8) all four `network_info`
+>   mutators (`MarkNetworkInfoNotCurrentAsync`, `TouchNetworkInfoAsync`, `MarkAllNetworkInfoNotCurrentAsync`,
+>   `TouchCurrentNetworkInfoAsync`) + the `MigrateSql` current-row backfill — demoted/touched rows re-sync so the
+>   server can never show a superseded row as current. Server-side consumption verified: `app_sessions`/`app_items`/
+>   `hardware_devices` upsert on conflict (DO UPDATE), so re-sent rows propagate. ⚠️ `network_info` sync is
+>   `ON CONFLICT (id) DO NOTHING` server-side and has no `is_current`/`last_seen_at` columns — re-sent network rows
+>   are inert no-ops today (kept for rule consistency + future-proofing; the `TouchCurrentNetworkInfoAsync` reset
+>   re-queues one tiny row ~every 5 min on stable networks). All other update paths already reset `is_synced`.
+>   Verified: `dotnet build` 0/0, `go build`/`go vet` clean, all 8 edited statements executed cleanly against a
+>   copy of the real client DB.
 >
 > - 2026-08-11: **Web user-detail page + employee detail endpoint.** The HR → List of Users page
 >   dropdown was clipped by the table's `overflow-x-auto` scroll container whenever the list was
@@ -604,7 +695,7 @@ flowchart LR
 **What's missing:**
 
 - **No tests** (0 test files)
-- **No auto-update mechanism**
+- ~~**No auto-update mechanism**~~ (resolved 2026-08-12 — GitHub Releases self-updater with GUI Check updates; see changelog)
 - **No crash reporting** — unhandled exceptions crash silently
 - **No offline queue analysis** — if server is unreachable, logs buffer locally with no back-pressure handling
 - **No encryption at rest** — SQLite encryption (sqlcipher) is commented out

@@ -72,18 +72,37 @@ var isUserLaunch = !isBackground && !isMinimized;
 var appMutex = new Mutex(true, "AlphaAITracker", out var mutexCreated);
 if (!mutexCreated)
 {
-    // Another instance already owns the mutex — the persistent background
-    // instance launched by auto-start / systemd, or a previously-opened GUI
-    // that is hidden in the tray. Instead of exiting silently (which was
-    // making the GUI "open and instantly close"), ask that instance to show
-    // its window, then exit. This lets the user open the GUI as many times
-    // as they want without ever stopping the running background tracker.
-    Console.Error.WriteLine("Another instance is already running.");
-    if (isUserLaunch)
+    // ── --restart (post-update relaunch) ──
+    // The updater launches us with --restart and then shuts the OLD process down
+    // so the newly-installed binary can take over. The old process may still own
+    // the mutex for a moment, so instead of treating this like a normal second
+    // launch (signal-and-exit), wait up to 8s for it to release ownership.
+    if (args.Contains("--restart"))
     {
-        SingleInstanceService.SignalExistingInstance();
+        if (appMutex.WaitOne(TimeSpan.FromSeconds(8)))
+        {
+            mutexCreated = true;
+        }
+        else
+        {
+            return;
+        }
     }
-    return;
+    else
+    {
+        // Another instance already owns the mutex — the persistent background
+        // instance launched by auto-start / systemd, or a previously-opened GUI
+        // that is hidden in the tray. Instead of exiting silently (which was
+        // making the GUI "open and instantly close"), ask that instance to show
+        // its window, then exit. This lets the user open the GUI as many times
+        // as they want without ever stopping the running background tracker.
+        Console.Error.WriteLine("Another instance is already running.");
+        if (isUserLaunch)
+        {
+            SingleInstanceService.SignalExistingInstance();
+        }
+        return;
+    }
 }
 
 // We are the primary (mutex-owning) instance: start listening for SHOW
@@ -175,6 +194,13 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<LogCollectorServic
 // IMMEDIATE drain the moment credentials are persisted (RequestImmediateSync).
 builder.Services.AddSingleton<SyncService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<SyncService>());
+
+// Self-updater — checks GitHub Releases for a newer installer, downloads it into the
+// user data dir and installs via the OS installer (pkexec dpkg / Inno / dmg). Always
+// registered (the service no-ops when ALPHA_UPDATE_ENABLED=false) so MainViewModel
+// and the dashboard can bind its state regardless.
+builder.Services.AddSingleton<AppUpdateService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<AppUpdateService>());
 
 // Near-real-time install/uninstall detection: watches .desktop/dpkg/Start Menu//Applications
 // and triggers an immediate inventory rescan on change — no GUI interaction needed.
