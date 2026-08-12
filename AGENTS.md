@@ -3,6 +3,35 @@
 > **Last audited:** 2026-08-12
 > **Changelog:**
 >
+> - 2026-08-12: **Windows auto-update "downloaded but never installed" root-caused — the installer was TREE-KILLING itself.**
+>   Linux updated fine, Windows did nothing after the download finished. Root cause: `installer-windows.iss`
+>   `KillRunningInstance` ran `taskkill /F /IM client.exe /T` — the **`/T` is a TREE-kill**. The self-updater
+>   launches the installer as a DESCENDANT of the running app (`client.exe → cmd.exe update script → setup.exe`),
+>   so that tree-kill terminated the updater's OWN cmd script AND the installer itself in `InitializeSetup` —
+>   before a single file was written, with the relaunch script dead too → old version stays. Linux works because
+>   `pkexec dpkg` is a separate elevated process, never in the app's kill-tree. Fix, both sides:
+>   **(1)** `installer-windows.iss` — `/T` removed from `KillRunningInstance` (kills by image name only as a
+>   manual-install safety net); exe name is no longer hardcoded either (`{#MyAppExeName}`) and `AppMutex` is now
+>   `{#APP_MUTEX}` — both from APP_IDENTIFIERS via `windows_vars.iss`. **(2)** `AppUpdateService.InstallAsync`
+>   (Windows) rewritten so the updater does NOT depend on the installer killing the app: it writes a detached
+>   `.cmd` to `%TEMP%` that (a) polls `tasklist /FI "IMAGENAME eq {exeName}"` (exit code 0 = running, 1 = gone —
+>   no `find` pipe, so the 25-char tasklist display truncation that broke the old `find`-based check is moot)
+>   until the app exits (max ~60s, then falls through — the installer's image-name taskkill is the net), (b)
+>   launches the silent installer (`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`), (c) waits for setup to APPEAR
+>   (UAC approval — setup.exe is only created AFTER the consent prompt is approved; ~5 min), (d) waits for it to
+>   finish (~10 min), (e) relaunches `{exe} --restart` and (f) deletes itself. The app shuts itself down
+>   gracefully via `Dispatcher` (Program.cs finally releases the mutex) right after spawning the script. **Slow-UAC
+>   self-heal:** if setup never appears (UAC denied / launch failed) the script relaunches the old app but KEEPS
+>   watching — a slow consent click can still spawn setup after that relaunch (setup force-closes the app it
+>   finds), so it waits that setup out and relaunches the NEW build once more. Bounded counters everywhere
+>   (60/300/600/60/600) — no loop can run away. Verified: `dotnet build` 0/0; two code reviews walked every
+>   batch line against real-Windows `tasklist`/UAC/Inno semantics; the exact rendered `.cmd` was extracted from
+>   the source and audited (every `goto` resolves, all five loops bounded, no executable `/T` anywhere). Wine
+>   cannot smoke-test the flow (its `tasklist` returns 0 for no-match, unlike Windows' 1), so the real test is a
+>   Windows machine: click Update → app closes → UAC → silent install → app reopens on the new version. Note:
+>   the previous 2026-08-12 release/installer-cleanup fix (no stale assets) must ship TOGETHER with this —
+>   rebuild the Windows installer so the new `.iss` (no `/T`) actually reaches machines.
+>
 > - 2026-08-12: **Auto-update "still shows old version" root cause fixed — stale installers can never be published or picked.**
 >   Live evidence: the GitHub `v1.1.1` release carried BOTH `alpha-ai-tracker_1.1.0_amd64.deb`/`AlphaAITracker-Setup-1.1.0.exe`
 >   AND the 1.1.1 ones, and the client's `updates/` dir held the downloaded **1.1.0** deb — because `release.sh` uploaded
