@@ -3,6 +3,20 @@
 > **Last audited:** 2026-08-12
 > **Changelog:**
 >
+> - 2026-08-12: **Auto-update "still shows old version" root cause fixed — stale installers can never be published or picked.**
+>   Live evidence: the GitHub `v1.1.1` release carried BOTH `alpha-ai-tracker_1.1.0_amd64.deb`/`AlphaAITracker-Setup-1.1.0.exe`
+>   AND the 1.1.1 ones, and the client's `updates/` dir held the downloaded **1.1.0** deb — because `release.sh` uploaded
+>   EVERY file left in `client/installers/` from the previous release, and `ResolvePlatformAsset` used `FirstOrDefault`,
+>   so the OLD installer won. "Update to v1.1.1" re-installed 1.1.0 over 1.1.0. Two-part fix: **(1)** `release.sh` and
+>   `build-installer.sh` now `rm -rf "$INSTALLER_DIR"` at the start (after arg parsing in build-installer so `-h` doesn't
+>   wipe; release.sh cleans before anything else so even a failed build can never upload stale artifacts) — stale assets are
+>   unrepresentable; **(2)** `AppUpdateService.ResolvePlatformAsset` now prefers the asset whose name embeds the RELEASE
+>   version (boundary-aware regex `(^|[\-_.])1\.1\.1(?=$|[\-_.])` — "1.1.10"/"1.11.1" can never match a request for "1.1.1"),
+>   falling back to the old arch/extension matching for well-formed releases. Verified: `bash -n` both scripts, `dotnet build`
+>   0/0, regex unit-checked against the real asset names (stale skipped / new matched / prefix-collisions rejected).
+>   Note: the ALREADY-published v1.1.1 release still contains the stale 1.1.0 assets — future releases won't, and the client
+>   now picks 1.1.1 even if they linger.
+>
 > - 2026-08-12: **Self-update from GitHub Releases — auto-update + GUI "Check updates".** New
 >   `client/Services/AppUpdateService.cs` (ObservableObject + IHostedService singleton, same
 >   register-singleton-and-hosted pattern as SyncService): checks
