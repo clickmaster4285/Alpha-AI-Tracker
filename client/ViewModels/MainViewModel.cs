@@ -21,6 +21,9 @@ public partial class MainViewModel : ViewModelBase
     private readonly LogCollectorService _logCollector;
     private readonly SyncService _syncService;
 
+    /// <summary>Self-update state — bound by the top-bar buttons and the dashboard banner.</summary>
+    public AppUpdateService Update { get; }
+
     // ─── Branding (APP_IDENTIFIERS + VERSION) ───
     // Bound by every view instead of literals, so editing client/APP_IDENTIFIERS or
     // client/VERSION and rebuilding is all it takes to re-brand the whole GUI.
@@ -272,6 +275,7 @@ public partial class MainViewModel : ViewModelBase
         AutoStartService autoStart,
         LogCollectorService logCollector,
         SyncService syncService,
+        AppUpdateService updateService,
         DashboardViewModel dashboard,
         SystemSpecsViewModel systemSpecs,
         InstalledAppsViewModel installedApps)
@@ -283,6 +287,7 @@ public partial class MainViewModel : ViewModelBase
         _autoStart = autoStart;
         _logCollector = logCollector;
         _syncService = syncService;
+        Update = updateService;
         Dashboard = dashboard;
         SystemSpecs = systemSpecs;
         InstalledApps = installedApps;
@@ -372,6 +377,11 @@ public partial class MainViewModel : ViewModelBase
         if (!IsProfile) return;
         ActivePage = AppPage.Dashboard;
         await Dashboard.RefreshAsync();
+
+        // Quiet self-update check: only runs when the configured interval has elapsed
+        // (persisted in app_status), never blocks the UI, and auto-installs when a
+        // newer version exists and ALPHA_UPDATE_AUTO_INSTALL is on.
+        _ = Update.RunAutoCheckIfDueAsync(CancellationToken.None);
     }
 
     public async Task InitializeAsync(CancellationToken ct)

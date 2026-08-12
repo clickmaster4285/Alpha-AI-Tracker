@@ -20,14 +20,20 @@ public partial class DashboardViewModel : ViewModelBase
     private readonly AppConfig _config;
     private readonly LogCollectorService _logCollector;
 
+    /// <summary>Self-update state — same singleton the top bar binds, so the banner and the
+    /// top-bar buttons always agree.</summary>
+    public AppUpdateService Update { get; }
+
     public DashboardViewModel(
         ILogStore store,
         AppConfig config,
-        LogCollectorService logCollector)
+        LogCollectorService logCollector,
+        AppUpdateService updateService)
     {
         _store = store;
         _config = config;
         _logCollector = logCollector;
+        Update = updateService;
     }
 
     // ─── Identity ───

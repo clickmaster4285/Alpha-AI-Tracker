@@ -24,7 +24,9 @@ MainWindow.axaml (236 lines — a ROUTER, not a screen)
               ├─ col 0  Nav rail (dark navy) — brand tile, 3 nav buttons,
               │         employee card, version
               └─ col 1  RowDefinitions="Auto,*"
-                    ├─ Top bar: ActivePageTitle / ActivePageSubtitle / env badge / refresh
+                    ├─ Top bar: ActivePageTitle / ActivePageSubtitle / env badge /
+                    │         update controls (Check updates / Update to vX / Restart
+                    │         to apply / status) / refresh
                     └─ Page host — three UserControls stacked, one visible:
                          DashboardPage      (page 4)  DataContext = Dashboard
                          SystemSpecsPage    (page 5)  DataContext = SystemSpecs
@@ -119,6 +121,8 @@ Two decisions worth keeping:
 - **The app-count tile reads the stored `installed_applications` count from SQLite** — the exact table page 6 renders — so the tile, the page, and the DB can never disagree.
 
 The `Or` / `Join` / `FormatMb` / `FormatDuration` / `FormatAgo` helpers are `internal static` here and reused by `SystemSpecsViewModel` and `InstalledAppsViewModel` — one em-dash placeholder convention (`"—"`) across all three pages.
+
+**Software update banner (2026-08-12).** The dashboard also hosts a self-update banner at the top of the page when `Update.UpdateAvailable` — version + release notes, a download progress bar while streaming, and **Download & Install** / **Later** buttons (Later persists `update_dismissed_version`). `DashboardViewModel.Update` is the SAME singleton `AppUpdateService` the top bar binds, so the two surfaces never disagree (see `client/ARCHITECTURE.md` §18).
 
 ### Page 5 — System Specs
 

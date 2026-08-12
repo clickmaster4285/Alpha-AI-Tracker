@@ -19,6 +19,72 @@
     <ScrollViewer VerticalScrollBarVisibility="Auto">
         <StackPanel Spacing="18" Margin="26,22,26,32">
 
+            <!-- ── Software update banner ── -->
+            <Border Classes="card" IsVisible="{Binding Update.UpdateAvailable}"
+                    Background="{StaticResource PrimarySoftBrush}"
+                    BorderBrush="{StaticResource PrimaryBrush}" BorderThickness="1"
+                    BoxShadow="{StaticResource ShadowSm}">
+                <Grid ColumnDefinitions="*,Auto" Margin="0">
+                    <StackPanel Spacing="7" VerticalAlignment="Center">
+                        <StackPanel Orientation="Horizontal" Spacing="9">
+                            <Border Width="28" Height="28" CornerRadius="8"
+                                    Background="{StaticResource PrimaryBrush}">
+                                <Path Data="{StaticResource DownloadGeometry}"
+                                      Stroke="White" StrokeThickness="1.7" StrokeLineCap="Round"
+                                      Stretch="Uniform" Width="14" Height="14"
+                                      HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Spacing="1">
+                                <TextBlock Text="Software update available" Classes="h2"/>
+                                <TextBlock Classes="label" FontSize="11.5">
+                                    <Run Text="Version"/>
+                                    <Run Text=" "/>
+                                    <Run Text="{Binding Update.LatestVersion, Mode=OneWay}"/>
+                                    <Run Text="is ready — installed"/>
+                                    <Run Text=" "/>
+                                    <Run Text="{Binding Update.VersionLabel, Mode=OneWay}"/>
+                                    <Run Text="is running now."/>
+                                </TextBlock>
+                            </StackPanel>
+                        </StackPanel>
+
+                        <TextBlock Text="{Binding Update.ReleaseNotes}" Classes="label" FontSize="11.5"
+                                   TextWrapping="Wrap" MaxHeight="54"
+                                   IsVisible="{Binding Update.ReleaseNotes, Converter={StaticResource StringNotEmpty}}"/>
+
+                        <StackPanel Orientation="Horizontal" Spacing="10"
+                                    IsVisible="{Binding Update.IsDownloading}">
+                            <TextBlock Classes="label mono" FontSize="11.5" VerticalAlignment="Center">
+                                <Run Text="Downloading"/>
+                                <Run Text=" "/>
+                                <Run Text="{Binding Update.DownloadProgressText, Mode=OneWay}"/>
+                            </TextBlock>
+                            <ProgressBar Minimum="0" Maximum="100"
+                                         Value="{Binding Update.DownloadProgress}"
+                                         Width="220" Height="6" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10"
+                                VerticalAlignment="Center">
+                        <Button Classes="primary" Command="{Binding Update.InstallUpdateCommand}"
+                                IsEnabled="{Binding !Update.IsDownloading}"
+                                ToolTip.Tip="Download and install">
+                            <TextBlock Text="{Binding Update.InstallButtonText}"/>
+                        </Button>
+                        <Button Classes="ghost" Command="{Binding Update.DismissUpdateCommand}"
+                                IsEnabled="{Binding !Update.IsDownloading}"
+                                ToolTip.Tip="Remind me later (this version)">
+                            <TextBlock Text="Later"/>
+                        </Button>
+                        <Button Classes="ghost" Command="{Binding Update.OpenReleasesPageCommand}"
+                                ToolTip.Tip="Open the releases page in your browser">
+                            <TextBlock Text="GitHub"/>
+                        </Button>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
             <!-- ── Identity hero ── -->
             <Border CornerRadius="{StaticResource RadiusLg}" ClipToBounds="True"
                     Height="188" BoxShadow="{StaticResource ShadowSm}">

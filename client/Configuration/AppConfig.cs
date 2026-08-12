@@ -49,6 +49,17 @@ public class AppConfig
     public bool SyncCompression { get; init; } = true;       // gzip request bodies (server: middleware.Decompress)
     public int SyncRetentionHours { get; init; } = 24;       // retention: synced app_items/app_sessions older than this are deleted client-side
 
+    // ─── Self-update (GitHub Releases) ───
+    // The client checks https://github.com/{UpdateRepo}/releases/latest for an
+    // installer newer than the running VERSION, downloads it into the user data dir
+    // and installs via the OS installer (pkexec dpkg / Inno Setup / dmg).
+    // NO hardcoded repo here: ALPHA_UPDATE_REPO is read from .env, falling back to the
+    // pre-existing REPO=.env key. When neither is set the updater is simply disabled.
+    public string UpdateRepo { get; init; } = string.Empty;
+    public bool UpdateEnabled { get; init; } = true;          // master switch for all update behaviour
+    public int UpdateAutoCheckHours { get; init; } = 24;      // min hours between quiet background checks
+    public bool UpdateAutoInstall { get; init; } = true;      // auto-download+install when a check finds a newer version
+
     public static AppConfig FromEnv()
     {
         return new AppConfig
@@ -76,7 +87,20 @@ public class AppConfig
             SyncBackoffMaxSec = Math.Max(5, int.TryParse(GetEnv("ALPHA_SYNC_BACKOFF_MAX_SEC"), out var syncBack) ? syncBack : 300),
             SyncCompression = GetEnv("ALPHA_SYNC_COMPRESSION") is not ("0" or "false" or "False"),
             SyncRetentionHours = Math.Max(1, int.TryParse(GetEnv("ALPHA_SYNC_RETENTION_HOURS"), out var syncRet) ? syncRet : 24),
+            UpdateRepo = FirstNonEmpty(GetEnv("ALPHA_UPDATE_REPO"), GetEnv("REPO")) ?? string.Empty,
+            UpdateEnabled = GetEnv("ALPHA_UPDATE_ENABLED") is not ("0" or "false" or "False"),
+            UpdateAutoCheckHours = Math.Max(1, int.TryParse(GetEnv("ALPHA_UPDATE_AUTO_CHECK_HOURS"), out var updHours) ? updHours : 24),
+            UpdateAutoInstall = GetEnv("ALPHA_UPDATE_AUTO_INSTALL") is not ("0" or "false" or "False"),
         };
+    }
+
+    private static string? FirstNonEmpty(params string?[] values)
+    {
+        foreach (var v in values)
+        {
+            if (!string.IsNullOrWhiteSpace(v)) return v.Trim();
+        }
+        return null;
     }
 
     private static string? GetDefaultServerUrl()

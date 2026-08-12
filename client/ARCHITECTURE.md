@@ -1,7 +1,18 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-08-10 (§3, §4, §7 re-verified against source after the six-page GUI rewrite)
+> **Last audited:** 2026-08-12 (self-update §16 added)
 > **Changelog:**
+> - 2026-08-12: **Self-update from GitHub Releases** — new `Services/AppUpdateService.cs`
+>   (singleton + hosted, ObservableObject): checks the GitHub latest-release API, picks the platform
+>   installer asset (`.deb` by arch / `.exe` / `.dmg`), compares against `AppInfo.Version`, and on a
+>   newer version either auto-installs (`ALPHA_UPDATE_AUTO_INSTALL=true` default — Linux
+>   `pkexec dpkg -i`, Windows silent Inno which force-closes the app then a detached `.cmd` relaunches
+>   it, macOS `open` dmg) or surfaces a GUI banner + top-bar **Check updates** / **Update to vX.Y.Z** /
+>   **Restart to apply** buttons. Downloads stream to `~/.local/share/alpha-ai-tracker/updates`
+>   (never the install dir). Background loop checks every 30 min, gated by persisted
+>   `update_last_check_at` ≥ `ALPHA_UPDATE_AUTO_CHECK_HOURS` (24h). New   `--restart` CLI arg: the
+>   single-instance mutex is retried for 8s instead of signal-and-exit (post-update relaunch). Full
+>   detail in §18.
 > - 2026-08-10: **Employee disconnect removed.** The nav-rail **Disconnect** button, `LogoutCommand`/
 >   `LogoutAsync` and `LogCollectorService.StopTracking()` are deleted; the client no longer calls
 >   `POST /api/v1/auth/employee-disconnect`. Once `IsProfile` is reached the shell has no in-app
@@ -110,7 +121,7 @@
 - **No ORM** — raw parameterized SQL via `SqliteCommand`
 - **No test framework** — no test project at all
 - **No structured logging beyond ILogger** — console (dev) + `FileLoggerProvider` → `dotnetrunlog.txt`
-- **No auto-updater library** — releases are manual (GitHub + installers)
+- **No third-party auto-updater library** — the built-in `AppUpdateService` (2026-08-12, §16) self-updates from GitHub Releases; installers are still published via `release.sh`
 
 ---
 
@@ -198,6 +209,7 @@ client/
 ├── Services/
 │   ├── LogCollectorService.cs      # ⭐ main BackgroundService: collect → resolve → sessions/items → heartbeat (no network I/O since 2026-08-11)
 │   ├── SyncService.cs              # ⭐ dedicated sync engine: drains unsent rows in byte-bounded chunks (gzip, polite pauses, exponential backoff)
+│   ├── AppUpdateService.cs         # ⭐ self-updater (2026-08-12): GitHub latest-release check → platform asset → download to user data dir → pkexec dpkg / silent Inno / dmg; ObservableObject state bound by the GUI; 24h auto-check loop
 │   ├── DesktopEventService.cs      # ⭐ orchestrates file-explorer watchers → coordinator → JourneyEngine
 │   ├── BackgroundGuardService.cs   # watchdog: re-installs auto-start/systemd unit if removed (60s)
 │   ├── AutoStartService.cs         # Run key / ~/.config/autostart .desktop / launchd plist
@@ -276,9 +288,9 @@ shell state binds through the window:
 
 | Lifetime | Services |
 |---|---|
-| **Singleton** | `AppConfig`, `ILogStore` (SqliteLogStore), `HttpClient` (30s timeout), `IInstalledAppDetector`, `IPackageDetector`, `IActivityCollector` (per-platform), `AutoStartService`, `LogCollectorService`, `EventCoordinator`, `JourneyEngine`, `ATSPIEventWatcher`, `WindowsExplorerWatcher`, `IExplorerWindowProvider`, `FileSystemEventWatcher`, `RecentFilesWatcher` |
+| **Singleton** | `AppConfig`, `ILogStore` (SqliteLogStore), `HttpClient` (30s timeout), `IInstalledAppDetector`, `IPackageDetector`, `IActivityCollector` (per-platform), `AutoStartService`, `LogCollectorService`, `EventCoordinator`, `JourneyEngine`, `ATSPIEventWatcher`, `WindowsExplorerWatcher`, `IExplorerWindowProvider`, `FileSystemEventWatcher`, `RecentFilesWatcher`, `AppUpdateService` |
 | **Singleton (conditional)** | `IAccessibilityBrowserReader` (platform reader) + `BrowserHistoryReader` — only when `ALPHA_BROWSER_TRACKING_ENABLED` |
-| **Hosted** | `BackgroundGuardService`, `LogCollectorService`, `DesktopEventService`, `AccessibilityBrowserTracker` (conditional), `HardwareDeviceWatcherService` |
+| **Hosted** | `BackgroundGuardService`, `LogCollectorService`, `DesktopEventService`, `AccessibilityBrowserTracker` (conditional), `HardwareDeviceWatcherService`, `AppUpdateService` |
 | **Transient** | `DashboardViewModel`, `SystemSpecsViewModel`, `InstalledAppsViewModel`, `MainViewModel` |
 
 `App.ServiceProvider = host.Services` is set after `StartAsync`; `App.axaml.cs` resolves `MainViewModel`
@@ -628,8 +640,13 @@ Watchers (IObservableEventSource)          EventCoordinator                 Jour
 | `ALPHA_SYNC_BACKOFF_MAX_SEC` | 300 | exponential-backoff ceiling on sync failure (5 min) |
 | `ALPHA_SYNC_COMPRESSION` | true | gzip request bodies (server: `middleware.Decompress()`) |
 | `ALPHA_BROWSER_HISTORY_POLL_SECONDS` | 10 | history re-read cadence |
+| `ALPHA_UPDATE_REPO` | — (no code default) | GitHub repo the self-updater checks — ALWAYS from `.env`; falls back to `REPO=`; updater disabled when both are empty |
+| `ALPHA_UPDATE_ENABLED` | true | master switch for self-update (background checks + auto-install + GUI) |
+| `ALPHA_UPDATE_AUTO_CHECK_HOURS` | 24 | min hours between quiet background update checks (persisted `update_last_check_at` in app_status) |
+| `ALPHA_UPDATE_AUTO_INSTALL` | true | auto-download+install when a check finds a newer version (Linux still shows the polkit password dialog) |
 
-> `client/.env.example` also carries a `REPO=AlphaDev-7/Alpha-AI-Tracker` key that the client **never reads** — the web dashboard owns the GitHub download link.
+> `client/.env.example` carries a `REPO=` key; the client self-updater reads it as a fallback when
+> `ALPHA_UPDATE_REPO` is unset (the web dashboard separately owns its GitHub download link via `NEXT_PUBLIC_GITHUB_REPO`).
 
 ### Loading order (`EnvLoader.Load`)
 
@@ -701,7 +718,7 @@ Two consequences worth knowing before you touch either file:
 | Gap | Severity | Details |
 |---|---|---|
 | **No crash handling** | 🔴 High | No `AppDomain.UnhandledException` subscription, no crash dumps, no telemetry. |
-| **No auto-update** | 🔴 High | Manual reinstall via GitHub releases; no update notification. |
+| ~~**No auto-update**~~ (resolved 2026-08-12) | — | `AppUpdateService` checks GitHub Releases on a 24h cadence + on demand (GUI **Check updates**), auto-installs (Linux polkit / Windows silent Inno / macOS dmg) and relaunches itself. |
 | **SQLite unencrypted** | 🟠 Medium | `ALPHA_DB_ENCRYPTION_KEY` exists but sqlcipher is not wired in. |
 | **macOS CPU = 0%** | 🟠 Medium | macOS collector does not measure CPU. |
 | **macOS window capture limited** | 🟢 Low | Only foreground window via osascript; no EnumWindows equivalent. |
@@ -721,10 +738,70 @@ Two consequences worth knowing before you touch either file:
 4. **Fix macOS CPU + window capture** — sample `TotalProcessorTime`; enumerate windows beyond the foreground.
 5. **Add periodic data cleanup** — prune old synced `app_sessions`/`app_items` locally.
 6. **Offline retry with backoff** — exponential backoff on sync failures.
-7. **Consider auto-update** — Velopack/Squirrel for silent updates.
+7. ~~**Consider auto-update**~~ (resolved 2026-08-12 — built-in `AppUpdateService`, §18).
 8. ~~Remove dead shell-command code~~ ✅ (deleted 2026-08-05)
 9. ~~Debugger/extension browser pipeline~~ ✅ (replaced 2026-08-05 by Option B accessibility)
 10. ~~File-explorer journey watchers~~ ✅ (2026-07-29)
 11. **Installed-build acceptance** — rebuild the installer and re-verify the a11y journey + private-window URLs from the installed build (the 2026-08-07 verification passed; re-run after the next code change).
 12. **Ship-test the six-page GUI** — the hero images and `APP_IDENTIFIERS` both ride inside `client.dll`, so no packaging change was needed, but that has not yet been confirmed from an installed build. Per the Build-Parity Rule this is the remaining acceptance step for the 2026-08-10 redesign.
 13. **Re-brand smoke test** — change `DISPLAY_NAME` in `APP_IDENTIFIERS`, bump `VERSION`, rebuild, and confirm the rail, window title, splash, footer, tray tooltip and installer filenames all follow with no other edit.
+
+---
+
+## 18. Self-Update from GitHub Releases (`AppUpdateService`)
+
+> Added 2026-08-12. **Installers are published to GitHub by `release.sh`** (tag `v<version>` with the
+> `.deb` / `.exe` / `.dmg` attached); this service is the client half of that loop.
+
+### Flow
+
+1. `GET https://api.github.com/repos/{ALPHA_UPDATE_REPO}/releases/latest` (User-Agent set; GitHub requires it).
+2. Normalize `tag_name` (`v1.1.0` → `1.1.0`; numeric three-part compare, `-beta`/`+sha` ignored).
+3. Pick the installer asset for this platform: Linux → `_<arch>.deb` (arch from `RuntimeInformation`,
+   fallback any `.deb`); Windows → `.exe`; macOS → `.dmg`. No asset → "No release found".
+4. Compare vs `AppInfo.Version` (the `VERSION` file). Newer → `UpdateAvailable`, else "You're up to date".
+5. **Auto-install** (when `ALPHA_UPDATE_AUTO_INSTALL=true`, the default):
+   - **Linux:** stream-download to `~/.local/share/alpha-ai-tracker/updates/`, then `pkexec dpkg -i`
+     (polkit password dialog — the only human step; the install dir `/usr/share/alpha-ai-tracker` is
+     root-owned). dpkg replaces the binary while the process runs; a **Restart to apply** button
+     relaunches with `--restart`.
+   - **Windows:** download, write a detached `.cmd` that runs `start /wait "" installer.exe
+     /VERYSILENT /SUPPRESSMSGBOXES /NORESTART` then relaunches the app with `--restart`. The Inno
+     installer (`CloseApplications=force` + `AppMutex` + `taskkill` in `InitializeSetup`) terminates
+     the running app itself, so the relaunch must come from outside the process.
+   - **macOS:** `open` the dmg (no silent installer for the dmg build) — manual drag to Applications.
+6. `--restart` in `Program.cs`: retry the single-instance mutex for up to 8s (`WaitOne`) instead of
+   the normal second-launch signal-and-exit, so the freshly-installed binary can take over.
+
+### GUI
+
+- Top bar: **Check updates** ghost button (always visible), **"Update to vX.Y.Z"** primary button when
+  available, **Restart to apply** after a Linux dpkg install, and a status line for check feedback.
+- Dashboard: an **update banner** card with version, release notes, download progress bar,
+  **Download & Install** and **Later** (persists `update_dismissed_version` in app_status so a
+  dismissed version is not re-offered by background checks; a manual check still shows it).
+- Both surfaces bind the SAME singleton `AppUpdateService` instance (injected into `MainViewModel`
+  and `DashboardViewModel`), which is an `ObservableObject` (`IsChecking`, `IsDownloading`,
+  `DownloadProgress`, `UpdateAvailable`, `RestartReady`, `StatusText`, …).
+
+### Background loop
+
+`IHostedService.StartAsync` starts a 30-min `PeriodicTimer` loop; each tick calls
+`RunAutoCheckIfDueAsync`, which reads `update_last_check_at` (app_status) and only checks when the
+`ALPHA_UPDATE_AUTO_CHECK_HOURS` (default 24h) interval has elapsed. `MainViewModel.EnterShellAsync`
+also fires the same method on shell entry (startup/login), so a check runs shortly after launch even
+if the 30-min tick has not yet elapsed. All failures surface as `StatusText` and are never thrown
+into the UI thread.
+
+### Config knobs
+
+| Key | Default | Meaning |
+|---|---|---|
+| `ALPHA_UPDATE_REPO` | — (no code default) | GitHub repo to check — ALWAYS from `.env`; falls back to `REPO=`; disabled when both empty |
+| `ALPHA_UPDATE_ENABLED` | true | master switch (background loop + GUI no-op when false) |
+| `ALPHA_UPDATE_AUTO_CHECK_HOURS` | 24 | min hours between background checks |
+| `ALPHA_UPDATE_AUTO_INSTALL` | true | auto-download+install without a click |
+
+⚠️ **Installers are not code-signed / checksum-verified** — the download is trusted over GitHub's TLS.
+Signing is a future hardening step (the Inno `.iss`, `build-deb.sh` and `build-dmg.sh` have no signing
+hooks yet).
