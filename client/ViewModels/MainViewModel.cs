@@ -322,7 +322,7 @@ public partial class MainViewModel : ViewModelBase
     {
         AppPage.SystemSpecs => "System Specifications",
         AppPage.InstalledApps => "Installed Applications",
-        _ => "Operational Overview ss"
+        _ => "Operational Overview"
     };
 
     public string ActivePageSubtitle => ActivePage switch
