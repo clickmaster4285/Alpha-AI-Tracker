@@ -459,6 +459,9 @@ public class AppUpdateService : ObservableObject, IHostedService
         }
         catch (Exception ex)
         {
+            // Progress can hit 100% before the final rename — reset so the UI
+            // does not look "done" when install never started.
+            DownloadProgress = 0;
             // Keep the banner + install button available for a manual retry.
             StatusText = $"Update failed: {ex.Message}";
             _logger.LogWarning(ex, "Update install failed");
@@ -590,25 +593,35 @@ public class AppUpdateService : ObservableObject, IHostedService
         StatusText = $"Downloading {info.AssetName}…";
         try
         {
+            // Drop stale artifacts from a prior attempt so Move never fights a locked dest.
+            await DeleteFileWithRetryAsync(part, ct);
+            await DeleteFileWithRetryAsync(dest, ct);
+
             using var req = new HttpRequestMessage(HttpMethod.Get, info.DownloadUrl);
             using var resp = await _downloadHttp.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
             resp.EnsureSuccessStatusCode();
 
             var total = resp.Content.Headers.ContentLength ?? 0;
             await using var src = await resp.Content.ReadAsStreamAsync(ct);
-            await using var dst = new FileStream(part, FileMode.Create, FileAccess.Write, FileShare.None);
-            var buffer = new byte[81920];
-            long read = 0;
-            while (true)
+            // Write inside a nested block so the part stream is CLOSED before we rename
+            // it on Windows — File.Move fails with "used by another process" while the
+            // FileStream is still open (Linux rename is more permissive, which hid this).
             {
-                var n = await src.ReadAsync(buffer, ct);
-                if (n == 0) break;
-                await dst.WriteAsync(buffer.AsMemory(0, n), ct);
-                read += n;
-                if (total > 0) DownloadProgress = Math.Min(100, read * 100.0 / total);
+                await using var dst = new FileStream(part, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                var buffer = new byte[81920];
+                long read = 0;
+                while (true)
+                {
+                    var n = await src.ReadAsync(buffer, ct);
+                    if (n == 0) break;
+                    await dst.WriteAsync(buffer.AsMemory(0, n), ct);
+                    read += n;
+                    if (total > 0) DownloadProgress = Math.Min(100, read * 100.0 / total);
+                }
+                await dst.FlushAsync(ct);
             }
-            await dst.FlushAsync(ct);
-            File.Move(part, dest, overwrite: true);
+
+            await MoveInstallerPartAsync(part, dest, ct);
             StatusText = $"Downloaded {info.AssetName}";
             DownloadProgress = 100;
         }
@@ -620,6 +633,43 @@ public class AppUpdateService : ObservableObject, IHostedService
         finally
         {
             IsDownloading = false;
+        }
+    }
+
+    /// <summary>Renames the finished .part download to the final installer name.</summary>
+    private static async Task MoveInstallerPartAsync(string part, string dest, CancellationToken ct)
+    {
+        for (var attempt = 0; attempt < 6; attempt++)
+        {
+            try
+            {
+                if (File.Exists(dest))
+                    File.Delete(dest);
+                File.Move(part, dest);
+                return;
+            }
+            catch (IOException) when (attempt < 5)
+            {
+                // AV/indexer may briefly hold the dest from a prior download.
+                await Task.Delay(400, ct);
+            }
+        }
+    }
+
+    private static async Task DeleteFileWithRetryAsync(string path, CancellationToken ct)
+    {
+        if (!File.Exists(path)) return;
+        for (var attempt = 0; attempt < 4; attempt++)
+        {
+            try
+            {
+                File.Delete(path);
+                return;
+            }
+            catch (IOException) when (attempt < 3)
+            {
+                await Task.Delay(250, ct);
+            }
         }
     }
 
