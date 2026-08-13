@@ -8,7 +8,7 @@ type Employee struct {
 	EmployeeID      string    `json:"employeeId" db:"employee_id"`
 	Name            string    `json:"name" db:"name"`
 	Email           string    `json:"email" db:"email"`
-	Department      string    `json:"department" db:"department"`
+	Department      string    `json:"department"`
 	DepartmentID    int       `json:"departmentId" db:"department_id"`
 	Shift           string    `json:"shift" db:"shift"`
 	TrackingEnabled bool      `json:"trackingEnabled" db:"tracking_enabled"`

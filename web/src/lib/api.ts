@@ -184,14 +184,12 @@ export interface CreateEmployeePayload {
   name: string;
   email: string;
   departmentId: number;
-  department?: string;
   shift?: string;
 }
 
 export interface UpdateEmployeePayload {
   name?: string;
   email?: string;
-  department?: string;
   departmentId?: number;
   shift?: string;
   trackingEnabled?: boolean;

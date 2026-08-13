@@ -83,10 +83,6 @@ func (s *EmployeeService) Create(ctx context.Context, req *dto.CreateEmployeeReq
 	if deptID == 0 {
 		deptID = 1 // Default to Engineering (ID 1)
 	}
-	departmentStr := req.Department
-	if departmentStr == "" {
-		departmentStr = "Engineering"
-	}
 
 	// Validate department_id exists
 	// (deptID defaults to 1 which is Engineering — always seeded)
@@ -95,7 +91,6 @@ func (s *EmployeeService) Create(ctx context.Context, req *dto.CreateEmployeeReq
 		EmployeeID:      employeeID,
 		Name:            req.Name,
 		Email:           req.Email,
-		Department:      departmentStr,
 		DepartmentID:    deptID,
 		Shift:           shift,
 		TrackingEnabled: true,
@@ -129,9 +124,6 @@ func (s *EmployeeService) Update(ctx context.Context, id string, req *dto.Update
 	}
 	if req.Email != nil {
 		updates["email"] = *req.Email
-	}
-	if req.Department != nil {
-		updates["department"] = *req.Department
 	}
 	if req.DepartmentID != nil {
 		updates["department_id"] = *req.DepartmentID

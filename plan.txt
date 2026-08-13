@@ -21,7 +21,7 @@ on the employee schemas remove the role and also on frontend.
 
 
 
-1. remove department name on employee table becuase i already use department_id on same table, and also check othere table and fix it
+1. on server side remove department name on employee table becuase i already use department_id on same table, and also check othere table and fix it
 
 2. on client side add on .env the file journey data collect or not (true | False)
 @prompt.txt 

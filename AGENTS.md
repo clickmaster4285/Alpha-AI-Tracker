@@ -3,6 +3,26 @@
 > **Last audited:** 2026-08-13
 > **Changelog:**
 >
+> - 2026-08-13: **Server: `employees.department` name column removed — department_id is the sole source of truth.**
+>   The `employees` table stored the department NAME as a denormalized VARCHAR next to the `department_id` FK.
+>   Migration **019** drops `employees.department` (column + `idx_employees_department` index, mirroring the 018
+>   role-drop pattern). The department name is now resolved ONLY at read time via the existing
+>   `LEFT JOIN departments d ON e.department_id = d.id` (`COALESCE(d.name, '')` in all SELECT/RETURNING clauses),
+>   so API responses still carry a `department` name; nothing writes it anymore. Go: `Department` removed from
+>   `CreateEmployeeRequest`/`UpdateEmployeeRequest` and from the UPDATE allowed-fields map + service branches
+>   (the model/`EmployeeResponse` keep the derived name for the web table/display); repo List filter now matches
+>   `d.name` (and the count query gained the departments JOIN), INSERT writes `department_id` only. Web:
+>   `department?` dropped from `CreateEmployeePayload`/`UpdateEmployeePayload` (the value was never sent — the UI
+>   always used `departmentId`). `users` admin table is unrelated and unchanged. Verified: `go build`/`go vet`
+>   clean. **2026-08-13: Client `ALPHA_FILE_JOURNEY_ENABLED` — file-journey master switch.** New `.env` knob
+>   (`.env` + `.env.example`, default `true`) controls the **Desktop Event Bus** (file-manager navigations +
+>   file create/rename/delete/recent-file journeys — AT-SPI on Linux, Shell COM on Windows, FileSystemWatcher +
+>   recent-files on every platform). `false` → the entire event bus (`EventCoordinator`, `JourneyEngine`,
+>   `ATSPIEventWatcher`, `WindowsExplorerWatcher`, `FileSystemEventWatcher`, `RecentFilesWatcher`,
+>   `DesktopEventService`) is NOT registered in DI, so zero file-journey rows are produced or synced. Browser
+>   journey tracking is governed separately by `ALPHA_BROWSER_TRACKING_ENABLED` (unchanged). `AppConfig`
+>   property + `--print-config` line added. Verified: `dotnet build` 0/0.
+>
 > - 2026-08-13: **Employees rename + employee role removed.** Web: the HR sidebar item "List of Users" is now
 >   **"Employees"** and the routes `/users`, `/users/[id]`, `/users/activity` moved to `/employees`,
 >   `/employees/[id]`, `/employees/activity` (permission module keys stay `users`/`users/activity` so stored
