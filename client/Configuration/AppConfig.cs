@@ -24,6 +24,11 @@ public class AppConfig
     public bool BrowserHistoryEnabled { get; init; } = true;
     public int BrowserHistoryPollSec { get; init; } = 10;        // how often history DBs are re-scanned/re-read
 
+    // File Explorer journey tracking (Desktop Event Bus — AT-SPI on Linux, Shell COM
+    // on Windows, FileSystemWatcher + recent-files on every platform). Captures file
+    // manager navigations + file create/rename/delete into app_items journeys.
+    public bool FileJourneyEnabled { get; init; } = true;
+
     // USB / peripheral hotplug tracking (synced to the server since 2026-08-11;
     // never deleted client-side)
     public bool HardwareDevicesEnabled { get; init; } = true;
@@ -77,6 +82,7 @@ public class AppConfig
             BrowserCaptureIncognito = GetEnv("ALPHA_BROWSER_CAPTURE_INCOGNITO") is ("1" or "true" or "True"),
             BrowserHistoryEnabled = GetEnv("ALPHA_BROWSER_HISTORY_ENABLED") is not ("0" or "false" or "False"),
             BrowserHistoryPollSec = int.TryParse(GetEnv("ALPHA_BROWSER_HISTORY_POLL_SECONDS"), out var histPoll) ? histPoll : 10,
+            FileJourneyEnabled = GetEnv("ALPHA_FILE_JOURNEY_ENABLED") is not ("0" or "false" or "False"),
             HardwareDevicesEnabled = GetEnv("ALPHA_HARDWARE_DEVICES_ENABLED") is not ("0" or "false" or "False"),
             InventoryWatchEnabled = GetEnv("ALPHA_INVENTORY_WATCH_ENABLED") is not ("0" or "false" or "False"),
             SyncIntervalSec = Math.Max(1, int.TryParse(GetEnv("ALPHA_SYNC_INTERVAL_SEC"), out var syncInt) ? syncInt : 60),

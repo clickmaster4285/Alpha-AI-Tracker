@@ -632,6 +632,7 @@ Watchers (IObservableEventSource)          EventCoordinator                 Jour
 | `ALPHA_BROWSER_JOURNEY_IDLE_MINUTES` | 15 | idle-close timeout |
 | `ALPHA_BROWSER_CAPTURE_INCOGNITO` | false | store incognito URLs (legal review required) |
 | `ALPHA_BROWSER_HISTORY_ENABLED` | true | profile-history URL fallback |
+| `ALPHA_FILE_JOURNEY_ENABLED` | true | master switch for the Desktop Event Bus (file-manager navigations + file create/rename/delete/recent-file journeys) |
 | `ALPHA_SYNC_INTERVAL_SEC` | 60 | min wait between sync drain passes when idle |
 | `ALPHA_SYNC_MAX_ROWS` | 1000 | max rows per sync chunk |
 | `ALPHA_SYNC_MAX_BYTES` | 1000000 | max serialized payload bytes per chunk (~1MB) |
