@@ -26,7 +26,6 @@ func NewEmployeeRepo(pool *pgxpool.Pool) *EmployeeRepo {
 type EmployeeListParams struct {
 	Search     string
 	Department string
-	Role       string
 	Status     string // "tracked" or "untracked"
 	Page       int
 	PerPage    int
@@ -66,11 +65,6 @@ func (r *EmployeeRepo) List(ctx context.Context, params EmployeeListParams) (*Em
 		args = append(args, params.Department)
 		argIdx++
 	}
-	if params.Role != "" {
-		conditions = append(conditions, fmt.Sprintf("role = $%d", argIdx))
-		args = append(args, params.Role)
-		argIdx++
-	}
 	if params.Status == "tracked" {
 		conditions = append(conditions, "tracking_status = 'tracked'")
 	} else if params.Status == "untracked" {
@@ -94,7 +88,7 @@ func (r *EmployeeRepo) List(ctx context.Context, params EmployeeListParams) (*Em
 
 	// Fetch page — use manual scan to avoid RowToStructByName issues with nullable columns
 	query := fmt.Sprintf(`
-		SELECT e.id, e.employee_id, e.name, e.email, e.role,
+		SELECT e.id, e.employee_id, e.name, e.email,
 		       COALESCE(d.name, e.department) AS department,
 		       e.department_id, e.shift,
 		       e.tracking_enabled, e.tracking_status, e.is_online,
@@ -118,7 +112,7 @@ func (r *EmployeeRepo) List(ctx context.Context, params EmployeeListParams) (*Em
 	for rows.Next() {
 		var e models.Employee
 		if err := rows.Scan(
-			&e.ID, &e.EmployeeID, &e.Name, &e.Email, &e.Role,
+			&e.ID, &e.EmployeeID, &e.Name, &e.Email,
 			&e.Department, &e.DepartmentID, &e.Shift,
 			&e.TrackingEnabled, &e.TrackingStatus, &e.IsOnline,
 			&e.Avatar, &e.AvatarColor,
@@ -149,7 +143,7 @@ func (r *EmployeeRepo) getByID(ctx context.Context, query string, args ...interf
 // GetByID returns an employee by UUID.
 func (r *EmployeeRepo) GetByID(ctx context.Context, id string) (*models.Employee, error) {
 	return r.getByID(ctx, `
-		SELECT e.id, e.employee_id, e.name, e.email, e.role,
+		SELECT e.id, e.employee_id, e.name, e.email,
 		       COALESCE(d.name, e.department) AS department,
 		       e.department_id, e.shift,
 		       e.tracking_enabled, e.tracking_status, e.is_online,
@@ -164,7 +158,7 @@ func (r *EmployeeRepo) GetByID(ctx context.Context, id string) (*models.Employee
 // GetByEmployeeID returns an employee by their employee ID (EMP-XXXXX).
 func (r *EmployeeRepo) GetByEmployeeID(ctx context.Context, employeeID string) (*models.Employee, error) {
 	return r.getByID(ctx, `
-		SELECT e.id, e.employee_id, e.name, e.email, e.role,
+		SELECT e.id, e.employee_id, e.name, e.email,
 		       COALESCE(d.name, e.department) AS department,
 		       e.department_id, e.shift,
 		       e.tracking_enabled, e.tracking_status, e.is_online,
@@ -179,7 +173,7 @@ func (r *EmployeeRepo) GetByEmployeeID(ctx context.Context, employeeID string) (
 // GetByEmail returns an employee by email.
 func (r *EmployeeRepo) GetByEmail(ctx context.Context, email string) (*models.Employee, error) {
 	return r.getByID(ctx, `
-		SELECT e.id, e.employee_id, e.name, e.email, e.role,
+		SELECT e.id, e.employee_id, e.name, e.email,
 		       COALESCE(d.name, e.department) AS department,
 		       e.department_id, e.shift,
 		       e.tracking_enabled, e.tracking_status, e.is_online,
@@ -201,18 +195,18 @@ func (r *EmployeeRepo) Create(ctx context.Context, e *models.Employee) (*models.
 	defer tx.Rollback(ctx)
 
 	query := `
-		INSERT INTO employees (employee_id, name, email, role, department, department_id, shift,
+		INSERT INTO employees (employee_id, name, email, department, department_id, shift,
 		                       tracking_enabled, tracking_status, is_online)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		RETURNING id, employee_id, name, email, role,
-		          COALESCE((SELECT name FROM departments WHERE id = $6), $5) AS department,
-		          $6 AS department_id, shift,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		RETURNING id, employee_id, name, email,
+		          COALESCE((SELECT name FROM departments WHERE id = $5), $4) AS department,
+		          $5 AS department_id, shift,
 		          tracking_enabled, tracking_status, is_online,
 		          COALESCE(avatar, '') AS avatar, COALESCE(avatar_color, '') AS avatar_color,
 		          created_at, updated_at, deleted_at
 	`
 	emp, err := execGetByID(ctx, tx, query,
-		e.EmployeeID, e.Name, e.Email, e.Role, e.Department, e.DepartmentID, e.Shift,
+		e.EmployeeID, e.Name, e.Email, e.Department, e.DepartmentID, e.Shift,
 		e.TrackingEnabled, e.TrackingStatus, e.IsOnline,
 	)
 	if err != nil {
@@ -250,7 +244,7 @@ func (r *EmployeeRepo) Update(ctx context.Context, id string, updates map[string
 	allowedFields := map[string]string{
 		"name": "name", "email": "email", "department": "department",
 		"department_id": "department_id",
-		"role": "role", "shift": "shift", "tracking_enabled": "tracking_enabled",
+		"shift": "shift", "tracking_enabled": "tracking_enabled",
 		"tracking_status": "tracking_status", "is_online": "is_online",
 	}
 
@@ -271,7 +265,7 @@ func (r *EmployeeRepo) Update(ctx context.Context, id string, updates map[string
 	query := fmt.Sprintf(`
 		UPDATE employees SET %s
 		WHERE id = $1 AND deleted_at IS NULL
-		RETURNING id, employee_id, name, email, role,
+		RETURNING id, employee_id, name, email,
 		          COALESCE((SELECT name FROM departments WHERE id = employees.department_id), department) AS department,
 		          department_id, shift,
 		          tracking_enabled, tracking_status, is_online,
@@ -352,7 +346,7 @@ func scanEmployeeRow(rows pgx.Rows) (*models.Employee, error) {
 	emp, err := pgx.CollectOneRow(rows, func(row pgx.CollectableRow) (models.Employee, error) {
 		var e models.Employee
 		err := row.Scan(
-			&e.ID, &e.EmployeeID, &e.Name, &e.Email, &e.Role,
+			&e.ID, &e.EmployeeID, &e.Name, &e.Email,
 			&e.Department, &e.DepartmentID, &e.Shift,
 			&e.TrackingEnabled, &e.TrackingStatus, &e.IsOnline,
 			&e.Avatar, &e.AvatarColor,

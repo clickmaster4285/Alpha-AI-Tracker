@@ -11,7 +11,7 @@ const PERMISSIONS_KEY = `${STORAGE_PREFIX}dynamic_permissions`;
 export const ALL_MODULES: { key: string; label: string; group: string }[] = [
   { key: 'dashboard', label: 'Dashboard', group: 'General' },
   { key: 'employee-portal', label: 'Employee Portal', group: 'General' },
-  { key: 'users', label: 'List of Users', group: 'HR' },
+  { key: 'users', label: 'Employees', group: 'HR' },
   { key: 'users/activity', label: 'User Activity Status', group: 'HR' },
   { key: 'departments', label: 'Departments', group: 'HR' },
   { key: 'roles', label: 'Roles', group: 'HR' },

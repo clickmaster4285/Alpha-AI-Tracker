@@ -1,1 +1,27 @@
-on @client side when any row update and same row has already synced:1 then also update to synced:0
+i want some changes 
+
+1. (
+on sidebar change the name 'list of users' to 'employees',
+also route change '/users' to '/employees' and '/users/[id]' to '/employees/[id]',
+)
+2. (
+on the employee schemas remove the role and also on frontend.
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+1. remove department name on employee table becuase i already use department_id on same table, and also check othere table and fix it
+
+2. on client side add on .env the file journey data collect or not (true | False)
+@prompt.txt 

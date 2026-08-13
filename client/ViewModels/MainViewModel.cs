@@ -170,9 +170,6 @@ public partial class MainViewModel : ViewModelBase
     private string _employeeDepartment = string.Empty;
 
     [ObservableProperty]
-    private string _employeeRole = string.Empty;
-
-    [ObservableProperty]
     private string _employeeAvatar = string.Empty;
 
     [ObservableProperty]
@@ -392,7 +389,6 @@ public partial class MainViewModel : ViewModelBase
             IsLoggedIn = true;
             EmployeeName = info.Name;
             EmployeeDepartment = info.Department;
-            EmployeeRole = info.Role;
             EmployeeAvatar = info.Avatar ?? string.Empty;
             EmployeeAvatarColor = info.AvatarColor ?? "#8B5CF6";
 
@@ -781,7 +777,6 @@ public partial class MainViewModel : ViewModelBase
             IsLoggedIn = true;
             EmployeeName = emp.Name;
             EmployeeDepartment = emp.Department;
-            EmployeeRole = emp.Role;
             EmployeeAvatar = emp.Avatar ?? string.Empty;
             EmployeeAvatarColor = emp.AvatarColor ?? "#8B5CF6";
             StatusMessage = string.Empty;

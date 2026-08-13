@@ -1,8 +1,23 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-08-12
+> **Last audited:** 2026-08-13
 > **Changelog:**
 >
+> - 2026-08-13: **Employees rename + employee role removed.** Web: the HR sidebar item "List of Users" is now
+>   **"Employees"** and the routes `/users`, `/users/[id]`, `/users/activity` moved to `/employees`,
+>   `/employees/[id]`, `/employees/activity` (permission module keys stay `users`/`users/activity` so stored
+>   permission configs in localStorage survive). Employee `role` was removed end-to-end on the employee surface:
+>   server migration **018** drops `employees.role` (column + its index), and `role` is gone from the Go employee
+>   model/`EmployeePublic`/DTOs (`CreateEmployeeRequest`, `UpdateEmployeeRequest`, `EmployeeResponse`), the repo
+>   (list filter, all SELECTs, INSERT, UPDATE allowed-fields, scans), the service, the handler, and the
+>   `POST /auth/employee-login` response. Web: `role` removed from `Employee`/`CreateEmployeePayload`/
+>   `UpdateEmployeePayload`, the employees table (Role column), the Add-Employee dialog, and the employee detail
+>   page role badge. Desktop client: the Role line is gone from the dashboard hero and the nav-rail identity
+>   block (`EmployeeRole` VM props + XAML bindings); the local `employee_info.role` cache column is left intact
+>   (no client migration risk — the server simply no longer sends a value). **Admin-user RBAC is unrelated and
+>   unchanged** (`users.role`, `UserRole`, permissions, settings/user-management, onboarding invites). Verified:
+>   `go build`/`go vet` clean, `tsc --noEmit` clean, `next build` registers `/employees`,
+>   `/employees/[id]`, `/employees/activity`, `dotnet build` 0/0.
 > - 2026-08-12: **Windows auto-update "downloaded but never installed" root-caused — the installer was TREE-KILLING itself.**
 >   Linux updated fine, Windows did nothing after the download finished. Root cause: `installer-windows.iss`
 >   `KillRunningInstance` ran `taskkill /F /IM client.exe /T` — the **`/T` is a TREE-kill**. The self-updater
