@@ -31,7 +31,6 @@ export default function UsersList() {
   const [newName, setNewName] = useState('');
   const [newEmail, setNewEmail] = useState('');
   const [newDeptId, setNewDeptId] = useState(1);
-  const [newRole, setNewRole] = useState('employee');
   const [editName, setEditName] = useState('');
   const [editEmail, setEditEmail] = useState('');
   const [editDeptId, setEditDeptId] = useState(1);
@@ -104,7 +103,6 @@ export default function UsersList() {
     setNewName('');
     setNewEmail('');
     setNewDeptId(1);
-    setNewRole('employee');
   };
 
   const handleAdd = () => {
@@ -116,7 +114,6 @@ export default function UsersList() {
       name: newName,
       email: newEmail,
       departmentId: newDeptId,
-      role: newRole,
       shift: 'Day',
     });
   };
@@ -192,7 +189,7 @@ export default function UsersList() {
   return (
     <div className="space-y-4 animate-fade-in">
       {/* Filters */}
-      <div className="flex flex-col sm:flex-row gap-3">
+      <div className="flex justify-between">
         <div className="flex items-center bg-card border border-border rounded-lg px-3 py-2 gap-2 flex-1 max-w-sm">
           <Search className="w-4 h-4 text-muted-foreground" />
           <input
@@ -202,20 +199,22 @@ export default function UsersList() {
             className="bg-transparent border-none outline-none text-sm flex-1 text-foreground placeholder:text-muted-foreground"
           />
         </div>
-        <select
-          value={deptFilter}
-          onChange={e => { setDeptFilter(e.target.value); setPage(1); }}
-          className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground"
-        >
-          <option value="">All Departments</option>
-          {departments.map(d => <option key={d.id} value={d.name}>{d.name}</option>)}
-        </select>
-        <button
-          onClick={() => setShowAdd(true)}
-          className="gradient-primary text-primary-foreground px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 hover:opacity-90 transition-opacity"
-        >
-          <Plus className="w-4 h-4" /> Add Employee
-        </button>
+        <div className='flex space-x-3'>
+          <select
+            value={deptFilter}
+            onChange={e => { setDeptFilter(e.target.value); setPage(1); }}
+            className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground"
+          >
+            <option value="">All Departments</option>
+            {departments.map(d => <option key={d.id} value={d.name}>{d.name}</option>)}
+          </select>
+          <button
+            onClick={() => setShowAdd(true)}
+            className="gradient-primary text-primary-foreground px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 hover:opacity-90 transition-opacity"
+          >
+            <Plus className="w-4 h-4" /> Add Employee
+          </button>
+        </div>
       </div>
 
       {/* Table */}
@@ -223,7 +222,7 @@ export default function UsersList() {
         <table className="w-full min-w-[700px]">
           <thead>
             <tr className="border-b border-border">
-              {['Name', 'Employee ID', 'Email', 'Department', 'Role', 'Status', 'Action'].map(h => (
+              {['Name', 'Employee ID', 'Email', 'Department', 'Status', 'Action'].map(h => (
                 <th key={h} className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground">{h}</th>
               ))}
             </tr>
@@ -231,7 +230,7 @@ export default function UsersList() {
           <tbody>
             {employees.length === 0 ? (
               <tr>
-                <td colSpan={7} className="text-center py-12 text-muted-foreground text-sm">
+                <td colSpan={6} className="text-center py-12 text-muted-foreground text-sm">
                   No employees found
                 </td>
               </tr>
@@ -253,7 +252,7 @@ export default function UsersList() {
                         {emp.avatar || emp.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)}
                       </div>
                       <Link
-                        href={`/users/${emp.id}`}
+                        href={`/employees/${emp.id}`}
                         className="text-sm font-medium text-foreground hover:text-primary hover:underline underline-offset-4 transition-colors"
                       >
                         {emp.name}
@@ -263,11 +262,6 @@ export default function UsersList() {
                   <td className="px-4 py-3 text-sm font-mono font-medium text-foreground">{emp.employeeId}</td>
                   <td className="px-4 py-3 text-sm text-muted-foreground">{emp.email}</td>
                   <td className="px-4 py-3 text-sm text-foreground">{emp.department}</td>
-                  <td className="px-4 py-3">
-                    <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-primary/10 text-primary">
-                      {emp.role}
-                    </span>
-                  </td>
                   <td className="px-4 py-3">
                     <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${
                       emp.trackingStatus === 'tracked'
@@ -286,7 +280,7 @@ export default function UsersList() {
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="bg-card border-border rounded-lg min-w-[180px]">
                         <DropdownMenuItem asChild className="cursor-pointer">
-                          <Link href={`/users/${emp.id}`} className="flex items-center gap-2">
+                          <Link href={`/employees/${emp.id}`} className="flex items-center gap-2">
                             <Eye className="w-3.5 h-3.5" />
                             View Details
                           </Link>
@@ -367,16 +361,6 @@ export default function UsersList() {
               className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
             >
               {departments.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
-            </select>
-            <select
-              value={newRole}
-              onChange={e => setNewRole(e.target.value)}
-              className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
-            >
-              <option value="employee">Employee</option>
-              <option value="manager">Manager</option>
-              <option value="hr_admin">HR Admin</option>
-              <option value="org_admin">Org Admin</option>
             </select>
             <button
               onClick={handleAdd}

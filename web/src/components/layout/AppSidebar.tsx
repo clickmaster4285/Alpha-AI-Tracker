@@ -27,8 +27,8 @@ const navItems: NavItem[] = [
   { label: "Dashboard", icon: LayoutDashboard, path: "/dashboard", module: "dashboard" },
   { label: "Employee Portal", icon: Briefcase, path: "/employee-portal", module: "employee-portal" },
   { label: "HR", icon: Users, children: [
-    { label: "List of Users", path: "/users", module: "users" },
-    { label: "User Activity Status", path: "/users/activity", module: "users/activity" },
+    { label: "Employees", path: "/employees", module: "users" },
+    { label: "User Activity Status", path: "/employees/activity", module: "users/activity" },
     { label: "Departments", path: "/departments", module: "departments" },
     { label: "Roles", path: "/roles", module: "roles" },
     { label: "KPIs & KRAs", path: "/kpis", module: "kpis" },

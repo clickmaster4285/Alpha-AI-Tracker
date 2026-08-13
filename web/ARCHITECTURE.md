@@ -220,8 +220,8 @@ web/
 |---|---|---|---|
 | `/login` | Login | Server (auth) | ✅ |
 | `/dashboard` | Dashboard | localStorage mock | ❌ |
-| `/users` | Employee list | Server | ✅ |
-| `/users/activity` | Activity status | localStorage mock | ❌ |
+| `/employees` | Employee list | Server | ✅ |
+| `/employees/activity` | Activity status | localStorage mock | ❌ |
 | `/departments` | Departments | Server | ✅ |
 | `/logs/comprehensive` | Activity logs | Server | ✅ |
 | `/logs/insights` | User insights | localStorage mock | ❌ |

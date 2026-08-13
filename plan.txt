@@ -1,1 +1,1 @@
-on @client side when any row update and same row has already synced:1 then also update to synced:0
+auto open only background openning:::::::::::::::::::::: bugs found via fahad pc at 4:11/

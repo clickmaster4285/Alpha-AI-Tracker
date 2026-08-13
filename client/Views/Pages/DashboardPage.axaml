@@ -107,11 +107,9 @@
                             <TextBlock Text="{Binding EmployeeName}"
                                        FontSize="23" FontWeight="Bold" Foreground="White"
                                        TextTrimming="CharacterEllipsis"/>
-                            <TextBlock FontSize="12.5" Foreground="#BFD5E8">
-                                <Run Text="{Binding EmployeeRole}"/>
-                                <Run Text="·"/>
-                                <Run Text="{Binding EmployeeDepartment}"/>
-                            </TextBlock>
+                            <TextBlock Text="{Binding EmployeeDepartment}" FontSize="12.5"
+                                       Foreground="#BFD5E8"/>
+
                             <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,3,0,0">
                                 <Border Classes="badge" Background="#26FFFFFF" BorderBrush="#3DFFFFFF">
                                     <TextBlock Text="{Binding EmployeeId}" Foreground="#E2E8F0"/>

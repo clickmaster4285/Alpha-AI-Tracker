@@ -144,10 +144,6 @@
                                                Foreground="{StaticResource RailFgActiveBrush}"
                                                FontSize="12.5" FontWeight="SemiBold"
                                                TextTrimming="CharacterEllipsis" MaxWidth="150"/>
-                                    <TextBlock Text="{Binding EmployeeRole}"
-                                               Foreground="{StaticResource RailFgBrush}"
-                                               FontSize="10.5"
-                                               TextTrimming="CharacterEllipsis" MaxWidth="150"/>
                                 </StackPanel>
                             </StackPanel>
 

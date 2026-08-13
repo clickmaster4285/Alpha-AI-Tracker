@@ -115,8 +115,8 @@ export default function UserDetailPage() {
         <div className="text-center">
           <p className="text-destructive font-medium mb-2">Failed to load employee</p>
           <p className="text-sm text-muted-foreground mb-4">{error ? (error as Error).message : 'Employee not found'}</p>
-          <Link href="/users" className="text-sm text-primary hover:underline">
-            Back to Users
+          <Link href="/employees" className="text-sm text-primary hover:underline">
+            Back to Employees
           </Link>
         </div>
       </div>
@@ -129,8 +129,8 @@ export default function UserDetailPage() {
     <div className="space-y-5 animate-fade-in">
       {/* Breadcrumb */}
       <div className="flex items-center gap-2 text-sm">
-        <Link href="/users" className="flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors">
-          <ArrowLeft className="w-3.5 h-3.5" /> Users
+        <Link href="/employees" className="flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors">
+          <ArrowLeft className="w-3.5 h-3.5" /> Employees
         </Link>
         <span className="text-muted-foreground">/</span>
         <span className="font-medium text-foreground">{employee.name}</span>
@@ -153,7 +153,6 @@ export default function UserDetailPage() {
               <div className="flex flex-wrap items-center gap-2 mt-8 sm:mt-0">
                 <h1 className="text-2xl font-bold text-foreground font-display">{employee.name}</h1>
                 <span className="text-xs font-mono px-2 py-0.5 rounded-md bg-muted text-muted-foreground">{employee.employeeId}</span>
-                <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-primary/10 text-primary capitalize">{employee.role.replace(/_/g, ' ')}</span>
                 <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium flex items-center gap-1.5 ${
                   employee.trackingStatus === 'tracked' ? 'bg-success/15 text-success' : 'bg-warning/15 text-warning'
                 }`}>

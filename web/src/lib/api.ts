@@ -160,7 +160,6 @@ export interface Employee {
   employeeId: string;
   name: string;
   email: string;
-  role: string;
   department: string;
   departmentId: number;
   shift: string;
@@ -185,17 +184,13 @@ export interface CreateEmployeePayload {
   name: string;
   email: string;
   departmentId: number;
-  department?: string;
-  role: string;
   shift?: string;
 }
 
 export interface UpdateEmployeePayload {
   name?: string;
   email?: string;
-  department?: string;
   departmentId?: number;
-  role?: string;
   shift?: string;
   trackingEnabled?: boolean;
   trackingStatus?: string;

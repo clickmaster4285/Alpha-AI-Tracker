@@ -48,6 +48,7 @@ if (args.Contains("--print-config"))
     Console.WriteLine($"BrowserCaptureIncognito={cfg.BrowserCaptureIncognito}");
     Console.WriteLine($"BrowserHistoryEnabled={cfg.BrowserHistoryEnabled}");
     Console.WriteLine($"BrowserHistoryPollSec={cfg.BrowserHistoryPollSec}");
+    Console.WriteLine($"FileJourneyEnabled={cfg.FileJourneyEnabled}");
     Console.WriteLine($"DbPath={cfg.DbPath}");
     Console.WriteLine($"ApiKeySet={!string.IsNullOrEmpty(cfg.ApiKey)}");
     Console.WriteLine($"SyncIntervalSec={cfg.SyncIntervalSec}");
@@ -224,16 +225,20 @@ if (config.BrowserTrackingEnabled)
 }
 
 // Desktop Event Bus (File Explorer tracking via AT-SPI on Linux, Shell COM on Windows,
-// plus FileSystemWatcher + recent-files sources on every platform)
-builder.Services.AddSingleton<EventCoordinator>();
-builder.Services.AddSingleton<JourneyEngine>();
-builder.Services.AddSingleton<ATSPIEventWatcher>();
-builder.Services.AddSingleton<WindowsExplorerWatcher>();
-builder.Services.AddSingleton<IExplorerWindowProvider>(
-    sp => sp.GetRequiredService<WindowsExplorerWatcher>());
-builder.Services.AddSingleton<FileSystemEventWatcher>();
-builder.Services.AddSingleton<RecentFilesWatcher>();
-builder.Services.AddHostedService<DesktopEventService>();
+// plus FileSystemWatcher + recent-files sources on every platform). Master switch:
+// ALPHA_FILE_JOURNEY_ENABLED — when false, no file-journey data is collected at all.
+if (config.FileJourneyEnabled)
+{
+    builder.Services.AddSingleton<EventCoordinator>();
+    builder.Services.AddSingleton<JourneyEngine>();
+    builder.Services.AddSingleton<ATSPIEventWatcher>();
+    builder.Services.AddSingleton<WindowsExplorerWatcher>();
+    builder.Services.AddSingleton<IExplorerWindowProvider>(
+        sp => sp.GetRequiredService<WindowsExplorerWatcher>());
+    builder.Services.AddSingleton<FileSystemEventWatcher>();
+    builder.Services.AddSingleton<RecentFilesWatcher>();
+    builder.Services.AddHostedService<DesktopEventService>();
+}
 
 // USB / peripheral hotplug tracker (local SQLite only; no server sync yet)
 if (config.HardwareDevicesEnabled)

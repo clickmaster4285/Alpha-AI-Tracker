@@ -8,9 +8,7 @@ import "time"
 type CreateEmployeeRequest struct {
 	Name         string `json:"name"`
 	Email        string `json:"email"`
-	Department   string `json:"department,omitempty"`
 	DepartmentID int    `json:"departmentId"`
-	Role         string `json:"role"`
 	Shift        string `json:"shift,omitempty"`
 }
 
@@ -18,9 +16,7 @@ type CreateEmployeeRequest struct {
 type UpdateEmployeeRequest struct {
 	Name            *string `json:"name,omitempty"`
 	Email           *string `json:"email,omitempty"`
-	Department      *string `json:"department,omitempty"`
 	DepartmentID    *int    `json:"departmentId,omitempty"`
-	Role            *string `json:"role,omitempty"`
 	Shift           *string `json:"shift,omitempty"`
 	TrackingEnabled *bool   `json:"trackingEnabled,omitempty"`
 	TrackingStatus  *string `json:"trackingStatus,omitempty"`
@@ -49,7 +45,6 @@ type EmployeeResponse struct {
 	EmployeeID      string    `json:"employeeId"`
 	Name            string    `json:"name"`
 	Email           string    `json:"email"`
-	Role            string    `json:"role"`
 	Department      string    `json:"department"`
 	DepartmentID    int       `json:"departmentId"`
 	Shift           string    `json:"shift"`

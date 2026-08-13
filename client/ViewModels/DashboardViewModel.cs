@@ -40,7 +40,6 @@ public partial class DashboardViewModel : ViewModelBase
 
     [ObservableProperty] private string _employeeName = string.Empty;
     [ObservableProperty] private string _employeeId = string.Empty;
-    [ObservableProperty] private string _employeeRole = string.Empty;
     [ObservableProperty] private string _employeeDepartment = string.Empty;
     [ObservableProperty] private string _employeeEmail = string.Empty;
     [ObservableProperty] private string _employeeShift = string.Empty;
@@ -90,7 +89,6 @@ public partial class DashboardViewModel : ViewModelBase
             {
                 EmployeeName = employee.Name;
                 EmployeeId = employee.EmployeeId;
-                EmployeeRole = string.IsNullOrWhiteSpace(employee.Role) ? "—" : employee.Role;
                 EmployeeDepartment = string.IsNullOrWhiteSpace(employee.Department) ? "—" : employee.Department;
                 EmployeeEmail = string.IsNullOrWhiteSpace(employee.Email) ? "—" : employee.Email;
                 EmployeeShift = string.IsNullOrWhiteSpace(employee.Shift) ? "—" : employee.Shift;

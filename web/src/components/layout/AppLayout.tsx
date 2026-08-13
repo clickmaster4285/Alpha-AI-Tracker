@@ -8,8 +8,8 @@ import TopBar from "./TopBar";
 
 const pageTitles: Record<string, string> = {
   "/dashboard": "Dashboard",
-  "/users": "Users",
-  "/users/activity": "User Activity Status",
+  "/employees": "Employees",
+  "/employees/activity": "User Activity Status",
   "/apps": "Apps and Websites",
   "/screenshots": "Screenshots",
   "/logs/insights": "User Insights",

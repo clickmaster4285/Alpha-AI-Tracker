@@ -75,10 +75,6 @@ func (s *EmployeeService) Create(ctx context.Context, req *dto.CreateEmployeeReq
 		return nil, fmt.Errorf("generate employee id: %w", err)
 	}
 
-	role := req.Role
-	if role == "" {
-		role = "employee"
-	}
 	shift := req.Shift
 	if shift == "" {
 		shift = "Day"
@@ -86,10 +82,6 @@ func (s *EmployeeService) Create(ctx context.Context, req *dto.CreateEmployeeReq
 	deptID := req.DepartmentID
 	if deptID == 0 {
 		deptID = 1 // Default to Engineering (ID 1)
-	}
-	departmentStr := req.Department
-	if departmentStr == "" {
-		departmentStr = "Engineering"
 	}
 
 	// Validate department_id exists
@@ -99,8 +91,6 @@ func (s *EmployeeService) Create(ctx context.Context, req *dto.CreateEmployeeReq
 		EmployeeID:      employeeID,
 		Name:            req.Name,
 		Email:           req.Email,
-		Role:            role,
-		Department:      departmentStr,
 		DepartmentID:    deptID,
 		Shift:           shift,
 		TrackingEnabled: true,
@@ -135,14 +125,8 @@ func (s *EmployeeService) Update(ctx context.Context, id string, req *dto.Update
 	if req.Email != nil {
 		updates["email"] = *req.Email
 	}
-	if req.Department != nil {
-		updates["department"] = *req.Department
-	}
 	if req.DepartmentID != nil {
 		updates["department_id"] = *req.DepartmentID
-	}
-	if req.Role != nil {
-		updates["role"] = *req.Role
 	}
 	if req.Shift != nil {
 		updates["shift"] = *req.Shift
@@ -219,7 +203,6 @@ func employeeToResponse(e *models.Employee) dto.EmployeeResponse {
 		EmployeeID:      e.EmployeeID,
 		Name:            e.Name,
 		Email:           e.Email,
-		Role:            e.Role,
 		Department:      e.Department,
 		DepartmentID:    e.DepartmentID,
 		Shift:           e.Shift,

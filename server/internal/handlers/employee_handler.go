@@ -40,7 +40,6 @@ func (h *EmployeeHandler) ListEmployees(c echo.Context) error {
 	params := repository.EmployeeListParams{
 		Search:     c.QueryParam("search"),
 		Department: c.QueryParam("department"),
-		Role:       c.QueryParam("role"),
 		Status:     c.QueryParam("status"),
 		Page:       page,
 		PerPage:    perPage,

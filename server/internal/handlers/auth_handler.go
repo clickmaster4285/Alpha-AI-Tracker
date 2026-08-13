@@ -233,7 +233,6 @@ func (h *AuthHandler) EmployeeLogin(c echo.Context) error {
 			EmployeeID:      emp.EmployeeID,
 			Name:            emp.Name,
 			Email:           emp.Email,
-			Role:            emp.Role,
 			Department:      emp.Department,
 			DepartmentID:    emp.DepartmentID,
 			Shift:           emp.Shift,

@@ -1,8 +1,43 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-08-12
+> **Last audited:** 2026-08-13
 > **Changelog:**
 >
+> - 2026-08-13: **Server: `employees.department` name column removed — department_id is the sole source of truth.**
+>   The `employees` table stored the department NAME as a denormalized VARCHAR next to the `department_id` FK.
+>   Migration **019** drops `employees.department` (column + `idx_employees_department` index, mirroring the 018
+>   role-drop pattern). The department name is now resolved ONLY at read time via the existing
+>   `LEFT JOIN departments d ON e.department_id = d.id` (`COALESCE(d.name, '')` in all SELECT/RETURNING clauses),
+>   so API responses still carry a `department` name; nothing writes it anymore. Go: `Department` removed from
+>   `CreateEmployeeRequest`/`UpdateEmployeeRequest` and from the UPDATE allowed-fields map + service branches
+>   (the model/`EmployeeResponse` keep the derived name for the web table/display); repo List filter now matches
+>   `d.name` (and the count query gained the departments JOIN), INSERT writes `department_id` only. Web:
+>   `department?` dropped from `CreateEmployeePayload`/`UpdateEmployeePayload` (the value was never sent — the UI
+>   always used `departmentId`). `users` admin table is unrelated and unchanged. Verified: `go build`/`go vet`
+>   clean. **2026-08-13: Client `ALPHA_FILE_JOURNEY_ENABLED` — file-journey master switch.** New `.env` knob
+>   (`.env` + `.env.example`, default `true`) controls the **Desktop Event Bus** (file-manager navigations +
+>   file create/rename/delete/recent-file journeys — AT-SPI on Linux, Shell COM on Windows, FileSystemWatcher +
+>   recent-files on every platform). `false` → the entire event bus (`EventCoordinator`, `JourneyEngine`,
+>   `ATSPIEventWatcher`, `WindowsExplorerWatcher`, `FileSystemEventWatcher`, `RecentFilesWatcher`,
+>   `DesktopEventService`) is NOT registered in DI, so zero file-journey rows are produced or synced. Browser
+>   journey tracking is governed separately by `ALPHA_BROWSER_TRACKING_ENABLED` (unchanged). `AppConfig`
+>   property + `--print-config` line added. Verified: `dotnet build` 0/0.
+>
+> - 2026-08-13: **Employees rename + employee role removed.** Web: the HR sidebar item "List of Users" is now
+>   **"Employees"** and the routes `/users`, `/users/[id]`, `/users/activity` moved to `/employees`,
+>   `/employees/[id]`, `/employees/activity` (permission module keys stay `users`/`users/activity` so stored
+>   permission configs in localStorage survive). Employee `role` was removed end-to-end on the employee surface:
+>   server migration **018** drops `employees.role` (column + its index), and `role` is gone from the Go employee
+>   model/`EmployeePublic`/DTOs (`CreateEmployeeRequest`, `UpdateEmployeeRequest`, `EmployeeResponse`), the repo
+>   (list filter, all SELECTs, INSERT, UPDATE allowed-fields, scans), the service, the handler, and the
+>   `POST /auth/employee-login` response. Web: `role` removed from `Employee`/`CreateEmployeePayload`/
+>   `UpdateEmployeePayload`, the employees table (Role column), the Add-Employee dialog, and the employee detail
+>   page role badge. Desktop client: the Role line is gone from the dashboard hero and the nav-rail identity
+>   block (`EmployeeRole` VM props + XAML bindings); the local `employee_info.role` cache column is left intact
+>   (no client migration risk — the server simply no longer sends a value). **Admin-user RBAC is unrelated and
+>   unchanged** (`users.role`, `UserRole`, permissions, settings/user-management, onboarding invites). Verified:
+>   `go build`/`go vet` clean, `tsc --noEmit` clean, `next build` registers `/employees`,
+>   `/employees/[id]`, `/employees/activity`, `dotnet build` 0/0.
 > - 2026-08-12: **Windows auto-update "downloaded but never installed" root-caused — the installer was TREE-KILLING itself.**
 >   Linux updated fine, Windows did nothing after the download finished. Root cause: `installer-windows.iss`
 >   `KillRunningInstance` ran `taskkill /F /IM client.exe /T` — the **`/T` is a TREE-kill**. The self-updater
