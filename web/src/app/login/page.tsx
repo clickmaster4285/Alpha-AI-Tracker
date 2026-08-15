@@ -94,7 +94,7 @@ function LoginForm() {
   return (
     <div className="min-h-screen flex flex-col bg-background overflow-hidden">
       {/* Download Alpha AI Tracker — top strip */}
-      <div className="relative z-20 px-4 pt-4 lg:px-8 lg:pt-6">
+      <div className="fixed w-full h-full z-20 px-4 pt-4 lg:px-8 lg:pt-6">
         <DownloadAppSection compact />
       </div>
 
