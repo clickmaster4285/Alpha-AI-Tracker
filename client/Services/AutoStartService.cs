@@ -64,11 +64,14 @@ public class AutoStartService
         {
             if (OperatingSystem.IsWindows())
             {
-                // Create a scheduled task that runs on startup as a backup
+                // Create a scheduled task that runs on startup as a backup.
+                // --background = fully headless at boot (services only, NO GUI window
+                // and no tray). The GUI appears only when the user launches the app
+                // manually — the second launch signals this running instance to show it.
                 var psi = new ProcessStartInfo
                 {
                     FileName = "schtasks",
-                    Arguments = $"/Create /SC ONSTART /TN \"AlphaAITracker-Startup\" /TR \"cmd.exe /c start \"\" \\\"{_executablePath}\\\" --minimized\" /F /RL HIGHEST /DELAY 0000:10",
+                    Arguments = $"/Create /SC ONSTART /TN \"AlphaAITracker-Startup\" /TR \"cmd.exe /c start \"\" \\\"{_executablePath}\\\" --background\" /F /RL HIGHEST /DELAY 0000:10",
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     RedirectStandardOutput = true,
@@ -132,6 +135,53 @@ public class AutoStartService
     }
 
     /// <summary>
+    /// Migrate legacy auto-start entries that still launch with --minimized (the old
+    /// hidden-to-tray mode) to --background (fully headless at boot — the GUI only
+    /// opens when the user manually launches the app). Returns true when a stale
+    /// entry was refreshed. Called by the background guard every minute, so machines
+    /// that already registered --minimized self-heal on the next boot.
+    /// </summary>
+    public bool EnsureBackgroundAutoStartFlag()
+    {
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                    @"Software\Microsoft\Windows\CurrentVersion\Run");
+                var value = key?.GetValue("AlphaAITracker") as string;
+                if (value != null && value.Contains("--minimized", StringComparison.OrdinalIgnoreCase))
+                {
+                    EnableWindowsAutoStart(); // rewrites the value with --background
+                    _logger.LogInformation("Windows auto-start migrated: --minimized → --background");
+                    return true;
+                }
+            }
+            else if (OperatingSystem.IsLinux())
+            {
+                var desktopPath = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                    ".config", "autostart", "alpha-ai-tracker.desktop");
+                if (File.Exists(desktopPath))
+                {
+                    var content = File.ReadAllText(desktopPath);
+                    if (content.Contains("--minimized", StringComparison.OrdinalIgnoreCase))
+                    {
+                        EnableLinuxAutoStart(); // rewrites Exec= with --background
+                        _logger.LogInformation("Linux auto-start migrated: --minimized → --background");
+                        return true;
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Auto-start flag migration check failed");
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Check if auto-start is currently enabled.
     /// </summary>
     public bool IsAutoStartEnabled()
@@ -172,8 +222,11 @@ public class AutoStartService
                 @"Software\Microsoft\Windows\CurrentVersion\Run");
             if (key == null) return false;
 
+            // --background: at boot/power-on ONLY the background services run — no GUI
+            // window, no tray. The GUI opens only when the user manually launches the app
+            // (a second launch signals this instance to create + show its window).
             key.SetValue("AlphaAITracker",
-                $"\"{_executablePath}\" --minimized",
+                $"\"{_executablePath}\" --background",
                 Microsoft.Win32.RegistryValueKind.String);
             _logger.LogInformation("Windows auto-start enabled");
             return true;
@@ -213,7 +266,7 @@ public class AutoStartService
             [Desktop Entry]
             Type=Application
             Name=Alpha AI Tracker
-            Exec="{_executablePath}" --minimized
+            Exec="{_executablePath}" --background
             Terminal=false
             X-GNOME-Autostart-enabled=true
             X-GNOME-Autostart-Delay=5
@@ -258,7 +311,7 @@ public class AutoStartService
                 <key>ProgramArguments</key>
                 <array>
                     <string>{_executablePath}</string>
-                    <string>--minimized</string>
+                    <string>--background</string>
                 </array>
                 <key>RunAtLoad</key>
                 <true/>

@@ -367,6 +367,12 @@ export interface AppSession {
   machineId: string;
   sessionId: string;
   platform: string;
+  processId?: number;
+  parentProcessId?: number;
+  groupedBy?: string;
+  contextLabel?: string;
+  foregroundSeconds?: number;
+  backgroundSeconds?: number;
   syncedAt?: string;
 }
 

@@ -46,6 +46,18 @@ public class AppSession
     /// VS Code workspace/project folder name, Chrome --profile-directory, etc.
     /// </summary>
     public string? ContextLabel { get; set; }
+
+    /// <summary>
+    /// Accumulated seconds this session's window held the OS foreground focus.
+    /// Null = not tracked (pre-2026-08-15 rows / non-GUI sessions). Grows while the
+    /// session is open and is flushed periodically + on close (re-synced to the server).
+    /// </summary>
+    public double? ForegroundSeconds { get; set; }
+
+    /// <summary>
+    /// Accumulated seconds this session ran while another window had the focus.
+    /// </summary>
+    public double? BackgroundSeconds { get; set; }
 }
 
 /// <summary>

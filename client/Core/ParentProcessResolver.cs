@@ -25,6 +25,24 @@ public static partial class ParentProcessResolver
         return tree;
     }
 
+    /// <summary>
+    /// Snapshot of pid → base process name for the whole process table. Used together
+    /// with <see cref="BuildProcessTree"/> to resolve the TOP-MOST process of a
+    /// same-binary family (the app's main window process) — the Windows/macOS analog
+    /// of the Linux systemd cgroup scope. Built once per collection cycle; do NOT
+    /// call Process.GetProcessById per ancestor.
+    /// </summary>
+    public static Dictionary<int, string> BuildProcessNameMap()
+    {
+        var names = new Dictionary<int, string>();
+        var processes = Process.GetProcesses();
+        foreach (var proc in processes)
+        {
+            try { names[proc.Id] = proc.ProcessName; } catch { }
+        }
+        return names;
+    }
+
     public static string? ResolveWindowTitle(
         int pid,
         string processName,

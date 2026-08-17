@@ -73,6 +73,13 @@ namespace client.Services;
                 if (_autoStart.IsAutoStartEnabled())
                 {
                     _autoStartWasEnabled = true; // Seen at least once → start protecting
+
+                    // 2026-08-15: boot must be FULLY headless (no GUI at reboot/power-on).
+                    // Legacy entries launch with --minimized (hidden-to-tray, UI still
+                    // created) — migrate them to --background so only background jobs run
+                    // at boot and the GUI appears solely on a manual user launch.
+                    if (_autoStart.EnsureBackgroundAutoStartFlag())
+                        _logger.LogInformation("Auto-start entry migrated to --background (headless boot)");
                 }
                 else if (_autoStartWasEnabled)
                 {

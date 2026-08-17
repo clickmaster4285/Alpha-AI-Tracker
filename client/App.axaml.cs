@@ -14,6 +14,14 @@ public partial class App : Application
     public static IServiceProvider? ServiceProvider { get; internal set; }
     public static bool AllowShutdown { get; set; }
 
+    /// <summary>
+    /// True when the UI is being created HIDDEN (auto-start / systemd boot instance
+    /// launched with --background/--minimized — no window at boot). A manual user
+    /// launch sends a SHOW signal and the lazy GUI path clears this before starting
+    /// Avalonia, so the window appears only when the user actually opens the app.
+    /// </summary>
+    public static bool LaunchedHidden { get; set; }
+
     public override void Initialize()
     {
         AvaloniaXamlLoader.Load(this);
@@ -110,8 +118,11 @@ public partial class App : Application
                 });
             };
 
-            var args = Environment.GetCommandLineArgs();
-            if (!args.Contains("--background") && !args.Contains("--minimized"))
+            // Show the window only for a real user launch. Auto-start / systemd boot
+            // instances (--background / --minimized) start hidden (or fully headless),
+            // and the lazy-GUI path in Program.cs clears LaunchedHidden before creating
+            // the window so a manual launch always brings the GUI up.
+            if (!LaunchedHidden)
             {
                 mainWindow.Show();
             }

@@ -323,6 +323,8 @@ public class SyncService : BackgroundService
                 groupedBy = e.GroupedBy,
                 cgroupScope = e.CgroupScope,
                 contextLabel = e.ContextLabel,
+                foregroundSeconds = e.ForegroundSeconds ?? 0,
+                backgroundSeconds = e.BackgroundSeconds ?? 0,
             },
             (ids, token) => _store.MarkAppSessionsSentAsync(ids, token),
             e => e.Id,

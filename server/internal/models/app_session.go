@@ -19,8 +19,12 @@ type AppSession struct {
 	GroupedBy        *string    `json:"groupedBy,omitempty" db:"grouped_by"`
 	CgroupScope      *string    `json:"cgroupScope,omitempty" db:"cgroup_scope"`
 	ContextLabel     *string    `json:"contextLabel,omitempty" db:"context_label"`
-	SyncedAt         *time.Time `json:"syncedAt,omitempty" db:"synced_at"`
-	CreatedAt        time.Time  `json:"createdAt" db:"created_at"`
+	// Foreground/background focus durations in seconds (2026-08-15). The desktop
+	// client re-syncs rows as the totals grow and again on close.
+	ForegroundSeconds  float64    `json:"foregroundSeconds" db:"foreground_seconds"`
+	BackgroundSeconds  float64    `json:"backgroundSeconds" db:"background_seconds"`
+	SyncedAt           *time.Time `json:"syncedAt,omitempty" db:"synced_at"`
+	CreatedAt          time.Time  `json:"createdAt" db:"created_at"`
 }
 
 // AppItem is a generic child of AppSession, replacing BrowserContext, FileExplorerContext, UrlRecord, UrlVisit.
