@@ -11,6 +11,7 @@ import {
   Clock, Settings, ChevronLeft, ChevronDown, ChevronRight, X,
   ClipboardList, UserCheck, MapPin, Trophy, FileBarChart, AlertTriangle,
   Eye, Briefcase, CalendarDays, Navigation, Route,
+  Monitor,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { usePermissions } from "@/lib/permissions";
@@ -106,6 +107,7 @@ const navSections: NavSection[] = [
           { label: "Location Trail",    path: "/employee-journey/location",    module: "employee-journey" },
         ],
       },
+      { label: "Device Specs",    icon: Monitor, path: "/device-specs", module: "device-specs" },
       { label: "Apps & Websites", icon: AppWindow, path: "/apps",         module: "apps" },
       { label: "Screenshots",     icon: Camera,    path: "/screenshots",  module: "screenshots" },
       { label: "Live Stream",     icon: Radio,     path: "/live-stream",  module: "live-stream" },
