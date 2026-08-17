@@ -294,24 +294,25 @@ func (r *NewSchemaRepo) BulkInsertAppSessions(ctx context.Context, entries []mod
 		}
 		batch := entries[i:end]
 		valueStrings := make([]string, 0, len(batch))
-		args := make([]interface{}, 0, len(batch)*17)
+		args := make([]interface{}, 0, len(batch)*19)
 		argIdx := 1
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
 				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
 				argIdx+10, argIdx+11, argIdx+12, argIdx+13, argIdx+14,
-				argIdx+15, argIdx+16,
+				argIdx+15, argIdx+16, argIdx+17, argIdx+18,
 			))
 			args = append(args,
 				e.ID, e.EmployeeID, e.ProcessName, e.AppDisplayName, e.StartedAt,
 				e.EndedAt, e.MachineID, e.SessionID, e.Platform, e.ProcessID, e.ParentProcessID,
 				e.InstalledAppID, e.InstalledPackageID, e.GroupedBy, e.CgroupScope, e.ContextLabel,
+				e.ForegroundSeconds, e.BackgroundSeconds,
 				time.Now(),
 			)
-			argIdx += 17
+			argIdx += 19
 		}
 
 		query := fmt.Sprintf(`
@@ -319,6 +320,7 @@ func (r *NewSchemaRepo) BulkInsertAppSessions(ctx context.Context, entries []mod
 				(id, employee_id, process_name, app_display_name, started_at,
 				 ended_at, machine_id, session_id, platform, process_id, parent_process_id,
 				 installed_app_id, installed_package_id, grouped_by, cgroup_scope, context_label,
+				 foreground_seconds, background_seconds,
 				 synced_at)
 			VALUES %s
 			ON CONFLICT (id) DO UPDATE SET
@@ -329,6 +331,8 @@ func (r *NewSchemaRepo) BulkInsertAppSessions(ctx context.Context, entries []mod
 				grouped_by = COALESCE(EXCLUDED.grouped_by, app_sessions.grouped_by),
 				cgroup_scope = COALESCE(EXCLUDED.cgroup_scope, app_sessions.cgroup_scope),
 				context_label = COALESCE(EXCLUDED.context_label, app_sessions.context_label),
+				foreground_seconds = EXCLUDED.foreground_seconds,
+				background_seconds = EXCLUDED.background_seconds,
 				synced_at = EXCLUDED.synced_at
 		`, strings.Join(valueStrings, ", "))
 
@@ -485,7 +489,7 @@ func (r *NewSchemaRepo) ListAppSessions(ctx context.Context, params AppSessionLi
 		SELECT id, employee_id, process_name, app_display_name, started_at, ended_at,
 		       machine_id, session_id, platform, process_id, parent_process_id,
 		       installed_app_id, installed_package_id, grouped_by, cgroup_scope, context_label,
-		       synced_at, created_at
+		       foreground_seconds, background_seconds, synced_at, created_at
 		FROM app_sessions %s
 		ORDER BY started_at DESC
 		LIMIT $%d OFFSET $%d
@@ -505,7 +509,7 @@ func (r *NewSchemaRepo) ListAppSessions(ctx context.Context, params AppSessionLi
 			&s.ID, &s.EmployeeID, &s.ProcessName, &s.AppDisplayName, &s.StartedAt, &s.EndedAt,
 			&s.MachineID, &s.SessionID, &s.Platform, &s.ProcessID, &s.ParentProcessID,
 			&s.InstalledAppID, &s.InstalledPackageID, &s.GroupedBy, &s.CgroupScope, &s.ContextLabel,
-			&s.SyncedAt, &s.CreatedAt,
+			&s.ForegroundSeconds, &s.BackgroundSeconds, &s.SyncedAt, &s.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan app_session row: %w", err)
 		}

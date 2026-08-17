@@ -349,6 +349,8 @@ func (s *NewSchemaService) SyncAppSessions(ctx context.Context, req *dto.SyncApp
 			GroupedBy:          e.GroupedBy,
 			CgroupScope:        e.CgroupScope,
 			ContextLabel:       e.ContextLabel,
+			ForegroundSeconds:  e.ForegroundSeconds,
+			BackgroundSeconds:  e.BackgroundSeconds,
 			SyncedAt:           &now,
 		})
 	}
