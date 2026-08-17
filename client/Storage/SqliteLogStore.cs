@@ -1332,10 +1332,16 @@ public class SqliteLogStore : ILogStore, IDisposable
                 ((DbCommand)updateCmd).Transaction = tx;
                 var pId = updateCmd.Parameters.Add("$id", SqliteType.Text);
                 var pEnd = updateCmd.Parameters.Add("$ended_at", SqliteType.Text);
+                var pFg = updateCmd.Parameters.Add("$foreground_seconds", SqliteType.Real);
+                var pBg = updateCmd.Parameters.Add("$background_seconds", SqliteType.Real);
                 foreach (var e in closeSessions)
                 {
                     pId.Value = e.Id;
                     pEnd.Value = e.EndedAt!.Value.ToString("O");
+                    // NULL keeps the last flushed value when this close path has no
+                    // focus data (boot reconciliation, browser tracker closes).
+                    pFg.Value = e.ForegroundSeconds.HasValue ? e.ForegroundSeconds.Value : (object)DBNull.Value;
+                    pBg.Value = e.BackgroundSeconds.HasValue ? e.BackgroundSeconds.Value : (object)DBNull.Value;
                     await updateCmd.ExecuteNonQueryAsync(ct);
                 }
             }
@@ -1362,6 +1368,8 @@ public class SqliteLogStore : ILogStore, IDisposable
                 var pGroupedBy = cmd.Parameters.Add("$grouped_by", SqliteType.Text);
                 var pCgroupScope = cmd.Parameters.Add("$cgroup_scope", SqliteType.Text);
                 var pContextLabel = cmd.Parameters.Add("$context_label", SqliteType.Text);
+                var pFg = cmd.Parameters.Add("$foreground_seconds", SqliteType.Real);
+                var pBg = cmd.Parameters.Add("$background_seconds", SqliteType.Real);
 
                 foreach (var e in newSessions)
                 {
@@ -1382,6 +1390,8 @@ public class SqliteLogStore : ILogStore, IDisposable
                     pGroupedBy.Value = (object?)e.GroupedBy ?? DBNull.Value;
                     pCgroupScope.Value = (object?)e.CgroupScope ?? DBNull.Value;
                     pContextLabel.Value = (object?)e.ContextLabel ?? DBNull.Value;
+                    pFg.Value = e.ForegroundSeconds ?? 0;
+                    pBg.Value = e.BackgroundSeconds ?? 0;
                     await cmd.ExecuteNonQueryAsync(ct);
                 }
             }
@@ -1417,6 +1427,41 @@ public class SqliteLogStore : ILogStore, IDisposable
     public async Task MarkAppSessionsSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
         await MarkSentCoreAsync("app_sessions", "id", ids, ct);
+    }
+
+    /// <summary>
+    /// Persist accumulated foreground/background focus durations for open sessions and
+    /// re-queue each row (is_synced = 0) so SyncService re-sends it and the server learns
+    /// the growing totals. One UPDATE per row in a single transaction.
+    /// </summary>
+    public async Task UpdateAppSessionFocusAsync(
+        IReadOnlyList<(string Id, double ForegroundSeconds, double BackgroundSeconds)> updates,
+        CancellationToken ct)
+    {
+        if (_connection == null || updates.Count == 0) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            await using var tx = await _connection.BeginTransactionAsync(ct);
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = DatabaseSchema.UpdateAppSessionFocusSql;
+            ((DbCommand)cmd).Transaction = tx;
+            var pId = cmd.Parameters.Add("$id", SqliteType.Text);
+            var pFg = cmd.Parameters.Add("$foreground_seconds", SqliteType.Real);
+            var pBg = cmd.Parameters.Add("$background_seconds", SqliteType.Real);
+            foreach (var u in updates)
+            {
+                pId.Value = u.Id;
+                pFg.Value = u.ForegroundSeconds;
+                pBg.Value = u.BackgroundSeconds;
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+            await tx.CommitAsync(ct);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
     }
 
     // ────────────────────────────────────────
@@ -1665,10 +1710,15 @@ public class SqliteLogStore : ILogStore, IDisposable
             ((DbCommand)updateCmd).Transaction = tx;
             var pId = updateCmd.Parameters.Add("$id", SqliteType.Text);
             var pEnd = updateCmd.Parameters.Add("$ended_at", SqliteType.Text);
+            var pFg = updateCmd.Parameters.Add("$foreground_seconds", SqliteType.Real);
+            var pBg = updateCmd.Parameters.Add("$background_seconds", SqliteType.Real);
             foreach (var e in closeSessions)
             {
                 pId.Value = e.Id;
                 pEnd.Value = (e.EndedAt ?? closedAt).ToString("O");
+                // NULL keeps the last flushed value when the caller has no focus data.
+                pFg.Value = e.ForegroundSeconds.HasValue ? e.ForegroundSeconds.Value : (object)DBNull.Value;
+                pBg.Value = e.BackgroundSeconds.HasValue ? e.BackgroundSeconds.Value : (object)DBNull.Value;
                 await updateCmd.ExecuteNonQueryAsync(ct);
             }
 
@@ -2552,6 +2602,8 @@ public class SqliteLogStore : ILogStore, IDisposable
             GroupedBy = TryGetString(r, "grouped_by"),
             CgroupScope = TryGetString(r, "cgroup_scope"),
             ContextLabel = TryGetString(r, "context_label"),
+            ForegroundSeconds = TryGetDouble(r, "foreground_seconds"),
+            BackgroundSeconds = TryGetDouble(r, "background_seconds"),
             IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
             SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
             CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),
@@ -2659,6 +2711,19 @@ public class SqliteLogStore : ILogStore, IDisposable
         {
             var ordinal = r.GetOrdinal(column);
             return r.IsDBNull(ordinal) ? null : r.GetInt32(ordinal);
+        }
+        catch (IndexOutOfRangeException)
+        {
+            return null;
+        }
+    }
+
+    private static double? TryGetDouble(SqliteDataReader r, string column)
+    {
+        try
+        {
+            var ordinal = r.GetOrdinal(column);
+            return r.IsDBNull(ordinal) ? (double?)null : r.GetDouble(ordinal);
         }
         catch (IndexOutOfRangeException)
         {

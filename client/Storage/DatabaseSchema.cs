@@ -305,6 +305,12 @@ internal static class DatabaseSchema
         ALTER TABLE app_sessions ADD COLUMN grouped_by TEXT;
         ALTER TABLE app_sessions ADD COLUMN cgroup_scope TEXT;
         ALTER TABLE app_sessions ADD COLUMN context_label TEXT;
+        -- Foreground/background focus durations (2026-08-15): the collector knows the
+        -- OS foreground window every cycle, so each open session accumulates how long
+        -- it held the focus vs ran in the background. Values grow in place and the row
+        -- is re-synced so the server learns the totals.
+        ALTER TABLE app_sessions ADD COLUMN foreground_seconds REAL NOT NULL DEFAULT 0;
+        ALTER TABLE app_sessions ADD COLUMN background_seconds REAL NOT NULL DEFAULT 0;
         ALTER TABLE network_info ADD COLUMN first_seen_at TEXT;
         ALTER TABLE network_info ADD COLUMN last_seen_at TEXT;
         ALTER TABLE network_info ADD COLUMN is_current INTEGER NOT NULL DEFAULT 1;
@@ -451,12 +457,12 @@ internal static class DatabaseSchema
             (id, process_name, app_display_name, started_at, ended_at,
              machine_id, employee_id, employee_name, session_id, platform,
              installed_app_id, installed_package_id, process_id, parent_process_id,
-             grouped_by, cgroup_scope, context_label)
+             grouped_by, cgroup_scope, context_label, foreground_seconds, background_seconds)
         VALUES
             ($id, $process_name, $app_display_name, $started_at, $ended_at,
              $machine_id, $employee_id, $employee_name, $session_id, $platform,
              $installed_app_id, $installed_package_id, $process_id, $parent_process_id,
-             $grouped_by, $cgroup_scope, $context_label)
+             $grouped_by, $cgroup_scope, $context_label, $foreground_seconds, $background_seconds)
         ON CONFLICT(id) DO UPDATE SET
             ended_at = COALESCE(excluded.ended_at, app_sessions.ended_at),
             parent_process_id = COALESCE(excluded.parent_process_id, app_sessions.parent_process_id),
@@ -468,7 +474,21 @@ internal static class DatabaseSchema
     internal const string UpdateAppSessionEndedSql = @"
         UPDATE app_sessions
         SET ended_at = $ended_at,
+            -- Final focus durations ride along on close when known; NULL keeps the
+            -- last flushed value (sessions closed by paths that don't track focus).
+            foreground_seconds = COALESCE($foreground_seconds, foreground_seconds),
+            background_seconds = COALESCE($background_seconds, background_seconds),
             -- Re-sync on close: a session synced as OPEN must tell the server it ended.
+            is_synced = 0
+        WHERE id = $id
+    ";
+
+    /// <summary>Periodic focus-duration flush for open sessions (re-syncs the row so
+    /// the server learns the growing totals — rule 2026-08-12: any update re-queues).</summary>
+    internal const string UpdateAppSessionFocusSql = @"
+        UPDATE app_sessions
+        SET foreground_seconds = $foreground_seconds,
+            background_seconds = $background_seconds,
             is_synced = 0
         WHERE id = $id
     ";

@@ -61,6 +61,12 @@ public class LogCollectorService : BackgroundService
     // Session ended_at tracking: key = pid|machineId|clientSessionId → AppSession.Id
     private readonly Dictionary<string, string> _previousSessionKeys = new();
 
+    // Accumulated foreground/background seconds per OPEN session (key = app_sessions.id).
+    // The collector knows the OS foreground window every cycle; each open session earns
+    // `interval` seconds of foreground or background time. Flushed to SQLite periodically
+    // and on close, then the row re-syncs so the server learns the totals (2026-08-15).
+    private readonly Dictionary<string, (double ForegroundSeconds, double BackgroundSeconds)> _sessionFocusSeconds = new();
+
     // Root app_item id per session key (for context updates)
     private readonly Dictionary<string, string> _sessionRootItems = new();
 
@@ -280,6 +286,7 @@ public class LogCollectorService : BackgroundService
                 var allLogs = await _collector.CollectAsync(stoppingToken);
 
                 var processTree = ParentProcessResolver.BuildProcessTree();
+                var pidNames = ParentProcessResolver.BuildProcessNameMap();
                 var openRecords = await _store.GetOpenSessionRecordsAsync(stoppingToken);
                 var hierarchy = new SessionHierarchyResolver(processTree, openRecords, _logger);
 
@@ -294,6 +301,16 @@ public class LogCollectorService : BackgroundService
                 // (their key never appears in currentKeys) and close live browser
                 // sessions while the windows are still open — silently destroying the
                 // whole journey hierarchy ~one cycle after each window opens.
+                //
+                // Root-PID grouping (Windows/macOS, no cgroups): one logical app runs as
+                // MANY same-binary processes (VS Code = main window + renderer + GPU +
+                // utility + extension hosts). Legacy DBs hold one OPEN session PER child
+                // pid, so the same window hydrates to several rows. Resolve the top-most
+                // same-binary ancestor (the main window process) so they collapse to ONE
+                // key — keep the earliest record, close the duplicates so they stop
+                // showing as "running" forever.
+                var hydratedKeys = new Dictionary<string, string>(); // key → app_session_id (earliest wins)
+                var duplicateCloseSessions = new List<AppSession>();
                 foreach (var rec in openRecords)
                 {
                     if (BrowserAccessibilityHelpers.IsBrowserProcess(
@@ -301,14 +318,32 @@ public class LogCollectorService : BackgroundService
                         continue;
 
                     var scope = CgroupResolver.GetAppScope(rec.ProcessId);
-                    var openKey = BuildSessionKey(rec.ProcessId, scope, rec.InstalledAppId);
+                    var rootPid = ResolveRootPid(rec.ProcessId, processTree, pidNames);
+                    var openKey = BuildSessionKey(rootPid, scope, rec.InstalledAppId);
+
+                    if (hydratedKeys.ContainsKey(openKey))
+                    {
+                        duplicateCloseSessions.Add(new AppSession { Id = rec.AppSessionId, EndedAt = DateTime.UtcNow });
+                        continue;
+                    }
+                    hydratedKeys[openKey] = rec.AppSessionId;
                     _sessionRootItems[openKey] = rec.RootItemId;
                     if (!_previousSessionKeys.ContainsKey(openKey))
                         _previousSessionKeys[openKey] = rec.AppSessionId;
                 }
 
-                // Resolve display name, FK, isBrowser, and filter for each process
-                var resolvedLogs = new List<(ActivityLog log, string? displayName, string? appId, string? pkgId, bool isBrowser, string? scope)>();
+                if (duplicateCloseSessions.Count > 0)
+                {
+                    _logger.LogInformation(
+                        "Closing {Count} legacy duplicate open session(s) collapsed by root-PID grouping",
+                        duplicateCloseSessions.Count);
+                    await _store.CloseSessionsAndAppItemsAsync(duplicateCloseSessions, DateTime.UtcNow, stoppingToken);
+                }
+
+                // Resolve display name, FK, isBrowser, and filter for each process.
+                // rootPid = the top-most same-binary ancestor (main window process on
+                // Windows/macOS) — the session-grouping identity when no cgroup scope exists.
+                var resolvedLogs = new List<(ActivityLog log, string? displayName, string? appId, string? pkgId, bool isBrowser, string? scope, int rootPid)>();
                 foreach (var log in allLogs)
                 {
                     try
@@ -339,8 +374,12 @@ public class LogCollectorService : BackgroundService
                         // through the tuple so every BuildSessionKey call site derives the
                         // same key. Do NOT re-read /proc/<pid>/cgroup at multiple places.
                         var scope = CgroupResolver.GetAppScope(log.ProcessId);
+                        // N5: same for the root pid — resolve it once so every BuildSessionKey
+                        // call site (session key, focus accounting, context updates) derives
+                        // the same identity.
+                        var rootPid = ResolveRootPid(log.ProcessId, processTree, pidNames);
 
-                        resolvedLogs.Add((log, displayName, appId, pkgId, isBrowser, scope));
+                        resolvedLogs.Add((log, displayName, appId, pkgId, isBrowser, scope, rootPid));
                     }
                     catch (Exception ex)
                     {
@@ -353,11 +392,11 @@ public class LogCollectorService : BackgroundService
                     GetProcessPriority(AppProcessClassifier.ExtractBaseProcessName(a.log.ProcessName), a.isBrowser)
                         .CompareTo(GetProcessPriority(AppProcessClassifier.ExtractBaseProcessName(b.log.ProcessName), b.isBrowser)));
 
-                // Build set of current running session keys (scope-aware)
+                // Build set of current running session keys (scope-aware / root-pid aware)
                 var currentKeys = new Dictionary<string, string>();
-                foreach (var (log, _, appId, _, _, scope) in resolvedLogs)
+                foreach (var (_, _, appId, _, _, scope, rootPid) in resolvedLogs)
                 {
-                    var key = BuildSessionKey(log.ProcessId, scope, appId);
+                    var key = BuildSessionKey(rootPid, scope, appId);
                     currentKeys[key] = string.Empty;
                 }
 
@@ -384,19 +423,21 @@ public class LogCollectorService : BackgroundService
                 var newItems = new List<AppItem>();
                 var contextUpdates = new List<AppItem>();
 
-                foreach (var (log, displayName, appId, pkgId, isBrowser, scope) in resolvedLogs)
+                foreach (var (log, displayName, appId, pkgId, isBrowser, scope, rootPid) in resolvedLogs)
                 {
-                    var key = BuildSessionKey(log.ProcessId, scope, appId);
+                    var key = BuildSessionKey(rootPid, scope, appId);
 
                     if (!string.IsNullOrEmpty(currentKeys.GetValueOrDefault(key)))
                     {
                         await UpdateActivityContextAsync(
-                            currentKeys[key], log, appId, pkgId, isBrowser, contextUpdates, stoppingToken, displayName, scope);
+                            currentKeys[key], log, appId, pkgId, isBrowser, contextUpdates, stoppingToken, displayName, scope, rootPid);
                         continue;
                     }
 
                     var baseProcessName = AppProcessClassifier.ExtractBaseProcessName(log.ProcessName);
-                    var parentLink = hierarchy.ResolveParent(log.ProcessId, baseProcessName);
+                    // Resolve the parent chain for the TOP-MOST process (the main window), not
+                    // the individual child — children no longer create their own sessions.
+                    var parentLink = hierarchy.ResolveParent(rootPid, baseProcessName);
                     var appDisplayName = displayName ?? log.WindowTitle ?? log.ProcessName;
                     var rootItemType = AppProcessClassifier.ResolveRootItemType(
                         baseProcessName, appId, pkgId, log.WindowTitle, isBrowser);
@@ -421,7 +462,9 @@ public class LogCollectorService : BackgroundService
                         Platform = log.Platform,
                         InstalledAppId = appId,
                         InstalledPackageId = pkgId,
-                        ProcessId = log.ProcessId,
+                        // One session per logical window: store the main process pid so
+                        // hierarchy + hydration lookups stay stable across cycles.
+                        ProcessId = rootPid,
                         ParentProcessId = parentLink?.ParentProcessId,
                         GroupedBy = string.IsNullOrEmpty(scope) ? "pid" : "cgroup",
                         CgroupScope = scope,
@@ -438,7 +481,7 @@ public class LogCollectorService : BackgroundService
                         Title = parsed.RootTitle,
                         Identifier = parsed.RootIdentifier,
                         OpenedAt = log.Timestamp,
-                        ProcessId = log.ProcessId,
+                        ProcessId = rootPid,
                     };
                     newItems.Add(rootItem);
 
@@ -457,7 +500,7 @@ public class LogCollectorService : BackgroundService
 
                     hierarchy.Register(new OpenSessionRecord
                     {
-                        ProcessId = log.ProcessId,
+                        ProcessId = rootPid,
                         AppSessionId = session.Id,
                         RootItemId = rootItem.Id,
                         ProcessName = baseProcessName,
@@ -467,8 +510,38 @@ public class LogCollectorService : BackgroundService
                     _sessionRootItems[key] = rootItem.Id;
                 }
 
+                // ── Foreground/background focus accounting ──
+                // The collector marks the exact OS foreground PID; map it through the same
+                // root-PID grouping to the SESSION that currently holds focus. Every open
+                // session earns `interval` seconds this cycle — the focused one into
+                // foreground_seconds, every other into background_seconds. Values are flushed
+                // to SQLite every 10 cycles and on close (then the row re-syncs to the server).
+                var fgKey = string.Empty;
+                foreach (var (log, _, appId, _, _, scope, rootPid) in resolvedLogs)
+                {
+                    if (log.IsForeground)
+                    {
+                        fgKey = BuildSessionKey(rootPid, scope, appId);
+                        break;
+                    }
+                }
+                var stepSeconds = interval.TotalSeconds;
+                foreach (var kvp in currentKeys)
+                {
+                    if (string.IsNullOrEmpty(kvp.Value)) continue;
+                    var isFg = !string.IsNullOrEmpty(fgKey) && kvp.Key == fgKey;
+                    var cur = _sessionFocusSeconds.TryGetValue(kvp.Value, out var c) ? c : (ForegroundSeconds: 0.0, BackgroundSeconds: 0.0);
+                    _sessionFocusSeconds[kvp.Value] = isFg
+                        ? (cur.ForegroundSeconds + stepSeconds, cur.BackgroundSeconds)
+                        : (cur.ForegroundSeconds, cur.BackgroundSeconds + stepSeconds);
+                }
+
                 if (closeSessions.Count > 0)
+                {
+                    // Persist the final focus totals before closing, then close + re-sync.
+                    await FlushSessionFocusAsync(stoppingToken);
                     await _store.CloseSessionsAndAppItemsAsync(closeSessions, DateTime.UtcNow, stoppingToken);
+                }
 
                 if (newSessions.Count > 0)
                     await _store.StoreAppSessionsAsync(newSessions, stoppingToken);
@@ -521,6 +594,10 @@ public class LogCollectorService : BackgroundService
                 if (_cycleCount % 10 == 0)
                 {
                     await StorePermissionStatus(stoppingToken);
+                    // Periodic focus-duration flush (~every 5 min at the default 30s
+                    // interval) so the server learns growing totals even for long-running
+                    // sessions, not just at close.
+                    await FlushSessionFocusAsync(stoppingToken);
                 }
 
                 // ─── Write heartbeat for crash recovery ───
@@ -553,7 +630,69 @@ public class LogCollectorService : BackgroundService
             }
         }
 
+        // Final focus-duration flush on graceful shutdown (covers sessions that never
+        // hit the periodic flush). Failures are logged at Debug — data already lives
+        // in memory and the periodic flush already persisted most of it.
+        try { await FlushSessionFocusAsync(CancellationToken.None); }
+        catch { }
+
         _logger.LogInformation("LogCollectorService stopped");
+    }
+
+    /// <summary>
+    /// Persist the accumulated foreground/background focus durations for all open
+    /// sessions, then clear the in-memory counters. On failure the counters are kept
+    /// so the next flush retries (nothing is lost).
+    /// </summary>
+    private async Task FlushSessionFocusAsync(CancellationToken ct)
+    {
+        if (_sessionFocusSeconds.Count == 0) return;
+        var updates = _sessionFocusSeconds
+            .Select(kv => (kv.Key, kv.Value.ForegroundSeconds, kv.Value.BackgroundSeconds))
+            .ToList();
+        try
+        {
+            await _store.UpdateAppSessionFocusAsync(updates, ct);
+            _sessionFocusSeconds.Clear();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to flush session focus durations (will retry next cycle)");
+        }
+    }
+
+    /// <summary>
+    /// On platforms without systemd cgroups (Windows/macOS), one logical app runs as MANY
+    /// same-binary processes (VS Code = main window + renderer + GPU + utility + extension
+    /// hosts; Electron apps likewise). Keying sessions per-PID produced N duplicate
+    /// "Visual Studio Code" rows for ONE window. This walks the PPID chain up to the
+    /// TOP-MOST process with the same base name — the app's main window process — so the
+    /// whole family collapses into ONE session per window (the Windows/macOS analog of the
+    /// Linux systemd scope). A different binary (explorer, a shell, another app) is a hard
+    /// boundary: sessions are never merged across apps.
+    /// </summary>
+    private static int ResolveRootPid(int pid, Dictionary<int, int> processTree, Dictionary<int, string> processNames)
+    {
+        if (processTree.Count == 0 || processNames.Count == 0) return pid;
+        if (!processNames.TryGetValue(pid, out var baseName)) return pid;
+
+        var visited = new HashSet<int> { pid };
+        var current = pid;
+        var root = pid;
+
+        while (true)
+        {
+            if (!processTree.TryGetValue(current, out var ppid) || ppid <= 0) break;
+            if (visited.Contains(ppid)) break;
+            if (!processNames.TryGetValue(ppid, out var parentName)) break;
+            if (!string.Equals(parentName, baseName, StringComparison.OrdinalIgnoreCase)) break;
+
+            visited.Add(ppid);
+            root = ppid;
+            current = ppid;
+        }
+
+        return root;
     }
 
     private async Task RefreshKnownNames(CancellationToken ct)
@@ -600,7 +739,8 @@ public class LogCollectorService : BackgroundService
         List<AppItem> contextUpdates,
         CancellationToken ct,
         string? displayName = null,
-        string? scope = null)
+        string? scope = null,
+        int? rootPid = null)
     {
         var baseProcessName = AppProcessClassifier.ExtractBaseProcessName(log.ProcessName);
         var rootType = AppProcessClassifier.ResolveRootItemType(
@@ -620,7 +760,22 @@ public class LogCollectorService : BackgroundService
         {
             await _store.UpdateAppItemContextAsync(
                 existingRoot.Id, parsed.RootTitle, parsed.RootIdentifier, ct);
-            _sessionRootItems[BuildSessionKey(log.ProcessId, scope, appId)] = existingRoot.Id;
+            _sessionRootItems[BuildSessionKey(rootPid ?? log.ProcessId, scope, appId)] = existingRoot.Id;
+        }
+        else if (existingRoot == null && !string.IsNullOrWhiteSpace(log.WindowTitle))
+        {
+            // Root-PID grouping: the session's root item may have been created by a
+            // TITLE-LESS child process first (root identifier = process name, e.g.
+            // "code" instead of "project — Visual Studio Code"). When a window-bearing
+            // process of the same session arrives with a REAL title, upgrade the root
+            // in place so the stored item shows the actual window title.
+            var openRoot = await _store.GetOpenRootItemAsync(appSessionId, rootType, ct);
+            if (openRoot != null &&
+                string.Equals(openRoot.Identifier, baseProcessName, StringComparison.OrdinalIgnoreCase))
+            {
+                await _store.UpdateAppItemContextAsync(openRoot.Id, parsed.RootTitle, parsed.RootIdentifier, ct);
+                _sessionRootItems[BuildSessionKey(rootPid ?? log.ProcessId, scope, appId)] = openRoot.Id;
+            }
         }
 
         foreach (var child in parsed.Children)
@@ -645,7 +800,7 @@ public class LogCollectorService : BackgroundService
             }
             else
             {
-                var rootItemId = _sessionRootItems.GetValueOrDefault(BuildSessionKey(log.ProcessId, scope, appId));
+                var rootItemId = _sessionRootItems.GetValueOrDefault(BuildSessionKey(rootPid ?? log.ProcessId, scope, appId));
                 if (string.IsNullOrEmpty(rootItemId))
                 {
                     var open = await _store.GetOpenAppItemAsync(appSessionId, rootType, parsed.RootIdentifier, ct);

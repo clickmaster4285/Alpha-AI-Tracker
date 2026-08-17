@@ -176,6 +176,14 @@ public interface ILogStore
     /// </summary>
     Task CloseSessionsAndAppItemsAsync(IReadOnlyList<AppSession> closeSessions, DateTime closedAt, CancellationToken ct);
 
+    /// <summary>
+    /// Persist accumulated foreground/background focus durations for open sessions and
+    /// re-queue each row (is_synced = 0) so the server learns the growing totals.
+    /// </summary>
+    Task UpdateAppSessionFocusAsync(
+        IReadOnlyList<(string Id, double ForegroundSeconds, double BackgroundSeconds)> updates,
+        CancellationToken ct);
+
     /// <summary>Find an open context child item by type+identifier under a session.</summary>
     Task<AppItem?> GetOpenAppItemAsync(string appSessionId, string itemType, string identifier, CancellationToken ct);
 

@@ -207,6 +207,8 @@ type AppSessionEntry struct {
 	GroupedBy          *string `json:"groupedBy,omitempty"`
 	CgroupScope        *string `json:"cgroupScope,omitempty"`
 	ContextLabel       *string `json:"contextLabel,omitempty"`
+	ForegroundSeconds  float64 `json:"foregroundSeconds"`
+	BackgroundSeconds  float64 `json:"backgroundSeconds"`
 }
 
 type SyncAppSessionsRequest struct {
@@ -232,6 +234,8 @@ type AppSessionResponse struct {
 	GroupedBy          *string    `json:"groupedBy,omitempty"`
 	CgroupScope        *string    `json:"cgroupScope,omitempty"`
 	ContextLabel       *string    `json:"contextLabel,omitempty"`
+	ForegroundSeconds  float64    `json:"foregroundSeconds"`
+	BackgroundSeconds  float64    `json:"backgroundSeconds"`
 	SyncedAt           *time.Time `json:"syncedAt,omitempty"`
 }
 

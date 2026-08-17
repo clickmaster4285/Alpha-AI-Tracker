@@ -264,18 +264,58 @@ try
 
     if (isBackground)
     {
-        // Headless service mode (systemd `--background`): run the hosted services
-        // only, with no Avalonia/X11 UI. GUI init requires a working X connection
-        // (DISPLAY + XAUTHORITY); on Wayland the Xwayland auth file lives at
-        // /run/user/<uid>/.mutter-Xwaylandauth.* — NOT ~/.Xauthority — so a unit
-        // hardcoding XAUTHORITY=~/.Xauthority made the installed background
-        // service crash at startup (XOpenDisplay failed → Avalonia exception).
-        // Background mode never needs a window or tray, so skip the UI entirely;
-        // the process keeps running until systemd stops it (SIGTERM).
+        // Headless service mode (systemd `--background` / auto-start at boot): run the
+        // hosted services only — NO Avalonia/X11 UI, no window, no tray. GUI init
+        // requires a working X connection (DISPLAY + XAUTHORITY); on Wayland the
+        // Xwayland auth file lives at /run/user/<uid>/.mutter-Xwaylandauth.* — NOT
+        // ~/.Xauthority — so a unit hardcoding XAUTHORITY=~/.Xauthority made the
+        // installed background service crash at startup. Background mode never needs
+        // a window or tray, so skip the UI entirely; the process keeps running until
+        // systemd stops it (SIGTERM).
+        //
+        // The GUI is created LAZILY: when the user manually launches the app (desktop
+        // entry / start menu), the second launch sends a SHOW signal over the named
+        // pipe. We then start the Avalonia UI ONCE on a dedicated thread (window +
+        // tray) while THIS process keeps running all tracking services — no restart,
+        // no data gap. After the UI initializes, App.axaml.cs takes over
+        // OnShowRequested to bring the existing window forward for further launches.
+        var uiStarted = 0;
+        SingleInstanceService.OnShowRequested = () =>
+        {
+            if (Interlocked.Exchange(ref uiStarted, 1) == 1) return;
+            try
+            {
+                var thread = new Thread(() =>
+                {
+                    try
+                    {
+                        // The user asked for the GUI — show the window immediately.
+                        App.LaunchedHidden = false;
+                        BuildAvaloniaApp().StartWithClassicDesktopLifetime(
+                            args.Where(a => !a.Equals("--background", StringComparison.OrdinalIgnoreCase)).ToArray());
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"[client] GUI startup failed: {ex.Message}");
+                    }
+                });
+                thread.IsBackground = true;
+                if (OperatingSystem.IsWindows())
+                {
+                    thread.SetApartmentState(ApartmentState.STA);
+                }
+                thread.Start();
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[client] Failed to start GUI thread: {ex.Message}");
+            }
+        };
         await Task.Delay(Timeout.Infinite, CancellationToken.None);
     }
     else
     {
+        App.LaunchedHidden = isMinimized;
         BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }
 
