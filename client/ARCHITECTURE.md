@@ -347,6 +347,7 @@ log banners).
 1. `Program.cs` handles CLI modes, acquires the mutex, starts the single-instance pipe server, builds DI, `host.StartAsync`.
 2. **`LogCollectorService`** (hosted):
    - `InitializeAsync` (schema), `RefreshEmployeeInfo` (restores login from SQLite),
+   - **Headless session restore (2026-08-18):** if persisted employee credentials exist, `StartTracking()` runs here at boot — so `--background` mode (no GUI) tracks app sessions from power-on, not just browser journeys. Previously this restore happened ONLY in the Avalonia GUI (`MainViewModel.InitializeAsync`), so a headless boot spun on "waiting for login" forever while the browser tracker (which restores the login itself) kept working — the dashboard showed browser activity but zero app sessions.
    - **`ReconcileStaleSessionsOnBootAsync`** — stale `last_heartbeat_at` (>60s) → close orphaned sessions + items with the heartbeat time as approximate crash time (handles poweroff/crash/fast-restart).
    - **`CleanupGarbageSessionRowsAsync`** — closes old `--type=` / long process-name rows.
    - **`CleanupNonGuiAppEntriesAsync`** — removes pre-GUI-gate non-GUI entries (`sh`, `snap`) from `installed_applications` and closes their sessions.
@@ -354,7 +355,7 @@ log banners).
 3. **`DesktopEventService`** starts the file-explorer watchers after DB init.
 4. **`AccessibilityBrowserTracker`** starts polling browser windows (independent of login, no catalog dependency).
 5. **`BackgroundGuardService`** watches auto-start / systemd unit (60s loop) and re-installs if removed — it never *creates* them on its own.
-6. **Login (from UI)** → `MainViewModel.LoginAsync` → `_logCollector.StartTracking()` → permission wizard → tracking loop begins.
+6. **Login (from UI, first-time identity only)** → `MainViewModel.LoginAsync` → `_logCollector.SetEmployeeInfo(...)` + `StartTracking()` (idempotent — already running on a restored session) → permission wizard. After the first login the GUI is **login-only**: opening or closing it never starts or stops the tracking services (the background process owns tracking; window-close hides to tray; only an explicit quit exits the process).
 
 ---
 
@@ -363,7 +364,7 @@ log banners).
 ### Login
 
 - **Login:** `POST {serverUrl}/api/v1/auth/employee-login` with `{employeeId, secretKey}` → `{employee, token}`. Persists to `employee_info` (SQLite) and feeds `LogCollectorService.SetEmployeeInfo(employeeId, name, token)` + `StartTracking()` (which also records a `login` session event and arms Windows anti-sleep). **Instant sync on login (2026-08-11):** `LoginAsync` then calls `SyncService.RequestImmediateSync()` — the dedicated sync engine's inter-pass wait is a `SemaphoreSlim` that the request releases, so a full drain pass starts right away instead of waiting out the idle interval. The employee record itself is already server-side (it IS the login response); the instant pass pushes everything else — device_hardware_info, installed apps/packages, network, storage_devices, hardware_devices, session_events, permission_status, app_status, sessions/items.
-- **Session restore:** on launch, `MainViewModel.InitializeAsync` reads `employee_info`; if present it re-authenticates the collector, **fires `RequestImmediateSync()`** (so rows buffered since the last run land immediately), resets stored `perm_*` statuses, and re-evaluates the permission steps from scratch.
+- **Session restore:** at boot, `LogCollectorService` reads `employee_info` and **starts tracking headlessly** (2026-08-18) — no GUI required. When the GUI opens, `MainViewModel.InitializeAsync` re-authenticates the collector (idempotent), **fires `RequestImmediateSync()`** (so rows buffered since the last run land immediately), resets stored `perm_*` statuses, and re-evaluates the permission steps from scratch.
 - **No logout:** the employee-disconnect flow (button, `LogoutCommand`, `StopTracking()`, `POST /api/v1/auth/employee-disconnect`) was **removed** 2026-08-10. Once logged in the client tracks until the process stops.
 
 ### Permission wizard (`GetNextPermissionStep`)

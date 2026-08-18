@@ -3,6 +3,19 @@
 > **Last audited:** 2026-08-18
 > **Changelog:**
 >
+> - 2026-08-18: **Client: app-session tracking now starts headlessly at boot — the GUI can no longer start/stop tracking.**
+>   Root cause: `_trackingEnabled` was set ONLY by `StartTracking()`, which was called exclusively from the
+>   Avalonia GUI (`MainViewModel.InitializeAsync` / `LoginAsync`). Since 2026-08-15 boot runs `--background`
+>   (services only, no window), a powered-on PC restored the login (`LogCollectorService.RefreshEmployeeInfo`)
+>   but the main loop spun on "waiting for login" forever: browser journeys kept flowing (`AccessibilityBrowserTracker`
+>   restores the login from SQLite itself) while ZERO app sessions were collected — the web dashboard showed Web
+>   Activity but empty Session Timeline/App Usage after every reboot (Linux AND Windows). Fix: `ExecuteAsync` now
+>   calls `StartTracking()` right after `RefreshEmployeeInfo` when persisted employee credentials exist — the same
+>   restore the GUI performed, moved into the service so it runs in `--background` mode at power-on. The GUI is now
+>   strictly login-only (first-time identity + permission wizard); opening/closing it never starts or stops tracking
+>   (window-close hides to tray; only an explicit tray Quit / process stop exits the tracker). `StartTracking()` is
+>   idempotent (guarded login-event dedup), so the GUI restoring a second time is harmless. Verified: `dotnet build`
+>   0/0.
 > - 2026-08-18: **Web: Employee Journey + Device Specs modules — the `/users/[id]` detail page was replaced by nine pages behind a shared shell.**
 >   The old 820-line `web/src/app/(app)/employees/[id]/page.tsx` is deleted. New shared `EmployeePage` shell
 >   (`web/src/components/employees/EmployeePage.tsx`) provides the page header, a searchable `EmployeeSelector`
@@ -752,7 +765,7 @@ flowchart LR
 - Background guard watchdog
 - Tray icon (minimize to tray on close)
 - Windows power management (prevents sleep)
-- **Headless `--background` service mode** — runs the tracking services with no Avalonia/X11 UI (systemd); skips GUI init so the installed service can't crash on Wayland `XAUTHORITY`
+- **Headless `--background` service mode** — runs the tracking services with no Avalonia/X11 UI (systemd); skips GUI init so the installed service can't crash on Wayland `XAUTHORITY`. **Tracking starts headlessly at boot** (2026-08-18): `ExecuteAsync` restores the persisted session and calls `StartTracking()` itself, so power-on → full tracking (app sessions + browser journeys + inventory) with no GUI. The GUI is login-only — it cannot start or stop tracking
 - **Single-instance activation** — a second user launch signals the running instance (named pipe `alpha-ai-tracker-activation`) to raise its window; `--background`/`--minimized` relaunches exit quietly
 - **Six-page GUI** (2026-08-10) — `MainWindow` is a router over four exclusive states; pages live in `Views/Pages/`: Splash (boot checklist), Login, PermissionSetup (stepper), and behind the nav rail Dashboard (identity + status tiles + pipeline health + attached devices), System Specs (machine/compute/network/storage/peripherals) and Installed Applications (searchable apps + packages inventory, virtualized). One VM per page, all Transient in DI. Details: [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md)
 - **Runtime branding from a single source** — `Core/AppInfo.cs` resolves the product name, tagline, initials, publisher, copyright and version from the embedded `APP_IDENTIFIERS` + `VERSION`; no XAML or C# literal names anywhere in the UI. Editing either file re-brands both the app and the installers (§6 → *Branding-Single-Source Rule*)

@@ -217,6 +217,24 @@ public class LogCollectorService : BackgroundService
         await _store.InitializeAsync(stoppingToken);
         await RefreshEmployeeInfo(stoppingToken);
 
+        // ─── Headless session restore (boot / --background mode) ───
+        // _trackingEnabled is ONLY ever set by StartTracking(), which was previously
+        // called exclusively from the Avalonia GUI (MainViewModel.InitializeAsync on
+        // session restore, LoginAsync on explicit login). At boot the client auto-starts
+        // with --background (services only — no window, no MainViewModel), so the main
+        // loop below spun on "waiting for login" forever: browser journeys kept flowing
+        // (AccessibilityBrowserTracker restores the login from SQLite itself) but ZERO
+        // app sessions were ever collected — the web dashboard showed browser activity
+        // only, with no installed-app activity or app sessions. Restore the persisted
+        // session here exactly like the GUI does: if employee credentials exist in
+        // SQLite, begin tracking immediately. The GUI then becomes login-only — opening
+        // or closing it can no longer start or stop the tracking services.
+        if (!string.IsNullOrEmpty(_currentEmployeeId) && !string.IsNullOrEmpty(_currentToken))
+        {
+            StartTracking();
+            _logger.LogInformation("Session restored from SQLite — tracking started in background mode");
+        }
+
         // ─── Reconcile stale sessions from previous crashes ───
         // Uses last_heartbeat_at timestamp to detect crashes/poweroffs and
         // close orphaned sessions with the correct approximate ended_at time.
