@@ -5,7 +5,7 @@ import { AppWindow, Timer, Layers, Activity, Loader2, ChevronRight, ChevronDown 
 import { keepPreviousData, useQueries } from '@tanstack/react-query';
 import EmployeePage from '@/components/employees/EmployeePage';
 import EmptyState from '@/components/employees/EmptyState';
-import ActivityFilters, { DEFAULT_FILTER, type ActivityFilter } from '@/components/journey/ActivityFilters';
+import ActivityFilters, { createDefaultFilter, type ActivityFilter } from '@/components/journey/ActivityFilters';
 import { appSessionsApi, type AppSession } from '@/lib/api';
 import { formatDateTime, formatSeconds } from '@/lib/format';
 
@@ -43,7 +43,7 @@ export default function EmployeeJourneyApps() {
 
 function AppUsageBody({ employeeId }: { employeeId: string }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [filter, setFilter] = useState<ActivityFilter>(DEFAULT_FILTER);
+  const [filter, setFilter] = useState<ActivityFilter>(createDefaultFilter);
   const [isFiltering, setIsFiltering] = useState(false);
 
   const toggle = (key: string) => {

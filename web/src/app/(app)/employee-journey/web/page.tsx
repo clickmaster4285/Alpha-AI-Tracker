@@ -5,7 +5,7 @@ import { Globe, Loader2, ExternalLink, ChevronRight, ChevronDown } from 'lucide-
 import { keepPreviousData, useInfiniteQuery } from '@tanstack/react-query';
 import EmployeePage from '@/components/employees/EmployeePage';
 import EmptyState from '@/components/employees/EmptyState';
-import ActivityFilters, { DEFAULT_FILTER, type ActivityFilter } from '@/components/journey/ActivityFilters';
+import ActivityFilters, { createDefaultFilter, type ActivityFilter } from '@/components/journey/ActivityFilters';
 import { appItemsApi, type AppItem } from '@/lib/api';
 import { formatDateTime, formatDuration, formatSeconds } from '@/lib/format';
 
@@ -47,7 +47,7 @@ export default function EmployeeJourneyWeb() {
 
 function WebBody({ employeeId }: { employeeId: string }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [filter, setFilter] = useState<ActivityFilter>(DEFAULT_FILTER);
+  const [filter, setFilter] = useState<ActivityFilter>(createDefaultFilter);
   const [isFiltering, setIsFiltering] = useState(false);
 
   const toggle = (domain: string) => {

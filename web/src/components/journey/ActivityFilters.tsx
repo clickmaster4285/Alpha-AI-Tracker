@@ -26,7 +26,17 @@ const PRESETS: { key: DatePreset; label: string }[] = [
   { key: 'all', label: 'All time' },
 ];
 
-export const DEFAULT_FILTER: ActivityFilter = { search: '', preset: 'today' };
+/**
+ * Default filter = TODAY with the actual local-day bounds computed at mount time.
+ * (The preset name alone is not enough — without dateFrom/dateTo the server gets
+ * NO date filter and returns every session, leaking yesterday's data into "Today".)
+ */
+export function createDefaultFilter(): ActivityFilter {
+  const { dateFrom, dateTo } = presetRange('today');
+  return { search: '', preset: 'today', dateFrom, dateTo };
+}
+
+export const DEFAULT_FILTER: ActivityFilter = createDefaultFilter();
 
 function presetRange(preset: DatePreset): { dateFrom?: string; dateTo?: string } {
   switch (preset) {
