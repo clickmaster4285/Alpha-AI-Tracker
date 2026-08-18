@@ -48,6 +48,10 @@ npm run build       # production build — run before claiming a page works
 npm run lint
 ```
 
+> **Web list pages MUST use server-side infinite scroll** (`useInfiniteQuery` + IntersectionObserver
+> sentinel). Next/Previous buttons are forbidden — see AGENTS.md §6 *Web Infinite-Scroll Rule* and
+> `web/ARCHITECTURE.md` §4. Reference: `web/src/app/(app)/employees/page.tsx`.
+
 ### Client
 
 ```bash

@@ -1,10 +1,10 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
 import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check, Eye, Monitor, Upload, Download } from 'lucide-react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import * as XLSX from 'xlsx';
 import { employeesApi, departmentsApi, type Employee, type CreateEmployeePayload, type UpdateEmployeePayload, type ImportEmployeeRow, type ImportEmployeesResponse } from '@/lib/api';
@@ -37,12 +37,13 @@ const HEADER_FIELD: Record<string, keyof ImportEmployeeRow> = {
 const normalizeHeader = (raw: string) =>
   String(raw ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
 
+const PER_PAGE = 10;
+
 export default function UsersList() {
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [search, setSearch] = useState('');
   const [deptFilter, setDeptFilter] = useState('');
-  const [page, setPage] = useState(1);
   const [showAdd, setShowAdd] = useState(false);
   const [showEdit, setShowEdit] = useState<string | null>(null);
   const [showSecret, setShowSecret] = useState<string | null>(null);
@@ -59,10 +60,47 @@ export default function UsersList() {
   const [editDeptId, setEditDeptId] = useState(1);
 
   // ── Queries ──
-  const { data: employeesData, isLoading: employeesLoading, error: employeesError } = useQuery({
-    queryKey: ['employees', { page, search, department: deptFilter }],
-    queryFn: () => employeesApi.list({ page, perPage: 10, search: search || undefined, department: deptFilter || undefined }),
+  // Server-side pagination with infinite scroll (same pattern as the Session
+  // Timeline / Web Activity journey pages). The Next/Previous buttons are
+  // banned — see AGENTS.md §6 (Web Infinite-Scroll Rule).
+  const {
+    data: employeesData,
+    isLoading: employeesLoading,
+    error: employeesError,
+    isFetchingNextPage,
+    fetchNextPage,
+    hasNextPage,
+  } = useInfiniteQuery({
+    queryKey: ['employees', { search, department: deptFilter, perPage: PER_PAGE }],
+    queryFn: ({ pageParam }) => employeesApi.list({
+      page: pageParam as number,
+      perPage: PER_PAGE,
+      search: search || undefined,
+      department: deptFilter || undefined,
+    }),
+    initialPageParam: 1,
+    getNextPageParam: (last) => (last.page < last.totalPages ? last.page + 1 : undefined),
   });
+
+  const employees = useMemo(() => employeesData?.pages.flatMap(p => p.data) ?? [], [employeesData]);
+  const total = employeesData?.pages[0]?.total ?? 0;
+
+  // Sentinel that triggers the next page fetch when scrolled into view.
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting && hasNextPage && !isFetchingNextPage) {
+          fetchNextPage();
+        }
+      },
+      { rootMargin: '300px' },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   const { data: deptResponse } = useQuery({
     queryKey: ['departments'],
@@ -245,9 +283,6 @@ export default function UsersList() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const employees = employeesData?.data || [];
-  const totalPages = employeesData?.totalPages || 1;
-
   // ── Loading state ──
   if (employeesLoading) {
     return (
@@ -286,7 +321,7 @@ export default function UsersList() {
           <Search className="w-4 h-4 text-muted-foreground" />
           <input
             value={search}
-            onChange={e => { setSearch(e.target.value); setPage(1); }}
+            onChange={e => setSearch(e.target.value)}
             placeholder="Search by name, email, or ID"
             className="bg-transparent border-none outline-none text-sm flex-1 text-foreground placeholder:text-muted-foreground"
           />
@@ -294,7 +329,7 @@ export default function UsersList() {
         <div className='flex space-x-3'>
           <select
             value={deptFilter}
-            onChange={e => { setDeptFilter(e.target.value); setPage(1); }}
+            onChange={e => setDeptFilter(e.target.value)}
             className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground"
           >
             <option value="">All Departments</option>
@@ -434,29 +469,23 @@ export default function UsersList() {
         </table>
       </div>
 
-      {/* Pagination */}
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between">
-          <p className="text-sm text-muted-foreground">
-            Showing page {page} of {totalPages} ({employeesData?.total || 0} total employees)
-          </p>
-          <div className="flex gap-2">
-            <button
-              onClick={() => setPage(p => Math.max(1, p - 1))}
-              disabled={page <= 1}
-              className="px-3 py-1.5 rounded-lg border border-border text-sm text-foreground disabled:opacity-50 hover:bg-muted transition-colors"
-            >
-              Previous
-            </button>
-            <button
-              onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-              disabled={page >= totalPages}
-              className="px-3 py-1.5 rounded-lg border border-border text-sm text-foreground disabled:opacity-50 hover:bg-muted transition-colors"
-            >
-              Next
-            </button>
-          </div>
+      {/* Infinite scroll footer (server-side pagination; no Next/Previous buttons) */}
+      {hasNextPage ? (
+        <div ref={sentinelRef} className="h-12 flex items-center justify-center text-xs text-muted-foreground">
+          {isFetchingNextPage ? (
+            <span className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="w-4 h-4 animate-spin" /> Loading more…
+            </span>
+          ) : (
+            'Scroll for more'
+          )}
         </div>
+      ) : (
+        employees.length > 0 && (
+          <p className="text-sm text-muted-foreground text-center">
+            Showing all {total.toLocaleString()} employee{total === 1 ? '' : 's'}
+          </p>
+        )
       )}
 
       {/* Add Dialog */}

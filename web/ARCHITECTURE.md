@@ -263,7 +263,7 @@ web/
 |---|---|
 | **CSR (Client-Side Rendering)** | All pages use `"use client"` — no SSR, no ISR |
 | **TanStack Query** | Employees, Departments, Logs, Employee Journey, Device Specs pages (real API data) |
-| **Infinite scroll** | `useInfiniteQuery` + IntersectionObserver sentinel on Session Timeline + Web Activity (30/page, server-side pagination) |
+| **Infinite scroll** | `useInfiniteQuery` + IntersectionObserver sentinel — **the only allowed list pagination** on every list page (Session Timeline, Web Activity, Employees, …), server-side pagination via `page`/`perPage` (see *Web Infinite-Scroll Rule* below) |
 | **localStorage (mock data)** | ~25+ pages (dashboard, screenshots, charts, etc.) |
 | **Next.js Rewrites** | `/api/:path*` → `http://localhost:8080/api/:path*` (or `NEXT_PUBLIC_API_URL`) |
 | **Redux** | Auth state only (user, loading, auth status) |
@@ -271,6 +271,20 @@ web/
 ### Real-Time Updates
 
 **Not implemented.** No polling, no WebSocket, no Server-Sent Events. The web dashboard only shows data at the moment of page load — it never updates automatically.
+
+### Web Infinite-Scroll Rule (mandatory)
+
+**Every list/table page MUST paginate with server-side infinite scrolling — Next/Previous buttons are forbidden.**
+
+- Use `useInfiniteQuery` (TanStack Query v5) with `initialPageParam: 1` and
+  `getNextPageParam: (last) => (last.page < last.totalPages ? last.page + 1 : undefined)`.
+- Flatten pages with `data?.pages.flatMap(p => p.data)`.
+- Trigger the next fetch with an **IntersectionObserver sentinel** (`rootMargin: '300px'`, gated on
+  `hasNextPage && !isFetchingNextPage`) rendered below the list.
+- Show an inline "Loading more…" row while `isFetchingNextPage`; show a "Showing all N" footer when
+  `hasNextPage` is false.
+- Filters/search change the query key (a fresh infinite query starts at page 1) — never a `page` state.
+- Reference implementation: `src/app/(app)/employees/page.tsx` and the Session Timeline journey page.
 
 ---
 

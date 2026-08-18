@@ -3,6 +3,15 @@
 > **Last audited:** 2026-08-18
 > **Changelog:**
 >
+> - 2026-08-18: **Web: Employees list now uses server-side infinite scroll — Next/Previous buttons banned; rule codified in the docs.**
+>   The Employees page's `page` state + Previous/Next buttons were replaced with the same
+>   `useInfiniteQuery` + IntersectionObserver-sentinel pattern as the Session Timeline / Web Activity
+>   journey pages (`employeesApi.list` unchanged — server pagination via `page`/`perPage`, 10/page;
+>   filters change the query key and restart at page 1; "Loading more…" inline + "Showing all N" footer).
+>   **New mandatory rule — *Web Infinite-Scroll Rule*:** every web list/table page MUST use server-side
+>   infinite scroll; Next/Previous buttons are forbidden. Codified in `AGENTS.md` §6 (conventions table +
+>   rule subsection), `web/ARCHITECTURE.md` §4 (Data Fetching Strategy table + rule subsection), and
+>   `WORKFLOW.md` §1 (Web note). Verified: `tsc --noEmit` clean, `next build` passes.
 > - 2026-08-18: **Web: Employees Excel import/export.** The Employees page gains **Import** / **Export**
 >   buttons. **Export** downloads `employees-<date>.xlsx` (Employee ID / Name / Email / Department / Shift)
 >   from the new `GET /api/v1/employees/export` (all non-deleted employees, `EmployeeRepo.ListAll`).
@@ -939,7 +948,22 @@ flowchart LR
 | **Commit style**        | Descriptive lowercase messages: "now remove the exit btn on the tray on windows", "fixit" |
 | **Monorepo tooling**    | No shared tooling (no Turborepo, Nx, etc.). Each service has its own build system.        |
 | **Build parity**        | `dotnet run` is NOT a release test — every change must be verified from an installed build; new assets/config/scripts must be bundled by the `publish/*` scripts (see below) |
+| **Web list pagination** | List/table pages ALWAYS use server-side **infinite scroll** (`useInfiniteQuery` + IntersectionObserver sentinel) — Next/Previous buttons are forbidden (see *Web Infinite-Scroll Rule* below) |
 | **Branding & version**  | Product name and version are written in exactly two files — `client/APP_IDENTIFIERS` and `client/VERSION`. No literal product name or version string anywhere else in C#, XAML, or the build scripts (see below) |
+
+### Web Infinite-Scroll Rule (mandatory)
+
+**Every list/table page on the web dashboard MUST paginate with server-side infinite scrolling — Next/Previous buttons are forbidden.**
+
+- `useInfiniteQuery` with `initialPageParam: 1` and
+  `getNextPageParam: (last) => (last.page < last.totalPages ? last.page + 1 : undefined)`; flatten pages
+  with `data?.pages.flatMap(p => p.data)`.
+- Trigger the next fetch with an **IntersectionObserver sentinel** (`rootMargin: '300px'`, gated on
+  `hasNextPage && !isFetchingNextPage`) rendered below the list.
+- Inline "Loading more…" while `isFetchingNextPage`; a "Showing all N" footer once `hasNextPage` is false.
+- Filter/search inputs change the query key (the infinite query restarts at page 1) — there is NO `page`
+  state anywhere.
+- Reference implementations: `web/src/app/(app)/employees/page.tsx`, the Session Timeline journey page.
 
 ### Installer-Parity Rule (mandatory)
 
