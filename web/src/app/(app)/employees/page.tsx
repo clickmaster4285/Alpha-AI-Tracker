@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check, Eye } from 'lucide-react';
+import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check, Eye, Monitor } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { employeesApi, departmentsApi, type Employee, type CreateEmployeePayload, type UpdateEmployeePayload } from '@/lib/api';
@@ -251,12 +251,11 @@ export default function UsersList() {
                       >
                         {emp.avatar || emp.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)}
                       </div>
-                      <Link
-                        href={`/employees/${emp.id}`}
+                      <div
                         className="text-sm font-medium text-foreground hover:text-primary hover:underline underline-offset-4 transition-colors"
                       >
                         {emp.name}
-                      </Link>
+                      </div>
                     </div>
                   </td>
                   <td className="px-4 py-3 text-sm font-mono font-medium text-foreground">{emp.employeeId}</td>
@@ -280,9 +279,15 @@ export default function UsersList() {
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="bg-card border-border rounded-lg min-w-[180px]">
                         <DropdownMenuItem asChild className="cursor-pointer">
-                          <Link href={`/employees/${emp.id}`} className="flex items-center gap-2">
+                          <Link href={`/employee-journey/timeline?employeeId=${emp.id}`} className="flex items-center gap-2">
                             <Eye className="w-3.5 h-3.5" />
-                            View Details
+                            View Journey
+                          </Link>
+                        </DropdownMenuItem>
+                        <DropdownMenuItem asChild className="cursor-pointer">
+                          <Link href={`/device-specs?employeeId=${emp.id}`} className="flex items-center gap-2">
+                            <Monitor className="w-3.5 h-3.5" />
+                            Device Specs
                           </Link>
                         </DropdownMenuItem>
                         <DropdownMenuItem onSelect={() => handleEdit(emp)} className="cursor-pointer">

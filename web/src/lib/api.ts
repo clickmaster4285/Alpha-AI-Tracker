@@ -397,8 +397,20 @@ export interface AppItem {
   itemType: string;
   title: string;
   identifier: string;
+  url?: string;
+  domain?: string;
   openedAt: string;
   closedAt?: string;
+  processId?: number;
+  objectType?: string;
+  action?: string;
+  journeyId?: string;
+  sequence?: number;
+  previousPath?: string;
+  currentPath?: string;
+  windowId?: number;
+  tabId?: number;
+  metadataJson?: string;
   syncedAt?: string;
 }
 
