@@ -385,7 +385,10 @@ export interface AppSessionListResponse {
 }
 
 export const appSessionsApi = {
-  list: (params?: { page?: number; perPage?: number; employeeId?: string; search?: string; platform?: string }) =>
+  list: (params?: {
+    page?: number; perPage?: number; employeeId?: string; search?: string; platform?: string;
+    dateFrom?: string; dateTo?: string;
+  }) =>
     request<AppSessionListResponse>('/app-sessions', { params: params as Record<string, string | number | undefined> }),
 };
 
@@ -423,7 +426,10 @@ export interface AppItemListResponse {
 }
 
 export const appItemsApi = {
-  list: (params?: { page?: number; perPage?: number; employeeId?: string; appSessionId?: string; itemType?: string; search?: string }) =>
+  list: (params?: {
+    page?: number; perPage?: number; employeeId?: string; appSessionId?: string; itemType?: string; search?: string;
+    dateFrom?: string; dateTo?: string;
+  }) =>
     request<AppItemListResponse>('/app-items', { params: params as Record<string, string | number | undefined> }),
 };
 

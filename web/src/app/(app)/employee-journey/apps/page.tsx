@@ -1,10 +1,11 @@
 'use client';
 
-import { Fragment, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { AppWindow, Timer, Layers, Activity, Loader2, ChevronRight, ChevronDown } from 'lucide-react';
 import { useQueries } from '@tanstack/react-query';
 import EmployeePage from '@/components/employees/EmployeePage';
 import EmptyState from '@/components/employees/EmptyState';
+import ActivityFilters, { DEFAULT_FILTER, type ActivityFilter } from '@/components/journey/ActivityFilters';
 import { appSessionsApi, type AppSession } from '@/lib/api';
 import { formatDateTime, formatSeconds } from '@/lib/format';
 
@@ -42,6 +43,8 @@ export default function EmployeeJourneyApps() {
 
 function AppUsageBody({ employeeId }: { employeeId: string }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [filter, setFilter] = useState<ActivityFilter>(DEFAULT_FILTER);
+  const [isFiltering, setIsFiltering] = useState(false);
 
   const toggle = (key: string) => {
     setExpanded(prev => {
@@ -54,10 +57,21 @@ function AppUsageBody({ employeeId }: { employeeId: string }) {
 
   const queries = useQueries({
     queries: Array.from({ length: AGGREGATE_PAGES }, (_, i) => ({
-      queryKey: ['app-sessions', 'usage', { employeeId, page: i + 1, perPage: PER_PAGE }],
-      queryFn: () => appSessionsApi.list({ employeeId, page: i + 1, perPage: PER_PAGE }),
+      queryKey: ['app-sessions', 'usage', { employeeId, page: i + 1, perPage: PER_PAGE, ...filter }],
+      queryFn: () => appSessionsApi.list({
+        employeeId,
+        page: i + 1,
+        perPage: PER_PAGE,
+        search: filter.search || undefined,
+        dateFrom: filter.dateFrom,
+        dateTo: filter.dateTo,
+      }),
     })),
   });
+
+  // Reflect query activity into the filter bar spinner (search in flight).
+  const anyFetching = queries.some(q => q.isFetching);
+  useEffect(() => { setIsFiltering(anyFetching); }, [anyFetching]);
 
   const loading = queries.some(q => q.isLoading);
   const error = queries.find(q => q.isError);
@@ -110,6 +124,9 @@ function AppUsageBody({ employeeId }: { employeeId: string }) {
 
   return (
     <div className="space-y-4">
+      {/* Server-side filters: search + date (default today) + custom range */}
+      <ActivityFilters value={filter} onChange={setFilter} loading={isFiltering} />
+
       {/* Stat tiles */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <UsageTile icon={AppWindow} label="Applications" value={usage.length} accent="bg-primary/10 text-primary" />

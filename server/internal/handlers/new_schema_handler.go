@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/alpha-ai-tracker/server/internal/dto"
 	"github.com/alpha-ai-tracker/server/internal/repository"
@@ -222,6 +223,8 @@ func (h *NewSchemaHandler) ListAppSessions(c echo.Context) error {
 		EmployeeID: c.QueryParam("employeeId"),
 		Search:     c.QueryParam("search"),
 		Platform:   c.QueryParam("platform"),
+		DateFrom:   parseTimeParam(c.QueryParam("dateFrom")),
+		DateTo:     parseTimeParam(c.QueryParam("dateTo")),
 		Page:       page,
 		PerPage:    perPage,
 	}
@@ -250,6 +253,8 @@ func (h *NewSchemaHandler) ListAppItems(c echo.Context) error {
 		AppSessionID: c.QueryParam("appSessionId"),
 		ItemType:     c.QueryParam("itemType"),
 		Search:       c.QueryParam("search"),
+		DateFrom:     parseTimeParam(c.QueryParam("dateFrom")),
+		DateTo:       parseTimeParam(c.QueryParam("dateTo")),
 		Page:         page,
 		PerPage:      perPage,
 	}
@@ -263,6 +268,20 @@ func (h *NewSchemaHandler) ListAppItems(c echo.Context) error {
 		})
 	}
 	return c.JSON(http.StatusOK, result)
+}
+
+// parseTimeParam parses an optional RFC3339 (or date-only) query param into a
+// time.Time. Returns the zero value when empty/invalid (meaning "no bound").
+func parseTimeParam(v string) time.Time {
+	if v == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{time.RFC3339, "2006-01-02"} {
+		if t, err := time.Parse(layout, v); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
 }
 
 // ────────────────────────────────

@@ -5,6 +5,7 @@ import { Globe, Loader2, ExternalLink, ChevronRight, ChevronDown } from 'lucide-
 import { useInfiniteQuery } from '@tanstack/react-query';
 import EmployeePage from '@/components/employees/EmployeePage';
 import EmptyState from '@/components/employees/EmptyState';
+import ActivityFilters, { DEFAULT_FILTER, type ActivityFilter } from '@/components/journey/ActivityFilters';
 import { appItemsApi, type AppItem } from '@/lib/api';
 import { formatDateTime, formatDuration, formatSeconds } from '@/lib/format';
 
@@ -46,6 +47,8 @@ export default function EmployeeJourneyWeb() {
 
 function WebBody({ employeeId }: { employeeId: string }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [filter, setFilter] = useState<ActivityFilter>(DEFAULT_FILTER);
+  const [isFiltering, setIsFiltering] = useState(false);
 
   const toggle = (domain: string) => {
     setExpanded(prev => {
@@ -59,22 +62,28 @@ function WebBody({ employeeId }: { employeeId: string }) {
   const {
     data,
     isLoading,
+    isFetching,
     isError,
     error,
     isFetchingNextPage,
     fetchNextPage,
     hasNextPage,
   } = useInfiniteQuery({
-    queryKey: ['app-items', 'browser_tab', { employeeId, perPage: PER_PAGE }],
+    queryKey: ['app-items', 'browser_tab', { employeeId, perPage: PER_PAGE, ...filter }],
     queryFn: ({ pageParam }) => appItemsApi.list({
       employeeId,
       itemType: 'browser_tab',
       page: pageParam as number,
       perPage: PER_PAGE,
+      search: filter.search || undefined,
+      dateFrom: filter.dateFrom,
+      dateTo: filter.dateTo,
     }),
     initialPageParam: 1,
     getNextPageParam: (last) => (last.page < last.totalPages ? last.page + 1 : undefined),
   });
+
+  useEffect(() => { setIsFiltering(isFetching); }, [isFetching]);
 
   const items = useMemo(() => data?.pages.flatMap(p => p.data) ?? [], [data]);
   const total = data?.pages[0]?.total ?? 0;
@@ -136,12 +145,16 @@ function WebBody({ employeeId }: { employeeId: string }) {
 
   return (
     <div className="bg-card rounded-xl border border-border shadow-card overflow-hidden">
-      <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+      <div className="px-4 py-3 border-b border-border flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-2">
           <Globe className="w-4 h-4 text-primary" />
           <h3 className="text-sm font-semibold text-foreground">Visited Sites</h3>
         </div>
         <span className="text-xs text-muted-foreground">{total.toLocaleString()} page{total === 1 ? '' : 's'} · {groups.length} site{groups.length === 1 ? '' : 's'}</span>
+      </div>
+      {/* Server-side filters: search + date (default today) + custom range */}
+      <div className="px-4 py-3 border-b border-border">
+        <ActivityFilters value={filter} onChange={setFilter} loading={isFiltering} />
       </div>
       <div className="overflow-x-auto">
         <table className="w-full min-w-[820px]">

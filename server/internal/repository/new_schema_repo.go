@@ -427,6 +427,8 @@ type AppSessionListParams struct {
 	EmployeeID string
 	Search     string
 	Platform   string
+	DateFrom   time.Time
+	DateTo     time.Time
 	Page       int
 	PerPage    int
 }
@@ -468,6 +470,16 @@ func (r *NewSchemaRepo) ListAppSessions(ctx context.Context, params AppSessionLi
 	if params.Platform != "" {
 		conditions = append(conditions, fmt.Sprintf("platform = $%d", argIdx))
 		args = append(args, params.Platform)
+		argIdx++
+	}
+	if !params.DateFrom.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("started_at >= $%d", argIdx))
+		args = append(args, params.DateFrom)
+		argIdx++
+	}
+	if !params.DateTo.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("started_at <= $%d", argIdx))
+		args = append(args, params.DateTo)
 		argIdx++
 	}
 
@@ -534,6 +546,8 @@ type AppItemListParams struct {
 	AppSessionID string
 	ItemType     string
 	Search       string
+	DateFrom     time.Time
+	DateTo       time.Time
 	Page         int
 	PerPage      int
 }
@@ -580,6 +594,16 @@ func (r *NewSchemaRepo) ListAppItems(ctx context.Context, params AppItemListPara
 			"(LOWER(title) LIKE LOWER($%d) OR LOWER(identifier) LIKE LOWER($%d))",
 			argIdx, argIdx))
 		args = append(args, "%"+params.Search+"%")
+		argIdx++
+	}
+	if !params.DateFrom.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("opened_at >= $%d", argIdx))
+		args = append(args, params.DateFrom)
+		argIdx++
+	}
+	if !params.DateTo.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("opened_at <= $%d", argIdx))
+		args = append(args, params.DateTo)
 		argIdx++
 	}
 
