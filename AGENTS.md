@@ -3,6 +3,35 @@
 > **Last audited:** 2026-08-18
 > **Changelog:**
 >
+> - 2026-08-18: **Embedded-webview journeys — sites opened INSIDE apps (VS Code Simple Browser, Slack, Teams, any Electron/embedded browser) now tracked as web activity, with ZERO hardcoded app names.**
+>   Previously only real browser processes were tracked (a hardcoded `BrowserProcessHints` gate in the
+>   readers), so a website opened inside VS Code's Simple Browser never reached `/employee-journey/web`.
+>   The gate is replaced with **structural detection — the No-Hardcoded-Names Rule applied**: a window
+>   carries web content iff its accessibility tree contains a DOCUMENT_WEB node (AT-SPI role 95) whose
+>   DocURL is an **http(s)** URL. App chrome excludes itself by scheme (`vscode-webview://`, `file://`,
+>   `about:` never match), so no product-name list is needed anywhere — any app with an embedded http
+>   document is captured, and the HOST APP (process name, e.g. `code`) rides in metadata `"source":"webview"`
+>   so the web dashboard shows it as the source badge. Linux (`LinuxAtSpiBrowserReader`): the probe now
+>   scans ALL a11y apps (structurally skipping `--type=` Chromium/Electron child processes and `--headless`)
+>   — browsers keep the full path (omnibox + DocURL + incognito), non-browsers must PROVE an http DocURL
+>   or they are never emitted. The expensive non-browser walk runs every 5th poll (~15s) with a 400-node
+>   budget, and the reader **caches webview windows and re-emits them every poll** so sessions stay stable,
+>   focus accounting works, and the tracker's time-based missing-window close (5×interval) never fires
+>   between scans (cache entries expire ~60s after a rescan stops producing them). Windows
+>   (`WindowsUiaBrowserReader`): non-browser windows are scanned for a descendant Document/Edit whose
+>   Value/Name is an http(s) URL (the UIA analog of DocURL) — Electron webviews expose this on demand;
+>   browsers unchanged. Tracker: `HydrateTrackedWindowsAsync` now hydrates browser_tab-rooted sessions
+>   (webview sessions survive fast relaunches), metadata `source` is `webview` for webview windows, and
+>   **the main loop (`LogCollectorService`) now skips sessions whose root item is `browser_tab`** — without
+>   that, a webview session (process `code`) hydrated under the SAME key as the host app's own session and
+>   was closed as a duplicate one cycle later. Web: the source badge on Web Activity shows the host app
+>   process name for webview-source items (data-driven). Verified: `dotnet build` 0/0, `tsc` clean; the
+>   ACTUAL embedded probe run live on the dev PC captures Chrome (chatgpt.com, active) with zero junk
+>   webview rows, and the poll-4 throttle returns browsers only. ⚠️ Known Linux limitation (Chromium,
+>   NOT our code): Electron/Chromium apps only expose their content a11y tree when launched with
+>   `--force-renderer-accessibility` (the same documented Chrome limitation) — the webview DocURL is
+>   invisible otherwise; Windows/macOS UIA/AX expose webview trees on demand, so the feature works there
+>   out of the box. Ships only in a new installer build.
 > - 2026-08-18: **Downloaded installers no longer linger in `updates/` — the folder is force-deleted after every successful update (Windows + Linux) + a startup sweep.**
 >   Root cause: `AppUpdateService` downloaded the platform installer into the user data dir
 >   (`~/.local/share/alpha-ai-tracker/updates` / `%LocalAppData%\AlphaAITracker\updates`) and handed it to

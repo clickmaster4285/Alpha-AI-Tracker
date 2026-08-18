@@ -42,9 +42,13 @@ const BROWSER_NAMES: Record<string, string> = {
 /** Browser/source of a journey row, read from metadata_json.processName (e.g. "chrome"). */
 function browserOf(item: AppItem): string | null {
   try {
-    const meta = item.metadataJson ? JSON.parse(item.metadataJson) as { processName?: string } : null;
+    const meta = item.metadataJson ? JSON.parse(item.metadataJson) as { processName?: string; source?: string } : null;
     const name = meta?.processName;
     if (!name) return null;
+    // Real browsers → friendly name. Embedded webviews (metadata "source":"webview") →
+    // the HOST APP's process name ("code" for VS Code, "slack", …) — data-driven,
+    // no hardcoded list.
+    if (meta.source === 'webview') return name;
     return BROWSER_NAMES[name.toLowerCase()] ?? null;
   } catch { return null; }
 }
