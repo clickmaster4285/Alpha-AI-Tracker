@@ -3,6 +3,21 @@
 > **Last audited:** 2026-08-18
 > **Changelog:**
 >
+> - 2026-08-18: **Downloaded installers no longer linger in `updates/` — the folder is force-deleted after every successful update (Windows + Linux) + a startup sweep.**
+>   Root cause: `AppUpdateService` downloaded the platform installer into the user data dir
+>   (`~/.local/share/alpha-ai-tracker/updates` / `%LocalAppData%\AlphaAITracker\updates`) and handed it to
+>   the OS installer, but nothing ever deleted it — every updated machine kept every installer it had
+>   ever downloaded. Fix: new `CleanupUpdatesDirectoryAsync` force-deletes every file (retry loop, `.part`
+>   leftovers included) then the folder itself. Wired into three places: (1) **Linux** — after a successful
+>   `pkexec dpkg -i` in `InstallAsync` (dpkg is synchronous, so the app is still alive and can wipe the
+>   consumed `.deb` immediately); (2) **Windows** — inside the detached PowerShell update script, after the
+>   installer finishes and the app is relaunched (`Remove-Item` on the installer, every file in `updates/`,
+>   then the folder — the app can't do it itself because on Windows `InstallAsync` returns BEFORE setup
+>   runs); (3) **startup sweep** — `StartAsync` prunes the folder on every boot, so installers already
+>   sitting on disk from past updates (including the two PCs affected by this report) are wiped without
+>   waiting for the next update. Failures are tolerated (transient AV lock → logged, re-swept on next
+>   pass; the next download prunes its own dest anyway). macOS untouched (dmg is opened, not consumed).
+>   Verified: `dotnet build` 0/0. ⚠️ ships only in a new installer build.
 > - 2026-08-18: **Focus totals were still frozen (~0s on the web) — the periodic flush OVERWROTE the DB row with the in-memory delta instead of accumulating. Fixed + guaranteed 1-minute push.**
 >   Live evidence after the previous fix shipped in v1.2.4: Chrome stuck at exactly `fg=30.0`, VS
 >   Code/Calendar/Help at exactly `300.0`, byte-identical across 65s of running — so the collector WAS
