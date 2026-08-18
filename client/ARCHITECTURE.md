@@ -1,7 +1,19 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-08-12 (self-update §16 added)
+> **Last audited:** 2026-08-18 (focus-time root causes §8 + browser focus accounting §11)
 > **Changelog:**
+> - 2026-08-18: **Foreground/background focus times fixed — Linux/Wayland detection + browser sessions.**
+>   (1) `ProcessCollector` Linux AT-SPI foreground detection rewritten: at-spi2-core ≥ 2.50 returns
+>   `GetState` as a **packed 64-bit bitmask** (bit N = state N) not a list of ids, and the old check
+>   looked for state 8 (ENABLED, present on every window) — the focused window is the only one with
+>   bit 1 (STATE_ACTIVE)/bit 12 (STATE_FOCUSED). New `IsAtSpiActiveState` (gdbus path) and
+>   `is_active_window` (python path) decode both formats. This also makes the browser reader's
+>   per-window `active` flag work (the focused browser window is now identifiable on Wayland).
+>   (2) `AccessibilitySnapshot.IsActive` added and set per platform (Linux AT-SPI ACTIVE/FOCUSED,
+>   Windows `GetForegroundWindow` HWND, macOS frontmost process); `AccessibilityBrowserTracker` now
+>   accumulates the poll interval per open window every poll (active → `foreground_seconds`, rest →
+>   `background_seconds`) and flushes every 10 polls + on close via `UpdateAppSessionFocusAsync`
+>   (re-queues `is_synced=0` so SyncService re-sends) — browser journeys finally earn focus time.
 > - 2026-08-12: **Self-update from GitHub Releases** — new `Services/AppUpdateService.cs`
 >   (singleton + hosted, ObservableObject): checks the GitHub latest-release API, picks the platform
 >   installer asset (`.deb` by arch / `.exe` / `.dmg`), compares against `AppInfo.Version`, and on a
@@ -430,7 +442,7 @@ Theming is the **light** token dictionary in `Styles/AppTheme.xaml` plus the sty
 
 | Platform | Window titles | Foreground | CPU | Cmdline |
 |---|---|---|---|---|
-| **Linux** | GNOME Shell `Introspect.GetWindows` (Wayland, ALL windows) + `xprop _NET_CLIENT_LIST` (X11/XWayland) | xprop → AT-SPI (python3 / gdbus) → xdg portal → GNOME Shell → xdotool → heuristic | `TotalProcessorTime` two-sample 100ms gap | `/proc/<pid>/cmdline` |
+| **Linux** | GNOME Shell `Introspect.GetWindows` (Wayland, ALL windows) + `xprop _NET_CLIENT_LIST` (X11/XWayland) | xprop → AT-SPI (python3 / gdbus, **decodes the packed 64-bit state bitmask, ACTIVE/FOCUSED bits**) → xdg portal → GNOME Shell → xdotool → heuristic | `TotalProcessorTime` two-sample 100ms gap | `/proc/<pid>/cmdline` |
 | **Windows** | `EnumWindows` (all visible windows → titles) | `GetForegroundWindow` | same | PowerShell `Get-CimInstance Win32_Process` |
 | **macOS** | **foreground only** via osascript | osascript/System Events | **0 (not measured)** | `ps -o command=` |
 
@@ -525,9 +537,10 @@ Both detectors are forced-rechecked every scan (`ForceRecheck`) and upsert into 
 
 ### Poll loop (every `ALPHA_BROWSER_ACCESSIBILITY_POLL_SECONDS`, default 3s)
 
-1. `IAccessibilityBrowserReader.ReadAsync()` → `AccessibilitySnapshot[]` (windowKey, pid, process, title, URL, `UrlSource`, incognito).
-2. `EnrichUrlsFromHistoryAsync` fills empty URLs from the **profile-history fallback**.
-3. Per window: first sight → **new `app_sessions`** + `browser_tab` root item (URL, domain, journeyId, `metadata_json`); changes → rotate/record; vanished (5-miss grace) → close; idle (`ALPHA_BROWSER_JOURNEY_IDLE_MINUTES`, 15) → close; shutdown → close all.
+1. `IAccessibilityBrowserReader.ReadAsync()` → `AccessibilitySnapshot[]` (windowKey, pid, process, title, URL, `UrlSource`, incognito, **`IsActive`** — AT-SPI ACTIVE/FOCUSED state on Linux, `GetForegroundWindow` HWND match on Windows, frontmost process on macOS).
+2. `EnrichUrlsFromHistoryAsync` fills empty URLs from the **profile-history fallback** (preserves `IsActive`).
+3. **Focus accounting** — each poll the ACTIVE window's session earns the poll interval as `foreground_seconds` and every other open window earns `background_seconds`; totals flush every 10 polls + on close via `UpdateAppSessionFocusAsync` (`is_synced=0` re-syncs). Browser journeys finally earn focus time (they are owned here, not by the main loop's focus accounting).
+4. Per window: first sight → **new `app_sessions`** + `browser_tab` root item (URL, domain, journeyId, `metadata_json`); changes → rotate/record; vanished (5-miss grace) → close; idle (`ALPHA_BROWSER_JOURNEY_IDLE_MINUTES`, 15) → close; shutdown → close all.
 
 ### Reading the URL — three merged sources (Linux embedded python3 probe)
 

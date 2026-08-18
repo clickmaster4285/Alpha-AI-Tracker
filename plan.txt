@@ -1,1 +1,3 @@
-auto open only background openning:::::::::::::::::::::: bugs found via fahad pc at 4:11/
+1
+when i update the tool through gui the latest application store on /alpha-ai-tracker/updates but after update its still store on the updates folder why???
+i want forcly delete the updates folder on both windows|linux device

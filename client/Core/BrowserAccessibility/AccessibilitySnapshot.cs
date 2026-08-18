@@ -25,6 +25,14 @@ public sealed class AccessibilitySnapshot
     public bool IsIncognito { get; init; }
 
     /// <summary>
+    /// True when the OS marks this window as the ACTIVE/FOCUSED window (AT-SPI
+    /// STATE_ACTIVE/STATE_FOCUSED on Linux, foreground-window HWND on Windows, frontmost
+    /// process on macOS). The tracker credits exactly one tracked window per poll with
+    /// foreground time; all other open windows earn background time.
+    /// </summary>
+    public bool IsActive { get; init; }
+
+    /// <summary>
     /// Where the URL came from: "accessibility" (address-bar tree) or "history"
     /// (browser profile history DB fallback — used when the a11y tree cannot expose
     /// the omnibox, e.g. Linux Chrome 136+ / snap Firefox).

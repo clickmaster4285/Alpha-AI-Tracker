@@ -28,6 +28,10 @@ public sealed class WindowsUiaBrowserReader : IAccessibilityBrowserReader
     private const int UIA_EditControlTypeId = 50004;
     private const int UIA_ButtonControlTypeId = 50000;
 
+    // user32 foreground window — the OS statement of which top-level window is focused.
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
     private readonly ILogger<WindowsUiaBrowserReader> _logger;
 
     public string Platform => "Windows";
@@ -52,6 +56,10 @@ public sealed class WindowsUiaBrowserReader : IAccessibilityBrowserReader
             var root = uia.GetRootElement();
             var windowCondition = uia.CreatePropertyCondition(UIA_ControlTypePropertyId, UIA_WindowControlTypeId);
             var windows = root.FindAll(TreeScope.TreeScope_Children, windowCondition);
+
+            // OS focus: the foreground top-level window (user32 GetForegroundWindow) is
+            // the one the tracker credits with foreground time each poll.
+            var fgHwnd = GetForegroundWindow();
 
             for (var i = 0; i < windows.Length; i++)
             {
@@ -90,6 +98,8 @@ public sealed class WindowsUiaBrowserReader : IAccessibilityBrowserReader
                         // browsers expose in their accessibility tree ("Incognito"/"InPrivate").
                         IsIncognito = BrowserAccessibilityHelpers.TitleSuggestsIncognito(title)
                                      || DetectIncognito(element, uia),
+                        // Foreground window: matches the HWND returned by GetForegroundWindow.
+                        IsActive = fgHwnd != IntPtr.Zero && element.CurrentNativeWindowHandle == fgHwnd,
                     });
                 }
                 catch { }

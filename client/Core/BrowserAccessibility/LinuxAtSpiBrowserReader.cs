@@ -94,6 +94,7 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                 Url = string.IsNullOrWhiteSpace(w.Url) ? null : BrowserAccessibilityHelpers.NormalizeUrl(w.Url),
                 UrlSource = "accessibility",
                 IsIncognito = w.Incognito,
+                IsActive = w.Active,
                 CapturedAt = now,
             });
         }
@@ -276,7 +277,7 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
     // Combined python3 probe (Sources A + B)
     // ─────────────────────────────────────────────────────────────────────────────
 
-    private sealed record ProbeWindow(string Source, string Key, int Pid, string ProcessName, string Title, string Url, bool Incognito);
+    private sealed record ProbeWindow(string Source, string Key, int Pid, string ProcessName, string Title, string Url, bool Incognito, bool Active);
 
     private async Task<List<ProbeWindow>> RunCombinedProbeAsync(CancellationToken ct)
     {
@@ -340,7 +341,8 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                     el.GetProperty("proc").GetString() ?? string.Empty,
                     el.GetProperty("title").GetString() ?? string.Empty,
                     el.GetProperty("url").GetString() ?? string.Empty,
-                    el.TryGetProperty("incognito", out var inc) && inc.GetBoolean()));
+                    el.TryGetProperty("incognito", out var inc) && inc.GetBoolean(),
+                    el.TryGetProperty("active", out var act) && act.GetBoolean()));
             }
             catch (Exception ex)
             {
@@ -554,6 +556,20 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                             continue
                         if not wname.strip():
                             continue
+                        # OS focus: the window whose state carries STATE_ACTIVE (1) /
+                        # STATE_FOCUSED (12) is the focused one. at-spi2-core >= 2.50
+                        # returns a PACKED bitmask ([lo32, hi32]); older returns a list
+                        # of state ids — the focused window is marked in BOTH forms.
+                        win_active = False
+                        try:
+                            st = list(w.GetState(dbus_interface=A11Y))
+                            if st and max(st) > 0xFFFF:
+                                smask = st[0] | (st[1] << 32 if len(st) > 1 else 0)
+                                win_active = bool(smask & ((1 << 1) | (1 << 12)))
+                            else:
+                                win_active = (1 in st) or (12 in st)
+                        except Exception:
+                            pass
                         # Incognito is per-window: a single browser process hosts normal AND
                         # incognito windows, so one incognito window must never flag its
                         # siblings (that would strip their URLs when capture is gated off).
@@ -571,6 +587,7 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                             'title': wname,
                             'url': url,
                             'incognito': win_incognito,
+                            'active': win_active,
                         })
         except Exception:
             pass

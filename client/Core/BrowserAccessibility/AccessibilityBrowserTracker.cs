@@ -76,6 +76,11 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
     private static readonly TimeSpan HydrateGracePeriod = TimeSpan.FromSeconds(60);
 
     private readonly Dictionary<string, TrackedWindow> _tracked = new();
+    // Per-session foreground/background focus totals, accumulated once per poll from the
+    // OS ACTIVE/FOCUSED window and flushed every 10 polls + on close (mirrors the main
+    // collector loop). Keyed by app_session id.
+    private readonly Dictionary<string, (double Fg, double Bg)> _sessionFocusSeconds = new();
+    private int _pollCount;
     private readonly List<FileSystemWatcher> _downloadWatchers = new();
     // Per-PID window counts from the previous poll — used to distinguish a navigation
     // of the only window (re-key) from a second window returning after a transient
@@ -266,6 +271,44 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
                 tw.LastSeen = now;
                 await UpdateWindowAsync(tw, snap, ct);
             }
+
+            // ── Foreground/background focus accounting ──
+            // The OS marks exactly ONE window ACTIVE/FOCUSED per poll (AT-SPI
+            // STATE_ACTIVE/STATE_FOCUSED on Linux, foreground HWND on Windows, frontmost
+            // process on macOS — see the readers' IsActive). Credit that window's session
+            // with the poll interval as FOREGROUND; every other open window earns
+            // BACKGROUND. Totals are flushed every 10 polls and on close so the server
+            // learns growing values (the row re-syncs via is_synced=0). This closes the
+            // gap where browser sessions — the majority of usage — never earned any
+            // foreground/background time at all (they are owned here, not by the main
+            // collector loop, so its focus accounting never touched them).
+            string? activeSessionId = null;
+            foreach (var snap in snapshots)
+            {
+                if (!snap.IsActive) continue;
+                var activeKey = ResolveWindowKey(snap, pidCounts, _lastPollPidCounts);
+                if (_tracked.TryGetValue(activeKey, out var activeTw))
+                {
+                    activeSessionId = activeTw.SessionId;
+                    break;
+                }
+            }
+
+            var step = intervalSeconds;
+            foreach (var kv in _tracked.ToList())
+            {
+                var tw = kv.Value;
+                if (!present.Contains(kv.Key)) continue; // only windows seen this poll earn time
+                var cur = _sessionFocusSeconds.TryGetValue(tw.SessionId, out var c) ? c : (0.0, 0.0);
+                var isFg = !string.IsNullOrEmpty(activeSessionId) && tw.SessionId == activeSessionId;
+                _sessionFocusSeconds[tw.SessionId] = isFg
+                    ? (cur.Item1 + step, cur.Item2)
+                    : (cur.Item1, cur.Item2 + step);
+            }
+
+            _pollCount++;
+            if (_pollCount % 10 == 0)
+                await FlushBrowserFocusAsync(ct);
 
             // Close windows that vanished (browser closed). Give a few polls for
             // transient a11y-tree misses before declaring the window gone.
@@ -605,10 +648,36 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
 
     private async Task CloseWindowAsync(string key, TrackedWindow tw, DateTime closedAt, CancellationToken ct)
     {
+        // Persist the final focus totals before closing so the row carries them (the
+        // close itself only sets ended_at; totals ride on the pre-close flush).
+        try { await FlushBrowserFocusAsync(ct); } catch { }
         await _store.CloseSessionsAndAppItemsAsync(
             new[] { new AppSession { Id = tw.SessionId, ProcessName = string.Empty, EndedAt = closedAt } },
             closedAt, ct);
         _tracked.Remove(key);
+    }
+
+    /// <summary>
+    /// Persist accumulated foreground/background focus totals for all open browser
+    /// sessions and re-queue each row (is_synced = 0) so SyncService re-sends it and
+    /// the server learns the growing values. On failure the counters are kept and
+    /// retried next flush — nothing is lost.
+    /// </summary>
+    private async Task FlushBrowserFocusAsync(CancellationToken ct)
+    {
+        if (_sessionFocusSeconds.Count == 0) return;
+        var updates = _sessionFocusSeconds
+            .Select(kv => (kv.Key, kv.Value.Item1, kv.Value.Item2))
+            .ToList();
+        try
+        {
+            await _store.UpdateAppSessionFocusAsync(updates, ct);
+            _sessionFocusSeconds.Clear();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to flush browser session focus durations (will retry next poll)");
+        }
     }
 
     private async Task CloseAllAsync(DateTime closedAt, CancellationToken ct)
@@ -686,6 +755,7 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
                     Url = url,
                     UrlSource = "history",
                     IsIncognito = snap.IsIncognito,
+                    IsActive = snap.IsActive,
                     CapturedAt = snap.CapturedAt,
                 });
             }
