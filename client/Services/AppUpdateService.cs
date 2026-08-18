@@ -193,6 +193,12 @@ public class AppUpdateService : ObservableObject, IHostedService
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
+        // Startup sweep: anything still in updates/ is a leftover installer from a
+        // prior run (the folder is a download staging area, nothing belongs there
+        // once the app is running). Wipe it so stale .deb/.exe files never linger
+        // on Windows/Linux disks — user rule 2026-08-18.
+        _ = Task.Run(() => CleanupUpdatesDirectoryAsync(CancellationToken.None), CancellationToken.None);
+
         if (!_config.UpdateEnabled || !RepoConfigured) return Task.CompletedTask;
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _ = Task.Run(() => RunBackgroundLoopAsync(_cts.Token), CancellationToken.None);
@@ -636,6 +642,35 @@ public class AppUpdateService : ObservableObject, IHostedService
         }
     }
 
+    /// <summary>
+    /// Force-deletes the whole updates download dir — every installer and any .part
+    /// leftover, then the folder itself. Download artifacts are single-use; once the
+    /// installer has run (or at startup, where anything present is a leftover) they
+    /// must not linger on disk. Failures are tolerated and logged — a transient AV
+    /// lock on Windows can survive the retries, and the next download already prunes
+    /// its own dest before writing.
+    /// </summary>
+    private async Task CleanupUpdatesDirectoryAsync(CancellationToken ct)
+    {
+        var dir = GetUpdatesDir();
+        try
+        {
+            if (!Directory.Exists(dir)) return;
+            foreach (var file in Directory.GetFiles(dir))
+            {
+                await DeleteFileWithRetryAsync(file, ct);
+            }
+            // Delete the now-empty folder; a still-locked file leaves it behind and is
+            // swept again on the next cleanup pass (startup / next successful install).
+            try { Directory.Delete(dir, recursive: false); } catch (IOException) { }
+            _logger.LogInformation("Cleaned up downloaded update artifacts in {Dir}", dir);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to fully clean the updates directory");
+        }
+    }
+
     /// <summary>Renames the finished .part download to the final installer name.</summary>
     private static async Task MoveInstallerPartAsync(string part, string dest, CancellationToken ct)
     {
@@ -712,6 +747,9 @@ public class AppUpdateService : ObservableObject, IHostedService
                 }
                 StatusText = "Update installed. Restart the app to apply it.";
                 RestartReady = true;
+                // The .deb is single-use — wipe the whole updates dir now that dpkg
+                // consumed it (user rule 2026-08-18: no leftover installers).
+                await CleanupUpdatesDirectoryAsync(ct);
                 return true;
             }
             catch (Exception ex)
@@ -781,6 +819,11 @@ public class AppUpdateService : ObservableObject, IHostedService
                     "Start-Sleep -Seconds 2\r\n" +
                     "Write-UpdateLog 'Relaunching app with --restart'\r\n" +
                     "Start-Process -FilePath $exe -ArgumentList '--restart'\r\n" +
+                    "Write-UpdateLog 'Cleaning up downloaded installer (user rule 2026-08-18)'\r\n" +
+                    "$updatesDir = Split-Path -Parent $installer\r\n" +
+                    "Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue\r\n" +
+                    "Get-ChildItem -LiteralPath $updatesDir -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue\r\n" +
+                    "Remove-Item -LiteralPath $updatesDir -Force -ErrorAction SilentlyContinue\r\n" +
                     "Write-UpdateLog 'Update script done'\r\n" +
                     "Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue\r\n";
 
