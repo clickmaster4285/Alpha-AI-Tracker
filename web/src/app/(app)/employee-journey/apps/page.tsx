@@ -2,7 +2,7 @@
 
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { AppWindow, Timer, Layers, Activity, Loader2, ChevronRight, ChevronDown } from 'lucide-react';
-import { useQueries } from '@tanstack/react-query';
+import { keepPreviousData, useQueries } from '@tanstack/react-query';
 import EmployeePage from '@/components/employees/EmployeePage';
 import EmptyState from '@/components/employees/EmptyState';
 import ActivityFilters, { DEFAULT_FILTER, type ActivityFilter } from '@/components/journey/ActivityFilters';
@@ -66,6 +66,9 @@ function AppUsageBody({ employeeId }: { employeeId: string }) {
         dateFrom: filter.dateFrom,
         dateTo: filter.dateTo,
       }),
+      // Keep the previous result rendered while a filter/search refetch runs,
+      // so the table never flashes to a full-page spinner mid-typing.
+      placeholderData: keepPreviousData,
     })),
   });
 
@@ -73,7 +76,10 @@ function AppUsageBody({ employeeId }: { employeeId: string }) {
   const anyFetching = queries.some(q => q.isFetching);
   useEffect(() => { setIsFiltering(anyFetching); }, [anyFetching]);
 
-  const loading = queries.some(q => q.isLoading);
+  // Only show the full-page spinner on the very first load (no data at all yet);
+  // filter/search refetches keep the previous table rendered via keepPreviousData.
+  const hasData = queries.some(q => (q.data?.data?.length ?? 0) > 0);
+  const loading = !hasData && queries.some(q => q.isLoading);
   const error = queries.find(q => q.isError);
   const sessions: AppSession[] = queries.flatMap(q => q.data?.data ?? []);
 
@@ -100,33 +106,32 @@ function AppUsageBody({ employeeId }: { employeeId: string }) {
     return [...map.values()].sort((a, b) => b.durationSeconds - a.durationSeconds);
   }, [sessions]);
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <Loader2 className="w-6 h-6 animate-spin text-primary" />
-      </div>
-    );
-  }
-  if (error) {
-    return (
-      <div className="flex flex-col items-center justify-center py-12 gap-3 text-center">
-        <p className="text-sm text-destructive font-medium">Failed to load app usage</p>
-        <p className="text-xs text-muted-foreground">{(error.error as Error)?.message || 'Unknown error'}</p>
-      </div>
-    );
-  }
-  if (usage.length === 0) {
-    return <EmptyState icon={AppWindow} text="No app usage synced yet" />;
-  }
-
   const totalDuration = usage.reduce((n, u) => n + u.durationSeconds, 0);
   const runningCount = usage.filter(u => u.running).length;
+  const filtered = filter.search !== '' || filter.preset !== 'all';
 
   return (
     <div className="space-y-4">
-      {/* Server-side filters: search + date (default today) + custom range */}
+      {/* Server-side filters: search + date (default today) + custom range — always visible,
+          never unmounted by loading/error/empty states so the search input keeps focus. */}
       <ActivityFilters value={filter} onChange={setFilter} loading={isFiltering} />
 
+      {loading ? (
+        <div className="flex items-center justify-center py-12">
+          <Loader2 className="w-6 h-6 animate-spin text-primary" />
+        </div>
+      ) : error ? (
+        <div className="flex flex-col items-center justify-center py-12 gap-3 text-center">
+          <p className="text-sm text-destructive font-medium">Failed to load app usage</p>
+          <p className="text-xs text-muted-foreground">{(error.error as Error)?.message || 'Unknown error'}</p>
+        </div>
+      ) : usage.length === 0 ? (
+        <EmptyState
+          icon={AppWindow}
+          text={filtered ? 'No app usage matches the current filters' : 'No app usage synced yet'}
+        />
+      ) : (
+        <>
       {/* Stat tiles */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <UsageTile icon={AppWindow} label="Applications" value={usage.length} accent="bg-primary/10 text-primary" />
@@ -204,6 +209,8 @@ function AppUsageBody({ employeeId }: { employeeId: string }) {
           </tbody>
         </table>
       </div>
+        </>
+      )}
     </div>
   );
 }

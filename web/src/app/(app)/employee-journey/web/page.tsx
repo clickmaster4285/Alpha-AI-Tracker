@@ -2,7 +2,7 @@
 
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { Globe, Loader2, ExternalLink, ChevronRight, ChevronDown } from 'lucide-react';
-import { useInfiniteQuery } from '@tanstack/react-query';
+import { keepPreviousData, useInfiniteQuery } from '@tanstack/react-query';
 import EmployeePage from '@/components/employees/EmployeePage';
 import EmptyState from '@/components/employees/EmptyState';
 import ActivityFilters, { DEFAULT_FILTER, type ActivityFilter } from '@/components/journey/ActivityFilters';
@@ -79,6 +79,9 @@ function WebBody({ employeeId }: { employeeId: string }) {
       dateFrom: filter.dateFrom,
       dateTo: filter.dateTo,
     }),
+    // Keep the previous result rendered while a filter/search refetch runs,
+    // so the table never flashes to a full-page spinner mid-typing.
+    placeholderData: keepPreviousData,
     initialPageParam: 1,
     getNextPageParam: (last) => (last.page < last.totalPages ? last.page + 1 : undefined),
   });
@@ -124,37 +127,40 @@ function WebBody({ employeeId }: { employeeId: string }) {
     return () => observer.disconnect();
   }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <Loader2 className="w-6 h-6 animate-spin text-primary" />
-      </div>
-    );
-  }
-  if (isError) {
-    return (
-      <div className="flex flex-col items-center justify-center py-12 gap-3 text-center">
-        <p className="text-sm text-destructive font-medium">Failed to load web activity</p>
-        <p className="text-xs text-muted-foreground">{(error as Error)?.message || 'Unknown error'}</p>
-      </div>
-    );
-  }
-  if (items.length === 0) {
-    return <EmptyState icon={Globe} text="No web activity captured yet" />;
-  }
+  const filtered = filter.search !== '' || filter.preset !== 'all';
 
   return (
     <div className="bg-card rounded-xl border border-border shadow-card overflow-hidden">
+      {/* Server-side filters: search + date (default today) + custom range — always visible,
+          never unmounted by loading/error/empty states so the search input keeps focus. */}
+      <div className="px-4 py-3 border-b border-border">
+        <ActivityFilters value={filter} onChange={setFilter} loading={isFiltering} />
+      </div>
+
+      {isLoading && items.length === 0 ? (
+        <div className="flex items-center justify-center py-12">
+          <Loader2 className="w-6 h-6 animate-spin text-primary" />
+        </div>
+      ) : isError ? (
+        <div className="flex flex-col items-center justify-center py-12 gap-3 text-center">
+          <p className="text-sm text-destructive font-medium">Failed to load web activity</p>
+          <p className="text-xs text-muted-foreground">{(error as Error)?.message || 'Unknown error'}</p>
+        </div>
+      ) : items.length === 0 ? (
+        <div className="py-12">
+          <EmptyState
+            icon={Globe}
+            text={filtered ? 'No web activity matches the current filters' : 'No web activity captured yet'}
+          />
+        </div>
+      ) : (
+        <>
       <div className="px-4 py-3 border-b border-border flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-2">
           <Globe className="w-4 h-4 text-primary" />
           <h3 className="text-sm font-semibold text-foreground">Visited Sites</h3>
         </div>
         <span className="text-xs text-muted-foreground">{total.toLocaleString()} page{total === 1 ? '' : 's'} · {groups.length} site{groups.length === 1 ? '' : 's'}</span>
-      </div>
-      {/* Server-side filters: search + date (default today) + custom range */}
-      <div className="px-4 py-3 border-b border-border">
-        <ActivityFilters value={filter} onChange={setFilter} loading={isFiltering} />
       </div>
       <div className="overflow-x-auto">
         <table className="w-full min-w-[820px]">
@@ -227,6 +233,8 @@ function WebBody({ employeeId }: { employeeId: string }) {
         <div ref={sentinelRef} className="h-12 flex items-center justify-center text-xs text-muted-foreground">
           Scroll for more
         </div>
+      )}
+        </>
       )}
     </div>
   );
