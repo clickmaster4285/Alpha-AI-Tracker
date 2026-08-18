@@ -202,6 +202,37 @@ export interface GenerateSecretResponse {
   expiresIn: number;
 }
 
+export interface ImportEmployeeRow {
+  employeeId: string;
+  name: string;
+  email: string;
+  department: string;
+  shift?: string;
+}
+
+export interface ImportRowResult {
+  rowIndex: number;
+  employeeId: string;
+  name: string;
+  status: 'imported' | 'updated' | 'skipped';
+  reason?: string;
+}
+
+export interface ImportEmployeesResponse {
+  imported: number;
+  updated: number;
+  skipped: number;
+  results: ImportRowResult[];
+}
+
+export interface EmployeeExportRow {
+  employeeId: string;
+  name: string;
+  email: string;
+  department: string;
+  shift: string;
+}
+
 export const employeesApi = {
   list: (params?: { page?: number; perPage?: number; search?: string; department?: string; role?: string; status?: string }) =>
     request<EmployeeListResponse>('/employees', { params: params as Record<string, string | number | undefined> }),
@@ -223,6 +254,14 @@ export const employeesApi = {
 
   generateSecret: (id: string) =>
     request<GenerateSecretResponse>('/employees/' + id + '/generate-secret', { method: 'POST' }),
+
+  // Bulk Excel import — the server get-or-creates departments by name and upserts
+  // each row by its exact employee_id from the spreadsheet.
+  import: (rows: ImportEmployeeRow[]) =>
+    request<ImportEmployeesResponse>('/employees/import', { method: 'POST', body: { employees: rows } }),
+
+  // All non-deleted employees as flat rows for the Excel download.
+  export: () => request<EmployeeExportRow[]>('/employees/export'),
 };
 
 // ──────────────────────────

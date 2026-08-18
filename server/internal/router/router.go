@@ -112,6 +112,10 @@ func Setup(
 	// for a single employee — consumed by the web user-detail page. Registered BEFORE /:id is
 	// irrelevant to Echo (static segments win), but kept next to it for readability.
 	employees.GET("/:id/detail", newSchemaHandler.GetEmployeeDetail)
+	// Excel import/export — static routes win over /:id in Echo, but registered
+	// before it anyway for readability.
+	employees.POST("/import", employeeHandler.ImportEmployees)
+	employees.GET("/export", employeeHandler.ExportEmployees)
 	employees.GET("/:id", employeeHandler.GetEmployee)
 	employees.POST("", employeeHandler.CreateEmployee)
 	employees.PUT("/:id", employeeHandler.UpdateEmployee)

@@ -100,6 +100,40 @@ func (h *EmployeeHandler) CreateEmployee(c echo.Context) error {
 	return c.JSON(http.StatusCreated, emp)
 }
 
+// ImportEmployees handles POST /api/v1/employees/import
+func (h *EmployeeHandler) ImportEmployees(c echo.Context) error {
+	var req dto.ImportEmployeesRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, dto.APIError{
+			Code:    http.StatusBadRequest,
+			Message: "Invalid request body",
+		})
+	}
+
+	if len(req.Employees) == 0 {
+		return c.JSON(http.StatusBadRequest, dto.APIError{
+			Code:    http.StatusBadRequest,
+			Message: "No employee rows to import",
+		})
+	}
+
+	resp, err := h.employeeService.ImportEmployees(c.Request().Context(), &req)
+	if err != nil {
+		return h.logAndReturnError(c, http.StatusInternalServerError, "Failed to import employees", err)
+	}
+
+	return c.JSON(http.StatusOK, resp)
+}
+
+// ExportEmployees handles GET /api/v1/employees/export
+func (h *EmployeeHandler) ExportEmployees(c echo.Context) error {
+	rows, err := h.employeeService.ExportEmployees(c.Request().Context())
+	if err != nil {
+		return h.logAndReturnError(c, http.StatusInternalServerError, "Failed to export employees", err)
+	}
+	return c.JSON(http.StatusOK, rows)
+}
+
 // UpdateEmployee handles PUT /api/v1/employees/:id
 func (h *EmployeeHandler) UpdateEmployee(c echo.Context) error {
 	id := c.Param("id")

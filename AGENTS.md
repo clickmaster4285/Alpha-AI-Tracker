@@ -3,6 +3,21 @@
 > **Last audited:** 2026-08-18
 > **Changelog:**
 >
+> - 2026-08-18: **Web: Employees Excel import/export.** The Employees page gains **Import** / **Export**
+>   buttons. **Export** downloads `employees-<date>.xlsx` (Employee ID / Name / Email / Department / Shift)
+>   from the new `GET /api/v1/employees/export` (all non-deleted employees, `EmployeeRepo.ListAll`).
+>   **Import** reads an `.xlsx/.xls/.csv` in the browser (`xlsx` client-side), extracts ONLY the columns
+>   whose headers match `userid|user_id|user id|employeeid|employee_id|employee id|name|employee name|
+>   username|email|department` (case/whitespace-insensitive — the header map in `employees/page.tsx`),
+>   and posts normalized rows to `POST /api/v1/employees/import`. The server imports in ONE transaction
+>   (`EmployeeRepo.Import`): departments are **get-or-created by name** (created first, then attached via
+>   `department_id`; soft-deleted depts are revived), and each employee is **upserted by the exact
+>   employee_id from the spreadsheet** (the `RETURNING (xmax = 0)` trick distinguishes insert vs update;
+>   soft-deleted employees revive; email may only be reused by the same employee_id; empty department
+>   → Engineering, empty shift → Day). Per-row outcomes (`imported`/`updated`/`skipped` + reason) return
+>   to the UI as a result dialog with a skipped-rows table. `employee_id` must be ≤20 chars and unique in
+>   the file. Verified: `go build`/`go vet` clean, `tsc --noEmit` clean, `next build` passes. Server + web
+>   only — no client/installer change.
 > - 2026-08-18: **Embedded-webview journeys — sites opened INSIDE apps (VS Code Simple Browser, Slack, Teams, any Electron/embedded browser) now tracked as web activity, with ZERO hardcoded app names.**
 >   Previously only real browser processes were tracked (a hardcoded `BrowserProcessHints` gate in the
 >   readers), so a website opened inside VS Code's Simple Browser never reached `/employee-journey/web`.

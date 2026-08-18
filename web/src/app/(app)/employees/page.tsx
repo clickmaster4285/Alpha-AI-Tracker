@@ -1,12 +1,13 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check, Eye, Monitor } from 'lucide-react';
+import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check, Eye, Monitor, Upload, Download } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { employeesApi, departmentsApi, type Employee, type CreateEmployeePayload, type UpdateEmployeePayload } from '@/lib/api';
+import * as XLSX from 'xlsx';
+import { employeesApi, departmentsApi, type Employee, type CreateEmployeePayload, type UpdateEmployeePayload, type ImportEmployeeRow, type ImportEmployeesResponse } from '@/lib/api';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import {
   DropdownMenu,
@@ -16,8 +17,29 @@ import {
   DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu';
 
+// Excel header aliases → canonical field. Headers are matched case-insensitively
+// and whitespace-normalized, so "User ID", "user_id", "EMPLOYEEID", "employee name"
+// and "username" all resolve. Only these columns are extracted from the sheet.
+const HEADER_FIELD: Record<string, keyof ImportEmployeeRow> = {
+  userid: 'employeeId',
+  user_id: 'employeeId',
+  'user id': 'employeeId',
+  employeeid: 'employeeId',
+  employee_id: 'employeeId',
+  'employee id': 'employeeId',
+  name: 'name',
+  'employee name': 'name',
+  username: 'name',
+  email: 'email',
+  department: 'department',
+};
+
+const normalizeHeader = (raw: string) =>
+  String(raw ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+
 export default function UsersList() {
   const queryClient = useQueryClient();
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [search, setSearch] = useState('');
   const [deptFilter, setDeptFilter] = useState('');
   const [page, setPage] = useState(1);
@@ -26,6 +48,7 @@ export default function UsersList() {
   const [showSecret, setShowSecret] = useState<string | null>(null);
   const [secretValue, setSecretValue] = useState('');
   const [copied, setCopied] = useState(false);
+  const [importResult, setImportResult] = useState<ImportEmployeesResponse | null>(null);
 
   // Form state
   const [newName, setNewName] = useState('');
@@ -98,6 +121,75 @@ export default function UsersList() {
       toast.error('Failed to generate secret', { description: err.message });
     },
   });
+
+  const importMutation = useMutation({
+    mutationFn: (rows: ImportEmployeeRow[]) => employeesApi.import(rows),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['employees'] });
+      queryClient.invalidateQueries({ queryKey: ['departments'] });
+      setImportResult(data);
+      toast.success('Import complete', {
+        description: `${data.imported} imported, ${data.updated} updated, ${data.skipped} skipped.`,
+      });
+    },
+    onError: (err: Error) => {
+      toast.error('Import failed', { description: err.message });
+    },
+  });
+
+  const exportMutation = useMutation({
+    mutationFn: () => employeesApi.export(),
+    onSuccess: (rows) => {
+      const aoa: (string | number)[][] = [
+        ['Employee ID', 'Name', 'Email', 'Department', 'Shift'],
+        ...rows.map(r => [r.employeeId, r.name, r.email, r.department, r.shift]),
+      ];
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Employees');
+      XLSX.writeFile(wb, `employees-${new Date().toISOString().slice(0, 10)}.xlsx`);
+      toast.success('Export complete', { description: `${rows.length} employees exported.` });
+    },
+    onError: (err: Error) => {
+      toast.error('Export failed', { description: err.message });
+    },
+  });
+
+  const handleImportFile = (file: File) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const wb = XLSX.read(e.target?.result, { type: 'array' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        if (!ws) {
+          toast.error('Import failed', { description: 'The workbook has no sheets.' });
+          return;
+        }
+        const rawRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '' });
+        const rows = rawRows
+          .map(raw => {
+            const row: ImportEmployeeRow = { employeeId: '', name: '', email: '', department: '' };
+            for (const [header, value] of Object.entries(raw)) {
+              const field = HEADER_FIELD[normalizeHeader(header)];
+              if (field) row[field] = String(value ?? '').trim();
+            }
+            return row;
+          })
+          .filter(row => row.employeeId || row.name);
+        if (rows.length === 0) {
+          toast.error('Import failed', {
+            description: 'No recognized rows. Expected headers like User ID, Name, Email, Department.',
+          });
+          return;
+        }
+        importMutation.mutate(rows);
+      } catch (err) {
+        toast.error('Import failed', { description: (err as Error).message });
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
 
   const resetForm = () => {
     setNewName('');
@@ -208,6 +300,33 @@ export default function UsersList() {
             <option value="">All Departments</option>
             {departments.map(d => <option key={d.id} value={d.name}>{d.name}</option>)}
           </select>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,.xls,.csv"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) handleImportFile(file);
+              e.target.value = '';
+            }}
+          />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={importMutation.isPending}
+            className="bg-card border border-border text-foreground px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 hover:bg-muted transition-colors disabled:opacity-50"
+          >
+            <Upload className="w-4 h-4" />
+            {importMutation.isPending ? 'Importing...' : 'Import'}
+          </button>
+          <button
+            onClick={() => exportMutation.mutate()}
+            disabled={exportMutation.isPending}
+            className="bg-card border border-border text-foreground px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 hover:bg-muted transition-colors disabled:opacity-50"
+          >
+            <Download className="w-4 h-4" />
+            {exportMutation.isPending ? 'Exporting...' : 'Export'}
+          </button>
           <button
             onClick={() => setShowAdd(true)}
             className="gradient-primary text-primary-foreground px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 hover:opacity-90 transition-opacity"
@@ -450,6 +569,60 @@ export default function UsersList() {
             )}
             <button
               onClick={() => { setShowSecret(null); setSecretValue(''); setCopied(false); }}
+              className="w-full border border-border text-foreground py-2.5 rounded-lg text-sm font-medium hover:bg-muted transition-colors"
+            >
+              Close
+            </button>
+          </div>
+        </DialogContent>
+      </Dialog>
+      {/* Import Result Dialog */}
+      <Dialog open={importResult !== null} onOpenChange={(open) => { if (!open) setImportResult(null); }}>
+        <DialogContent className="bg-card sm:max-w-[640px]">
+          <DialogHeader>
+            <DialogTitle className="font-display">Import Complete</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 mt-2">
+            <div className="flex gap-4">
+              <div className="flex-1 bg-background border border-border rounded-lg p-4 text-center">
+                <div className="text-2xl font-bold text-success">{importResult?.imported ?? 0}</div>
+                <div className="text-xs text-muted-foreground mt-1">Imported</div>
+              </div>
+              <div className="flex-1 bg-background border border-border rounded-lg p-4 text-center">
+                <div className="text-2xl font-bold text-foreground">{importResult?.updated ?? 0}</div>
+                <div className="text-xs text-muted-foreground mt-1">Updated</div>
+              </div>
+              <div className="flex-1 bg-background border border-border rounded-lg p-4 text-center">
+                <div className="text-2xl font-bold text-warning">{importResult?.skipped ?? 0}</div>
+                <div className="text-xs text-muted-foreground mt-1">Skipped</div>
+              </div>
+            </div>
+            {importResult && importResult.skipped > 0 && (
+              <div className="max-h-64 overflow-y-auto border border-border rounded-lg">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-border text-left text-muted-foreground text-xs uppercase">
+                      <th className="px-3 py-2 font-semibold">Row</th>
+                      <th className="px-3 py-2 font-semibold">Employee ID</th>
+                      <th className="px-3 py-2 font-semibold">Name</th>
+                      <th className="px-3 py-2 font-semibold">Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {importResult.results.filter(r => r.status === 'skipped').map(r => (
+                      <tr key={r.rowIndex} className="border-b border-border last:border-0">
+                        <td className="px-3 py-2 text-muted-foreground">{r.rowIndex}</td>
+                        <td className="px-3 py-2 font-mono">{r.employeeId || '-'}</td>
+                        <td className="px-3 py-2">{r.name || '-'}</td>
+                        <td className="px-3 py-2 text-destructive">{r.reason}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <button
+              onClick={() => setImportResult(null)}
               className="w-full border border-border text-foreground py-2.5 rounded-lg text-sm font-medium hover:bg-muted transition-colors"
             >
               Close
