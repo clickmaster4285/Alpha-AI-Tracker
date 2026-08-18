@@ -476,7 +476,7 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                         return snap_name.lower()
             except Exception:
                 pass
-            return comm
+            return read_comm(pid)
 
         # Structural browser detection: scan .desktop files for Categories=WebBrowser.
         # Cached on disk for 5 minutes to avoid rescanning every 3s poll.

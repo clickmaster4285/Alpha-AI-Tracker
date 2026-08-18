@@ -126,7 +126,15 @@ public class AppConfig
         var id = Environment.GetEnvironmentVariable("ALPHA_CLIENT_ID");
         if (!string.IsNullOrWhiteSpace(id)) return id.Trim();
 
-        var existing = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".machine-id");
+        // Write to the user-writable data dir (Installer-Parity Rule §6): the install
+        // dir is root-owned and unwritable. Using the app dir caused .machine-id to
+        // never persist, generating a NEW machine_id on every restart — breaking auth
+        // and producing orphaned sessions.
+        var dataDir = OperatingSystem.IsWindows()
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AlphaAITracker")
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share", "alpha-ai-tracker");
+        try { Directory.CreateDirectory(dataDir); } catch { }
+        var existing = Path.Combine(dataDir, ".machine-id");
         if (File.Exists(existing))
         {
             return File.ReadAllText(existing).Trim();
