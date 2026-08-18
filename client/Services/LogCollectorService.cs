@@ -612,9 +612,13 @@ public class LogCollectorService : BackgroundService
                 if (_cycleCount % 10 == 0)
                 {
                     await StorePermissionStatus(stoppingToken);
-                    // Periodic focus-duration flush (~every 5 min at the default 30s
-                    // interval) so the server learns growing totals even for long-running
-                    // sessions, not just at close.
+                }
+                // Periodic focus-duration flush every 2 cycles (~1 min at the default 30s
+                // interval — user rule 2026-08-18: push is_synced=0 rows to the server at
+                // least every minute, so the dashboard learns growing foreground/background
+                // totals for long-running sessions instead of only at close).
+                if (_cycleCount % 2 == 0)
+                {
                     await FlushSessionFocusAsync(stoppingToken);
                 }
 

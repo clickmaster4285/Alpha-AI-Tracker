@@ -484,11 +484,18 @@ internal static class DatabaseSchema
     ";
 
     /// <summary>Periodic focus-duration flush for open sessions (re-syncs the row so
-    /// the server learns the growing totals — rule 2026-08-12: any update re-queues).</summary>
+    /// the server learns the growing totals — rule 2026-08-12: any update re-queues).
+    /// ADDITIVE: the in-memory counter holds the DELTA since the last flush and is
+    /// cleared after it, so the DB column must accumulate (fg = fg + delta). An
+    /// overwrite here would leave the row stuck on the last flush window (~300s /
+    /// ~30s) instead of the session total — the root cause of the frozen ~0s values.
+    /// The SQLite row is therefore the source of truth for the session total and
+    /// survives restarts (SyncService re-sends it verbatim; the server upsert
+    /// overwrites with it).</summary>
     internal const string UpdateAppSessionFocusSql = @"
         UPDATE app_sessions
-        SET foreground_seconds = $foreground_seconds,
-            background_seconds = $background_seconds,
+        SET foreground_seconds = COALESCE(foreground_seconds, 0) + $foreground_seconds,
+            background_seconds = COALESCE(background_seconds, 0) + $background_seconds,
             is_synced = 0
         WHERE id = $id
     ";

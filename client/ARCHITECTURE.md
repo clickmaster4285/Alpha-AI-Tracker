@@ -2,6 +2,16 @@
 
 > **Last audited:** 2026-08-18 (focus-time root causes §8 + browser focus accounting §11)
 > **Changelog:**
+> - 2026-08-18: **Focus totals frozen (~0s on the web) fixed — flush is now ADDITIVE + every-minute push.**
+>   Root cause: `UpdateAppSessionFocusSql` OVERWROTE the row with the in-memory delta and the counter was
+>   then cleared — each flush wrote only the last ~10-cycle window (300s main / 30s browser), never the
+>   session total (live evidence: Chrome frozen at exactly 30.0, others at exactly 300.0, identical across
+>   65s). Fix: `fg = COALESCE(fg,0) + $fg` — the in-memory dict stays a per-flush DELTA (cleared after
+>   every write, both loops), so SQLite holds the true cumulative total, restart-safe, re-sent verbatim
+>   (server upsert overwrites). Close paths flush first then close with NULL (`COALESCE($fg, fg)`) — no
+>   double-counting. Push cadence: main loop flushes focus every 2 cycles (~60s at the default 30s
+>   interval) and `SyncService` failure backoff is capped at 60s, so every `is_synced=0` row reaches the
+>   server within a minute even during repeated failures.
 > - 2026-08-18: **Foreground/background focus times fixed — Linux/Wayland detection + browser sessions.**
 >   (1) `ProcessCollector` Linux AT-SPI foreground detection rewritten: at-spi2-core ≥ 2.50 returns
 >   `GetState` as a **packed 64-bit bitmask** (bit N = state N) not a list of ids, and the old check
@@ -511,6 +521,7 @@ Per-platform `GetPermissionStatus()` (Linux: xprop/xdotool/gdbus/python3/portal/
 | Network info | Every 10 cycles (~5 min) |
 | Permission status | Every 10 cycles (~5 min) |
 | Heartbeat `last_heartbeat_at` | Every cycle |
+| **Focus flush** (open-session `foreground/background_seconds`, additive) | **Every 2 cycles (~1 min)** — was every 10 (~5 min); re-queues `is_synced=0` so the server learns growing totals within a minute (user rule 2026-08-18) |
 
 > **Sync moved out of this loop (2026-08-11)** — the dedicated `SyncService` background loop (§13) drains unsent rows on its own schedule; the collection loop never performs network I/O.
 
@@ -539,7 +550,7 @@ Both detectors are forced-rechecked every scan (`ForceRecheck`) and upsert into 
 
 1. `IAccessibilityBrowserReader.ReadAsync()` → `AccessibilitySnapshot[]` (windowKey, pid, process, title, URL, `UrlSource`, incognito, **`IsActive`** — AT-SPI ACTIVE/FOCUSED state on Linux, `GetForegroundWindow` HWND match on Windows, frontmost process on macOS).
 2. `EnrichUrlsFromHistoryAsync` fills empty URLs from the **profile-history fallback** (preserves `IsActive`).
-3. **Focus accounting** — each poll the ACTIVE window's session earns the poll interval as `foreground_seconds` and every other open window earns `background_seconds`; totals flush every 10 polls + on close via `UpdateAppSessionFocusAsync` (`is_synced=0` re-syncs). Browser journeys finally earn focus time (they are owned here, not by the main loop's focus accounting).
+3. **Focus accounting** — each poll the ACTIVE window's session earns the poll interval as `foreground_seconds` and every other open window earns `background_seconds`; totals flush every 10 polls + on close via `UpdateAppSessionFocusAsync` (`is_synced=0` re-syncs). The flush is **additive** (delta in memory, cleared after each write — the SQLite row is the true cumulative total), so long-running browser sessions show growing foreground/background on the dashboard, not just the last flush window. Browser journeys finally earn focus time (they are owned here, not by the main loop's focus accounting).
 4. Per window: first sight → **new `app_sessions`** + `browser_tab` root item (URL, domain, journeyId, `metadata_json`); changes → rotate/record; vanished (5-miss grace) → close; idle (`ALPHA_BROWSER_JOURNEY_IDLE_MINUTES`, 15) → close; shutdown → close all.
 
 ### Reading the URL — three merged sources (Linux embedded python3 probe)
@@ -590,7 +601,7 @@ Watchers (IObservableEventSource)          EventCoordinator                 Jour
 ## 13. Sync / Transport to Server
 
 - **Protocol:** REST over HTTP(S); JSON `{employeeId, token, entries: [...]}`; token = encrypted JWT from login, sent in the request body (not a header). Idempotent by design — the server upserts by client GUID (`ON CONFLICT (id) …`), so failed chunks are retried safely.
-- **Engine (2026-08-11):** dedicated `SyncService` background loop — collection **never blocks on the network**. Unsent rows drain in chunks bounded by **both** row count (`ALPHA_SYNC_MAX_ROWS`, default 1000) **and** serialized payload bytes (`ALPHA_SYNC_MAX_BYTES`, default ~1MB), with a politeness pause between chunks (`ALPHA_SYNC_CHUNK_DELAY_MS`, 150ms), a per-pass time budget (`ALPHA_SYNC_MAX_DURATION_SEC`, 5 min) so a backlog never monopolizes CPU, and **exponential backoff** on failure (5s → 10s → … → `ALPHA_SYNC_BACKOFF_MAX_SEC`, 5 min). A 50k+ backlog drains in minutes — the old inline sync moved a fixed 500 rows/table per 5-minute cycle while blocking collection (~8h to drain 50k).
+- **Engine (2026-08-11):** dedicated `SyncService` background loop — collection **never blocks on the network**. Unsent rows drain in chunks bounded by **both** row count (`ALPHA_SYNC_MAX_ROWS`, default 1000) **and** serialized payload bytes (`ALPHA_SYNC_MAX_BYTES`, default ~1MB), with a politeness pause between chunks (`ALPHA_SYNC_CHUNK_DELAY_MS`, 150ms), a per-pass time budget (`ALPHA_SYNC_MAX_DURATION_SEC`, 5 min) so a backlog never monopolizes CPU, and **exponential backoff** on failure (5s → 10s → … → `ALPHA_SYNC_BACKOFF_MAX_SEC`, 5 min). **2026-08-18:** the between-pass wait is now **capped at 60s even on failure** — backoff only stretches a single retry gap, never the guaranteed cadence — so every `is_synced=0` row reaches the server within a minute (user rule: force-push every minute). A 50k+ backlog drains in minutes — the old inline sync moved a fixed 500 rows/table per 5-minute cycle while blocking collection (~8h to drain 50k).
 - **Compression:** request bodies are **gzip**-encoded when `ALPHA_SYNC_COMPRESSION=true` (server must run `middleware.Decompress()`); oversized slices are auto-split (binary halving) to stay under the byte cap.
 - **Order matters:** small/inventory tables first (device-hardware → network-info → session-events → installed-apps → installed-packages), then **app-sessions (parents)**, then **app-items (children)**.
 - On success rows are marked `is_synced=1` (batched `UPDATE … WHERE id IN (…)`, 400 ids/statement); on 401/403 the chunk is dropped until re-login; on network failure the chunk is retried next pass with backoff.

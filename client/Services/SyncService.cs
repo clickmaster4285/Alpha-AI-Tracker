@@ -147,7 +147,13 @@ public class SyncService : BackgroundService
                 // Between passes: grow the wait on failure (backoff), otherwise the idle interval.
                 // The wait is interruptible — RequestImmediateSync() (login) releases the
                 // semaphore and this returns at once for an instant drain pass.
-                var wait = failed ? _backoff : TimeSpan.FromSeconds(Math.Max(1, _config.SyncIntervalSec));
+                // User rule 2026-08-18: even on repeated failures a drain pass runs at least
+                // every 60s — the backoff only stretches a single retry gap, never the
+                // guaranteed cadence — so is_synced=0 rows always reach the server within a
+                // minute, not after a 5-min backoff.
+                var wait = failed
+                    ? TimeSpan.FromSeconds(Math.Min(60, _backoff.TotalSeconds))
+                    : TimeSpan.FromSeconds(Math.Max(1, _config.SyncIntervalSec));
                 await _syncSignal.WaitAsync(wait, stoppingToken);
             }
             catch (OperationCanceledException)
