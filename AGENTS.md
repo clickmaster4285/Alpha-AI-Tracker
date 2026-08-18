@@ -1,8 +1,35 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-08-13
+> **Last audited:** 2026-08-18
 > **Changelog:**
 >
+> - 2026-08-18: **Web: Employee Journey + Device Specs modules — the `/users/[id]` detail page was replaced by nine pages behind a shared shell.**
+>   The old 820-line `web/src/app/(app)/employees/[id]/page.tsx` is deleted. New shared `EmployeePage` shell
+>   (`web/src/components/employees/EmployeePage.tsx`) provides the page header, a searchable `EmployeeSelector`
+>   picker (deep-linkable via `?employeeId=`), and loading/error/no-selection states; the page body is a
+>   render-prop handed `{employee, detail?, detailLoading}`, and pages needing the aggregate machine picture pass
+>   `fetchDetail` to load `GET /employees/:id/detail` (`hooks/use-employee-detail.ts`). **Employee Journey** —
+>   Session Timeline (`useInfiniteQuery` on `GET /app-sessions`, 30/page, IntersectionObserver sentinel,
+>   `FocusTime` fg/bg stacked bar), App Usage (aggregates the most recent 5×100 app sessions into per-app
+>   fg/bg totals), Web Activity (`GET /app-items?itemType=browser_tab`, infinite scroll), plus Screenshots /
+>   Location Trail placeholders (the client collects neither yet). **Device Specs** — Hardware Overview (specs +
+>   storage + network + app_status), Installed Software (Applications/Packages tabs with search,
+>   `InventoryTable`), Peripherals (plugged/unplugged cards + `DeviceClassIcon`), Permissions. The employees
+>   table action menu now offers **View Journey** (`/employee-journey/timeline?employeeId=`) and **Device
+>   Specs** (`/device-specs?employeeId=`) instead of the old detail link. `AppItem` gained the journey fields
+>   in `api.ts` (`url`, `domain`, `processId`, `objectType`, `action`, `journeyId`, `sequence`, `previousPath`,
+>   `currentPath`, `windowId`, `tabId`, `metadataJson`); new permission modules `employee-journey` +
+>   `device-specs`; new shared helpers `lib/format.ts` + `EmptyState`. **Hook-order crash fixed while landing:**
+>   hooks (`useQueries`/`useInfiniteQuery`/`useMemo`…) were being called INSIDE the `EmployeePage` render-prop,
+>   so selecting an employee changed the shell's hook count and React threw "Rendered more hooks than during the
+>   previous render" — each page body was extracted into a real inner component (`AppUsageBody`/`TimelineBody`/
+>   `WebBody`/`SoftwareBody`). Verified: `tsc --noEmit` clean.
+> - 2026-08-17: **Web sidebar restructure — Device Specs became a collapsible section.** `AppSidebar.tsx`: the
+>   single top-level "Device Specs" item is now a parent with four children — Hardware Overview
+>   (`/device-specs`), Installed Software (`/device-specs/software`), Peripherals (`/device-specs/peripherals`),
+>   Permissions (`/device-specs/permissions`) — all under the existing `device-specs` permission module;
+>   "Employee Journey" stays a collapsible with Session Timeline / App Usage / Web Activity / Screenshots /
+>   Location Trail. The rest of the commit is whitespace alignment of the nav config.
 > - 2026-08-15: **Duplicate sessions fixed — one session per logical window on Windows/macOS (root-PID grouping).** Root cause: on Linux, systemd cgroups (`app-*.scope`) collapse VS Code's ~8 same-named `Code.exe` processes into ONE session; on Windows/macOS there are no cgroups, so the session key fell back to per-PID and every `Code.exe` process (main window + renderer + GPU + utility + extension hosts) created its OWN session row — the web detail page showed 8 identical "Visual Studio Code" rows for one window. Fix: `LogCollectorService.ResolveRootPid` walks the PPID chain up to the TOP-MOST same-binary process (the app's main window process — a different binary is a hard boundary, so two VS Code windows still get two sessions) and every `BuildSessionKey`/`ProcessId`/root-item call site keys on it; boot hydration now dedups legacy per-PID open sessions that collapse to one key (keeps the earliest, closes the rest so they stop showing "running"). Also: a title-less child creating the session root first no longer leaves the root stuck on the process name — `UpdateActivityContextAsync` upgrades the open root in place when a window-bearing process arrives.
 > - 2026-08-15: **Foreground/background focus time per session (client + server + web).** The collector already knew the OS foreground PID each cycle (`ActivityLog.IsForeground`) but never persisted it. Client: new `foreground_seconds`/`background_seconds` on SQLite `app_sessions` (idempotent MigrateSql ALTERs), accumulated per cycle for every open session (mapped through the same root-PID grouping so the whole window counts), flushed every 10 cycles + on close with `is_synced=0` (rule 2026-08-12) so SyncService re-sends; payload sends the values. Server: migration **020** adds the two columns, model/DTO/`SyncAppSessions`/`BulkInsertAppSessions` upsert (EXCLUDED overwrite — the client re-sends the totals) + `ListAppSessions` SELECT. Web: employee detail **Activity tab rebuilt with server-side pagination + infinite scroll** (`useInfiniteQuery` on `GET /app-sessions`, 30/page, IntersectionObserver sentinel) and columns **Application, Status (Running/Closed), Opened, Closed, Duration, Foreground/Background** (green/gray stacked bar + `fg / bg` readout).
 > - 2026-08-15: **Boot is now fully headless — GUI only opens on manual launch.** Auto-start (Windows Run key + ONSTART scheduled task, Linux `.desktop` autostart, macOS plist) switched from `--minimized` (hidden-to-tray, UI still created) to `--background` (services only — no window, no tray at boot). `Program.cs` background mode now lazily creates the Avalonia UI ONCE on a dedicated thread when a manual launch sends the SHOW signal (new `App.LaunchedHidden` flag replaces the args check in `App.axaml.cs`), so "open the GUI" works any number of times without stopping the tracking process. The background guard migrates stale `--minimized` autostart entries to `--background` automatically (`AutoStartService.EnsureBackgroundAutoStartFlag`).
@@ -569,7 +596,7 @@ Alpha AI Tracker is an employee monitoring and productivity analytics system con
 
 1. **Desktop Client** (`client/`) — Installed on employee machines. Collects process activity, window titles, CPU/memory usage, and installed app/package information. Sends data to the central server via REST.
 2. **Server** (`server/`) — Go + Echo + PostgreSQL + Redis. Central API hub. Receives and stores client data, exposes admin-facing REST API for the web dashboard. Handles authentication for both web admins and employee desktop clients.
-3. **Web Dashboard** (`web/`) — Next.js 15 App Router. Admin-facing UI for viewing employee data, managing departments, generating login secrets, and analytics. Most pages currently render mock localStorage data rather than calling the real API.
+3. **Web Dashboard** (`web/`) — Next.js 15 App Router. Admin-facing UI for viewing employee data, managing departments, generating login secrets, and analytics. Most pages currently render mock localStorage data rather than calling the real API; the employees list, departments, logs, and the Employee Journey + Device Specs modules (2026-08-18) call real APIs.
 
 ---
 
@@ -741,23 +768,25 @@ flowchart LR
 - **macOS window titles** — only captures foreground window
 - **Six-page GUI not yet ship-tested** — it needs no packaging change (hero images and `APP_IDENTIFIERS` both compile into `client.dll`), but per the Installer-Parity Rule it is not "done" until verified from an installed build
 
-### Web — ~16% complete
+### Web — ~20% complete
 
 **What works:**
 
-- ~45 page routes exist with polished UI
+- ~50 page routes exist with polished UI
 - Login page with animated hero section
 - Auth check on mount (Redux + server cookie)
-- Users page — real API calls via TanStack Query (CRUD + generate secret, portal-rendered Radix action menu)
-- **User detail page (`/users/[id]`)** — real API calls via new aggregate `GET /employees/:id/detail`: identity + status, stat tiles, hardware/storage/network, installed apps, packages, peripherals, permissions
+- Employees page — real API calls via TanStack Query (CRUD + generate secret, portal-rendered Radix action menu); each row's action menu deep-links to **View Journey** and **Device Specs** (2026-08-18)
+- **Employee Journey module** (2026-08-18) — three real-API pages behind the shared `EmployeePage` shell + `EmployeeSelector` picker: Session Timeline (`useInfiniteQuery` on `GET /app-sessions`, 30/page, fg/bg stacked bar), App Usage (per-app foreground/background aggregation of the latest 500 sessions), Web Activity (`GET /app-items?itemType=browser_tab`); Screenshots and Location Trail are shell placeholders (the desktop client collects neither yet)
+- **Device Specs module** (2026-08-18) — four real-API pages over the aggregate `GET /employees/:id/detail`: Hardware Overview, Installed Software (Applications/Packages tabs + search), Peripherals, Permissions. This replaced the old `/users/[id]` single-page detail view (deleted)
+- Shared building blocks: `EmployeePage` shell (header + picker + loading/error/no-selection states, optional `fetchDetail`), `hooks/use-employee-detail.ts`, `lib/format.ts`, `EmployeeSelector`, `EmptyState`/`InventoryTable`/`FocusTime`/`DeviceClassIcon`
 - Departments page — real API calls (CRUD)
 - Logs/Comprehensive page — real API calls (now using new app_sessions API)
-- Sidebar with permission-based filtering (client-side only)
+- Sidebar with permission-based filtering (client-side only); Device Specs and Employee Journey are collapsible sections
 - Dashboard shows mock stats and chart
 
 **What's missing (most pages):**
 
-- **~40 of 45 pages use mock localStorage data** — not connected to real API
+- **~40 of 50 pages use mock localStorage data** — not connected to real API
 - **Client-side only permissions** — no server enforcement
 - **No error boundaries** — uncaught React errors crash the page
 - **No loading/empty/error states** on most mock-data pages
@@ -783,7 +812,7 @@ flowchart LR
 | **Soft delete**         | `deleted_at TIMESTAMPTZ` on all tables, filtered in queries                             |
 | **Migrations**          | Sequential numbered SQL files in`server/migrations/`                                    |
 | **Go module**           | `github.com/alpha-ai-tracker/server`                                                    |
-| **Git branch**          | Currently on`restructureClient` branch — no PR/branch convention visible            |
+| **Git branch**          | Currently on`uienhanced` branch — no PR/branch convention visible              |
 | **Commit style**        | Descriptive lowercase messages: "now remove the exit btn on the tray on windows", "fixit" |
 | **Monorepo tooling**    | No shared tooling (no Turborepo, Nx, etc.). Each service has its own build system.        |
 | **Build parity**        | `dotnet run` is NOT a release test — every change must be verified from an installed build; new assets/config/scripts must be bundled by the `publish/*` scripts (see below) |
@@ -854,7 +883,7 @@ flowchart LR
 | **No rate limiting**          | 🟠 Medium | Login endpoint and all sync endpoints have no rate limiting. Brute-force / DoS is trivial.                                                                                       |
 | **No server permission model**| 🟠 Medium | Any authenticated user can access all protected endpoints; no role checks server-side.                                                                                           |
 | **Cross-account injection**   | 🟠 Medium | Sync handlers validate the JWT but don't verify the body `employeeId` matches the JWT subject.                                                                                   |
-| **Mock data dominance**       | 🟠 Medium | ~90% of web pages use mock data, giving a false sense of completeness.                                                                                                           |
+| **Mock data dominance**       | 🟠 Medium | ~80% of web pages use mock data (~40 of ~50; employees list, departments, logs, Employee Journey + Device Specs are real-API), giving a false sense of completeness.                                                                          |
 | **Default passwords**         | 🟠 Medium | `AlphaAI@2024!` is the compiled-in default. Easy to forget to change.                                                                                                          |
 | **No offline/retry strategy** | 🟢 Low    | Client retries sync every cycle but has no exponential backoff or dedup.                                                                                                         |
 | **No data-pruning job**       | 🟢 Low    | Server's only background job (`staleness_sweep.go`) deactivates stale catalog links but never deletes old app_sessions/app_items data.                                            |
