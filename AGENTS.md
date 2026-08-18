@@ -32,6 +32,21 @@
 >   `--force-renderer-accessibility` (the same documented Chrome limitation) — the webview DocURL is
 >   invisible otherwise; Windows/macOS UIA/AX expose webview trees on demand, so the feature works there
 >   out of the box. Ships only in a new installer build.
+> - 2026-08-18: **Structural process name resolution — Flatpak/snap browsers (Floorp, LibreWolf, etc.) no longer show "xdg-dbus-proxy" as their browser name.**
+>   The AT-SPI PID for Flatpak apps belongs to the `xdg-dbus-proxy` IPC broker, not the app itself,
+>   so `/proc/<pid>/comm` returned the proxy name. New `resolve_app_name(pid)` in the Python probe
+>   checks **FLATPAK_ID** in `/proc/<pid>/environ` (extracts the short app name from the Flatpak app ID,
+>   e.g. `org.mozilla.Floorp` → `floorp`) and **snap path** in `/proc/<pid>/exe` (e.g.
+>   `/snap/firefox/...` → `firefox`). Falls back to `/proc/comm` for native apps. No name lists —
+>   Flatpak and snap are the only sandboxing systems that inject proxy PIDs, and the metadata they
+>   expose is structural (OS-defined environment variable / filesystem path). The resolved name is
+>   also used for browser detection: new **structural browser detection** scans `.desktop` files for
+>   `Categories=WebBrowser` (cached 5 min in `~/.cache/alpha-ai-tracker/browser_exes.json`) and
+>   matches against the resolved process name — any browser installed on the system is detected
+>   without a hardcoded hints list. Flatpak `.desktop` files with `Exec=flatpak run <app-id>` are
+>   parsed to extract the app ID's short name. C# reader: new `_pidNameCache` (populated from AT-SPI
+>   probe results each poll) lets `ReadComm()` resolve WM-only Flatpak/snap windows too.
+>   `StripBrowserSuffix` gains Floorp/LibreWolf/Waterfox. Verified: `dotnet build` 0/0.
 > - 2026-08-18: **Downloaded installers no longer linger in `updates/` — the folder is force-deleted after every successful update (Windows + Linux) + a startup sweep.**
 >   Root cause: `AppUpdateService` downloaded the platform installer into the user data dir
 >   (`~/.local/share/alpha-ai-tracker/updates` / `%LocalAppData%\AlphaAITracker\updates`) and handed it to
@@ -82,6 +97,20 @@
 >   (window-close hides to tray; only an explicit tray Quit / process stop exits the tracker). `StartTracking()` is
 >   idempotent (guarded login-event dedup), so the GUI restoring a second time is harmless. Verified: `dotnet build`
 >   0/0.
+> - 2026-08-18: **Web: Server-side date filters + expandable session groups + structural browser badges + UX fixes on App Usage and Web Activity.**
+>   Server: `GET /app-sessions` and `GET /app-items` now accept `dateFrom`/`dateTo` (RFC3339 or date-only),
+>   filtering `started_at` / `opened_at`; app-items search also matches `url`/`domain`. New shared
+>   `ActivityFilters` component (debounced search, Today-default date presets with real local-day bounds,
+>   custom range via Calendar popover) wired into both pages. **App Usage**: Duration column replaces
+>   Foreground/Background (computed from `endedAt - startedAt` / `now - startedAt`); Active Time tile =
+>   sum of durations; apps with >1 session get chevron → expandable nested per-session table (Opened/
+>   Closed/Duration/Details). **Web Activity**: pages grouped by domain ("Visisted Sites") with expandable
+>   groups; browser badge (Chrome/Floorp/etc.) from `metadata_json.processName` on every row + distinct
+>   browsers per site group; search switches to flat "Matching Pages" view (exact URL visible). Both pages
+>   use `keepPreviousData` so filter changes never swap the whole content to a spinner; `ActivityFilters`
+>   is always mounted (search field never loses focus, filters never disappear on empty results).
+>   `next.config.ts` gains `allowedDevOrigins` (suppresses cross-origin dev warning). Verified: `tsc`
+>   clean, `next build` passes.
 > - 2026-08-18: **Web: Employee Journey + Device Specs modules — the `/users/[id]` detail page was replaced by nine pages behind a shared shell.**
 >   The old 820-line `web/src/app/(app)/employees/[id]/page.tsx` is deleted. New shared `EmployeePage` shell
 >   (`web/src/components/employees/EmployeePage.tsx`) provides the page header, a searchable `EmployeeSelector`

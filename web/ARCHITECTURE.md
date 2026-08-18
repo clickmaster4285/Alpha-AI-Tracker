@@ -1,7 +1,27 @@
 # Web Architecture — Alpha AI Tracker Dashboard
 
-> **Last audited:** 2026-08-18  
+> **Last audited:** 2026-08-18
 > **Changelog:**
+> 2026-08-18: **Server-side date/search filters on App Usage + Web Activity + structural browser detection + UX fixes.**
+> - **Server-side filters**: `GET /app-sessions` and `GET /app-items` now accept `dateFrom`/`dateTo` (RFC3339 or
+>   date-only) — sessions filtered on `started_at`, items on `opened_at`; combined with existing `search`/`platform`.
+>   App-items search also matches `url`/`domain` (so searching "youtube" finds the exact page).
+> - **Shared `ActivityFilters` component** (`components/journey/ActivityFilters.tsx`): debounced search (300ms),
+>   date presets (Today/Yesterday/7d/30d/All Time) defaulting to **Today** with real local-day bounds
+>   (`createDefaultFilter()` sends `dateFrom`/`dateTo` on initial load — no stale data leaking), plus custom
+>   range via Calendar popover (`react-day-picker` + `date-fns`).
+> - **App Usage page** (`employee-journey/apps`): Duration column replaces Foreground/Background — computed from
+>   `endedAt - startedAt` (closed) or `now - startedAt` (running). Active Time tile = sum of durations.
+>   Apps with >1 session show a chevron → expandable nested table (Opened/Closed/Duration/Details per session).
+>   Uses `keepPreviousData` so filter changes never swap the whole content to a spinner.
+> - **Web Activity page** (`employee-journey/web`): Pages grouped by domain ("Visited Sites") with expandable
+>   groups (Visits/Duration/Last Visited). Sites with >1 visit get chevron → nested page list (Page/URL/Visited/
+>   Duration). Browser badge (Chrome/Floorp/etc.) from `metadata_json.processName` shown on every row — site
+>   rows show distinct browsers present. Search switches to flat "Matching Pages" view (exact URL visible).
+>   `keepPreviousData` for smooth filter transitions.
+> - **Filter UX fixes**: `ActivityFilters` always mounted (no unmount on empty/error/loading) — search field
+>   never loses focus, filters never disappear on no-match. `next.config.ts` gains `allowedDevOrigins`
+>   (suppresses cross-origin dev warning for LAN IP).
 > 2026-08-18: **Employee Journey + Device Specs modules** — the old `/users/[id]` detail page was replaced by nine
 > pages behind a shared `EmployeePage` shell + `EmployeeSelector` picker (deep-linkable via `?employeeId=`):
 > Session Timeline, App Usage, Web Activity (real APIs, infinite scroll) + Screenshots/Location Trail placeholders;
@@ -119,6 +139,7 @@ web/
     │   │   ├── EmployeePage.tsx #   Page shell: header + picker + loading/error/no-selection
     │   │   ├── InventoryTable.tsx  EmptyState.tsx  DeviceClassIcon.tsx
     │   ├── journey/
+    │   │   ├── ActivityFilters.tsx  Shared search + date presets + custom range filter bar
     │   │   └── FocusTime.tsx    #   Foreground/background stacked bar
     │   ├── ui/                  # ~45 shadcn/ui component files (button, card, dialog, table, chart, etc.)
     │   │   ├── button.tsx       #  (all are standard shadcn/ui, no customization)
@@ -156,8 +177,8 @@ web/
             │
             ├── employee-journey/# Per-employee journey, shared EmployeePage shell + picker
             │   ├── timeline/    #   Session timeline — real API, infinite scroll
-            │   ├── apps/        #   App usage — real API, fg/bg aggregation
-            │   ├── web/         #   Web activity — real API (browser_tab items)
+            │   ├── apps/        #   App usage — real API, duration aggregation, expandable session groups
+            │   ├── web/         #   Web activity — real API, domain-grouped, browser badges, search flat view
             │   ├── screenshots/ #   Placeholder — client collects none
             │   └── location/    #   Placeholder — client collects none
             ├── device-specs/    # Per-employee machine picture (detail API)
