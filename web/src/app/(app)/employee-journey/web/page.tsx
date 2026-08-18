@@ -228,6 +228,8 @@ function WebBody({ employeeId }: { employeeId: string }) {
                   {groups.map(g => {
                     const isOpen = expanded.has(g.domain);
                     const expandable = g.count > 1;
+                    // Distinct browsers used across this site's visits (e.g. Chrome + Firefox).
+                    const browsers = [...new Set(g.items.map(browserOf).filter((b): b is string => !!b))];
                     return (
                       <Fragment key={g.domain}>
                         <tr className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
@@ -248,9 +250,16 @@ function WebBody({ employeeId }: { employeeId: string }) {
                                 <Globe className="w-4 h-4 text-info" />
                               </div>
                               <div className="min-w-0">
-                                <div className="flex items-center gap-2">
+                                <div className="flex items-center gap-1.5">
                                   <p className="text-sm font-medium text-foreground truncate">{g.domain}</p>
-                                  {g.count === 1 && <BrowserBadge item={g.items[0]} />}
+                                  {browsers.slice(0, 3).map(b => (
+                                    <span key={b} className="px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-muted text-muted-foreground whitespace-nowrap">
+                                      {b}
+                                    </span>
+                                  ))}
+                                  {browsers.length > 3 && (
+                                    <span className="text-[10px] text-muted-foreground whitespace-nowrap">+{browsers.length - 3}</span>
+                                  )}
                                 </div>
                                 <p className="text-xs text-muted-foreground truncate">
                                   {g.count} page visit{g.count === 1 ? '' : 's'}
