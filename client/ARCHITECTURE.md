@@ -11,6 +11,15 @@
 >   caches/re-emits webview windows each poll so sessions never falsely close; `--type=` child processes
 >   are skipped structurally. The tracker hydrates browser_tab-rooted sessions, and the main loop skips
 >   them too (webview session + host-app session coexist; no duplicate-close).
+> - 2026-08-18: **Structural process name resolution — Flatpak/snap browsers get correct names + structural browser detection.**
+>   The Python probe's `resolve_app_name(pid)` checks FLATPAK_ID in `/proc/<pid>/environ` (extracts
+>   short name: `org.mozilla.Floorp` -> `floorp`) and snap path in `/proc/<pid>/exe` (`/snap/firefox/...`
+>   -> `firefox`), falling back to `/proc/comm` for native apps. No name lists: Flatpak/snap are the only
+>   sandboxing systems that inject proxy PIDs (e.g. `xdg-dbus-proxy`). Structural browser detection:
+>   `.desktop` files with `Categories=WebBrowser` are scanned (cached 5 min) and the resolved process name
+>   is matched against browser exe names from the desktop files + Flatpak app IDs. C# `ReadComm()` checks
+>   a `_pidNameCache` (populated from probe results each poll) before `/proc/comm`, so WM-only Flatpak/snap
+>   windows also get the correct name. `StripBrowserSuffix` gains Floorp/LibreWolf/Waterfox.
 > - 2026-08-18: **Focus totals frozen (~0s on the web) fixed — flush is now ADDITIVE + every-minute push.**
 >   Root cause: `UpdateAppSessionFocusSql` OVERWROTE the row with the in-memory delta and the counter was
 >   then cleared — each flush wrote only the last ~10-cycle window (300s main / 30s browser), never the

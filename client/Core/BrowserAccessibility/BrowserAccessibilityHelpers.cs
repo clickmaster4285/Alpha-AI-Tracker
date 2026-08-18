@@ -102,6 +102,7 @@ public static class BrowserAccessibilityHelpers
                  {
                      " - Google Chrome", " - Mozilla Firefox", " - Microsoft Edge",
                      " - Brave", " - Opera", " - Vivaldi", " - Chromium",
+                     " - Floorp", " - LibreWolf", " - Waterfox",
                  })
         {
             var idx = title.IndexOf(marker, StringComparison.OrdinalIgnoreCase);

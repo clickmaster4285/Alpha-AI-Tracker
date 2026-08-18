@@ -43,6 +43,10 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
     // close). Entries expire ~60s without a successful rescan.
     private sealed record CachedWebview(int Pid, string ProcessName, string Title, string Url, bool Active);
     private readonly Dictionary<string, (CachedWebview Wv, DateTime LastSeenUtc)> _webviewCache = new();
+    // PID->resolved-name cache populated from AT-SPI probe results each poll.
+    // Used by ReadComm() for WM-only windows where /proc/comm may give a
+    // Flatpak/snap proxy name (e.g. xdg-dbus-proxy) instead of the real app.
+    private readonly Dictionary<int, string> _pidNameCache = new();
 
     public string Platform => "Linux";
     public bool IsAvailable => OperatingSystem.IsLinux();
@@ -79,6 +83,14 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
         }
 
         var wmIndexed = IndexWmWindows(wmWindows);
+
+        // Populate PID->name cache from AT-SPI probe results so ReadComm() can
+        // resolve Flatpak/snap proxy PIDs to the real app name for WM-only windows.
+        foreach (var w in probe)
+        {
+            if (w.Pid > 0 && !string.IsNullOrEmpty(w.ProcessName))
+                _pidNameCache[w.Pid] = w.ProcessName;
+        }
 
         // 1. Emit AT-SPI windows first — they carry URL + incognito. Their identity is
         //    upgraded to the WM id when a WM window matches (stable across navigation);
@@ -439,6 +451,89 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
             except Exception:
                 return ''
 
+        def resolve_app_name(pid):
+            # Resolve the real application name from a PID using OS metadata.
+            # Flatpak apps register with xdg-dbus-proxy as their AT-SPI PID, so
+            # /proc/<pid>/comm gives the proxy name instead of the real app.
+            # Flatpak: FLATPAK_ID in /proc/<pid>/environ -> extract short app name
+            try:
+                with open('/proc/%d/environ' % pid, 'rb') as f:
+                    for part in f.read().split(b'\0'):
+                        if part.startswith(b'FLATPAK_ID='):
+                            app_id = part.split(b'=', 1)[1].decode('utf-8', 'replace')
+                            short = app_id.rsplit('.', 1)[-1]
+                            if short:
+                                return short.lower()
+            except Exception:
+                pass
+            # Snap: exe path contains /snap/<name>/
+            try:
+                exe = os.readlink('/proc/%d/exe' % pid)
+                idx = exe.find('/snap/')
+                if idx >= 0:
+                    snap_name = exe[idx + 6:].split('/')[0]
+                    if snap_name:
+                        return snap_name.lower()
+            except Exception:
+                pass
+            return comm
+
+        # Structural browser detection: scan .desktop files for Categories=WebBrowser.
+        # Cached on disk for 5 minutes to avoid rescanning every 3s poll.
+        _browser_exes = set()
+        import time as _time
+        _cache_dir = os.path.join(os.path.expanduser('~'), '.cache', 'alpha-ai-tracker')
+        _cache_file = os.path.join(_cache_dir, 'browser_exes.json')
+        try:
+            if os.path.exists(_cache_file) and (_time.time() - os.path.getmtime(_cache_file)) < 300:
+                with open(_cache_file) as _cf:
+                    _browser_exes = set(json.load(_cf))
+        except Exception:
+            pass
+        if not _browser_exes:
+            for _dd in ['/usr/share/applications', '/usr/local/share/applications',
+                         os.path.expanduser('~/.local/share/applications'),
+                         '/var/lib/flatpak/exports/share/applications',
+                         os.path.expanduser('~/.local/share/flatpak/exports/share/applications')]:
+                if not os.path.isdir(_dd):
+                    continue
+                for _df in os.listdir(_dd):
+                    if not _df.endswith('.desktop'):
+                        continue
+                    try:
+                        with open(os.path.join(_dd, _df)) as _f:
+                            _cats = ''
+                            _exec = ''
+                            for _line in _f:
+                                if _line.startswith('Categories='):
+                                    _cats = _line.strip()
+                                elif _line.startswith('Exec=') and not _exec:
+                                    _exec = _line.split('=', 1)[1].strip().split()[0]
+                            if 'WebBrowser' in _cats:
+                                _exec_parts = _exec.split() if _exec else []
+                                # Flatpak exec: 'flatpak run org.mozilla.Floorp' -> extract app ID
+                                if len(_exec_parts) >= 3 and _exec_parts[0] == 'flatpak' and _exec_parts[1] == 'run':
+                                    _fp_id = _exec_parts[2].replace('.desktop', '')
+                                    _browser_exes.add(_fp_id.lower())
+                                    _fp_short = _fp_id.rsplit('.', 1)[-1].lower()
+                                    if _fp_short:
+                                        _browser_exes.add(_fp_short)
+                                elif _exec:
+                                    _browser_exes.add(os.path.basename(_exec).lower())
+                                _did = _df.replace('.desktop', '')
+                                _browser_exes.add(_did.lower())
+                                _short = _did.rsplit('.', 1)[-1].lower()
+                                if _short:
+                                    _browser_exes.add(_short)
+                    except Exception:
+                        continue
+            try:
+                os.makedirs(_cache_dir, exist_ok=True)
+                with open(_cache_file, 'w') as _cf:
+                    json.dump(list(_browser_exes), _cf)
+            except Exception:
+                pass
+
         results = []
 
         # ═══════════════════════════════════════════════════════════════════
@@ -587,7 +682,7 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                         continue
                     if pid <= 0:
                         continue
-                    comm = read_comm(pid)
+                    comm = resolve_app_name(pid)
                     cmd = read_cmd(pid)
                     if '--headless' in cmd:
                         continue
@@ -597,7 +692,8 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                         # Electron apps' internal panes out of the journey stream.
                         continue
                     is_browser = (any(h in comm for h in BROWSER_HINTS) or
-                                  any(h in cmd for h in BROWSER_HINTS))
+                                  any(h in cmd for h in BROWSER_HINTS) or
+                                  comm in _browser_exes)
                     # Non-browser apps (Electron webviews etc.) are only scanned on the
                     # throttled cadence above.
                     if not is_browser and not webview_scan:
@@ -858,8 +954,13 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
         }
     }
 
-    private static string ReadComm(int pid)
+    private string ReadComm(int pid)
     {
+        // Check probe-resolved cache first -- Flatpak/snap apps report the proxy
+        // process name via /proc/comm (e.g. xdg-dbus-proxy) but the AT-SPI probe
+        // resolves the real app name from FLATPAK_ID / snap path metadata.
+        if (_pidNameCache.TryGetValue(pid, out var cached) && !string.IsNullOrEmpty(cached))
+            return cached;
         try
         {
             return File.ReadAllText($"/proc/{pid}/comm").Trim();
