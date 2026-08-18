@@ -27,6 +27,7 @@ public sealed class WindowsUiaBrowserReader : IAccessibilityBrowserReader
     private const int UIA_WindowControlTypeId = 50032;
     private const int UIA_EditControlTypeId = 50004;
     private const int UIA_ButtonControlTypeId = 50000;
+    private const int UIA_DocumentControlTypeId = 50030;
 
     // user32 foreground window — the OS statement of which top-level window is focused.
     [DllImport("user32.dll")]
@@ -83,8 +84,21 @@ public sealed class WindowsUiaBrowserReader : IAccessibilityBrowserReader
                         continue;
                     }
 
-                    if (!BrowserAccessibilityHelpers.IsBrowserProcess(processName))
-                        continue;
+                    var isBrowser = BrowserAccessibilityHelpers.IsBrowserProcess(processName);
+                    string url;
+                    if (isBrowser)
+                    {
+                        url = ReadAddressBar(element, uia);
+                    }
+                    else
+                    {
+                        // Embedded webview (Electron apps: VS Code Simple Browser, Slack,
+                        // Teams, …) — STRUCTURAL detection, no app-name lists: a descendant
+                        // document/edit exposing an http(s) URL via the Value pattern.
+                        url = ReadWebviewUrl(element, uia);
+                        if (string.IsNullOrWhiteSpace(url))
+                            continue; // no embedded web content → not a journey window
+                    }
 
                     result.Add(new AccessibilitySnapshot
                     {
@@ -92,7 +106,7 @@ public sealed class WindowsUiaBrowserReader : IAccessibilityBrowserReader
                         ProcessId = pid,
                         ProcessName = processName,
                         WindowTitle = title,
-                        Url = BrowserAccessibilityHelpers.NormalizeUrl(ReadAddressBar(element, uia)),
+                        Url = BrowserAccessibilityHelpers.NormalizeUrl(url),
                         // Chrome/Edge never put "incognito" in the window TITLE on Windows —
                         // the only reliable signal is the dedicated toggle BUTTON that the
                         // browsers expose in their accessibility tree ("Incognito"/"InPrivate").
@@ -100,6 +114,7 @@ public sealed class WindowsUiaBrowserReader : IAccessibilityBrowserReader
                                      || DetectIncognito(element, uia),
                         // Foreground window: matches the HWND returned by GetForegroundWindow.
                         IsActive = fgHwnd != IntPtr.Zero && element.CurrentNativeWindowHandle == fgHwnd,
+                        IsWebview = !isBrowser,
                     });
                 }
                 catch { }
@@ -170,6 +185,64 @@ private static bool DetectIncognito(IUIAutomationElement window, IUIAutomation u
         }
         catch { }
         return false;
+    }
+
+    /// <summary>
+    /// Structural webview-URL detection for non-browser windows: scans the window's
+    /// descendants for a Document or Edit control whose Value (or Name) is an http(s)
+    /// URL. Chromium/Electron webviews expose the embedded page this way; app chrome
+    /// (settings/preview panes) never exposes an http URL here, so no app-name list is
+    /// needed — only windows with real web content are emitted.
+    /// </summary>
+    private static string ReadWebviewUrl(IUIAutomationElement window, IUIAutomation uia)
+    {
+        try
+        {
+            var docCondition = uia.CreatePropertyCondition(UIA_ControlTypePropertyId, UIA_DocumentControlTypeId);
+            var docs = window.FindAll(TreeScope.TreeScope_Descendants, docCondition);
+            var valuePatternCondition = uia.CreatePropertyCondition(UIA_ControlTypePropertyId, UIA_EditControlTypeId);
+            var edits = window.FindAll(TreeScope.TreeScope_Descendants, valuePatternCondition);
+
+            for (var i = 0; i < docs.Length; i++)
+            {
+                try
+                {
+                    var url = ReadUrlValue(docs.GetElement(i));
+                    if (url.Length > 0) return url;
+                }
+                catch { }
+            }
+            for (var i = 0; i < edits.Length; i++)
+            {
+                try
+                {
+                    var url = ReadUrlValue(edits.GetElement(i));
+                    if (url.Length > 0) return url;
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return string.Empty;
+    }
+
+    private static string ReadUrlValue(IUIAutomationElement element)
+    {
+        string? value = null;
+        try
+        {
+            var pattern = element.GetCurrentPattern(UIA_ValuePatternId);
+            if (pattern is IUIAutomationValuePattern valuePattern)
+                value = valuePattern.CurrentValue;
+        }
+        catch { }
+        value ??= element.CurrentName;
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+        var trimmed = value.Trim();
+        return trimmed.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+               trimmed.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+            ? trimmed
+            : string.Empty;
     }
 
     private static string ReadAddressBar(IUIAutomationElement window, IUIAutomation uia)

@@ -39,5 +39,15 @@ public sealed class AccessibilitySnapshot
     /// </summary>
     public string UrlSource { get; init; } = "accessibility";
 
+    /// <summary>
+    /// True when this window is NOT a real browser but embeds web content — an
+    /// Electron/embedded webview (VS Code Simple Browser, Slack, Teams, …) detected
+    /// STRUCTURALLY: its accessibility tree contains a document node exposing an
+    /// http(s) URL. No product-name lists — any app with an embedded http document
+    /// is tracked; app chrome (settings/preview panes, vscode-webview:// URLs) is
+    /// excluded by the URL scheme itself. Metadata "source" = "webview" for these.
+    /// </summary>
+    public bool IsWebview { get; init; }
+
     public DateTime CapturedAt { get; init; } = DateTime.UtcNow;
 }

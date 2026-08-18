@@ -35,6 +35,14 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
 {
     private readonly ILogger<LinuxAtSpiBrowserReader> _logger;
     private bool? _checked;
+    private int _pollCount;
+
+    // Embedded-webview cache: the expensive non-browser tree walk runs every 5th poll;
+    // between scans the reader re-emits the last-known webview windows so the tracker
+    // sees them EVERY poll (stable sessions, focus accounting, no false missing-window
+    // close). Entries expire ~60s without a successful rescan.
+    private sealed record CachedWebview(int Pid, string ProcessName, string Title, string Url, bool Active);
+    private readonly Dictionary<string, (CachedWebview Wv, DateTime LastSeenUtc)> _webviewCache = new();
 
     public string Platform => "Linux";
     public bool IsAvailable => OperatingSystem.IsLinux();
@@ -92,11 +100,45 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                 ProcessName = w.ProcessName,
                 WindowTitle = w.Title,
                 Url = string.IsNullOrWhiteSpace(w.Url) ? null : BrowserAccessibilityHelpers.NormalizeUrl(w.Url),
-                UrlSource = "accessibility",
+                UrlSource = w.Webview ? "webview" : "accessibility",
                 IsIncognito = w.Incognito,
                 IsActive = w.Active,
+                IsWebview = w.Webview,
                 CapturedAt = now,
             });
+
+            if (w.Webview && !string.IsNullOrWhiteSpace(w.Url))
+                _webviewCache[key] = (new CachedWebview(w.Pid, w.ProcessName, w.Title, w.Url, w.Active), now);
+        }
+
+        // ── Re-emit cached webview windows between the throttled scans ──
+        // Expire first: a webview that is no longer produced by the fresh walk (or whose
+        // app closed) drops out here, and the tracker's missing-window close path ends
+        // its session a few polls later.
+        foreach (var stale in _webviewCache
+                     .Where(kv => (now - kv.Value.LastSeenUtc).TotalSeconds > 60)
+                     .Select(kv => kv.Key)
+                     .ToList())
+        {
+            _webviewCache.Remove(stale);
+        }
+        var emittedKeys = new HashSet<string>(result.Select(s => s.WindowKey), StringComparer.Ordinal);
+        foreach (var (key, (wv, _)) in _webviewCache)
+        {
+            if (emittedKeys.Contains(key)) continue;
+            result.Add(new AccessibilitySnapshot
+            {
+                WindowKey = key,
+                ProcessId = wv.Pid,
+                ProcessName = wv.ProcessName,
+                WindowTitle = wv.Title,
+                Url = BrowserAccessibilityHelpers.NormalizeUrl(wv.Url),
+                UrlSource = "webview",
+                IsWebview = true,
+                IsActive = wv.Active,
+                CapturedAt = now,
+            });
+            emittedKeys.Add(key);
         }
 
         // 2. WM windows that are browsers but invisible to AT-SPI (X11-only browsers,
@@ -277,7 +319,7 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
     // Combined python3 probe (Sources A + B)
     // ─────────────────────────────────────────────────────────────────────────────
 
-    private sealed record ProbeWindow(string Source, string Key, int Pid, string ProcessName, string Title, string Url, bool Incognito, bool Active);
+    private sealed record ProbeWindow(string Source, string Key, int Pid, string ProcessName, string Title, string Url, bool Incognito, bool Active, bool Webview);
 
     private async Task<List<ProbeWindow>> RunCombinedProbeAsync(CancellationToken ct)
     {
@@ -302,7 +344,11 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
             return result;
         }
 
-        await proc.StandardInput.WriteAsync(ProbeScript.AsMemory(), ct);
+        // Inject the poll counter so the probe can throttle the (expensive) non-browser
+        // webview scan to every 5th poll instead of walking every window's tree on each
+        // 3s poll. Real browsers are scanned every poll, unchanged.
+        var script = ProbeScript.Replace("__AAT_POLL_N__", (_pollCount++).ToString());
+        await proc.StandardInput.WriteAsync(script.AsMemory(), ct);
         proc.StandardInput.Close();
 
         var outputTask = proc.StandardOutput.ReadToEndAsync(ct);
@@ -342,7 +388,8 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                     el.GetProperty("title").GetString() ?? string.Empty,
                     el.GetProperty("url").GetString() ?? string.Empty,
                     el.TryGetProperty("incognito", out var inc) && inc.GetBoolean(),
-                    el.TryGetProperty("active", out var act) && act.GetBoolean()));
+                    el.TryGetProperty("active", out var act) && act.GetBoolean(),
+                    el.TryGetProperty("webview", out var wv) && wv.GetBoolean()));
             }
             catch (Exception ex)
             {
@@ -397,6 +444,10 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
         # ═══════════════════════════════════════════════════════════════════
         # SOURCE A — AT-SPI accessibility tree
         # ═══════════════════════════════════════════════════════════════════
+        # Non-browser apps are scanned for embedded webviews on a THROTTLED cadence
+        # (every 5th poll, ~15s) — walking every app's tree each 3s poll would cost
+        # measurable CPU. Real browsers are scanned every poll.
+        webview_scan = (int(__AAT_POLL_N__) % 5 == 0)
         try:
             raw = os.popen('gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus --method org.a11y.Bus.GetAddress 2>/dev/null').read().strip()
             start = raw.find("'") + 1
@@ -474,19 +525,21 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                             stack.append((k, depth + 1))
                     return addr or fallback
 
-                def find_doc_url(win, win_title):
+                def find_doc_url(win, win_title, budget=800):
                     # AT-SPI Document interface: the DOCUMENT_WEB node (role 95) exposes
                     # the page's EXACT URL via the DocURL attribute — including in
                     # private/incognito windows, where no other source (omnibox,
                     # sessionstore, profile history) has the URL. Firefox builds this
                     # tree whenever AT-SPI is reachable (the AppArmor override makes
                     # snap Firefox reachable). Chrome needs --force-renderer-accessibility
-                    # and returns nothing here when it does not build the tree.
+                    # and returns nothing here when it does not build the tree. This is
+                    # ALSO the structural webview signal: any app whose tree contains an
+                    # http(s) DOCUMENT_WEB embeds real web content (Electron apps), with
+                    # app chrome (vscode-webview://, file://, about:) excluded by scheme.
                     best = ''
                     page = (win_title or '').lower()
                     stack = [(win, 0)]
                     seen = set()
-                    budget = 800
                     while stack and budget > 0:
                         obj, depth = stack.pop()
                         budget -= 1
@@ -538,7 +591,16 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                     cmd = read_cmd(pid)
                     if '--headless' in cmd:
                         continue
-                    if not any(h in comm for h in BROWSER_HINTS) and not any(h in cmd for h in BROWSER_HINTS):
+                    if ' --type=' in cmd:
+                        # Chromium/Electron CHILD process (renderer/gpu/utility): its a11y
+                        # frames are not real OS windows — skipping them structurally keeps
+                        # Electron apps' internal panes out of the journey stream.
+                        continue
+                    is_browser = (any(h in comm for h in BROWSER_HINTS) or
+                                  any(h in cmd for h in BROWSER_HINTS))
+                    # Non-browser apps (Electron webviews etc.) are only scanned on the
+                    # throttled cadence above.
+                    if not is_browser and not webview_scan:
                         continue
                     try:
                         app_obj = bus.get_object(name, '/org/a11y/atspi/accessible/root')
@@ -576,9 +638,17 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                         win_incognito = '--incognito' in cmd
                         if any(s in wname.lower() for s in ('incognito', 'inprivate', 'private browsing')):
                             win_incognito = True
-                        url = find_address_bar(w)
-                        if not url:
-                            url = find_doc_url(w, wname)
+                        if is_browser:
+                            url = find_address_bar(w)
+                            if not url:
+                                url = find_doc_url(w, wname)
+                        else:
+                            # Embedded-webview proof: an http(s) DOCUMENT_WEB node. No URL
+                            # found (or only app-chrome schemes) → this window is NOT web
+                            # content, skip it — never emit a junk browser_tab for it.
+                            url = find_doc_url(w, wname, 400)
+                            if not url:
+                                continue
                         results.append({
                             'src': 'a11y',
                             'key': name + '|' + str(win_path),
@@ -588,6 +658,7 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                             'url': url,
                             'incognito': win_incognito,
                             'active': win_active,
+                            'webview': (not is_browser),
                         })
         except Exception:
             pass

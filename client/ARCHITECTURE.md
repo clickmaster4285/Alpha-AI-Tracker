@@ -1,7 +1,16 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-08-18 (focus-time root causes §8 + browser focus accounting §11)
+> **Last audited:** 2026-08-18 (focus-time root causes §8 + browser focus accounting §11 + webview tracking §11)
 > **Changelog:**
+> - 2026-08-18: **Embedded-webview journeys (VS Code Simple Browser, Electron apps) — structural detection, no hardcoded names.**
+>   Readers no longer gate on a browser-process list alone: any window whose a11y tree exposes a
+>   DOCUMENT_WEB node (AT-SPI role 95) with an **http(s) DocURL** is tracked (UIA on Windows: a
+>   descendant Document/Edit whose Value/Name is an http URL). App chrome excludes itself by URL scheme
+>   (`vscode-webview://`, `file://`, `about:`). Metadata `source="webview"` + the host process name let
+>   the dashboard show the source app. Linux scans non-browser apps every 5th poll (400-node budget) and
+>   caches/re-emits webview windows each poll so sessions never falsely close; `--type=` child processes
+>   are skipped structurally. The tracker hydrates browser_tab-rooted sessions, and the main loop skips
+>   them too (webview session + host-app session coexist; no duplicate-close).
 > - 2026-08-18: **Focus totals frozen (~0s on the web) fixed — flush is now ADDITIVE + every-minute push.**
 >   Root cause: `UpdateAppSessionFocusSql` OVERWROTE the row with the in-memory delta and the counter was
 >   then cleared — each flush wrote only the last ~10-cycle window (300s main / 30s browser), never the

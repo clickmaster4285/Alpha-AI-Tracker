@@ -331,8 +331,14 @@ public class LogCollectorService : BackgroundService
                 var duplicateCloseSessions = new List<AppSession>();
                 foreach (var rec in openRecords)
                 {
+                    // Skip tracker-owned sessions: real browsers (by process name) AND
+                    // embedded webview windows (browser_tab root on a non-browser process
+                    // like VS Code). Without the item-type check the webview session would
+                    // hydrate under the SAME key as the host app's own session and be
+                    // closed as a "duplicate" one cycle later.
                     if (BrowserAccessibilityHelpers.IsBrowserProcess(
-                            AppProcessClassifier.ExtractBaseProcessName(rec.ProcessName)))
+                            AppProcessClassifier.ExtractBaseProcessName(rec.ProcessName)) ||
+                        rec.ItemType == "browser_tab")
                         continue;
 
                     var scope = CgroupResolver.GetAppScope(rec.ProcessId);

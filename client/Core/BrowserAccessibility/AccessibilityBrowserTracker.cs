@@ -200,8 +200,13 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
             foreach (var rec in openRecords)
             {
                 if (rec.ProcessId <= 0) continue;
+                // Hydrate BOTH real-browser windows AND embedded webview windows — the
+                // latter carry a browser_tab root but a non-browser process (e.g. VS Code
+                // Simple Browser). The main loop skips browser_tab-rooted sessions too, so
+                // both stay owned by this tracker across a fast relaunch.
                 if (!BrowserAccessibilityHelpers.IsBrowserProcess(
-                        AppProcessClassifier.ExtractBaseProcessName(rec.ProcessName))) continue;
+                        AppProcessClassifier.ExtractBaseProcessName(rec.ProcessName)) &&
+                    rec.ItemType != "browser_tab") continue;
 
                 // Use the persisted root browser_tab title/URL as the baseline so the
                 // first poll's title-match / URL-match in UpdateWindowAsync sees "no change"
@@ -775,7 +780,10 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
     private string BuildMetadata(AccessibilitySnapshot snap, string windowKey) =>
         JsonSerializer.Serialize(new Dictionary<string, object?>
         {
-            ["source"] = snap.UrlSource,
+            // Embedded webview windows (Electron apps) are tagged "webview" so the web
+            // dashboard can show the HOST APP as the source (VS Code, Slack, …). Real
+            // browsers keep their platform source (accessibility/history/sessionstore).
+            ["source"] = snap.IsWebview ? "webview" : snap.UrlSource,
             ["windowKey"] = windowKey,
             ["incognito"] = snap.IsIncognito,
             ["processName"] = snap.ProcessName,
