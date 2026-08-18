@@ -1,7 +1,7 @@
 'use client';
 
-import { useMemo } from 'react';
-import { AppWindow, Timer, Layers, Activity, Loader2 } from 'lucide-react';
+import { Fragment, useMemo, useState } from 'react';
+import { AppWindow, Timer, Layers, Activity, Loader2, ChevronRight, ChevronDown } from 'lucide-react';
 import { useQueries } from '@tanstack/react-query';
 import EmployeePage from '@/components/employees/EmployeePage';
 import EmptyState from '@/components/employees/EmptyState';
@@ -12,10 +12,17 @@ interface AppUsage {
   appDisplayName: string;
   processName: string;
   sessionCount: number;
-  foregroundSeconds: number;
-  backgroundSeconds: number;
+  durationSeconds: number;
   lastActiveAt: string;
   running: boolean;
+  sessions: AppSession[];
+}
+
+/** Total time the session was open: endedAt - startedAt (or now - startedAt while running). */
+function sessionDurationSeconds(s: AppSession): number {
+  const start = new Date(s.startedAt).getTime();
+  const end = s.endedAt ? new Date(s.endedAt).getTime() : Date.now();
+  return Math.max(0, (end - start) / 1000);
 }
 
 const AGGREGATE_PAGES = 5; // most recent 5 × 100 = 500 sessions
@@ -34,6 +41,17 @@ export default function EmployeeJourneyApps() {
 }
 
 function AppUsageBody({ employeeId }: { employeeId: string }) {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  const toggle = (key: string) => {
+    setExpanded(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
   const queries = useQueries({
     queries: Array.from({ length: AGGREGATE_PAGES }, (_, i) => ({
       queryKey: ['app-sessions', 'usage', { employeeId, page: i + 1, perPage: PER_PAGE }],
@@ -53,21 +71,19 @@ function AppUsageBody({ employeeId }: { employeeId: string }) {
         appDisplayName: s.appDisplayName,
         processName: s.processName,
         sessionCount: 0,
-        foregroundSeconds: 0,
-        backgroundSeconds: 0,
+        durationSeconds: 0,
         lastActiveAt: s.startedAt,
         running: false,
+        sessions: [],
       };
       entry.sessionCount += 1;
-      entry.foregroundSeconds += s.foregroundSeconds ?? 0;
-      entry.backgroundSeconds += s.backgroundSeconds ?? 0;
+      entry.durationSeconds += sessionDurationSeconds(s);
+      entry.sessions.push(s);
       if (s.startedAt > entry.lastActiveAt) entry.lastActiveAt = s.startedAt;
       if (!s.endedAt) entry.running = true;
       map.set(key, entry);
     }
-    return [...map.values()].sort(
-      (a, b) => (b.foregroundSeconds + b.backgroundSeconds) - (a.foregroundSeconds + a.backgroundSeconds),
-    );
+    return [...map.values()].sort((a, b) => b.durationSeconds - a.durationSeconds);
   }, [sessions]);
 
   if (loading) {
@@ -89,8 +105,7 @@ function AppUsageBody({ employeeId }: { employeeId: string }) {
     return <EmptyState icon={AppWindow} text="No app usage synced yet" />;
   }
 
-  const totalFg = usage.reduce((n, u) => n + u.foregroundSeconds, 0);
-  const totalBg = usage.reduce((n, u) => n + u.backgroundSeconds, 0);
+  const totalDuration = usage.reduce((n, u) => n + u.durationSeconds, 0);
   const runningCount = usage.filter(u => u.running).length;
 
   return (
@@ -99,7 +114,7 @@ function AppUsageBody({ employeeId }: { employeeId: string }) {
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <UsageTile icon={AppWindow} label="Applications" value={usage.length} accent="bg-primary/10 text-primary" />
         <UsageTile icon={Layers} label="Sessions" value={sessions.length} accent="bg-info/15 text-info" />
-        <UsageTile icon={Timer} label="Active Time" value={formatSeconds(totalFg + totalBg)} accent="bg-success/15 text-success" />
+        <UsageTile icon={Timer} label="Active Time" value={formatSeconds(totalDuration)} accent="bg-success/15 text-success" />
         <UsageTile icon={Activity} label="Open Now" value={runningCount} accent="bg-warning/15 text-warning" />
       </div>
 
@@ -107,47 +122,111 @@ function AppUsageBody({ employeeId }: { employeeId: string }) {
         <table className="w-full min-w-[760px]">
           <thead>
             <tr className="border-b border-border">
-              {['Application', 'Sessions', 'Foreground', 'Background', 'Last Active', 'Status'].map(h => (
+              {['Application', 'Sessions', 'Duration', 'Last Active', 'Status'].map(h => (
                 <th key={h} className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground whitespace-nowrap">{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {usage.map(u => (
-              <tr key={u.appDisplayName + u.processName} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
-                <td className="px-4 py-3">
-                  <div className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">
-                      <AppWindow className="w-4 h-4 text-primary" />
-                    </div>
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium text-foreground truncate">{u.appDisplayName || u.processName}</p>
-                      {u.processName && u.processName !== u.appDisplayName && (
-                        <p className="text-xs text-muted-foreground font-mono truncate">{u.processName}</p>
+            {usage.map(u => {
+              const rowKey = `${u.appDisplayName}|${u.processName}`;
+              const isOpen = expanded.has(rowKey);
+              const expandable = u.sessionCount > 1;
+              return (
+                <Fragment key={rowKey}>
+                  <tr className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
+                    <td className="px-4 py-3">
+                      <div
+                        className={`flex items-center gap-2 ${expandable ? 'cursor-pointer select-none' : ''}`}
+                        onClick={expandable ? () => toggle(rowKey) : undefined}
+                        title={expandable ? (isOpen ? 'Collapse sessions' : 'Expand sessions') : undefined}
+                      >
+                        {expandable ? (
+                          isOpen
+                            ? <ChevronDown className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                            : <ChevronRight className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                        ) : (
+                          <span className="w-4 flex-shrink-0" />
+                        )}
+                        <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">
+                          <AppWindow className="w-4 h-4 text-primary" />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-foreground truncate">{u.appDisplayName || u.processName}</p>
+                          {u.processName && u.processName !== u.appDisplayName && (
+                            <p className="text-xs text-muted-foreground font-mono truncate">{u.processName}</p>
+                          )}
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-sm text-foreground font-medium">{u.sessionCount}</td>
+                    <td className="px-4 py-3 text-sm text-success font-medium whitespace-nowrap">{formatSeconds(u.durationSeconds)}</td>
+                    <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">{formatDateTime(u.lastActiveAt)}</td>
+                    <td className="px-4 py-3">
+                      {u.running ? (
+                        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-success/15 text-success">
+                          <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse-soft" /> Running
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-muted text-muted-foreground">
+                          <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground" /> Closed
+                        </span>
                       )}
-                    </div>
-                  </div>
-                </td>
-                <td className="px-4 py-3 text-sm text-foreground font-medium">{u.sessionCount}</td>
-                <td className="px-4 py-3 text-sm text-success font-medium whitespace-nowrap">{formatSeconds(u.foregroundSeconds)}</td>
-                <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">{formatSeconds(u.backgroundSeconds)}</td>
-                <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">{formatDateTime(u.lastActiveAt)}</td>
-                <td className="px-4 py-3">
-                  {u.running ? (
-                    <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-success/15 text-success">
-                      <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse-soft" /> Running
-                    </span>
-                  ) : (
-                    <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-muted text-muted-foreground">
-                      <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground" /> Closed
-                    </span>
+                    </td>
+                  </tr>
+                  {isOpen && (
+                    <tr className="border-b border-border bg-muted/20">
+                      <td colSpan={5} className="px-0 py-0">
+                        <ExpandedSessions sessions={u.sessions} />
+                      </td>
+                    </tr>
                   )}
-                </td>
-              </tr>
-            ))}
+                </Fragment>
+              );
+            })}
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+function ExpandedSessions({ sessions }: { sessions: AppSession[] }) {
+  return (
+    <div className="px-4 py-3">
+      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
+        {sessions.length} session{sessions.length === 1 ? '' : 's'}
+      </div>
+      <table className="w-full">
+        <thead>
+          <tr className="border-b border-border">
+            {['Opened', 'Closed', 'Duration', 'Details'].map(h => (
+              <th key={h} className="text-left px-3 py-2 text-xs font-semibold text-muted-foreground whitespace-nowrap">{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {sessions.map(s => (
+            <tr key={s.id} className="border-b border-border last:border-0">
+              <td className="px-3 py-2.5 text-sm text-foreground whitespace-nowrap">{formatDateTime(s.startedAt)}</td>
+              <td className="px-3 py-2.5 text-sm text-muted-foreground whitespace-nowrap">
+                {s.endedAt ? (
+                  formatDateTime(s.endedAt)
+                ) : (
+                  <span className="inline-flex items-center gap-1.5 text-xs font-medium bg-success/15 text-success px-2 py-0.5 rounded-full">
+                    <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse-soft" /> Running
+                  </span>
+                )}
+              </td>
+              <td className="px-3 py-2.5 text-sm text-foreground font-medium whitespace-nowrap">{formatSeconds(sessionDurationSeconds(s))}</td>
+              <td className="px-3 py-2.5 text-xs text-muted-foreground">
+                <span className="font-mono">{s.processName || '—'}</span>
+                {s.contextLabel && <span className="text-muted-foreground"> · {s.contextLabel}</span>}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

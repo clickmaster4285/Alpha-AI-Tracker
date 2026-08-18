@@ -3,6 +3,26 @@
 > **Last audited:** 2026-08-18
 > **Changelog:**
 >
+> - 2026-08-18: **Focus totals were still frozen (~0s on the web) — the periodic flush OVERWROTE the DB row with the in-memory delta instead of accumulating. Fixed + guaranteed 1-minute push.**
+>   Live evidence after the previous fix shipped in v1.2.4: Chrome stuck at exactly `fg=30.0`, VS
+>   Code/Calendar/Help at exactly `300.0`, byte-identical across 65s of running — so the collector WAS
+>   detecting foreground, but the flush SQL (`UpdateAppSessionFocusSql`) did `SET foreground_seconds =
+>   $foreground_seconds` and then cleared the counter — each flush rewrote only the last ~10-cycle window
+>   (300s main loop / 30s browser tracker), never the session total, and the web App Usage page showed
+>   those tiny deltas as 0s. Fix: the flush is now **ADDITIVE** (`foreground_seconds = COALESCE(foreground_seconds,
+>   0) + $foreground_seconds`) — the in-memory dictionary stays a per-flush DELTA (cleared after each write,
+>   verified both loops), so the SQLite row is the true cumulative session total, survives restarts, and is
+>   re-sent verbatim to the server (whose upsert overwrites with it). Close paths were audited for
+>   double-counting: `CloseSessionsAndAppItemsAsync`/browser closes flush FIRST then close with NULL focus
+>   (`UpdateAppSessionEndedSql` is `COALESCE($fg, fg)` — NULL keeps the flushed total). **User rule
+>   2026-08-18 — every minute, force-push all `is_synced=0` rows:** (1) the main loop now calls
+>   `FlushSessionFocusAsync` every 2 cycles (~60s at the default 30s interval, was every 10/~5min), so
+>   growing totals re-queue every minute; (2) `SyncService` failure backoff is now **capped at 60s** — the
+>   backoff only stretches a single retry gap, never the guaranteed cadence, so a drain pass (and thus every
+>   `is_synced=0` row) reaches the server within a minute even during repeated failures (previously a 5-min
+>   max backoff could starve unsent rows). Verified: `dotnet build` 0/0; the exact additive SQL executed
+>   twice against a copy of the live DB accumulates 30→60 fg / 310→320 bg and re-queues `is_synced=0`.
+>   ⚠️ ships only in a new installer build.
 > - 2026-08-18: **Foreground/background focus times were stuck at 0 — two root causes fixed (live-DB + OS-probe root-caused on the Linux/Wayland dev PC, cross-checked against Windows EMP-10005/EMP-10006).**
 >   **Cause 1 — Linux/Wayland foreground detection was completely dead.** Every method in `ProcessCollector.GetActiveWindowInfo` failed on this machine: `xprop _NET_ACTIVE_WINDOW` returns `0x0` (Wayland), the GNOME portal has no `org.freedesktop.portal.Window` interface (GNOME backend doesn't implement it), GNOME Shell Introspect `GetWindows` is `AccessDenied`, xdotool is X11-only, and — the core bug — **the AT-SPI probe could not read `GetState`**: at-spi2-core ≥ 2.50 returns a **PACKED 64-bit bitmask** (`[uint32 1124073730, 0]` — low word first, bit N = state N) instead of a list of state ids, and the check `if 8 not in state` (python) / `Contains("8")` (gdbus fallback) looked for state **8 = ENABLED** (every window has it) in the wrong format. Verified live: the focused Chrome window is the ONLY one whose bitmask has bit **1 = STATE_ACTIVE** set (`0x43000102` vs `0x43000100`); VS Code/Nautilus/etc. don't. Fix: `IsAtSpiActiveState`/`is_active_window` decode BOTH formats and test ACTIVE(1)/FOCUSED(12) — the old fallback heuristic (newest-started process) never matched a tracked session, so `fgKey` was always empty → every session earned only `background_seconds`. **Cause 2 — browser sessions never earned focus time at all.** Browsers are owned by `AccessibilityBrowserTracker` (excluded from the main loop's `resolvedLogs`), and the tracker never wrote foreground/background — so Chrome/Firefox/Edge rows (the majority of usage!) always showed 0/0, and when a browser held focus even non-browser apps got only background (fgKey empty). Fix: new `AccessibilitySnapshot.IsActive` set per-platform (Linux AT-SPI ACTIVE/FOCUSED bit, Windows `GetForegroundWindow` HWND match, macOS frontmost process) and the tracker now accumulates the poll interval into `foreground_seconds`/`background_seconds` per open window every poll (active window → foreground, rest → background), flushing every 10 polls + on close through the existing `UpdateAppSessionFocusAsync` (re-syncs via `is_synced=0`). Verified: `dotnet build` 0/0; the exact new decode run live on the dev PC returns exactly one active window. ⚠️ ships only in a new installer build.
 > - 2026-08-18: **Client: app-session tracking now starts headlessly at boot — the GUI can no longer start/stop tracking.**
