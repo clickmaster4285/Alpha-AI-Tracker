@@ -590,9 +590,12 @@ func (r *NewSchemaRepo) ListAppItems(ctx context.Context, params AppItemListPara
 		argIdx++
 	}
 	if params.Search != "" {
+		// Search the page title/identifier AND the exact URL/domain — searching
+		// "why update" must surface the google.com/search?q=why+update page itself,
+		// not just rows whose title mentions it.
 		conditions = append(conditions, fmt.Sprintf(
-			"(LOWER(title) LIKE LOWER($%d) OR LOWER(identifier) LIKE LOWER($%d))",
-			argIdx, argIdx))
+			"(LOWER(title) LIKE LOWER($%d) OR LOWER(identifier) LIKE LOWER($%d) OR LOWER(COALESCE(url, '')) LIKE LOWER($%d) OR LOWER(COALESCE(domain, '')) LIKE LOWER($%d))",
+			argIdx, argIdx, argIdx, argIdx))
 		args = append(args, "%"+params.Search+"%")
 		argIdx++
 	}
