@@ -45,6 +45,7 @@ public class SyncService : BackgroundService
     private string? _employeeId;
     private string? _employeeName;
     private string? _token;
+    private string? _refreshToken;
 
     // Exponential backoff on failed passes: 5s → 10s → 20s → … → SyncBackoffMaxSec.
     private TimeSpan _backoff = TimeSpan.FromSeconds(5);
@@ -487,44 +488,47 @@ public class SyncService : BackgroundService
     /// Per-request timeout is bound via a linked CTS (the shared HttpClient.Timeout is the
     /// hard ceiling). 2xx = every row in this slice is durable server-side (idempotent
     /// upserts by client GUID), so the rows can be marked sent.
+    ///
+    /// On 401/403 the method attempts a token refresh via the stored refresh token,
+    /// updates the persisted token in SQLite, and retries the request exactly once.
     /// </summary>
     private async Task<bool> SendAsync(string endpoint, byte[] json, CancellationToken ct)
     {
         var serverUrl = _config.ServerUrl ?? "http://localhost:8080";
         try
         {
-            HttpContent content;
-            if (_config.SyncCompression && json.Length > 512)
-            {
-                await using var ms = new MemoryStream();
-                await using (var gz = new GZipStream(ms, CompressionLevel.Fastest, leaveOpen: true))
-                    await gz.WriteAsync(json, ct);
-                content = new ByteArrayContent(ms.ToArray());
-                content.Headers.ContentEncoding.Add("gzip");
-            }
-            else
-            {
-                content = new ByteArrayContent(json);
-            }
-            content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
-
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(TimeSpan.FromSeconds(30));
-            var response = await _httpClient.PostAsync($"{serverUrl}{endpoint}", content, cts.Token);
+            var response = await PostWithTokenAsync(serverUrl, endpoint, json, _token, ct);
 
             if (response.IsSuccessStatusCode)
                 return true;
 
+            // 401/403 → try token refresh once
             if ((int)response.StatusCode == 401 || (int)response.StatusCode == 403)
             {
-                _logger.LogWarning("Auth failed (status {Status}) for {Endpoint}", (int)response.StatusCode, endpoint);
+                _logger.LogDebug("Auth expired (status {Status}) for {Endpoint} — attempting token refresh",
+                    (int)response.StatusCode, endpoint);
+
+                if (await TryRefreshTokenAsync(serverUrl, ct))
+                {
+                    // Retry with the new token
+                    response = await PostWithTokenAsync(serverUrl, endpoint, json, _token, ct);
+                    if (response.IsSuccessStatusCode)
+                        return true;
+
+                    _logger.LogWarning("Sync still failed after token refresh (status {Status}) for {Endpoint}",
+                        (int)response.StatusCode, endpoint);
+                }
+                else
+                {
+                    _logger.LogWarning("Token refresh failed — employee must re-login (status {Status}) for {Endpoint}",
+                        (int)response.StatusCode, endpoint);
+                }
+                return false;
             }
-            else
-            {
-                var body = await response.Content.ReadAsStringAsync(ct);
-                _logger.LogWarning("Sync failed for {Endpoint} (status {Status}): {Body}",
-                    endpoint, (int)response.StatusCode, body);
-            }
+
+            var body = await response.Content.ReadAsStringAsync(ct);
+            _logger.LogWarning("Sync failed for {Endpoint} (status {Status}): {Body}",
+                endpoint, (int)response.StatusCode, body);
             return false;
         }
         catch (HttpRequestException ex)
@@ -544,6 +548,156 @@ public class SyncService : BackgroundService
         }
     }
 
+    /// <summary>
+    /// POSTs a serialized payload with a specific token injected into the request body.
+    /// The token field in the JSON body is replaced with the provided token before sending.
+    /// </summary>
+    private async Task<HttpResponseMessage> PostWithTokenAsync(
+        string serverUrl, string endpoint, byte[] json, string? token, CancellationToken ct)
+    {
+        // The sync endpoints read the token from the request body's "token" field.
+        // Re-inject the (possibly refreshed) token into the JSON payload.
+        var payloadStr = System.Text.Encoding.UTF8.GetString(json);
+        if (!string.IsNullOrEmpty(token))
+        {
+            // Replace the token value in the JSON — the payload always has "token":"<old>"
+            // Simple string replacement: find "token":"..." and replace the value.
+            // The payload JSON always has this exact shape from BuildDrainPass.
+            var tokenStart = payloadStr.IndexOf("\"token\":\"", StringComparison.Ordinal);
+            if (tokenStart >= 0)
+            {
+                var valueStart = tokenStart + 9; // length of "token":"
+                var valueEnd = payloadStr.IndexOf('"', valueStart);
+                if (valueEnd > valueStart)
+                {
+                    payloadStr = payloadStr.Substring(0, valueStart) + token + payloadStr.Substring(valueEnd);
+                }
+            }
+        }
+        json = System.Text.Encoding.UTF8.GetBytes(payloadStr);
+
+        HttpContent content;
+        if (_config.SyncCompression && json.Length > 512)
+        {
+            await using var ms = new MemoryStream();
+            await using (var gz = new GZipStream(ms, CompressionLevel.Fastest, leaveOpen: true))
+                await gz.WriteAsync(json, ct);
+            content = new ByteArrayContent(ms.ToArray());
+            content.Headers.ContentEncoding.Add("gzip");
+        }
+        else
+        {
+            content = new ByteArrayContent(json);
+        }
+        content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(30));
+        return await _httpClient.PostAsync($"{serverUrl}{endpoint}", content, cts.Token);
+    }
+
+    /// <summary>
+    /// Attempts to refresh the access token using the stored refresh token.
+    /// On success: persists the new access token in SQLite and updates the in-memory fields.
+    /// On failure: clears the stored tokens (the employee must re-login).
+    /// Returns true if a new access token was obtained.
+    /// </summary>
+    private async Task<bool> TryRefreshTokenAsync(string serverUrl, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(_refreshToken) || string.IsNullOrEmpty(_employeeId))
+        {
+            _logger.LogDebug("No refresh token available — cannot refresh");
+            return false;
+        }
+
+        try
+        {
+            var payload = new { employeeId = _employeeId, refreshToken = _refreshToken };
+            var json = JsonSerializer.SerializeToUtf8Bytes(payload);
+            var content = new ByteArrayContent(json);
+            content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(15));
+            var response = await _httpClient.PostAsync(
+                $"{serverUrl}/api/v1/auth/refresh-employee-token", content, cts.Token);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Refresh token rejected (status {Status}) — clearing stored tokens",
+                    (int)response.StatusCode);
+                _token = _refreshToken = null;
+                await ClearEmployeeTokensAsync(ct);
+                return false;
+            }
+
+            var body = await response.Content.ReadAsStringAsync(ct);
+            var refreshResp = JsonSerializer.Deserialize<RefreshTokenResponse>(body,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+            if (string.IsNullOrEmpty(refreshResp?.Token))
+            {
+                _logger.LogWarning("Refresh endpoint returned empty token");
+                return false;
+            }
+
+            // Update in-memory token
+            _token = refreshResp.Token;
+
+            // Persist the new access token in SQLite (the refresh token itself is not
+            // returned by the refresh endpoint — the server rotated it, but the client
+            // keeps its original refresh token for future refreshes; the server will
+            // accept it until it expires).
+            await UpdateStoredTokenAsync(_token, ct);
+
+            _logger.LogInformation("Access token refreshed successfully for employee {EmployeeId}", _employeeId);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to refresh token for employee {EmployeeId}", _employeeId);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Updates the access token in the persisted EmployeeInfo row in SQLite.
+    /// </summary>
+    private async Task UpdateStoredTokenAsync(string newToken, CancellationToken ct)
+    {
+        try
+        {
+            var info = await _store.GetEmployeeInfoAsync(ct);
+            if (info == null) return;
+            info.Token = newToken;
+            await _store.SaveEmployeeInfoAsync(info, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to persist refreshed token");
+        }
+    }
+
+    /// <summary>
+    /// Clears the stored token and refresh token (employee must re-login).
+    /// </summary>
+    private async Task ClearEmployeeTokensAsync(CancellationToken ct)
+    {
+        try
+        {
+            var info = await _store.GetEmployeeInfoAsync(ct);
+            if (info == null) return;
+            info.Token = null;
+            info.RefreshToken = null;
+            await _store.SaveEmployeeInfoAsync(info, ct);
+            _employeeId = _employeeName = _token = _refreshToken = null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to clear stored tokens");
+        }
+    }
+
     private async Task<bool> RefreshEmployeeInfoAsync(CancellationToken ct)
     {
         try
@@ -551,12 +705,13 @@ public class SyncService : BackgroundService
             var info = await _store.GetEmployeeInfoAsync(ct);
             if (info == null || string.IsNullOrEmpty(info.Token))
             {
-                _employeeId = _employeeName = _token = null;
+                _employeeId = _employeeName = _token = _refreshToken = null;
                 return false;
             }
             _employeeId = info.EmployeeId;
             _employeeName = info.Name;
             _token = info.Token;
+            _refreshToken = info.RefreshToken;
             return true;
         }
         catch
@@ -564,4 +719,11 @@ public class SyncService : BackgroundService
             return false;
         }
     }
+}
+
+// DTO for the refresh-employee-token response from the server.
+internal class RefreshTokenResponse
+{
+    [System.Text.Json.Serialization.JsonPropertyName("token")]
+    public string? Token { get; set; }
 }

@@ -278,6 +278,7 @@ internal static class DatabaseSchema
             avatar          TEXT,
             avatar_color    TEXT,
             token           TEXT,
+            refresh_token   TEXT,
             logged_in_at    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
         );
 
@@ -348,6 +349,8 @@ internal static class DatabaseSchema
         -- NOTE: the v1 dedup DELETE + UNIQUE fingerprint index were REMOVED here — the
         -- rows-per-cycle lifecycle model deliberately allows multiple rows per package
         -- (one per install cycle) and a UNIQUE constraint would break reinstall history.
+        -- Refresh token for employee session persistence (2026-08-19).
+        ALTER TABLE employee_info ADD COLUMN refresh_token TEXT;
     ";
 
     // PHASE 1: INSERT STATEMENTS

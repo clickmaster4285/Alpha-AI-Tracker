@@ -1,7 +1,12 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-08-18 (focus-time root causes §8 + browser focus accounting §11 + webview tracking §11)
+> **Last audited:** 2026-08-19 (employee refresh tokens)
 > **Changelog:**
+> - 2026-08-19: **Employee refresh token flow.** The client now stores a refresh token alongside the
+>   access token in `employee_info` (SQLite). On sync 401/403, `SyncService` calls
+>   `POST /api/v1/auth/refresh-employee-token` to obtain a new access token (rotation), persists it
+>   in SQLite, and retries the failed request. If the refresh token itself is rejected, both tokens
+>   are cleared and the employee must re-login. Login response now includes `refreshToken`.
 > - 2026-08-18: **Embedded-webview journeys (VS Code Simple Browser, Electron apps) — structural detection, no hardcoded names.**
 >   Readers no longer gate on a browser-process list alone: any window whose a11y tree exposes a
 >   DOCUMENT_WEB node (AT-SPI role 95) with an **http(s) DocURL** is tracked (UIA on Windows: a
@@ -355,7 +360,7 @@ log banners).
 
 **11 tables** (defined in `DatabaseSchema.CreateTableSql`, `IF NOT EXISTS`):
 
-`device_hardware_info` · `storage_devices` (relational child of hardware) · `installed_applications` (GUI apps) · `installed_packages` (CLI tools/runtimes/libraries) · `network_info` · `session_events` · `app_sessions` · `app_items` (generic self-referencing child) · `app_status` (key-value, e.g. `last_heartbeat_at`, `perm_*`) · `permission_status` · `employee_info` (login + JWT token)
+`device_hardware_info` · `storage_devices` (relational child of hardware) · `installed_applications` (GUI apps) · `installed_packages` (CLI tools/runtimes/libraries) · `network_info` · `session_events` · `app_sessions` · `app_items` (generic self-referencing child) · `app_status` (key-value, e.g. `last_heartbeat_at`, `perm_*`) · `permission_status` · `employee_info` (login + JWT access token + refresh token)
 
 ### Key columns
 
@@ -403,7 +408,8 @@ log banners).
 
 ### Login
 
-- **Login:** `POST {serverUrl}/api/v1/auth/employee-login` with `{employeeId, secretKey}` → `{employee, token}`. Persists to `employee_info` (SQLite) and feeds `LogCollectorService.SetEmployeeInfo(employeeId, name, token)` + `StartTracking()` (which also records a `login` session event and arms Windows anti-sleep). **Instant sync on login (2026-08-11):** `LoginAsync` then calls `SyncService.RequestImmediateSync()` — the dedicated sync engine's inter-pass wait is a `SemaphoreSlim` that the request releases, so a full drain pass starts right away instead of waiting out the idle interval. The employee record itself is already server-side (it IS the login response); the instant pass pushes everything else — device_hardware_info, installed apps/packages, network, storage_devices, hardware_devices, session_events, permission_status, app_status, sessions/items.
+- **Login:** `POST {serverUrl}/api/v1/auth/employee-login` with `{employeeId, secretKey}` → `{employee, token, refreshToken}`. Persists both tokens to `employee_info` (SQLite) and feeds `LogCollectorService.SetEmployeeInfo(employeeId, name, token)` + `StartTracking()` (which also records a `login` session event and arms Windows anti-sleep). **Instant sync on login (2026-08-11):** `LoginAsync` then calls `SyncService.RequestImmediateSync()` — the dedicated sync engine's inter-pass wait is a `SemaphoreSlim` that the request releases, so a full drain pass starts right away instead of waiting out the idle interval. The employee record itself is already server-side (it IS the login response); the instant pass pushes everything else — device_hardware_info, installed apps/packages, network, storage_devices, hardware_devices, session_events, permission_status, app_status, sessions/items.
+- **Token refresh (2026-08-19):** On sync 401/403, `SyncService.SendAsync` calls `TryRefreshTokenAsync` → `POST /api/v1/auth/refresh-employee-token` with the stored refresh token. On success: new access token persisted in SQLite, in-memory `_token` updated, failed request retried once. On failure: both tokens cleared, employee must re-login with a new secret. The refresh token itself is opaque (64-byte random hex) and lives in Redis for up to 30 days (`JWT_REFRESH_EXPIRY`).
 - **Session restore:** at boot, `LogCollectorService` reads `employee_info` and **starts tracking headlessly** (2026-08-18) — no GUI required. When the GUI opens, `MainViewModel.InitializeAsync` re-authenticates the collector (idempotent), **fires `RequestImmediateSync()`** (so rows buffered since the last run land immediately), resets stored `perm_*` statuses, and re-evaluates the permission steps from scratch.
 - **No logout:** the employee-disconnect flow (button, `LogoutCommand`, `StopTracking()`, `POST /api/v1/auth/employee-disconnect`) was **removed** 2026-08-10. Once logged in the client tracks until the process stops.
 
@@ -618,7 +624,7 @@ Watchers (IObservableEventSource)          EventCoordinator                 Jour
 
 ## 13. Sync / Transport to Server
 
-- **Protocol:** REST over HTTP(S); JSON `{employeeId, token, entries: [...]}`; token = encrypted JWT from login, sent in the request body (not a header). Idempotent by design — the server upserts by client GUID (`ON CONFLICT (id) …`), so failed chunks are retried safely.
+- **Protocol:** REST over HTTP(S); JSON `{employeeId, token, entries: [...]}`; token = encrypted JWT from login, sent in the request body (not a header). Idempotent by design — the server upserts by client GUID (`ON CONFLICT (id) …`), so failed chunks are retried safely. **Token refresh (2026-08-19):** on 401/403, `SyncService` calls `POST /api/v1/auth/refresh-employee-token` with the stored refresh token, obtains a new access token, persists it in SQLite, and retries the failed request exactly once. If the refresh token is also rejected, tokens are cleared and the employee must re-login.
 - **Engine (2026-08-11):** dedicated `SyncService` background loop — collection **never blocks on the network**. Unsent rows drain in chunks bounded by **both** row count (`ALPHA_SYNC_MAX_ROWS`, default 1000) **and** serialized payload bytes (`ALPHA_SYNC_MAX_BYTES`, default ~1MB), with a politeness pause between chunks (`ALPHA_SYNC_CHUNK_DELAY_MS`, 150ms), a per-pass time budget (`ALPHA_SYNC_MAX_DURATION_SEC`, 5 min) so a backlog never monopolizes CPU, and **exponential backoff** on failure (5s → 10s → … → `ALPHA_SYNC_BACKOFF_MAX_SEC`, 5 min). **2026-08-18:** the between-pass wait is now **capped at 60s even on failure** — backoff only stretches a single retry gap, never the guaranteed cadence — so every `is_synced=0` row reaches the server within a minute (user rule: force-push every minute). A 50k+ backlog drains in minutes — the old inline sync moved a fixed 500 rows/table per 5-minute cycle while blocking collection (~8h to drain 50k).
 - **Compression:** request bodies are **gzip**-encoded when `ALPHA_SYNC_COMPRESSION=true` (server must run `middleware.Decompress()`); oversized slices are auto-split (binary halving) to stay under the byte cap.
 - **Order matters:** small/inventory tables first (device-hardware → network-info → session-events → installed-apps → installed-packages), then **app-sessions (parents)**, then **app-items (children)**.
@@ -637,7 +643,8 @@ Watchers (IObservableEventSource)          EventCoordinator                 Jour
 | `POST /api/v1/hardware-devices/sync` | deviceClass, vendor, product, serial, busPath, pluggedAt/unpluggedAt |
 | `POST /api/v1/permission-status/sync` | checkId, sessionId, sessionType, platform, method, works, details |
 | `POST /api/v1/storage-devices/sync` | deviceHardwareId, deviceType, model, capacityMb |
-| `POST /api/v1/auth/employee-login` | employeeId + secretKey → {employee, token} |
+| `POST /api/v1/auth/employee-login` | employeeId + secretKey → {employee, token, refreshToken} |
+| `POST /api/v1/auth/refresh-employee-token` | employeeId + refreshToken → {token} (rotation) |
 
 > **Instant sync on login (2026-08-11):** `MainViewModel` (which injects the singleton
 > `SyncService` — registered `AddSingleton` + `AddHostedService(GetRequiredService)` like
