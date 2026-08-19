@@ -25,8 +25,12 @@ type UpdateEmployeeRequest struct {
 
 // EmployeeLoginRequest is the payload for employee login via desktop client.
 type EmployeeLoginRequest struct {
-	EmployeeID string `json:"employeeId"`
-	SecretKey  string `json:"secretKey"`
+	EmployeeID    string `json:"employeeId"`
+	SecretKey     string `json:"secretKey"`
+	MachineID     string `json:"machineId,omitempty"`
+	Platform      string `json:"platform,omitempty"`
+	ClientVersion string `json:"clientVersion,omitempty"`
+	DeviceName    string `json:"deviceName,omitempty"`
 }
 
 // GenerateSecretResponse is returned when generating a login secret.
@@ -114,8 +118,10 @@ type EmployeeExportRow struct {
 
 // EmployeeLoginResponse is returned on successful employee login.
 type EmployeeLoginResponse struct {
-	Employee EmployeeResponse `json:"employee"`
-	Token    string           `json:"token,omitempty"`
+	Employee    EmployeeResponse `json:"employee"`
+	Token       string           `json:"token,omitempty"`
+	DeviceToken string           `json:"deviceToken,omitempty"`
+	DeviceID    string           `json:"deviceId,omitempty"`
 }
 
 // ────────────────────────────────

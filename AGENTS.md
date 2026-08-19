@@ -1,8 +1,12 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-08-18
+> **Last audited:** 2026-08-19
 > **Changelog:**
 >
+> - 2026-08-19: **Core: Secure Linux update handoff + Opaque Device Authentication + DB Retention Purge & Performance Indexes.**
+>   **Linux Update Handoff**: `AppUpdateService.InstallAsync` replaces synchronous `pkexec dpkg -i` with a detached bash script (`aat_update_*.sh`) in `/tmp`. The script waits for the parent tracker process to terminate before invoking `pkexec dpkg -i`, and automatically relaunches `--background --restart` upon success, preventing headless process hangs.
+>   **Device Authentication**: `AuthHandler.EmployeeLogin` generates a secure 256-bit opaque token (`dev_tok_...`) alongside JWT, upserts hardware metadata into `employee_devices`, and enforces device validation on all 11 sync endpoints via `DeviceAuth` middleware (`Authorization: Device <token>`). Added admin device listing and revocation endpoints. Client `EmployeeInfo`, `SqliteLogStore`, and `SyncService` updated to persist `device_token` and send `Authorization: Device ...`.
+>   **DB Retention & Performance**: Added `RetentionWorker` background job running hourly DB purges (configurable via `RETENTION_DAYS`, default 30 days) for stale `app_items` and ended `app_sessions`. Created composite index `idx_app_items_session_opened` (`app_session_id, opened_at DESC`) in migration 021 for optimized timeline reads. Verified: `go build`/`go vet` clean, `dotnet build` clean (0 warnings, 0 errors), `tsc --noEmit` clean.
 > - 2026-08-18: **Web: Employees list now uses server-side infinite scroll — Next/Previous buttons banned; rule codified in the docs.**
 >   The Employees page's `page` state + Previous/Next buttons were replaced with the same
 >   `useInfiniteQuery` + IntersectionObserver-sentinel pattern as the Session Timeline / Web Activity

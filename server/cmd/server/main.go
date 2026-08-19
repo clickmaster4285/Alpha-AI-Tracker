@@ -67,6 +67,7 @@ func main() {
 	// ────────────────
 	userRepo := repository.NewUserRepo(pool)
 	employeeRepo := repository.NewEmployeeRepo(pool)
+	deviceRepo := repository.NewDeviceRepo(pool)
 	departmentRepo := repository.NewDepartmentRepo(pool)
 	newSchemaRepo := repository.NewNewSchemaRepo(pool)
 
@@ -82,7 +83,7 @@ func main() {
 		redisInterface = redisClient
 	}
 
-	authHandler := handlers.NewAuthHandler(authService, employeeRepo, redisInterface, cfg.JWT)
+	authHandler := handlers.NewAuthHandler(authService, employeeRepo, deviceRepo, redisInterface, cfg.JWT)
 	userHandler := handlers.NewUserHandler(userService)
 	employeeHandler := handlers.NewEmployeeHandler(employeeService)
 	departmentHandler := handlers.NewDepartmentHandler(departmentService)
@@ -105,6 +106,9 @@ func main() {
 	stalenessSweep.Start(sweepCtx)
 	log.Printf("[server] staleness sweep started (stale window: %d days)", cfg.LinkStaleDays)
 
+	retentionWorker := jobs.NewRetentionWorker(pool)
+	go retentionWorker.Start(sweepCtx)
+
 	// ────────────────
 	// Setup Echo
 	// ────────────────
@@ -112,7 +116,7 @@ func main() {
 	e.HideBanner = true
 	e.HidePort = true
 
-	router.Setup(e, cfg, authService, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler)
+	router.Setup(e, cfg, authService, deviceRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler)
 
 	// ────────────────
 	// Graceful Shutdown

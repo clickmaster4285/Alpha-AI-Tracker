@@ -22,6 +22,15 @@ func NewNewSchemaHandler(service *services.NewSchemaService, authService *servic
 	return &NewSchemaHandler{service: service, authService: authService}
 }
 
+// Helper to extract server-authenticated employee ID from Echo context
+func getAuthenticatedEmployeeID(c echo.Context) (string, error) {
+	employeeID, ok := c.Get("employee_id").(string)
+	if !ok || employeeID == "" {
+		return "", c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Unauthorized employee context"})
+	}
+	return employeeID, nil
+}
+
 // ────────────────────────────────
 // Phase 1: Device Hardware Info
 // ────────────────────────────────
@@ -31,16 +40,12 @@ func (h *NewSchemaHandler) SyncDeviceHardware(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Invalid request body"})
 	}
-	if req.EmployeeID == "" || req.Token == "" {
-		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Employee ID and token are required"})
+	empID, errResp := getAuthenticatedEmployeeID(c)
+	if errResp != nil {
+		return errResp
 	}
-	claims, err := h.authService.ValidateToken(req.Token)
-	if err != nil {
-		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid or expired token"})
-	}
-	if claims.UserID == "" {
-		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid token claims"})
-	}
+	req.EmployeeID = empID
+
 	resp, err := h.service.SyncDeviceHardware(c.Request().Context(), &req)
 	if err != nil {
 		log.Printf("[new_schema] SyncDeviceHardware error: %v", err)
@@ -58,16 +63,12 @@ func (h *NewSchemaHandler) SyncInstalledApps(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Invalid request body"})
 	}
-	if req.EmployeeID == "" || req.Token == "" {
-		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Employee ID and token are required"})
+	empID, errResp := getAuthenticatedEmployeeID(c)
+	if errResp != nil {
+		return errResp
 	}
-	claims, err := h.authService.ValidateToken(req.Token)
-	if err != nil {
-		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid or expired token"})
-	}
-	if claims.UserID == "" {
-		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid token claims"})
-	}
+	req.EmployeeID = empID
+
 	resp, err := h.service.SyncInstalledApps(c.Request().Context(), &req)
 	if err != nil {
 		log.Printf("[new_schema] SyncInstalledApps error: %v", err)
@@ -85,16 +86,12 @@ func (h *NewSchemaHandler) SyncInstalledPackages(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Invalid request body"})
 	}
-	if req.EmployeeID == "" || req.Token == "" {
-		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Employee ID and token are required"})
+	empID, errResp := getAuthenticatedEmployeeID(c)
+	if errResp != nil {
+		return errResp
 	}
-	claims, err := h.authService.ValidateToken(req.Token)
-	if err != nil {
-		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid or expired token"})
-	}
-	if claims.UserID == "" {
-		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid token claims"})
-	}
+	req.EmployeeID = empID
+
 	resp, err := h.service.SyncInstalledPackages(c.Request().Context(), &req)
 	if err != nil {
 		log.Printf("[new_schema] SyncInstalledPackages error: %v", err)
@@ -112,16 +109,12 @@ func (h *NewSchemaHandler) SyncNetworkInfo(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Invalid request body"})
 	}
-	if req.EmployeeID == "" || req.Token == "" {
-		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Employee ID and token are required"})
+	empID, errResp := getAuthenticatedEmployeeID(c)
+	if errResp != nil {
+		return errResp
 	}
-	claims, err := h.authService.ValidateToken(req.Token)
-	if err != nil {
-		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid or expired token"})
-	}
-	if claims.UserID == "" {
-		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid token claims"})
-	}
+	req.EmployeeID = empID
+
 	resp, err := h.service.SyncNetworkInfo(c.Request().Context(), &req)
 	if err != nil {
 		log.Printf("[new_schema] SyncNetworkInfo error: %v", err)
@@ -139,16 +132,12 @@ func (h *NewSchemaHandler) SyncSessionEvents(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Invalid request body"})
 	}
-	if req.EmployeeID == "" || req.Token == "" {
-		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Employee ID and token are required"})
+	empID, errResp := getAuthenticatedEmployeeID(c)
+	if errResp != nil {
+		return errResp
 	}
-	claims, err := h.authService.ValidateToken(req.Token)
-	if err != nil {
-		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid or expired token"})
-	}
-	if claims.UserID == "" {
-		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid token claims"})
-	}
+	req.EmployeeID = empID
+
 	resp, err := h.service.SyncSessionEvents(c.Request().Context(), &req)
 	if err != nil {
 		log.Printf("[new_schema] SyncSessionEvents error: %v", err)
@@ -166,16 +155,12 @@ func (h *NewSchemaHandler) SyncAppSessions(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Invalid request body"})
 	}
-	if req.EmployeeID == "" || req.Token == "" {
-		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Employee ID and token are required"})
+	empID, errResp := getAuthenticatedEmployeeID(c)
+	if errResp != nil {
+		return errResp
 	}
-	claims, err := h.authService.ValidateToken(req.Token)
-	if err != nil {
-		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid or expired token"})
-	}
-	if claims.UserID == "" {
-		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid token claims"})
-	}
+	req.EmployeeID = empID
+
 	resp, err := h.service.SyncAppSessions(c.Request().Context(), &req)
 	if err != nil {
 		log.Printf("[new_schema] SyncAppSessions error: %v", err)
@@ -193,16 +178,12 @@ func (h *NewSchemaHandler) SyncAppItems(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Invalid request body"})
 	}
-	if req.EmployeeID == "" || req.Token == "" {
-		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Employee ID and token are required"})
+	empID, errResp := getAuthenticatedEmployeeID(c)
+	if errResp != nil {
+		return errResp
 	}
-	claims, err := h.authService.ValidateToken(req.Token)
-	if err != nil {
-		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid or expired token"})
-	}
-	if claims.UserID == "" {
-		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid token claims"})
-	}
+	req.EmployeeID = empID
+
 	resp, err := h.service.SyncAppItems(c.Request().Context(), &req)
 	if err != nil {
 		log.Printf("[new_schema] SyncAppItems error: %v", err)
@@ -293,16 +274,12 @@ func (h *NewSchemaHandler) SyncAppStatus(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Invalid request body"})
 	}
-	if req.EmployeeID == "" || req.Token == "" {
-		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Employee ID and token are required"})
+	empID, errResp := getAuthenticatedEmployeeID(c)
+	if errResp != nil {
+		return errResp
 	}
-	claims, err := h.authService.ValidateToken(req.Token)
-	if err != nil {
-		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid or expired token"})
-	}
-	if claims.UserID == "" {
-		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid token claims"})
-	}
+	req.EmployeeID = empID
+
 	resp, err := h.service.SyncAppStatus(c.Request().Context(), &req)
 	if err != nil {
 		log.Printf("[new_schema] SyncAppStatus error: %v", err)
@@ -320,16 +297,12 @@ func (h *NewSchemaHandler) SyncHardwareDevices(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Invalid request body"})
 	}
-	if req.EmployeeID == "" || req.Token == "" {
-		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Employee ID and token are required"})
+	empID, errResp := getAuthenticatedEmployeeID(c)
+	if errResp != nil {
+		return errResp
 	}
-	claims, err := h.authService.ValidateToken(req.Token)
-	if err != nil {
-		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid or expired token"})
-	}
-	if claims.UserID == "" {
-		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid token claims"})
-	}
+	req.EmployeeID = empID
+
 	resp, err := h.service.SyncHardwareDevices(c.Request().Context(), &req)
 	if err != nil {
 		log.Printf("[new_schema] SyncHardwareDevices error: %v", err)
@@ -347,16 +320,12 @@ func (h *NewSchemaHandler) SyncPermissionStatus(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Invalid request body"})
 	}
-	if req.EmployeeID == "" || req.Token == "" {
-		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Employee ID and token are required"})
+	empID, errResp := getAuthenticatedEmployeeID(c)
+	if errResp != nil {
+		return errResp
 	}
-	claims, err := h.authService.ValidateToken(req.Token)
-	if err != nil {
-		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid or expired token"})
-	}
-	if claims.UserID == "" {
-		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid token claims"})
-	}
+	req.EmployeeID = empID
+
 	resp, err := h.service.SyncPermissionStatus(c.Request().Context(), &req)
 	if err != nil {
 		log.Printf("[new_schema] SyncPermissionStatus error: %v", err)
@@ -374,16 +343,12 @@ func (h *NewSchemaHandler) SyncStorageDevices(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Invalid request body"})
 	}
-	if req.EmployeeID == "" || req.Token == "" {
-		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Employee ID and token are required"})
+	empID, errResp := getAuthenticatedEmployeeID(c)
+	if errResp != nil {
+		return errResp
 	}
-	claims, err := h.authService.ValidateToken(req.Token)
-	if err != nil {
-		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid or expired token"})
-	}
-	if claims.UserID == "" {
-		return c.JSON(http.StatusUnauthorized, dto.APIError{Code: http.StatusUnauthorized, Message: "Invalid token claims"})
-	}
+	req.EmployeeID = empID
+
 	resp, err := h.service.SyncStorageDevices(c.Request().Context(), &req)
 	if err != nil {
 		log.Printf("[new_schema] SyncStorageDevices error: %v", err)

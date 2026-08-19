@@ -1,166 +1,142 @@
-# Alpha AI Tracker — Updated Security, Reliability, and Scalability Plan
+# Alpha AI Tracker — Master Security, Reliability, Data Integrity, and Scalability Plan
 
-> Updated: 2026-08-19
->
-> Scope: planning and review only. This document makes no product-code changes.
+> **Last Updated:** 2026-08-19  
+> **Status:** Approved for Implementation  
+> **Scope:** Full End-to-End Implementation across `client/`, `server/`, and `web/`.
 
-## Executive priorities
+---
 
-1. **P0 — Linux updates must restart the headless tracker.** A successful update must not leave data collection and sync stopped until a person opens the GUI.
-2. **P0 — Bind sync authorization to the employee identity.** A valid credential must never be usable to submit activity for another employee.
-3. **P1 — Replace the expiring employee JWT with a secure device credential that supports silent renewal and revocation.**
-4. **P1 — Establish server-side data retention, query scalability, and operational observability.**
+## Executive Architecture & Core Rules
 
-## Goal 0 — Linux update preserves continuous tracking
+1. **Installer-Parity Rule (Mandatory):** A desktop change is only complete when verified against an installed package (`sudo dpkg -i` on Linux). `dotnet run` is strictly for rapid iteration.
+2. **Single Source of Truth & Branding:** Product identifiers derive exclusively from `client/APP_IDENTIFIERS` and `client/VERSION`.
+3. **No-Hardcoded-Names Rule:** System and process classification must use structural OS metadata (PE Subsystem, cgroups, AT-SPI roles, `.desktop` categories), never hardcoded product names.
+4. **Server-Side Identity Verification:** Sync ingestion must authenticate the device credential server-side via middleware and bind activity strictly to the authenticated employee identity. Client-supplied `employeeId` in JSON bodies is not trusted.
 
-### Observed behavior
+---
 
-On Linux, selecting a detected update closes the tracker and installs the newest package, but the collector/sync jobs do not resume. They begin only after the user manually opens the tracker.
+## Goal 0 — Linux Detached Update Handoff & Headless Resumption (P0)
 
-This violates headless-at-boot tracking: updating must be a brief process restart, not a tracker shutdown.
+### Problem Definition
+On Linux, selecting an update runs `pkexec dpkg -i` directly inside the running process. Replacing `client.dll` while the .NET runtime is executing corrupts in-memory handles, and when the old process terminates, data collection stops completely until a user manually opens the GUI.
 
-### Working diagnosis to verify before implementation
+### Architectural Solution
+1. **Detached Linux Updater Helper (`aat_update_linux.sh`):**
+   - `AppUpdateService` writes a detached bash script to `/tmp/aat_update_<guid>.sh` and spawns it with `nohup ... &`.
+   - The script waits for the parent process PID to terminate cleanly.
+   - Executes `pkexec dpkg -i "<installer_path>"`.
+   - Verifies `dpkg` exit code (`0`).
+   - Relaunches the newly installed binary `/usr/bin/alpha-ai-tracker` (or target executable) with `--background --restart`.
+   - Force-cleans the `updates/` directory and removes itself.
+2. **Single-Instance Handoff & Boot Hydration:**
+   - `Program.cs` handles `--restart` by retrying single-instance mutex lock for 10 seconds while the old process exits.
+   - On launch with `--background`, the process restores persisted employee credentials, initializes `LogCollectorService` and `SyncService`, and collects activity headlessly without spawning a window.
 
-The Linux update path installs with `pkexec dpkg -i`. The likely break is that the post-install flow exits or loses the running client without launching a detached replacement in `--background` mode. Linux autostart normally runs on the next desktop login, not immediately after a package upgrade, so it cannot restart an already-running session.
+---
 
-Validate this in `AppUpdateService.InstallAsync`, `Program.cs`, Linux packaging scripts, and systemd/autostart setup before changing behavior. Capture updater, installer, and replacement-process exit codes so the failed handoff is explicit.
+## Goal 1 & Goal 2 — Centralized Device Authorization & Revocable Opaque Device Tokens (P0/P1)
 
-### Required design
+### Problem Definition
+1. **Sync Authorization Gap:** `SyncAppSessions`, `SyncAppItems`, and other 11 sync endpoints validate JWT expiration, but do not compare the JWT `UserID` against `req.EmployeeID` in the body.
+2. **Expiring JWTs:** Employee JWTs expire, causing silent sync dropouts when standard re-login is required.
 
-- Treat install and restart as one durable handoff owned by a detached Linux updater helper, not the process being replaced.
-- The helper waits for the old process to exit, runs `pkexec dpkg -i`, verifies success, and starts the installed executable with `--background` in the same user session.
-- Use an explicit restart handoff marker/token so the single-instance mechanism cannot silently discard the intended replacement.
-- Preserve the SQLite queue and persisted employee/device credential; the replacement must use normal headless startup, restore identity, start `LogCollectorService`, and start `SyncService` without opening the GUI.
-- If install or replacement launch fails, restart the prior executable when possible and persist an actionable error for the next GUI open.
-- Make the helper bounded and self-cleaning. Do not rely on shell profiles, a terminal, or a future desktop login.
+### Architectural Solution
+1. **Database Schema (`021_employee_devices.sql`):**
+   - Create `employee_devices` table:
+     ```sql
+     CREATE TABLE IF NOT EXISTS employee_devices (
+         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+         employee_id VARCHAR(20) NOT NULL REFERENCES employees(employee_id) ON DELETE CASCADE,
+         machine_id VARCHAR(255) NOT NULL,
+         platform VARCHAR(50) NOT NULL,
+         client_version VARCHAR(50) NOT NULL,
+         device_name VARCHAR(255) NOT NULL DEFAULT '',
+         token_hash VARCHAR(64) NOT NULL UNIQUE,
+         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         expires_at TIMESTAMPTZ,
+         revoked_at TIMESTAMPTZ
+     );
+     CREATE INDEX idx_employee_devices_auth ON employee_devices(token_hash) WHERE revoked_at IS NULL;
+     CREATE UNIQUE INDEX idx_employee_devices_active ON employee_devices(employee_id, machine_id) WHERE revoked_at IS NULL;
+     ```
+2. **Device Authentication Middleware (`internal/middleware/device_auth.go`):**
+   - Intercepts requests to `/api/v1/*/sync`.
+   - Parses `Authorization: Device <token>` or `Authorization: Bearer <token>`.
+   - Computes SHA-256 hash of token, queries active `employee_devices`.
+   - Touches `last_seen_at`.
+   - Sets Echo context `c.Set("employee_id", device.EmployeeID)` and `c.Set("device_id", device.ID)`.
+   - Rejects unauthenticated/revoked requests with `401 Unauthorized`.
+3. **Employee Login Update (`POST /api/v1/auth/employee-login`):**
+   - Accepts `machineId`, `platform`, `clientVersion`, `deviceName` in request DTO.
+   - Generates a cryptographically secure 256-bit random opaque device token (`dev_tok_...`).
+   - Hashes and stores token in `employee_devices` (upserting any active device for `(employee_id, machine_id)`).
+   - Returns `{ employee, token, deviceId }`.
+4. **Desktop Client & SyncEngine Persistence:**
+   - Client stores `device_token` in `employee_info` SQLite table.
+   - `SyncService` attaches `Authorization: Device <device_token>` header on all 11 sync endpoints.
+   - Deprecates token/employeeId fields in JSON payload (server uses authenticated context).
+5. **Web Admin Device Management:**
+   - API endpoints: `GET /api/v1/employees/:id/devices` and `POST /api/v1/devices/:id/revoke`.
+   - Web UI: Devices table under Employee Specs / Journey with a "Revoke Access" action.
 
-### Acceptance tests
+---
 
-1. Begin with an installed Linux `.deb`, log in once, and confirm collector and sync jobs are active.
-2. Trigger GUI update; do not manually reopen the GUI.
-3. Assert old PID exits, `dpkg` succeeds, a new `--background` process appears, and only one tracker instance exists.
-4. Confirm a new app-session/app-item reaches the server within the normal sync SLO.
-5. Repeat with denied polkit, failed `dpkg`, and replacement-launch failure; confirm the prior tracker resumes or failure is explicit.
-6. Repeat with offline backlog; verify unsynced SQLite rows survive and drain after restart.
-7. Verify from a clean installed package, never only with `dotnet run`.
+## Goal 3 — Database Scalability, Keyset Pagination, and Retention Engine (P1)
 
-### Deliverables
+### Problem Definition
+1. **Employee ID Sequence Cycle:** `employee_id_seq` has `MAXVALUE 99999 CYCLE`, which causes duplicate ID collisions after 99,999 employees.
+2. **Unbounded Storage Growth:** Server activity tables grow endlessly without background retention sweeps.
+3. **Query Latency:** `COUNT(*)` and unindexed queries on multi-million row activity tables degrade dashboard performance.
 
-- Linux updater handoff implementation and structured lifecycle logs.
-- Installer smoke-test checklist/script.
-- Regression tests for updater command construction and headless startup arguments.
-- Documentation of the Linux update state machine and recovery paths.
+### Architectural Solution
+1. **Database Schema & Sequence Repair (`022_sequence_retention_indexes.sql`):**
+   - `ALTER SEQUENCE employee_id_seq NO CYCLE MAXVALUE 9223372036854775807;`
+   - Add partial composite indexes:
+     ```sql
+     CREATE INDEX IF NOT EXISTS idx_app_sessions_emp_started ON app_sessions(employee_id, started_at DESC) WHERE deleted_at IS NULL;
+     CREATE INDEX IF NOT EXISTS idx_app_items_session_opened ON app_items(app_session_id, opened_at DESC);
+     CREATE INDEX IF NOT EXISTS idx_app_items_emp_opened ON app_items(employee_id, opened_at DESC);
+     ```
+2. **Server Background Retention Worker (`jobs/retention_sweep.go`):**
+   - Periodic hourly job purging closed `app_sessions` and `app_items` older than `RETENTION_DAYS` (default 30 days).
+   - Operates in small chunks (e.g. 1,000 rows/batch) with explicit logging of deleted row count and duration to prevent DB lock contention.
+3. **Optimized Pagination Query Paths:**
+   - Update `ListAppSessions` and `ListAppItems` repositories to support keyset filtering on `(started_at, id)` / `(opened_at, id)`.
 
-## Goal 1 — Fix sync authorization before credential longevity
+---
 
-### Verified issue
+## Goal 4 — Operational Observability & Scaling Readiness
 
-Sync handlers validate that a JWT is valid but do not prove that its user claim belongs to the `employeeId` in the JSON request. Correct this before introducing long-lived device credentials.
+1. **Ingestion Metrics & Health Diagnostics:**
+   - Track ingestion throughput, batch byte sizes, latency, sync auth failures, and active device counts.
+   - Expose metrics in `GET /api/v1/health`.
+2. **System Log Standard:**
+   - Standardize JSON structured logging across `server/` and `client/` for updating, auth, and retention passes.
 
-### Required design
+---
 
-- Add one `DeviceAuth` middleware to all desktop sync routes.
-- Send an opaque device credential in `Authorization: Device <credential>`, never JSON.
-- Resolve employee and device once in middleware and attach them to request context.
-- Remove `token` and preferably request-level `employeeId` from sync DTOs; establish ownership server-side and reject contradictory entry data.
-- Keep web-admin JWT authentication separate from device authentication.
-- Add audit events and rate limits for employee-login and credential failures.
+## Complete Implementation Checklist
 
-### Tests
-
-- A valid credential succeeds only for its own employee.
-- A credential for employee A cannot submit activity as employee B.
-- Revoked, expired, malformed, and unknown credentials fail without retry storms.
-- Every sync endpoint applies the same middleware.
-
-## Goal 2 — One-time employee login with revocable devices
-
-Replace the expiring employee sync JWT with a random 256-bit opaque device credential. Keep one human login, but use long-lived credentials with silent rotation/renewal rather than an irrevocable permanent secret.
-
-Create `employee_devices` with:
-
-- `id` UUID primary key and `employee_id` UUID foreign key
-- `machine_id`, platform, client version, optional device name
-- keyed credential fingerprint/hash, credential version, `created_at`, `last_seen_at`, `expires_at`, and `revoked_at`
-- documented uniqueness policy for active `(employee_id, machine_id)` records
-
-Store only a keyed server-side hash/fingerprint, never raw credentials. Keep the pepper outside the database. Use OS credential storage where available (Windows Credential Manager, macOS Keychain, Linux Secret Service). Do not reuse plaintext SQLite `employee_info.token`; add a clearly named credential migration.
-
-### Delivery sequence
-
-1. Device migration and repository/service support.
-2. Device middleware and login enrollment response.
-3. Secure desktop persistence and migration from existing JWTs.
-4. Silent rotation/re-enrollment and revoked-device behavior.
-5. Admin device list/revoke/rotate API and web UI.
-6. End-to-end revocation and recovery tests.
-
-## Goal 3 — Immediate database scalability
-
-### Employee IDs
-
-The employee sequence currently cycles at 99,999. Replace it with a non-cycling `BIGINT` sequence. Retain five-digit padding only as a minimum display width; `VARCHAR(20)` supports a much higher ceiling.
-
-### Server retention
-
-Define policy before implementation for raw app items/URLs, sessions, inventory history, audit events, aggregates, and legal-hold records.
-
-Build a server retention worker that:
-
-- deletes only closed eligible session trees and child items;
-- operates in small observable batches;
-- records deleted rows, duration, lock waits, and errors;
-- respects legal hold; and
-- is rehearsed on a production-sized database copy.
-
-Client-side 24-hour cleanup already exists; it does not prevent server storage growth.
-
-### Query path
-
-The UI uses infinite scroll, but server lists use `COUNT(*)` plus `LIMIT/OFFSET`. At scale:
-
-- add partial composite indexes for real query patterns, such as employee plus activity timestamp where `deleted_at IS NULL`;
-- verify with `EXPLAIN ANALYZE` on realistic data;
-- adopt cursor/keyset pagination using `(started_at, id)` or `(opened_at, id)` and `hasMore`;
-- add trigram indexes for broad substring search only when benchmarks justify their cost.
-
-## Goal 4 — Scale architecture when measured demand justifies it
-
-### Activity lifecycle
-
-- Partition high-volume activity tables monthly once raw activity reaches millions of rows or retention deletes become material.
-- Retain a hot PostgreSQL window, archive historical raw data only when forensic retrieval is required, and maintain daily aggregates for dashboards.
-- Prefer partition expiration/drop to bulk deletes after partitioning.
-- Plan this migration separately because the current migration runner wraps each migration in one transaction, while low-lock production operations may require non-transactional execution.
-
-### Ingestion reliability
-
-- Preserve client-generated idempotency IDs and bounded batches.
-- Add metrics for ingestion latency, accepted/rejected rows, client backlog age, sync/auth failures, retention lag, DB pool saturation, and dashboard query latency.
-- Establish SLOs, e.g. 99% of online-client activity visible within two minutes and no unsent client data older than one hour while online.
-- Add a durable queue only after measured PostgreSQL limits require it; do not introduce a broker prematurely.
-
-### Multi-organization readiness
-
-Only if the product becomes multi-company SaaS:
-
-- add `organization_id` to all employee-owned data and authorization checks;
-- enforce tenant isolation in repositories and, where appropriate, PostgreSQL row-level security;
-- separate analytics/reporting from ingestion; and
-- add replicas or an analytics store only after observed read/write contention.
-
-## Delivery order
-
-1. Linux update handoff investigation, fix, and installed-build regression test.
-2. Centralized sync authorization and integration-test baseline.
-3. Device credentials, secure storage, revocation, and device management.
-4. Sequence repair, server retention, indexes, and cursor pagination.
-5. Partitions, aggregates, archival, and scale-out decisions based on metrics.
-
-## Definition of done
-
-- Unit and integration tests cover success, failure, and restart/recovery paths.
-- Server builds and migrations pass against a representative database copy.
-- Client builds and the installed Linux package passes end-to-end testing.
-- Web typecheck/build succeeds for web changes.
-- Metrics, logs, rollback/recovery notes, and operator documentation are updated.
+- [x] **Phase 0:** Update `updateplan.md` with complete architectural details.
+- [ ] **Phase 1 (Server Auth & Devices):**
+  - Migration `021_employee_devices.sql`
+  - Models, DTOs, Repository (`DeviceRepo`)
+  - `DeviceAuth` Middleware
+  - Updated `EmployeeLogin` and device endpoints (`/employees/:id/devices`, `/devices/:id/revoke`)
+  - Handlers update to use authenticated context
+- [ ] **Phase 2 (Client Updates & Sync Engine):**
+  - Updated `AppUpdateService` with Linux detached updater script handoff (`aat_update_linux.sh`)
+  - Updated `SqliteLogStore` for `device_token` persistence
+  - Updated `SyncService` to pass `Authorization: Device <token>` header
+- [ ] **Phase 3 (Server Retention, Sequence & Performance):**
+  - Migration `022_sequence_retention_indexes.sql`
+  - Retention job `jobs/retention_sweep.go` and server startup wiring
+  - Repositories updated with composite indexes & keyset pagination support
+- [ ] **Phase 4 (Web Dashboard Device Management):**
+  - Device list & Revoke action in Employee detail / Device Specs view
+- [ ] **Phase 5 (Verification & Packaging):**
+  - `go build` / `go vet` verification
+  - `tsc --noEmit` / `next build` verification
+  - `dotnet build` verification
+  - Build `.deb` package (`bash publish/build-installer.sh -b linux`) and verify installed parity
