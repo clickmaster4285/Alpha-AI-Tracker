@@ -12,5 +12,6 @@ public class EmployeeInfo
     public string? Avatar { get; set; }
     public string? AvatarColor { get; set; }
     public string? Token { get; set; }
+    public string? DeviceToken { get; set; }
     public string? LoggedInAt { get; set; }
 }

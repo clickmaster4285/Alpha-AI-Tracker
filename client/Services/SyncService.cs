@@ -45,6 +45,7 @@ public class SyncService : BackgroundService
     private string? _employeeId;
     private string? _employeeName;
     private string? _token;
+    private string? _deviceToken;
 
     // Exponential backoff on failed passes: 5s → 10s → 20s → … → SyncBackoffMaxSec.
     private TimeSpan _backoff = TimeSpan.FromSeconds(5);
@@ -508,9 +509,23 @@ public class SyncService : BackgroundService
             }
             content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 
+            using var request = new HttpRequestMessage(HttpMethod.Post, $"{serverUrl}{endpoint}")
+            {
+                Content = content
+            };
+
+            if (!string.IsNullOrEmpty(_deviceToken))
+            {
+                request.Headers.Authorization = new AuthenticationHeaderValue("Device", _deviceToken);
+            }
+            else if (!string.IsNullOrEmpty(_token))
+            {
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _token);
+            }
+
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(30));
-            var response = await _httpClient.PostAsync($"{serverUrl}{endpoint}", content, cts.Token);
+            var response = await _httpClient.SendAsync(request, cts.Token);
 
             if (response.IsSuccessStatusCode)
                 return true;
@@ -551,12 +566,13 @@ public class SyncService : BackgroundService
             var info = await _store.GetEmployeeInfoAsync(ct);
             if (info == null || string.IsNullOrEmpty(info.Token))
             {
-                _employeeId = _employeeName = _token = null;
+                _employeeId = _employeeName = _token = _deviceToken = null;
                 return false;
             }
             _employeeId = info.EmployeeId;
             _employeeName = info.Name;
             _token = info.Token;
+            _deviceToken = info.DeviceToken;
             return true;
         }
         catch
