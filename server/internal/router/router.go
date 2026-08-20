@@ -21,6 +21,7 @@ func Setup(
 	employeeHandler *handlers.EmployeeHandler,
 	departmentHandler *handlers.DepartmentHandler,
 	newSchemaHandler *handlers.NewSchemaHandler,
+	monitoringHandler *handlers.MonitoringHandler,
 ) {
 	// ─────────────────────────────
 	// Global Middleware
@@ -37,7 +38,7 @@ func Setup(
 	// CORS — allow frontend origin with credentials
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
 		AllowOrigins:     cfg.CORS.AllowedOrigins,
-		AllowMethods:     []string{echo.GET, echo.POST, echo.PUT, echo.DELETE, echo.OPTIONS},
+		AllowMethods:     []string{echo.GET, echo.POST, echo.PUT, echo.PATCH, echo.DELETE, echo.OPTIONS},
 		AllowHeaders:     []string{"Content-Type", "Authorization", "X-Requested-With"},
 		AllowCredentials: true,
 		MaxAge:           300,
@@ -139,4 +140,19 @@ func Setup(
 	depts.POST("", departmentHandler.CreateDepartment)
 	depts.PUT("/:id", departmentHandler.UpdateDepartment)
 	depts.DELETE("/:id", departmentHandler.DeleteDepartment)
+
+	// Monitoring configuration (types, categories, app/site classification)
+	monitoring := protected.Group("/monitoring")
+	monitoring.GET("/types", monitoringHandler.ListTypes)
+	monitoring.POST("/types", monitoringHandler.CreateType)
+	monitoring.PUT("/types/:id", monitoringHandler.UpdateType)
+	monitoring.DELETE("/types/:id", monitoringHandler.DeleteType)
+	monitoring.GET("/categories", monitoringHandler.ListCategories)
+	monitoring.POST("/categories", monitoringHandler.CreateCategory)
+	monitoring.PUT("/categories/:id", monitoringHandler.UpdateCategory)
+	monitoring.DELETE("/categories/:id", monitoringHandler.DeleteCategory)
+	monitoring.GET("/apps", monitoringHandler.ListApps)
+	monitoring.PATCH("/apps/:id", monitoringHandler.UpdateAppClassification)
+	monitoring.GET("/websites", monitoringHandler.ListWebsites)
+	monitoring.PATCH("/websites/:id", monitoringHandler.UpdateSiteClassification)
 }
