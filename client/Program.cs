@@ -213,10 +213,17 @@ if (config.InventoryWatchEnabled)
 // Browser Journey (Option B — accessibility-based: reads the OS accessibility tree.
 // No debugger, no extension, no browser catalog dependency; works on every browser
 // and every Chrome version, including install→use→uninstall-in-5-min scenarios.)
+//
+// IBrowserRegistry is registered unconditionally because LogCollectorService and
+// SessionLabelResolver consume it regardless of the browser-tracking master switch.
+builder.Services.AddSingleton<IBrowserRegistry, BrowserRegistry>();
+
 if (config.BrowserTrackingEnabled)
 {
     builder.Services.AddSingleton<IAccessibilityBrowserReader>(sp =>
-        AccessibilityBrowserReaderFactory.Create(sp.GetRequiredService<ILoggerFactory>()));
+        AccessibilityBrowserReaderFactory.Create(
+            sp.GetRequiredService<ILoggerFactory>(),
+            sp.GetRequiredService<IBrowserRegistry>()));
     // Hybrid URL fallback: reads the browser's own profile history DB when the a11y
     // tree cannot expose the omnibox (Linux Chrome 136+ / snap Firefox). No restart,
     // no flag, no extension; works on all platforms and browsers incl. brand-new ones.

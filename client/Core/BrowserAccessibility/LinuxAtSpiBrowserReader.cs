@@ -34,6 +34,7 @@ namespace client.Core.BrowserAccessibility;
 public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
 {
     private readonly ILogger<LinuxAtSpiBrowserReader> _logger;
+    private readonly IBrowserRegistry _browserRegistry;
     private bool? _checked;
     private int _pollCount;
 
@@ -51,9 +52,10 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
     public string Platform => "Linux";
     public bool IsAvailable => OperatingSystem.IsLinux();
 
-    public LinuxAtSpiBrowserReader(ILogger<LinuxAtSpiBrowserReader> logger)
+    public LinuxAtSpiBrowserReader(ILogger<LinuxAtSpiBrowserReader> logger, IBrowserRegistry browserRegistry)
     {
         _logger = logger;
+        _browserRegistry = browserRegistry;
     }
 
     public async Task<IReadOnlyList<AccessibilitySnapshot>> ReadAsync(CancellationToken ct)
@@ -157,16 +159,17 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
         //    a11y-less setups) → title-only snapshots; history fills the URL later.
         var seenTitles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var s in result)
-            seenTitles.Add($"{s.ProcessId}|{BrowserAccessibilityHelpers.StripBrowserSuffix(s.WindowTitle)}");
+            seenTitles.Add($"{s.ProcessId}|{BrowserAccessibilityHelpers.StripBrowserSuffix(s.WindowTitle, _browserRegistry.GetDisplayName(s.ProcessName))}");
 
         foreach (var wm in wmWindows)
         {
             if (string.IsNullOrWhiteSpace(wm.Title)) continue;
             var processName = ReadComm(wm.Pid);
-            if (!BrowserAccessibilityHelpers.IsBrowserProcess(processName))
+            if (!_browserRegistry.IsBrowser(processName))
                 continue;
 
-            var t = BrowserAccessibilityHelpers.StripBrowserSuffix(wm.Title);
+            var displayName = _browserRegistry.GetDisplayName(processName) ?? processName;
+            var t = BrowserAccessibilityHelpers.StripBrowserSuffix(wm.Title, displayName);
             if (seenTitles.Contains($"{wm.Pid}|{t}")) continue;
 
             result.Add(new AccessibilitySnapshot
@@ -314,13 +317,14 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
         return windows;
     }
 
-    private static List<WmWindow> IndexWmWindows(List<WmWindow> windows)
+    private List<WmWindow> IndexWmWindows(List<WmWindow> windows)
     {
         var dedup = new List<WmWindow>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var w in windows)
         {
-            var t = BrowserAccessibilityHelpers.StripBrowserSuffix(w.Title);
+            var displayName = _browserRegistry.GetDisplayName(ReadComm(w.Pid)) ?? ReadComm(w.Pid);
+            var t = BrowserAccessibilityHelpers.StripBrowserSuffix(w.Title, displayName);
             if (seen.Add($"{w.Pid}|{t}"))
                 dedup.Add(w);
         }
@@ -554,7 +558,6 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                 A11Y = 'org.a11y.atspi.Accessible'
                 PROPS = 'org.freedesktop.DBus.Properties'
                 TEXT = 'org.a11y.atspi.Text'
-                BROWSER_HINTS = ('chrome', 'chromium', 'firefox', 'brave', 'edge', 'msedge', 'vivaldi', 'opera', 'safari', 'arc', 'iexplore')
 
                 def getp(obj, name):
                     try:
@@ -691,9 +694,7 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                         # frames are not real OS windows — skipping them structurally keeps
                         # Electron apps' internal panes out of the journey stream.
                         continue
-                    is_browser = (any(h in comm for h in BROWSER_HINTS) or
-                                  any(h in cmd for h in BROWSER_HINTS) or
-                                  comm in _browser_exes)
+                    is_browser = comm in _browser_exes
                     # Non-browser apps (Electron webviews etc.) are only scanned on the
                     # throttled cadence above.
                     if not is_browser and not webview_scan:
@@ -855,11 +856,14 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
             ]
             # A running Firefox main process? (sessionstore may linger after exit)
             ff_pid = 0
+            ff_proc = ''
             for pid in os.listdir('/proc'):
                 if not pid.isdigit():
                     continue
-                if read_comm(int(pid)) == 'firefox':
+                comm = read_comm(int(pid))
+                if comm in _browser_exes:
                     ff_pid = int(pid)
+                    ff_proc = comm
                     break
 
             if ff_pid > 0:
@@ -911,7 +915,7 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                                     'src': 'ff',
                                     'key': win_key,
                                     'pid': ff_pid,
-                                    'proc': 'firefox',
+                                    'proc': ff_proc,
                                     'title': title,
                                     'url': url,
                                     'incognito': ispriv,
@@ -982,8 +986,8 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
     /// browser flavor, quotes, or the a11y tree exposes one without the suffix).</summary>
     private static bool TitlesOverlap(string a, string b)
     {
-        var x = BrowserAccessibilityHelpers.StripBrowserSuffix(a).Trim();
-        var y = BrowserAccessibilityHelpers.StripBrowserSuffix(b).Trim();
+        var x = BrowserAccessibilityHelpers.StripBrowserSuffix(a, null).Trim();
+        var y = BrowserAccessibilityHelpers.StripBrowserSuffix(b, null).Trim();
         if (x.Length == 0 || y.Length == 0) return false;
         if (string.Equals(x, y, StringComparison.OrdinalIgnoreCase)) return true;
         return x.Contains(y, StringComparison.OrdinalIgnoreCase) ||
