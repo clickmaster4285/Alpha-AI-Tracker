@@ -1,8 +1,42 @@
 # Web Architecture — Alpha AI Tracker Dashboard
 
-> **Last audited:** 2026-07-29  
-> **Changelog:** 2026-07-25: Updated comprehensive/logs page to use new app_sessions API (replaced old activityLogsApi). Added appSessionsApi to api.ts with AppSession types. Tabs removed (system log and productive/unproductive tabs not yet implemented for new schema).  
-> **Service completion (honest):** ~16%
+> **Last audited:** 2026-08-18
+> **Changelog:**
+> 2026-08-18: **Server-side date/search filters on App Usage + Web Activity + structural browser detection + UX fixes.**
+> - **Server-side filters**: `GET /app-sessions` and `GET /app-items` now accept `dateFrom`/`dateTo` (RFC3339 or
+>   date-only) — sessions filtered on `started_at`, items on `opened_at`; combined with existing `search`/`platform`.
+>   App-items search also matches `url`/`domain` (so searching "youtube" finds the exact page).
+> - **Shared `ActivityFilters` component** (`components/journey/ActivityFilters.tsx`): debounced search (300ms),
+>   date presets (Today/Yesterday/7d/30d/All Time) defaulting to **Today** with real local-day bounds
+>   (`createDefaultFilter()` sends `dateFrom`/`dateTo` on initial load — no stale data leaking), plus custom
+>   range via Calendar popover (`react-day-picker` + `date-fns`).
+> - **App Usage page** (`employee-journey/apps`): Duration column replaces Foreground/Background — computed from
+>   `endedAt - startedAt` (closed) or `now - startedAt` (running). Active Time tile = sum of durations.
+>   Apps with >1 session show a chevron → expandable nested table (Opened/Closed/Duration/Details per session).
+>   Uses `keepPreviousData` so filter changes never swap the whole content to a spinner.
+> - **Web Activity page** (`employee-journey/web`): Pages grouped by domain ("Visited Sites") with expandable
+>   groups (Visits/Duration/Last Visited). Sites with >1 visit get chevron → nested page list (Page/URL/Visited/
+>   Duration). Browser badge (Chrome/Floorp/etc.) from `metadata_json.processName` shown on every row — site
+>   rows show distinct browsers present. Search switches to flat "Matching Pages" view (exact URL visible).
+>   `keepPreviousData` for smooth filter transitions.
+> - **Filter UX fixes**: `ActivityFilters` always mounted (no unmount on empty/error/loading) — search field
+>   never loses focus, filters never disappear on no-match. `next.config.ts` gains `allowedDevOrigins`
+>   (suppresses cross-origin dev warning for LAN IP).
+> 2026-08-18: **Employee Journey + Device Specs modules** — the old `/users/[id]` detail page was replaced by nine
+> pages behind a shared `EmployeePage` shell + `EmployeeSelector` picker (deep-linkable via `?employeeId=`):
+> Session Timeline, App Usage, Web Activity (real APIs, infinite scroll) + Screenshots/Location Trail placeholders;
+> Device Specs: Hardware Overview, Installed Software, Peripherals, Permissions (all over `GET /employees/:id/detail`).
+> The employees table action menu now deep-links to both modules; `AppItem` gained the journey fields; new
+> `employee-journey` + `device-specs` permission modules; shared helpers `lib/format.ts`, `hooks/use-employee-detail.ts`,
+> components `EmptyState`/`InventoryTable`/`FocusTime`/`DeviceClassIcon`.
+> 2026-08-17: Sidebar restructure — Device Specs became a collapsible section with 4 children (Hardware Overview,
+> Installed Software, Peripherals, Permissions); Employee Journey stays collapsible with 5 children.
+> 2026-08-13: Employees rename — `/users`, `/users/[id]`, `/users/activity` moved to `/employees`, `/employees/[id]`,
+> `/employees/activity`; employee `role` removed (see [AGENTS.md](./AGENTS.md) changelog).
+> 2026-08-11: `/users/[id]` detail page + `GET /employees/:id/detail` aggregate endpoint; users list action menu became a
+> portal-rendered Radix `DropdownMenu`.
+> 2026-07-25: Updated comprehensive/logs page to use new app_sessions API (replaced old activityLogsApi). Added appSessionsApi to api.ts with AppSession types. Tabs removed (system log and productive/unproductive tabs not yet implemented for new schema).  
+> **Service completion (honest):** ~20%
 
 ---
 
@@ -78,7 +112,10 @@ web/
     │
     ├── lib/
     │   ├── api.ts               # API client: fetch wrapper with credentials:'include'
-    │   │                        #   authApi, employeesApi, departmentsApi, activityLogsApi
+    │   │                        #   authApi, employeesApi, departmentsApi, appSessionsApi,
+    │   │                        #   appItemsApi, healthApi (AppItem carries the journey fields)
+    │   ├── format.ts            # Shared formatters: formatMb / formatSeconds / formatDuration
+    │   │                        #   / formatDateTime / formatDate / formatDateShort
     │   ├── auth.tsx             # AuthContext, AuthProvider, useAuth, fallback users
     │   ├── permissions.tsx      # PermissionsContext, role-based permission matrix
     │   │                        #   (client-side only, stored in localStorage)
@@ -91,11 +128,19 @@ web/
     │
     ├── hooks/
     │   ├── use-mobile.tsx       # Responsive detection hook
-    │   └── use-toast.ts         # Toast notification hook (shadcn/ui)
+    │   ├── use-toast.ts         # Toast notification hook (shadcn/ui)
+    │   └── use-employee-detail.ts  # Query for GET /employees/:id/detail (enabled once an employee is picked)
     │
     ├── components/
     │   ├── providers.tsx        # Root provider: Redux + QueryClient + Tooltip + Toasts + Auth + Permissions
     │   ├── NavLink.tsx          # Active nav link component
+    │   ├── EmployeeSelector.tsx # Searchable employee picker (shared by Journey/Device-Specs pages)
+    │   ├── employees/           # Shared employee-page building blocks
+    │   │   ├── EmployeePage.tsx #   Page shell: header + picker + loading/error/no-selection
+    │   │   ├── InventoryTable.tsx  EmptyState.tsx  DeviceClassIcon.tsx
+    │   ├── journey/
+    │   │   ├── ActivityFilters.tsx  Shared search + date presets + custom range filter bar
+    │   │   └── FocusTime.tsx    #   Foreground/background stacked bar
     │   ├── ui/                  # ~45 shadcn/ui component files (button, card, dialog, table, chart, etc.)
     │   │   ├── button.tsx       #  (all are standard shadcn/ui, no customization)
     │   │   ├── card.tsx
@@ -124,9 +169,23 @@ web/
             ├── layout.tsx       # Wraps children with ProtectedRoute + AppLayout
             │
             ├── dashboard/       # Dashboard: stats cards, best performer, chart (mock data)
-            ├── users/           # Users list: CRUD via real API, generate secret dialog
-            │   └── activity/    # User activity status (mock data)
+            ├── employees/       # Employees list: CRUD via real API, generate secret dialog,
+            │   └── activity/    #   action menu deep-links to Journey/Device Specs
+            │                    #   (activity status: mock data; the /employees/[id] detail
+            │                    #   page was removed 2026-08-18 — see Employee Journey/Device Specs)
             ├── departments/     # Department CRUD via real API
+            │
+            ├── employee-journey/# Per-employee journey, shared EmployeePage shell + picker
+            │   ├── timeline/    #   Session timeline — real API, infinite scroll
+            │   ├── apps/        #   App usage — real API, duration aggregation, expandable session groups
+            │   ├── web/         #   Web activity — real API, domain-grouped, browser badges, search flat view
+            │   ├── screenshots/ #   Placeholder — client collects none
+            │   └── location/    #   Placeholder — client collects none
+            ├── device-specs/    # Per-employee machine picture (detail API)
+            │   ├── page.tsx     #   Hardware overview
+            │   ├── software/    #   Installed software (apps/packages tabs + search)
+            │   ├── peripherals/ #   Peripherals (plugged/unplugged cards)
+            │   └── permissions/ #   Permission checks
             │
             ├── logs/
             │   ├── comprehensive/  # Activity logs with filtering (real API)
@@ -203,7 +262,8 @@ web/
 | Strategy | Usage |
 |---|---|
 | **CSR (Client-Side Rendering)** | All pages use `"use client"` — no SSR, no ISR |
-| **TanStack Query** | Users, Departments, Activity Logs pages (real API data) |
+| **TanStack Query** | Employees, Departments, Logs, Employee Journey, Device Specs pages (real API data) |
+| **Infinite scroll** | `useInfiniteQuery` + IntersectionObserver sentinel — **the only allowed list pagination** on every list page (Session Timeline, Web Activity, Employees, …), server-side pagination via `page`/`perPage` (see *Web Infinite-Scroll Rule* below) |
 | **localStorage (mock data)** | ~25+ pages (dashboard, screenshots, charts, etc.) |
 | **Next.js Rewrites** | `/api/:path*` → `http://localhost:8080/api/:path*` (or `NEXT_PUBLIC_API_URL`) |
 | **Redux** | Auth state only (user, loading, auth status) |
@@ -212,9 +272,26 @@ web/
 
 **Not implemented.** No polling, no WebSocket, no Server-Sent Events. The web dashboard only shows data at the moment of page load — it never updates automatically.
 
+### Web Infinite-Scroll Rule (mandatory)
+
+**Every list/table page MUST paginate with server-side infinite scrolling — Next/Previous buttons are forbidden.**
+
+- Use `useInfiniteQuery` (TanStack Query v5) with `initialPageParam: 1` and
+  `getNextPageParam: (last) => (last.page < last.totalPages ? last.page + 1 : undefined)`.
+- Flatten pages with `data?.pages.flatMap(p => p.data)`.
+- Trigger the next fetch with an **IntersectionObserver sentinel** (`rootMargin: '300px'`, gated on
+  `hasNextPage && !isFetchingNextPage`) rendered below the list.
+- Show an inline "Loading more…" row while `isFetchingNextPage`; show a "Showing all N" footer when
+  `hasNextPage` is false.
+- Filters/search change the query key (a fresh infinite query starts at page 1) — never a `page` state.
+- Reference implementation: `src/app/(app)/employees/page.tsx` and the Session Timeline journey page.
+
 ---
 
 ## 5. Pages/Routes Inventory & Data Dependencies
+
+> The old `/employees/[id]` single-page detail view was removed 2026-08-18 — it is replaced by the
+> Employee Journey + Device Specs modules below (both deep-linkable via `?employeeId=`).
 
 | Route | Page | Data Source | Real API? |
 |---|---|---|---|
@@ -222,6 +299,15 @@ web/
 | `/dashboard` | Dashboard | localStorage mock | ❌ |
 | `/employees` | Employee list | Server | ✅ |
 | `/employees/activity` | Activity status | localStorage mock | ❌ |
+| `/employee-journey/timeline` | Session timeline | Server (`GET /app-sessions`, infinite scroll) | ✅ |
+| `/employee-journey/apps` | App usage | Server (aggregated `GET /app-sessions`) | ✅ |
+| `/employee-journey/web` | Web activity | Server (`GET /app-items?itemType=browser_tab`) | ✅ |
+| `/employee-journey/screenshots` | Screenshots | Placeholder — client collects none | ❌ |
+| `/employee-journey/location` | Location trail | Placeholder — client collects none | ❌ |
+| `/device-specs` | Hardware overview | Server (`GET /employees/:id/detail`) | ✅ |
+| `/device-specs/software` | Installed software | Server (detail payload) | ✅ |
+| `/device-specs/peripherals` | Peripherals | Server (detail payload) | ✅ |
+| `/device-specs/permissions` | Permissions | Server (detail payload) | ✅ |
 | `/departments` | Departments | Server | ✅ |
 | `/logs/comprehensive` | Activity logs | Server | ✅ |
 | `/logs/insights` | User insights | localStorage mock | ❌ |
@@ -296,7 +382,7 @@ These are used by the permissions system as sample roles, not real users.
 ### Permission System (`permissions.tsx`)
 
 - Defines a matrix of `module → role → permission` where permission is `'full' | 'view' | 'self' | 'config' | 'none'`
-- 36 modules defined (dashboard, users, departments, apps, screenshots, logs, etc.)
+- 38 modules defined (dashboard, users, employees, departments, apps, employee-journey, device-specs, screenshots, logs, etc.)
 - 9 roles defined
 - Stored in localStorage under `alpha_ai_tracker_dynamic_permissions`
 - **Entirely client-side** — the server has no knowledge of this permission system
@@ -308,7 +394,7 @@ These are used by the permissions system as sample roles, not real users.
 
 | Gap | Severity | Details |
 |---|---|---|
-| **Mock data dominance** | 🔴 High | ~25 of 30+ pages use fake localStorage data. They look functional but don't connect to the real server. A demo trap. |
+| **Mock data dominance** | 🔴 High | ~40 of ~50 pages use fake localStorage data (employees list, departments, logs, Employee Journey + Device Specs are real-API). They look functional but don't connect to the real server. A demo trap. |
 | **No tests** | 🔴 High | 0 test files. No unit, integration, or e2e tests. |
 | **Client-side only auth** | 🟠 Medium | Permission checks are in the browser. Any user can modify localStorage or bypass the sidebar to access any route. |
 | **No error boundaries** | 🟠 Medium | Uncaught React errors crash the entire page. No per-page error boundaries. |

@@ -193,6 +193,12 @@ public class AppUpdateService : ObservableObject, IHostedService
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
+        // Startup sweep: anything still in updates/ is a leftover installer from a
+        // prior run (the folder is a download staging area, nothing belongs there
+        // once the app is running). Wipe it so stale .deb/.exe files never linger
+        // on Windows/Linux disks — user rule 2026-08-18.
+        _ = Task.Run(() => CleanupUpdatesDirectoryAsync(CancellationToken.None), CancellationToken.None);
+
         if (!_config.UpdateEnabled || !RepoConfigured) return Task.CompletedTask;
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _ = Task.Run(() => RunBackgroundLoopAsync(_cts.Token), CancellationToken.None);
@@ -636,6 +642,35 @@ public class AppUpdateService : ObservableObject, IHostedService
         }
     }
 
+    /// <summary>
+    /// Force-deletes the whole updates download dir — every installer and any .part
+    /// leftover, then the folder itself. Download artifacts are single-use; once the
+    /// installer has run (or at startup, where anything present is a leftover) they
+    /// must not linger on disk. Failures are tolerated and logged — a transient AV
+    /// lock on Windows can survive the retries, and the next download already prunes
+    /// its own dest before writing.
+    /// </summary>
+    private async Task CleanupUpdatesDirectoryAsync(CancellationToken ct)
+    {
+        var dir = GetUpdatesDir();
+        try
+        {
+            if (!Directory.Exists(dir)) return;
+            foreach (var file in Directory.GetFiles(dir))
+            {
+                await DeleteFileWithRetryAsync(file, ct);
+            }
+            // Delete the now-empty folder; a still-locked file leaves it behind and is
+            // swept again on the next cleanup pass (startup / next successful install).
+            try { Directory.Delete(dir, recursive: false); } catch (IOException) { }
+            _logger.LogInformation("Cleaned up downloaded update artifacts in {Dir}", dir);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to fully clean the updates directory");
+        }
+    }
+
     /// <summary>Renames the finished .part download to the final installer name.</summary>
     private static async Task MoveInstallerPartAsync(string part, string dest, CancellationToken ct)
     {
@@ -678,45 +713,84 @@ public class AppUpdateService : ObservableObject, IHostedService
     {
         if (OperatingSystem.IsLinux())
         {
-            // The install dir is root-owned (/usr/share/alpha-ai-tracker), so dpkg
-            // needs elevation — pkexec opens the polkit password dialog (same pattern
-            // as the permission wizard). dpkg replaces the binary while we run; the
-            // user restarts to apply.
-            StatusText = "Installing — enter your password in the system dialog…";
+            StatusText = "Preparing update handoff…";
             try
             {
+                var updatesDir = Path.GetDirectoryName(installerPath) ?? "/tmp";
+                var exePath = Environment.ProcessPath ?? "/usr/bin/alpha-ai-tracker";
+                var pid = Environment.ProcessId;
+                var scriptPath = Path.Combine(Path.GetTempPath(), $"aat_update_{Guid.NewGuid():N}.sh");
+
+                var scriptContent = $@"#!/bin/sh
+PID={pid}
+INSTALLER=""{installerPath}""
+EXE_PATH=""{exePath}""
+UPDATES_DIR=""{updatesDir}""
+
+# Wait for parent process to exit
+COUNT=0
+while kill -0 $PID 2>/dev/null; do
+    sleep 0.5
+    COUNT=$((COUNT+1))
+    if [ $COUNT -ge 60 ]; then
+        break
+    fi
+done
+
+# Run installer via pkexec
+pkexec dpkg -i ""$INSTALLER""
+DPKG_EXIT=$?
+
+if [ $DPKG_EXIT -eq 0 ]; then
+    rm -rf ""$UPDATES_DIR"" 2>/dev/null
+    if [ -x ""$EXE_PATH"" ]; then
+        ""$EXE_PATH"" --background --restart &
+    elif [ -x ""/usr/bin/alpha-ai-tracker"" ]; then
+        ""/usr/bin/alpha-ai-tracker"" --background --restart &
+    fi
+fi
+
+rm -f ""$0"" 2>/dev/null
+";
+
+                await File.WriteAllTextAsync(scriptPath, scriptContent.Replace("\r\n", "\n"), ct);
+                try
+                {
+                    File.SetUnixFileMode(scriptPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+                }
+                catch { }
+
                 var psi = new ProcessStartInfo
                 {
-                    FileName = "pkexec",
-                    Arguments = $"dpkg -i \"{installerPath}\"",
+                    FileName = "/bin/sh",
+                    Arguments = $"\"{scriptPath}\"",
                     UseShellExecute = false,
                     CreateNoWindow = true
                 };
+
                 using var proc = Process.Start(psi);
                 if (proc is null)
                 {
-                    StatusText = "Could not launch the installer (is policykit-1 installed?).";
+                    StatusText = "Could not launch update helper script.";
                     return false;
                 }
-                var exited = proc.WaitForExit(120_000);
-                if (!exited)
-                {
-                    try { proc.Kill(entireProcessTree: true); } catch { }
-                    StatusText = "Installation timed out. Try again.";
-                    return false;
-                }
-                if (proc.ExitCode != 0)
-                {
-                    StatusText = "Installation failed — the polkit dialog may have been cancelled.";
-                    return false;
-                }
-                StatusText = "Update installed. Restart the app to apply it.";
+
+                StatusText = "Update handoff initiated. Restarting background tracker…";
                 RestartReady = true;
+                _logger.LogInformation("Linux updater helper spawned detached (script: {ScriptPath}). Exiting for update handoff.", scriptPath);
+
+                // Trigger process exit so the helper can take over cleanly
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(1000);
+                    Environment.Exit(0);
+                });
+
                 return true;
             }
             catch (Exception ex)
             {
-                StatusText = $"Install failed: {ex.Message}";
+                StatusText = $"Install handoff failed: {ex.Message}";
                 return false;
             }
         }
@@ -781,6 +855,11 @@ public class AppUpdateService : ObservableObject, IHostedService
                     "Start-Sleep -Seconds 2\r\n" +
                     "Write-UpdateLog 'Relaunching app with --restart'\r\n" +
                     "Start-Process -FilePath $exe -ArgumentList '--restart'\r\n" +
+                    "Write-UpdateLog 'Cleaning up downloaded installer (user rule 2026-08-18)'\r\n" +
+                    "$updatesDir = Split-Path -Parent $installer\r\n" +
+                    "Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue\r\n" +
+                    "Get-ChildItem -LiteralPath $updatesDir -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue\r\n" +
+                    "Remove-Item -LiteralPath $updatesDir -Force -ErrorAction SilentlyContinue\r\n" +
                     "Write-UpdateLog 'Update script done'\r\n" +
                     "Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue\r\n";
 

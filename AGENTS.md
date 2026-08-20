@@ -1,8 +1,171 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-08-13
+> **Last audited:** 2026-08-19
 > **Changelog:**
 >
+> - 2026-08-19: **Core: Secure Linux update handoff + Opaque Device Authentication + DB Retention Purge & Performance Indexes.**
+>   **Linux Update Handoff**: `AppUpdateService.InstallAsync` replaces synchronous `pkexec dpkg -i` with a detached bash script (`aat_update_*.sh`) in `/tmp`. The script waits for the parent tracker process to terminate before invoking `pkexec dpkg -i`, and automatically relaunches `--background --restart` upon success, preventing headless process hangs.
+>   **Device Authentication**: `AuthHandler.EmployeeLogin` generates a secure 256-bit opaque token (`dev_tok_...`) alongside JWT, upserts hardware metadata into `employee_devices`, and enforces device validation on all 11 sync endpoints via `DeviceAuth` middleware (`Authorization: Device <token>`). Added admin device listing and revocation endpoints. Client `EmployeeInfo`, `SqliteLogStore`, and `SyncService` updated to persist `device_token` and send `Authorization: Device ...`.
+>   **DB Retention & Performance**: Added `RetentionWorker` background job running hourly DB purges (configurable via `RETENTION_DAYS`, default 30 days) for stale `app_items` and ended `app_sessions`. Created composite index `idx_app_items_session_opened` (`app_session_id, opened_at DESC`) in migration 021 for optimized timeline reads. Verified: `go build`/`go vet` clean, `dotnet build` clean (0 warnings, 0 errors), `tsc --noEmit` clean.
+> - 2026-08-18: **Web: Employees list now uses server-side infinite scroll — Next/Previous buttons banned; rule codified in the docs.**
+>   The Employees page's `page` state + Previous/Next buttons were replaced with the same
+>   `useInfiniteQuery` + IntersectionObserver-sentinel pattern as the Session Timeline / Web Activity
+>   journey pages (`employeesApi.list` unchanged — server pagination via `page`/`perPage`, 10/page;
+>   filters change the query key and restart at page 1; "Loading more…" inline + "Showing all N" footer).
+>   **New mandatory rule — *Web Infinite-Scroll Rule*:** every web list/table page MUST use server-side
+>   infinite scroll; Next/Previous buttons are forbidden. Codified in `AGENTS.md` §6 (conventions table +
+>   rule subsection), `web/ARCHITECTURE.md` §4 (Data Fetching Strategy table + rule subsection), and
+>   `WORKFLOW.md` §1 (Web note). Verified: `tsc --noEmit` clean, `next build` passes.
+> - 2026-08-18: **Web: Employees Excel import/export.** The Employees page gains **Import** / **Export**
+>   buttons. **Export** downloads `employees-<date>.xlsx` (Employee ID / Name / Email / Department / Shift)
+>   from the new `GET /api/v1/employees/export` (all non-deleted employees, `EmployeeRepo.ListAll`).
+>   **Import** reads an `.xlsx/.xls/.csv` in the browser (`xlsx` client-side), extracts ONLY the columns
+>   whose headers match `userid|user_id|user id|employeeid|employee_id|employee id|name|employee name|
+>   username|email|department` (case/whitespace-insensitive — the header map in `employees/page.tsx`),
+>   and posts normalized rows to `POST /api/v1/employees/import`. The server imports in ONE transaction
+>   (`EmployeeRepo.Import`): departments are **get-or-created by name** (created first, then attached via
+>   `department_id`; soft-deleted depts are revived), and each employee is **upserted by the exact
+>   employee_id from the spreadsheet** (the `RETURNING (xmax = 0)` trick distinguishes insert vs update;
+>   soft-deleted employees revive; email may only be reused by the same employee_id; empty department
+>   → Engineering, empty shift → Day). Per-row outcomes (`imported`/`updated`/`skipped` + reason) return
+>   to the UI as a result dialog with a skipped-rows table. `employee_id` must be ≤20 chars and unique in
+>   the file. Verified: `go build`/`go vet` clean, `tsc --noEmit` clean, `next build` passes. Server + web
+>   only — no client/installer change.
+> - 2026-08-18: **Embedded-webview journeys — sites opened INSIDE apps (VS Code Simple Browser, Slack, Teams, any Electron/embedded browser) now tracked as web activity, with ZERO hardcoded app names.**
+>   Previously only real browser processes were tracked (a hardcoded `BrowserProcessHints` gate in the
+>   readers), so a website opened inside VS Code's Simple Browser never reached `/employee-journey/web`.
+>   The gate is replaced with **structural detection — the No-Hardcoded-Names Rule applied**: a window
+>   carries web content iff its accessibility tree contains a DOCUMENT_WEB node (AT-SPI role 95) whose
+>   DocURL is an **http(s)** URL. App chrome excludes itself by scheme (`vscode-webview://`, `file://`,
+>   `about:` never match), so no product-name list is needed anywhere — any app with an embedded http
+>   document is captured, and the HOST APP (process name, e.g. `code`) rides in metadata `"source":"webview"`
+>   so the web dashboard shows it as the source badge. Linux (`LinuxAtSpiBrowserReader`): the probe now
+>   scans ALL a11y apps (structurally skipping `--type=` Chromium/Electron child processes and `--headless`)
+>   — browsers keep the full path (omnibox + DocURL + incognito), non-browsers must PROVE an http DocURL
+>   or they are never emitted. The expensive non-browser walk runs every 5th poll (~15s) with a 400-node
+>   budget, and the reader **caches webview windows and re-emits them every poll** so sessions stay stable,
+>   focus accounting works, and the tracker's time-based missing-window close (5×interval) never fires
+>   between scans (cache entries expire ~60s after a rescan stops producing them). Windows
+>   (`WindowsUiaBrowserReader`): non-browser windows are scanned for a descendant Document/Edit whose
+>   Value/Name is an http(s) URL (the UIA analog of DocURL) — Electron webviews expose this on demand;
+>   browsers unchanged. Tracker: `HydrateTrackedWindowsAsync` now hydrates browser_tab-rooted sessions
+>   (webview sessions survive fast relaunches), metadata `source` is `webview` for webview windows, and
+>   **the main loop (`LogCollectorService`) now skips sessions whose root item is `browser_tab`** — without
+>   that, a webview session (process `code`) hydrated under the SAME key as the host app's own session and
+>   was closed as a duplicate one cycle later. Web: the source badge on Web Activity shows the host app
+>   process name for webview-source items (data-driven). Verified: `dotnet build` 0/0, `tsc` clean; the
+>   ACTUAL embedded probe run live on the dev PC captures Chrome (chatgpt.com, active) with zero junk
+>   webview rows, and the poll-4 throttle returns browsers only. ⚠️ Known Linux limitation (Chromium,
+>   NOT our code): Electron/Chromium apps only expose their content a11y tree when launched with
+>   `--force-renderer-accessibility` (the same documented Chrome limitation) — the webview DocURL is
+>   invisible otherwise; Windows/macOS UIA/AX expose webview trees on demand, so the feature works there
+>   out of the box. Ships only in a new installer build.
+> - 2026-08-18: **Structural process name resolution — Flatpak/snap browsers (Floorp, LibreWolf, etc.) no longer show "xdg-dbus-proxy" as their browser name.**
+>   The AT-SPI PID for Flatpak apps belongs to the `xdg-dbus-proxy` IPC broker, not the app itself,
+>   so `/proc/<pid>/comm` returned the proxy name. New `resolve_app_name(pid)` in the Python probe
+>   checks **FLATPAK_ID** in `/proc/<pid>/environ` (extracts the short app name from the Flatpak app ID,
+>   e.g. `org.mozilla.Floorp` → `floorp`) and **snap path** in `/proc/<pid>/exe` (e.g.
+>   `/snap/firefox/...` → `firefox`). Falls back to `/proc/comm` for native apps. No name lists —
+>   Flatpak and snap are the only sandboxing systems that inject proxy PIDs, and the metadata they
+>   expose is structural (OS-defined environment variable / filesystem path). The resolved name is
+>   also used for browser detection: new **structural browser detection** scans `.desktop` files for
+>   `Categories=WebBrowser` (cached 5 min in `~/.cache/alpha-ai-tracker/browser_exes.json`) and
+>   matches against the resolved process name — any browser installed on the system is detected
+>   without a hardcoded hints list. Flatpak `.desktop` files with `Exec=flatpak run <app-id>` are
+>   parsed to extract the app ID's short name. C# reader: new `_pidNameCache` (populated from AT-SPI
+>   probe results each poll) lets `ReadComm()` resolve WM-only Flatpak/snap windows too.
+>   `StripBrowserSuffix` gains Floorp/LibreWolf/Waterfox. Verified: `dotnet build` 0/0.
+> - 2026-08-18: **Downloaded installers no longer linger in `updates/` — the folder is force-deleted after every successful update (Windows + Linux) + a startup sweep.**
+>   Root cause: `AppUpdateService` downloaded the platform installer into the user data dir
+>   (`~/.local/share/alpha-ai-tracker/updates` / `%LocalAppData%\AlphaAITracker\updates`) and handed it to
+>   the OS installer, but nothing ever deleted it — every updated machine kept every installer it had
+>   ever downloaded. Fix: new `CleanupUpdatesDirectoryAsync` force-deletes every file (retry loop, `.part`
+>   leftovers included) then the folder itself. Wired into three places: (1) **Linux** — after a successful
+>   `pkexec dpkg -i` in `InstallAsync` (dpkg is synchronous, so the app is still alive and can wipe the
+>   consumed `.deb` immediately); (2) **Windows** — inside the detached PowerShell update script, after the
+>   installer finishes and the app is relaunched (`Remove-Item` on the installer, every file in `updates/`,
+>   then the folder — the app can't do it itself because on Windows `InstallAsync` returns BEFORE setup
+>   runs); (3) **startup sweep** — `StartAsync` prunes the folder on every boot, so installers already
+>   sitting on disk from past updates (including the two PCs affected by this report) are wiped without
+>   waiting for the next update. Failures are tolerated (transient AV lock → logged, re-swept on next
+>   pass; the next download prunes its own dest anyway). macOS untouched (dmg is opened, not consumed).
+>   Verified: `dotnet build` 0/0. ⚠️ ships only in a new installer build.
+> - 2026-08-18: **Focus totals were still frozen (~0s on the web) — the periodic flush OVERWROTE the DB row with the in-memory delta instead of accumulating. Fixed + guaranteed 1-minute push.**
+>   Live evidence after the previous fix shipped in v1.2.4: Chrome stuck at exactly `fg=30.0`, VS
+>   Code/Calendar/Help at exactly `300.0`, byte-identical across 65s of running — so the collector WAS
+>   detecting foreground, but the flush SQL (`UpdateAppSessionFocusSql`) did `SET foreground_seconds =
+>   $foreground_seconds` and then cleared the counter — each flush rewrote only the last ~10-cycle window
+>   (300s main loop / 30s browser tracker), never the session total, and the web App Usage page showed
+>   those tiny deltas as 0s. Fix: the flush is now **ADDITIVE** (`foreground_seconds = COALESCE(foreground_seconds,
+>   0) + $foreground_seconds`) — the in-memory dictionary stays a per-flush DELTA (cleared after each write,
+>   verified both loops), so the SQLite row is the true cumulative session total, survives restarts, and is
+>   re-sent verbatim to the server (whose upsert overwrites with it). Close paths were audited for
+>   double-counting: `CloseSessionsAndAppItemsAsync`/browser closes flush FIRST then close with NULL focus
+>   (`UpdateAppSessionEndedSql` is `COALESCE($fg, fg)` — NULL keeps the flushed total). **User rule
+>   2026-08-18 — every minute, force-push all `is_synced=0` rows:** (1) the main loop now calls
+>   `FlushSessionFocusAsync` every 2 cycles (~60s at the default 30s interval, was every 10/~5min), so
+>   growing totals re-queue every minute; (2) `SyncService` failure backoff is now **capped at 60s** — the
+>   backoff only stretches a single retry gap, never the guaranteed cadence, so a drain pass (and thus every
+>   `is_synced=0` row) reaches the server within a minute even during repeated failures (previously a 5-min
+>   max backoff could starve unsent rows). Verified: `dotnet build` 0/0; the exact additive SQL executed
+>   twice against a copy of the live DB accumulates 30→60 fg / 310→320 bg and re-queues `is_synced=0`.
+>   ⚠️ ships only in a new installer build.
+> - 2026-08-18: **Foreground/background focus times were stuck at 0 — two root causes fixed (live-DB + OS-probe root-caused on the Linux/Wayland dev PC, cross-checked against Windows EMP-10005/EMP-10006).**
+>   **Cause 1 — Linux/Wayland foreground detection was completely dead.** Every method in `ProcessCollector.GetActiveWindowInfo` failed on this machine: `xprop _NET_ACTIVE_WINDOW` returns `0x0` (Wayland), the GNOME portal has no `org.freedesktop.portal.Window` interface (GNOME backend doesn't implement it), GNOME Shell Introspect `GetWindows` is `AccessDenied`, xdotool is X11-only, and — the core bug — **the AT-SPI probe could not read `GetState`**: at-spi2-core ≥ 2.50 returns a **PACKED 64-bit bitmask** (`[uint32 1124073730, 0]` — low word first, bit N = state N) instead of a list of state ids, and the check `if 8 not in state` (python) / `Contains("8")` (gdbus fallback) looked for state **8 = ENABLED** (every window has it) in the wrong format. Verified live: the focused Chrome window is the ONLY one whose bitmask has bit **1 = STATE_ACTIVE** set (`0x43000102` vs `0x43000100`); VS Code/Nautilus/etc. don't. Fix: `IsAtSpiActiveState`/`is_active_window` decode BOTH formats and test ACTIVE(1)/FOCUSED(12) — the old fallback heuristic (newest-started process) never matched a tracked session, so `fgKey` was always empty → every session earned only `background_seconds`. **Cause 2 — browser sessions never earned focus time at all.** Browsers are owned by `AccessibilityBrowserTracker` (excluded from the main loop's `resolvedLogs`), and the tracker never wrote foreground/background — so Chrome/Firefox/Edge rows (the majority of usage!) always showed 0/0, and when a browser held focus even non-browser apps got only background (fgKey empty). Fix: new `AccessibilitySnapshot.IsActive` set per-platform (Linux AT-SPI ACTIVE/FOCUSED bit, Windows `GetForegroundWindow` HWND match, macOS frontmost process) and the tracker now accumulates the poll interval into `foreground_seconds`/`background_seconds` per open window every poll (active window → foreground, rest → background), flushing every 10 polls + on close through the existing `UpdateAppSessionFocusAsync` (re-syncs via `is_synced=0`). Verified: `dotnet build` 0/0; the exact new decode run live on the dev PC returns exactly one active window. ⚠️ ships only in a new installer build.
+> - 2026-08-18: **Client: app-session tracking now starts headlessly at boot — the GUI can no longer start/stop tracking.**
+>   Root cause: `_trackingEnabled` was set ONLY by `StartTracking()`, which was called exclusively from the
+>   Avalonia GUI (`MainViewModel.InitializeAsync` / `LoginAsync`). Since 2026-08-15 boot runs `--background`
+>   (services only, no window), a powered-on PC restored the login (`LogCollectorService.RefreshEmployeeInfo`)
+>   but the main loop spun on "waiting for login" forever: browser journeys kept flowing (`AccessibilityBrowserTracker`
+>   restores the login from SQLite itself) while ZERO app sessions were collected — the web dashboard showed Web
+>   Activity but empty Session Timeline/App Usage after every reboot (Linux AND Windows). Fix: `ExecuteAsync` now
+>   calls `StartTracking()` right after `RefreshEmployeeInfo` when persisted employee credentials exist — the same
+>   restore the GUI performed, moved into the service so it runs in `--background` mode at power-on. The GUI is now
+>   strictly login-only (first-time identity + permission wizard); opening/closing it never starts or stops tracking
+>   (window-close hides to tray; only an explicit tray Quit / process stop exits the tracker). `StartTracking()` is
+>   idempotent (guarded login-event dedup), so the GUI restoring a second time is harmless. Verified: `dotnet build`
+>   0/0.
+> - 2026-08-18: **Web: Server-side date filters + expandable session groups + structural browser badges + UX fixes on App Usage and Web Activity.**
+>   Server: `GET /app-sessions` and `GET /app-items` now accept `dateFrom`/`dateTo` (RFC3339 or date-only),
+>   filtering `started_at` / `opened_at`; app-items search also matches `url`/`domain`. New shared
+>   `ActivityFilters` component (debounced search, Today-default date presets with real local-day bounds,
+>   custom range via Calendar popover) wired into both pages. **App Usage**: Duration column replaces
+>   Foreground/Background (computed from `endedAt - startedAt` / `now - startedAt`); Active Time tile =
+>   sum of durations; apps with >1 session get chevron → expandable nested per-session table (Opened/
+>   Closed/Duration/Details). **Web Activity**: pages grouped by domain ("Visisted Sites") with expandable
+>   groups; browser badge (Chrome/Floorp/etc.) from `metadata_json.processName` on every row + distinct
+>   browsers per site group; search switches to flat "Matching Pages" view (exact URL visible). Both pages
+>   use `keepPreviousData` so filter changes never swap the whole content to a spinner; `ActivityFilters`
+>   is always mounted (search field never loses focus, filters never disappear on empty results).
+>   `next.config.ts` gains `allowedDevOrigins` (suppresses cross-origin dev warning). Verified: `tsc`
+>   clean, `next build` passes.
+> - 2026-08-18: **Web: Employee Journey + Device Specs modules — the `/users/[id]` detail page was replaced by nine pages behind a shared shell.**
+>   The old 820-line `web/src/app/(app)/employees/[id]/page.tsx` is deleted. New shared `EmployeePage` shell
+>   (`web/src/components/employees/EmployeePage.tsx`) provides the page header, a searchable `EmployeeSelector`
+>   picker (deep-linkable via `?employeeId=`), and loading/error/no-selection states; the page body is a
+>   render-prop handed `{employee, detail?, detailLoading}`, and pages needing the aggregate machine picture pass
+>   `fetchDetail` to load `GET /employees/:id/detail` (`hooks/use-employee-detail.ts`). **Employee Journey** —
+>   Session Timeline (`useInfiniteQuery` on `GET /app-sessions`, 30/page, IntersectionObserver sentinel,
+>   `FocusTime` fg/bg stacked bar), App Usage (aggregates the most recent 5×100 app sessions into per-app
+>   fg/bg totals), Web Activity (`GET /app-items?itemType=browser_tab`, infinite scroll), plus Screenshots /
+>   Location Trail placeholders (the client collects neither yet). **Device Specs** — Hardware Overview (specs +
+>   storage + network + app_status), Installed Software (Applications/Packages tabs with search,
+>   `InventoryTable`), Peripherals (plugged/unplugged cards + `DeviceClassIcon`), Permissions. The employees
+>   table action menu now offers **View Journey** (`/employee-journey/timeline?employeeId=`) and **Device
+>   Specs** (`/device-specs?employeeId=`) instead of the old detail link. `AppItem` gained the journey fields
+>   in `api.ts` (`url`, `domain`, `processId`, `objectType`, `action`, `journeyId`, `sequence`, `previousPath`,
+>   `currentPath`, `windowId`, `tabId`, `metadataJson`); new permission modules `employee-journey` +
+>   `device-specs`; new shared helpers `lib/format.ts` + `EmptyState`. **Hook-order crash fixed while landing:**
+>   hooks (`useQueries`/`useInfiniteQuery`/`useMemo`…) were being called INSIDE the `EmployeePage` render-prop,
+>   so selecting an employee changed the shell's hook count and React threw "Rendered more hooks than during the
+>   previous render" — each page body was extracted into a real inner component (`AppUsageBody`/`TimelineBody`/
+>   `WebBody`/`SoftwareBody`). Verified: `tsc --noEmit` clean.
+> - 2026-08-17: **Web sidebar restructure — Device Specs became a collapsible section.** `AppSidebar.tsx`: the
+>   single top-level "Device Specs" item is now a parent with four children — Hardware Overview
+>   (`/device-specs`), Installed Software (`/device-specs/software`), Peripherals (`/device-specs/peripherals`),
+>   Permissions (`/device-specs/permissions`) — all under the existing `device-specs` permission module;
+>   "Employee Journey" stays a collapsible with Session Timeline / App Usage / Web Activity / Screenshots /
+>   Location Trail. The rest of the commit is whitespace alignment of the nav config.
 > - 2026-08-15: **Duplicate sessions fixed — one session per logical window on Windows/macOS (root-PID grouping).** Root cause: on Linux, systemd cgroups (`app-*.scope`) collapse VS Code's ~8 same-named `Code.exe` processes into ONE session; on Windows/macOS there are no cgroups, so the session key fell back to per-PID and every `Code.exe` process (main window + renderer + GPU + utility + extension hosts) created its OWN session row — the web detail page showed 8 identical "Visual Studio Code" rows for one window. Fix: `LogCollectorService.ResolveRootPid` walks the PPID chain up to the TOP-MOST same-binary process (the app's main window process — a different binary is a hard boundary, so two VS Code windows still get two sessions) and every `BuildSessionKey`/`ProcessId`/root-item call site keys on it; boot hydration now dedups legacy per-PID open sessions that collapse to one key (keeps the earliest, closes the rest so they stop showing "running"). Also: a title-less child creating the session root first no longer leaves the root stuck on the process name — `UpdateActivityContextAsync` upgrades the open root in place when a window-bearing process arrives.
 > - 2026-08-15: **Foreground/background focus time per session (client + server + web).** The collector already knew the OS foreground PID each cycle (`ActivityLog.IsForeground`) but never persisted it. Client: new `foreground_seconds`/`background_seconds` on SQLite `app_sessions` (idempotent MigrateSql ALTERs), accumulated per cycle for every open session (mapped through the same root-PID grouping so the whole window counts), flushed every 10 cycles + on close with `is_synced=0` (rule 2026-08-12) so SyncService re-sends; payload sends the values. Server: migration **020** adds the two columns, model/DTO/`SyncAppSessions`/`BulkInsertAppSessions` upsert (EXCLUDED overwrite — the client re-sends the totals) + `ListAppSessions` SELECT. Web: employee detail **Activity tab rebuilt with server-side pagination + infinite scroll** (`useInfiniteQuery` on `GET /app-sessions`, 30/page, IntersectionObserver sentinel) and columns **Application, Status (Running/Closed), Opened, Closed, Duration, Foreground/Background** (green/gray stacked bar + `fg / bg` readout).
 > - 2026-08-15: **Boot is now fully headless — GUI only opens on manual launch.** Auto-start (Windows Run key + ONSTART scheduled task, Linux `.desktop` autostart, macOS plist) switched from `--minimized` (hidden-to-tray, UI still created) to `--background` (services only — no window, no tray at boot). `Program.cs` background mode now lazily creates the Avalonia UI ONCE on a dedicated thread when a manual launch sends the SHOW signal (new `App.LaunchedHidden` flag replaces the args check in `App.axaml.cs`), so "open the GUI" works any number of times without stopping the tracking process. The background guard migrates stale `--minimized` autostart entries to `--background` automatically (`AutoStartService.EnsureBackgroundAutoStartFlag`).
@@ -569,7 +732,7 @@ Alpha AI Tracker is an employee monitoring and productivity analytics system con
 
 1. **Desktop Client** (`client/`) — Installed on employee machines. Collects process activity, window titles, CPU/memory usage, and installed app/package information. Sends data to the central server via REST.
 2. **Server** (`server/`) — Go + Echo + PostgreSQL + Redis. Central API hub. Receives and stores client data, exposes admin-facing REST API for the web dashboard. Handles authentication for both web admins and employee desktop clients.
-3. **Web Dashboard** (`web/`) — Next.js 15 App Router. Admin-facing UI for viewing employee data, managing departments, generating login secrets, and analytics. Most pages currently render mock localStorage data rather than calling the real API.
+3. **Web Dashboard** (`web/`) — Next.js 15 App Router. Admin-facing UI for viewing employee data, managing departments, generating login secrets, and analytics. Most pages currently render mock localStorage data rather than calling the real API; the employees list, departments, logs, and the Employee Journey + Device Specs modules (2026-08-18) call real APIs.
 
 ---
 
@@ -725,7 +888,7 @@ flowchart LR
 - Background guard watchdog
 - Tray icon (minimize to tray on close)
 - Windows power management (prevents sleep)
-- **Headless `--background` service mode** — runs the tracking services with no Avalonia/X11 UI (systemd); skips GUI init so the installed service can't crash on Wayland `XAUTHORITY`
+- **Headless `--background` service mode** — runs the tracking services with no Avalonia/X11 UI (systemd); skips GUI init so the installed service can't crash on Wayland `XAUTHORITY`. **Tracking starts headlessly at boot** (2026-08-18): `ExecuteAsync` restores the persisted session and calls `StartTracking()` itself, so power-on → full tracking (app sessions + browser journeys + inventory) with no GUI. The GUI is login-only — it cannot start or stop tracking
 - **Single-instance activation** — a second user launch signals the running instance (named pipe `alpha-ai-tracker-activation`) to raise its window; `--background`/`--minimized` relaunches exit quietly
 - **Six-page GUI** (2026-08-10) — `MainWindow` is a router over four exclusive states; pages live in `Views/Pages/`: Splash (boot checklist), Login, PermissionSetup (stepper), and behind the nav rail Dashboard (identity + status tiles + pipeline health + attached devices), System Specs (machine/compute/network/storage/peripherals) and Installed Applications (searchable apps + packages inventory, virtualized). One VM per page, all Transient in DI. Details: [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md)
 - **Runtime branding from a single source** — `Core/AppInfo.cs` resolves the product name, tagline, initials, publisher, copyright and version from the embedded `APP_IDENTIFIERS` + `VERSION`; no XAML or C# literal names anywhere in the UI. Editing either file re-brands both the app and the installers (§6 → *Branding-Single-Source Rule*)
@@ -741,23 +904,25 @@ flowchart LR
 - **macOS window titles** — only captures foreground window
 - **Six-page GUI not yet ship-tested** — it needs no packaging change (hero images and `APP_IDENTIFIERS` both compile into `client.dll`), but per the Installer-Parity Rule it is not "done" until verified from an installed build
 
-### Web — ~16% complete
+### Web — ~20% complete
 
 **What works:**
 
-- ~45 page routes exist with polished UI
+- ~50 page routes exist with polished UI
 - Login page with animated hero section
 - Auth check on mount (Redux + server cookie)
-- Users page — real API calls via TanStack Query (CRUD + generate secret, portal-rendered Radix action menu)
-- **User detail page (`/users/[id]`)** — real API calls via new aggregate `GET /employees/:id/detail`: identity + status, stat tiles, hardware/storage/network, installed apps, packages, peripherals, permissions
+- Employees page — real API calls via TanStack Query (CRUD + generate secret, portal-rendered Radix action menu); each row's action menu deep-links to **View Journey** and **Device Specs** (2026-08-18)
+- **Employee Journey module** (2026-08-18) — three real-API pages behind the shared `EmployeePage` shell + `EmployeeSelector` picker: Session Timeline (`useInfiniteQuery` on `GET /app-sessions`, 30/page, fg/bg stacked bar), App Usage (per-app foreground/background aggregation of the latest 500 sessions), Web Activity (`GET /app-items?itemType=browser_tab`); Screenshots and Location Trail are shell placeholders (the desktop client collects neither yet)
+- **Device Specs module** (2026-08-18) — four real-API pages over the aggregate `GET /employees/:id/detail`: Hardware Overview, Installed Software (Applications/Packages tabs + search), Peripherals, Permissions. This replaced the old `/users/[id]` single-page detail view (deleted)
+- Shared building blocks: `EmployeePage` shell (header + picker + loading/error/no-selection states, optional `fetchDetail`), `hooks/use-employee-detail.ts`, `lib/format.ts`, `EmployeeSelector`, `EmptyState`/`InventoryTable`/`FocusTime`/`DeviceClassIcon`
 - Departments page — real API calls (CRUD)
 - Logs/Comprehensive page — real API calls (now using new app_sessions API)
-- Sidebar with permission-based filtering (client-side only)
+- Sidebar with permission-based filtering (client-side only); Device Specs and Employee Journey are collapsible sections
 - Dashboard shows mock stats and chart
 
 **What's missing (most pages):**
 
-- **~40 of 45 pages use mock localStorage data** — not connected to real API
+- **~40 of 50 pages use mock localStorage data** — not connected to real API
 - **Client-side only permissions** — no server enforcement
 - **No error boundaries** — uncaught React errors crash the page
 - **No loading/empty/error states** on most mock-data pages
@@ -783,11 +948,26 @@ flowchart LR
 | **Soft delete**         | `deleted_at TIMESTAMPTZ` on all tables, filtered in queries                             |
 | **Migrations**          | Sequential numbered SQL files in`server/migrations/`                                    |
 | **Go module**           | `github.com/alpha-ai-tracker/server`                                                    |
-| **Git branch**          | Currently on`restructureClient` branch — no PR/branch convention visible            |
+| **Git branch**          | Currently on`uienhanced` branch — no PR/branch convention visible              |
 | **Commit style**        | Descriptive lowercase messages: "now remove the exit btn on the tray on windows", "fixit" |
 | **Monorepo tooling**    | No shared tooling (no Turborepo, Nx, etc.). Each service has its own build system.        |
 | **Build parity**        | `dotnet run` is NOT a release test — every change must be verified from an installed build; new assets/config/scripts must be bundled by the `publish/*` scripts (see below) |
+| **Web list pagination** | List/table pages ALWAYS use server-side **infinite scroll** (`useInfiniteQuery` + IntersectionObserver sentinel) — Next/Previous buttons are forbidden (see *Web Infinite-Scroll Rule* below) |
 | **Branding & version**  | Product name and version are written in exactly two files — `client/APP_IDENTIFIERS` and `client/VERSION`. No literal product name or version string anywhere else in C#, XAML, or the build scripts (see below) |
+
+### Web Infinite-Scroll Rule (mandatory)
+
+**Every list/table page on the web dashboard MUST paginate with server-side infinite scrolling — Next/Previous buttons are forbidden.**
+
+- `useInfiniteQuery` with `initialPageParam: 1` and
+  `getNextPageParam: (last) => (last.page < last.totalPages ? last.page + 1 : undefined)`; flatten pages
+  with `data?.pages.flatMap(p => p.data)`.
+- Trigger the next fetch with an **IntersectionObserver sentinel** (`rootMargin: '300px'`, gated on
+  `hasNextPage && !isFetchingNextPage`) rendered below the list.
+- Inline "Loading more…" while `isFetchingNextPage`; a "Showing all N" footer once `hasNextPage` is false.
+- Filter/search inputs change the query key (the infinite query restarts at page 1) — there is NO `page`
+  state anywhere.
+- Reference implementations: `web/src/app/(app)/employees/page.tsx`, the Session Timeline journey page.
 
 ### Installer-Parity Rule (mandatory)
 
@@ -854,7 +1034,7 @@ flowchart LR
 | **No rate limiting**          | 🟠 Medium | Login endpoint and all sync endpoints have no rate limiting. Brute-force / DoS is trivial.                                                                                       |
 | **No server permission model**| 🟠 Medium | Any authenticated user can access all protected endpoints; no role checks server-side.                                                                                           |
 | **Cross-account injection**   | 🟠 Medium | Sync handlers validate the JWT but don't verify the body `employeeId` matches the JWT subject.                                                                                   |
-| **Mock data dominance**       | 🟠 Medium | ~90% of web pages use mock data, giving a false sense of completeness.                                                                                                           |
+| **Mock data dominance**       | 🟠 Medium | ~80% of web pages use mock data (~40 of ~50; employees list, departments, logs, Employee Journey + Device Specs are real-API), giving a false sense of completeness.                                                                          |
 | **Default passwords**         | 🟠 Medium | `AlphaAI@2024!` is the compiled-in default. Easy to forget to change.                                                                                                          |
 | **No offline/retry strategy** | 🟢 Low    | Client retries sync every cycle but has no exponential backoff or dedup.                                                                                                         |
 | **No data-pruning job**       | 🟢 Low    | Server's only background job (`staleness_sweep.go`) deactivates stale catalog links but never deletes old app_sessions/app_items data.                                            |

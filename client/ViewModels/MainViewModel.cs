@@ -760,6 +760,7 @@ public partial class MainViewModel : ViewModelBase
                 Avatar = emp.Avatar,
                 AvatarColor = emp.AvatarColor,
                 Token = loginResp.Token,
+                DeviceToken = loginResp.DeviceToken,
             };
 
             await _store.SaveEmployeeInfoAsync(employeeInfo, CancellationToken.None);
@@ -1085,6 +1086,9 @@ public class EmployeeLoginResponse
 
     [JsonPropertyName("token")]
     public string? Token { get; set; }
+
+    [JsonPropertyName("deviceToken")]
+    public string? DeviceToken { get; set; }
 }
 
 public class EmployeeData

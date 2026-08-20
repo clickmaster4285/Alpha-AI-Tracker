@@ -45,6 +45,7 @@ public class SyncService : BackgroundService
     private string? _employeeId;
     private string? _employeeName;
     private string? _token;
+    private string? _deviceToken;
 
     // Exponential backoff on failed passes: 5s → 10s → 20s → … → SyncBackoffMaxSec.
     private TimeSpan _backoff = TimeSpan.FromSeconds(5);
@@ -147,7 +148,13 @@ public class SyncService : BackgroundService
                 // Between passes: grow the wait on failure (backoff), otherwise the idle interval.
                 // The wait is interruptible — RequestImmediateSync() (login) releases the
                 // semaphore and this returns at once for an instant drain pass.
-                var wait = failed ? _backoff : TimeSpan.FromSeconds(Math.Max(1, _config.SyncIntervalSec));
+                // User rule 2026-08-18: even on repeated failures a drain pass runs at least
+                // every 60s — the backoff only stretches a single retry gap, never the
+                // guaranteed cadence — so is_synced=0 rows always reach the server within a
+                // minute, not after a 5-min backoff.
+                var wait = failed
+                    ? TimeSpan.FromSeconds(Math.Min(60, _backoff.TotalSeconds))
+                    : TimeSpan.FromSeconds(Math.Max(1, _config.SyncIntervalSec));
                 await _syncSignal.WaitAsync(wait, stoppingToken);
             }
             catch (OperationCanceledException)
@@ -502,9 +509,23 @@ public class SyncService : BackgroundService
             }
             content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 
+            using var request = new HttpRequestMessage(HttpMethod.Post, $"{serverUrl}{endpoint}")
+            {
+                Content = content
+            };
+
+            if (!string.IsNullOrEmpty(_deviceToken))
+            {
+                request.Headers.Authorization = new AuthenticationHeaderValue("Device", _deviceToken);
+            }
+            else if (!string.IsNullOrEmpty(_token))
+            {
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _token);
+            }
+
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(30));
-            var response = await _httpClient.PostAsync($"{serverUrl}{endpoint}", content, cts.Token);
+            var response = await _httpClient.SendAsync(request, cts.Token);
 
             if (response.IsSuccessStatusCode)
                 return true;
@@ -545,12 +566,13 @@ public class SyncService : BackgroundService
             var info = await _store.GetEmployeeInfoAsync(ct);
             if (info == null || string.IsNullOrEmpty(info.Token))
             {
-                _employeeId = _employeeName = _token = null;
+                _employeeId = _employeeName = _token = _deviceToken = null;
                 return false;
             }
             _employeeId = info.EmployeeId;
             _employeeName = info.Name;
             _token = info.Token;
+            _deviceToken = info.DeviceToken;
             return true;
         }
         catch

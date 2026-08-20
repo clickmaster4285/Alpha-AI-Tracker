@@ -1,7 +1,47 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-08-12 (self-update §16 added)
+> **Last audited:** 2026-08-18 (focus-time root causes §8 + browser focus accounting §11 + webview tracking §11)
 > **Changelog:**
+> - 2026-08-18: **Embedded-webview journeys (VS Code Simple Browser, Electron apps) — structural detection, no hardcoded names.**
+>   Readers no longer gate on a browser-process list alone: any window whose a11y tree exposes a
+>   DOCUMENT_WEB node (AT-SPI role 95) with an **http(s) DocURL** is tracked (UIA on Windows: a
+>   descendant Document/Edit whose Value/Name is an http URL). App chrome excludes itself by URL scheme
+>   (`vscode-webview://`, `file://`, `about:`). Metadata `source="webview"` + the host process name let
+>   the dashboard show the source app. Linux scans non-browser apps every 5th poll (400-node budget) and
+>   caches/re-emits webview windows each poll so sessions never falsely close; `--type=` child processes
+>   are skipped structurally. The tracker hydrates browser_tab-rooted sessions, and the main loop skips
+>   them too (webview session + host-app session coexist; no duplicate-close).
+> - 2026-08-18: **Structural process name resolution — Flatpak/snap browsers get correct names + structural browser detection.**
+>   The Python probe's `resolve_app_name(pid)` checks FLATPAK_ID in `/proc/<pid>/environ` (extracts
+>   short name: `org.mozilla.Floorp` -> `floorp`) and snap path in `/proc/<pid>/exe` (`/snap/firefox/...`
+>   -> `firefox`), falling back to `/proc/comm` for native apps. No name lists: Flatpak/snap are the only
+>   sandboxing systems that inject proxy PIDs (e.g. `xdg-dbus-proxy`). Structural browser detection:
+>   `.desktop` files with `Categories=WebBrowser` are scanned (cached 5 min) and the resolved process name
+>   is matched against browser exe names from the desktop files + Flatpak app IDs. C# `ReadComm()` checks
+>   a `_pidNameCache` (populated from probe results each poll) before `/proc/comm`, so WM-only Flatpak/snap
+>   windows also get the correct name. `StripBrowserSuffix` gains Floorp/LibreWolf/Waterfox.
+> - 2026-08-18: **Focus totals frozen (~0s on the web) fixed — flush is now ADDITIVE + every-minute push.**
+>   Root cause: `UpdateAppSessionFocusSql` OVERWROTE the row with the in-memory delta and the counter was
+>   then cleared — each flush wrote only the last ~10-cycle window (300s main / 30s browser), never the
+>   session total (live evidence: Chrome frozen at exactly 30.0, others at exactly 300.0, identical across
+>   65s). Fix: `fg = COALESCE(fg,0) + $fg` — the in-memory dict stays a per-flush DELTA (cleared after
+>   every write, both loops), so SQLite holds the true cumulative total, restart-safe, re-sent verbatim
+>   (server upsert overwrites). Close paths flush first then close with NULL (`COALESCE($fg, fg)`) — no
+>   double-counting. Push cadence: main loop flushes focus every 2 cycles (~60s at the default 30s
+>   interval) and `SyncService` failure backoff is capped at 60s, so every `is_synced=0` row reaches the
+>   server within a minute even during repeated failures.
+> - 2026-08-18: **Foreground/background focus times fixed — Linux/Wayland detection + browser sessions.**
+>   (1) `ProcessCollector` Linux AT-SPI foreground detection rewritten: at-spi2-core ≥ 2.50 returns
+>   `GetState` as a **packed 64-bit bitmask** (bit N = state N) not a list of ids, and the old check
+>   looked for state 8 (ENABLED, present on every window) — the focused window is the only one with
+>   bit 1 (STATE_ACTIVE)/bit 12 (STATE_FOCUSED). New `IsAtSpiActiveState` (gdbus path) and
+>   `is_active_window` (python path) decode both formats. This also makes the browser reader's
+>   per-window `active` flag work (the focused browser window is now identifiable on Wayland).
+>   (2) `AccessibilitySnapshot.IsActive` added and set per platform (Linux AT-SPI ACTIVE/FOCUSED,
+>   Windows `GetForegroundWindow` HWND, macOS frontmost process); `AccessibilityBrowserTracker` now
+>   accumulates the poll interval per open window every poll (active → `foreground_seconds`, rest →
+>   `background_seconds`) and flushes every 10 polls + on close via `UpdateAppSessionFocusAsync`
+>   (re-queues `is_synced=0` so SyncService re-sends) — browser journeys finally earn focus time.
 > - 2026-08-12: **Self-update from GitHub Releases** — new `Services/AppUpdateService.cs`
 >   (singleton + hosted, ObservableObject): checks the GitHub latest-release API, picks the platform
 >   installer asset (`.deb` by arch / `.exe` / `.dmg`), compares against `AppInfo.Version`, and on a
@@ -347,6 +387,7 @@ log banners).
 1. `Program.cs` handles CLI modes, acquires the mutex, starts the single-instance pipe server, builds DI, `host.StartAsync`.
 2. **`LogCollectorService`** (hosted):
    - `InitializeAsync` (schema), `RefreshEmployeeInfo` (restores login from SQLite),
+   - **Headless session restore (2026-08-18):** if persisted employee credentials exist, `StartTracking()` runs here at boot — so `--background` mode (no GUI) tracks app sessions from power-on, not just browser journeys. Previously this restore happened ONLY in the Avalonia GUI (`MainViewModel.InitializeAsync`), so a headless boot spun on "waiting for login" forever while the browser tracker (which restores the login itself) kept working — the dashboard showed browser activity but zero app sessions.
    - **`ReconcileStaleSessionsOnBootAsync`** — stale `last_heartbeat_at` (>60s) → close orphaned sessions + items with the heartbeat time as approximate crash time (handles poweroff/crash/fast-restart).
    - **`CleanupGarbageSessionRowsAsync`** — closes old `--type=` / long process-name rows.
    - **`CleanupNonGuiAppEntriesAsync`** — removes pre-GUI-gate non-GUI entries (`sh`, `snap`) from `installed_applications` and closes their sessions.
@@ -354,7 +395,7 @@ log banners).
 3. **`DesktopEventService`** starts the file-explorer watchers after DB init.
 4. **`AccessibilityBrowserTracker`** starts polling browser windows (independent of login, no catalog dependency).
 5. **`BackgroundGuardService`** watches auto-start / systemd unit (60s loop) and re-installs if removed — it never *creates* them on its own.
-6. **Login (from UI)** → `MainViewModel.LoginAsync` → `_logCollector.StartTracking()` → permission wizard → tracking loop begins.
+6. **Login (from UI, first-time identity only)** → `MainViewModel.LoginAsync` → `_logCollector.SetEmployeeInfo(...)` + `StartTracking()` (idempotent — already running on a restored session) → permission wizard. After the first login the GUI is **login-only**: opening or closing it never starts or stops the tracking services (the background process owns tracking; window-close hides to tray; only an explicit quit exits the process).
 
 ---
 
@@ -363,7 +404,7 @@ log banners).
 ### Login
 
 - **Login:** `POST {serverUrl}/api/v1/auth/employee-login` with `{employeeId, secretKey}` → `{employee, token}`. Persists to `employee_info` (SQLite) and feeds `LogCollectorService.SetEmployeeInfo(employeeId, name, token)` + `StartTracking()` (which also records a `login` session event and arms Windows anti-sleep). **Instant sync on login (2026-08-11):** `LoginAsync` then calls `SyncService.RequestImmediateSync()` — the dedicated sync engine's inter-pass wait is a `SemaphoreSlim` that the request releases, so a full drain pass starts right away instead of waiting out the idle interval. The employee record itself is already server-side (it IS the login response); the instant pass pushes everything else — device_hardware_info, installed apps/packages, network, storage_devices, hardware_devices, session_events, permission_status, app_status, sessions/items.
-- **Session restore:** on launch, `MainViewModel.InitializeAsync` reads `employee_info`; if present it re-authenticates the collector, **fires `RequestImmediateSync()`** (so rows buffered since the last run land immediately), resets stored `perm_*` statuses, and re-evaluates the permission steps from scratch.
+- **Session restore:** at boot, `LogCollectorService` reads `employee_info` and **starts tracking headlessly** (2026-08-18) — no GUI required. When the GUI opens, `MainViewModel.InitializeAsync` re-authenticates the collector (idempotent), **fires `RequestImmediateSync()`** (so rows buffered since the last run land immediately), resets stored `perm_*` statuses, and re-evaluates the permission steps from scratch.
 - **No logout:** the employee-disconnect flow (button, `LogoutCommand`, `StopTracking()`, `POST /api/v1/auth/employee-disconnect`) was **removed** 2026-08-10. Once logged in the client tracks until the process stops.
 
 ### Permission wizard (`GetNextPermissionStep`)
@@ -429,7 +470,7 @@ Theming is the **light** token dictionary in `Styles/AppTheme.xaml` plus the sty
 
 | Platform | Window titles | Foreground | CPU | Cmdline |
 |---|---|---|---|---|
-| **Linux** | GNOME Shell `Introspect.GetWindows` (Wayland, ALL windows) + `xprop _NET_CLIENT_LIST` (X11/XWayland) | xprop → AT-SPI (python3 / gdbus) → xdg portal → GNOME Shell → xdotool → heuristic | `TotalProcessorTime` two-sample 100ms gap | `/proc/<pid>/cmdline` |
+| **Linux** | GNOME Shell `Introspect.GetWindows` (Wayland, ALL windows) + `xprop _NET_CLIENT_LIST` (X11/XWayland) | xprop → AT-SPI (python3 / gdbus, **decodes the packed 64-bit state bitmask, ACTIVE/FOCUSED bits**) → xdg portal → GNOME Shell → xdotool → heuristic | `TotalProcessorTime` two-sample 100ms gap | `/proc/<pid>/cmdline` |
 | **Windows** | `EnumWindows` (all visible windows → titles) | `GetForegroundWindow` | same | PowerShell `Get-CimInstance Win32_Process` |
 | **macOS** | **foreground only** via osascript | osascript/System Events | **0 (not measured)** | `ps -o command=` |
 
@@ -498,6 +539,7 @@ Per-platform `GetPermissionStatus()` (Linux: xprop/xdotool/gdbus/python3/portal/
 | Network info | Every 10 cycles (~5 min) |
 | Permission status | Every 10 cycles (~5 min) |
 | Heartbeat `last_heartbeat_at` | Every cycle |
+| **Focus flush** (open-session `foreground/background_seconds`, additive) | **Every 2 cycles (~1 min)** — was every 10 (~5 min); re-queues `is_synced=0` so the server learns growing totals within a minute (user rule 2026-08-18) |
 
 > **Sync moved out of this loop (2026-08-11)** — the dedicated `SyncService` background loop (§13) drains unsent rows on its own schedule; the collection loop never performs network I/O.
 
@@ -524,9 +566,10 @@ Both detectors are forced-rechecked every scan (`ForceRecheck`) and upsert into 
 
 ### Poll loop (every `ALPHA_BROWSER_ACCESSIBILITY_POLL_SECONDS`, default 3s)
 
-1. `IAccessibilityBrowserReader.ReadAsync()` → `AccessibilitySnapshot[]` (windowKey, pid, process, title, URL, `UrlSource`, incognito).
-2. `EnrichUrlsFromHistoryAsync` fills empty URLs from the **profile-history fallback**.
-3. Per window: first sight → **new `app_sessions`** + `browser_tab` root item (URL, domain, journeyId, `metadata_json`); changes → rotate/record; vanished (5-miss grace) → close; idle (`ALPHA_BROWSER_JOURNEY_IDLE_MINUTES`, 15) → close; shutdown → close all.
+1. `IAccessibilityBrowserReader.ReadAsync()` → `AccessibilitySnapshot[]` (windowKey, pid, process, title, URL, `UrlSource`, incognito, **`IsActive`** — AT-SPI ACTIVE/FOCUSED state on Linux, `GetForegroundWindow` HWND match on Windows, frontmost process on macOS).
+2. `EnrichUrlsFromHistoryAsync` fills empty URLs from the **profile-history fallback** (preserves `IsActive`).
+3. **Focus accounting** — each poll the ACTIVE window's session earns the poll interval as `foreground_seconds` and every other open window earns `background_seconds`; totals flush every 10 polls + on close via `UpdateAppSessionFocusAsync` (`is_synced=0` re-syncs). The flush is **additive** (delta in memory, cleared after each write — the SQLite row is the true cumulative total), so long-running browser sessions show growing foreground/background on the dashboard, not just the last flush window. Browser journeys finally earn focus time (they are owned here, not by the main loop's focus accounting).
+4. Per window: first sight → **new `app_sessions`** + `browser_tab` root item (URL, domain, journeyId, `metadata_json`); changes → rotate/record; vanished (5-miss grace) → close; idle (`ALPHA_BROWSER_JOURNEY_IDLE_MINUTES`, 15) → close; shutdown → close all.
 
 ### Reading the URL — three merged sources (Linux embedded python3 probe)
 
@@ -576,7 +619,7 @@ Watchers (IObservableEventSource)          EventCoordinator                 Jour
 ## 13. Sync / Transport to Server
 
 - **Protocol:** REST over HTTP(S); JSON `{employeeId, token, entries: [...]}`; token = encrypted JWT from login, sent in the request body (not a header). Idempotent by design — the server upserts by client GUID (`ON CONFLICT (id) …`), so failed chunks are retried safely.
-- **Engine (2026-08-11):** dedicated `SyncService` background loop — collection **never blocks on the network**. Unsent rows drain in chunks bounded by **both** row count (`ALPHA_SYNC_MAX_ROWS`, default 1000) **and** serialized payload bytes (`ALPHA_SYNC_MAX_BYTES`, default ~1MB), with a politeness pause between chunks (`ALPHA_SYNC_CHUNK_DELAY_MS`, 150ms), a per-pass time budget (`ALPHA_SYNC_MAX_DURATION_SEC`, 5 min) so a backlog never monopolizes CPU, and **exponential backoff** on failure (5s → 10s → … → `ALPHA_SYNC_BACKOFF_MAX_SEC`, 5 min). A 50k+ backlog drains in minutes — the old inline sync moved a fixed 500 rows/table per 5-minute cycle while blocking collection (~8h to drain 50k).
+- **Engine (2026-08-11):** dedicated `SyncService` background loop — collection **never blocks on the network**. Unsent rows drain in chunks bounded by **both** row count (`ALPHA_SYNC_MAX_ROWS`, default 1000) **and** serialized payload bytes (`ALPHA_SYNC_MAX_BYTES`, default ~1MB), with a politeness pause between chunks (`ALPHA_SYNC_CHUNK_DELAY_MS`, 150ms), a per-pass time budget (`ALPHA_SYNC_MAX_DURATION_SEC`, 5 min) so a backlog never monopolizes CPU, and **exponential backoff** on failure (5s → 10s → … → `ALPHA_SYNC_BACKOFF_MAX_SEC`, 5 min). **2026-08-18:** the between-pass wait is now **capped at 60s even on failure** — backoff only stretches a single retry gap, never the guaranteed cadence — so every `is_synced=0` row reaches the server within a minute (user rule: force-push every minute). A 50k+ backlog drains in minutes — the old inline sync moved a fixed 500 rows/table per 5-minute cycle while blocking collection (~8h to drain 50k).
 - **Compression:** request bodies are **gzip**-encoded when `ALPHA_SYNC_COMPRESSION=true` (server must run `middleware.Decompress()`); oversized slices are auto-split (binary halving) to stay under the byte cap.
 - **Order matters:** small/inventory tables first (device-hardware → network-info → session-events → installed-apps → installed-packages), then **app-sessions (parents)**, then **app-items (children)**.
 - On success rows are marked `is_synced=1` (batched `UPDATE … WHERE id IN (…)`, 400 ids/statement); on 401/403 the chunk is dropped until re-login; on network failure the chunk is retried next pass with backoff.

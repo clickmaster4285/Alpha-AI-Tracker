@@ -2288,7 +2288,7 @@ public class SqliteLogStore : ILogStore, IDisposable
         if (_connection == null) return null;
 
         var cmd = _connection.CreateCommand();
-        cmd.CommandText = "SELECT id, employee_id, name, email, role, department, shift, avatar, avatar_color, token, logged_in_at FROM employee_info LIMIT 1";
+        cmd.CommandText = "SELECT id, employee_id, name, email, role, department, shift, avatar, avatar_color, token, device_token, logged_in_at FROM employee_info LIMIT 1";
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         if (await reader.ReadAsync(ct))
@@ -2305,6 +2305,7 @@ public class SqliteLogStore : ILogStore, IDisposable
                 Avatar = reader.IsDBNull(reader.GetOrdinal("avatar")) ? null : reader.GetString(reader.GetOrdinal("avatar")),
                 AvatarColor = reader.IsDBNull(reader.GetOrdinal("avatar_color")) ? null : reader.GetString(reader.GetOrdinal("avatar_color")),
                 Token = reader.IsDBNull(reader.GetOrdinal("token")) ? null : reader.GetString(reader.GetOrdinal("token")),
+                DeviceToken = reader.IsDBNull(reader.GetOrdinal("device_token")) ? null : reader.GetString(reader.GetOrdinal("device_token")),
                 LoggedInAt = reader.IsDBNull(reader.GetOrdinal("logged_in_at")) ? null : reader.GetString(reader.GetOrdinal("logged_in_at")),
             };
         }
@@ -2389,8 +2390,8 @@ public class SqliteLogStore : ILogStore, IDisposable
 
             var cmd = _connection.CreateCommand();
             cmd.CommandText = @"
-                INSERT INTO employee_info (id, employee_id, name, email, role, department, shift, avatar, avatar_color, token, logged_in_at)
-                VALUES ($id, $employee_id, $name, $email, $role, $department, $shift, $avatar, $avatar_color, $token, strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+                INSERT INTO employee_info (id, employee_id, name, email, role, department, shift, avatar, avatar_color, token, device_token, logged_in_at)
+                VALUES ($id, $employee_id, $name, $email, $role, $department, $shift, $avatar, $avatar_color, $token, $device_token, strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
             ";
             cmd.Parameters.AddWithValue("$id", employee.Id);
             cmd.Parameters.AddWithValue("$employee_id", employee.EmployeeId);
@@ -2402,6 +2403,7 @@ public class SqliteLogStore : ILogStore, IDisposable
             cmd.Parameters.AddWithValue("$avatar", (object?)employee.Avatar ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$avatar_color", (object?)employee.AvatarColor ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$token", (object?)employee.Token ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$device_token", (object?)employee.DeviceToken ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync(ct);
 
             // Uses ungated private helper — caller already holds _connectionGate

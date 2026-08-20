@@ -25,11 +25,29 @@ public sealed class AccessibilitySnapshot
     public bool IsIncognito { get; init; }
 
     /// <summary>
+    /// True when the OS marks this window as the ACTIVE/FOCUSED window (AT-SPI
+    /// STATE_ACTIVE/STATE_FOCUSED on Linux, foreground-window HWND on Windows, frontmost
+    /// process on macOS). The tracker credits exactly one tracked window per poll with
+    /// foreground time; all other open windows earn background time.
+    /// </summary>
+    public bool IsActive { get; init; }
+
+    /// <summary>
     /// Where the URL came from: "accessibility" (address-bar tree) or "history"
     /// (browser profile history DB fallback — used when the a11y tree cannot expose
     /// the omnibox, e.g. Linux Chrome 136+ / snap Firefox).
     /// </summary>
     public string UrlSource { get; init; } = "accessibility";
+
+    /// <summary>
+    /// True when this window is NOT a real browser but embeds web content — an
+    /// Electron/embedded webview (VS Code Simple Browser, Slack, Teams, …) detected
+    /// STRUCTURALLY: its accessibility tree contains a document node exposing an
+    /// http(s) URL. No product-name lists — any app with an embedded http document
+    /// is tracked; app chrome (settings/preview panes, vscode-webview:// URLs) is
+    /// excluded by the URL scheme itself. Metadata "source" = "webview" for these.
+    /// </summary>
+    public bool IsWebview { get; init; }
 
     public DateTime CapturedAt { get; init; } = DateTime.UtcNow;
 }

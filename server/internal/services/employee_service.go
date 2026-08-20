@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 
 	"github.com/alpha-ai-tracker/server/internal/dto"
 	"github.com/alpha-ai-tracker/server/internal/models"
@@ -163,6 +164,117 @@ func (s *EmployeeService) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("employee not found")
 	}
 	return s.repo.Delete(ctx, id)
+}
+
+// ImportEmployees bulk-imports Excel rows. Departments are get-or-created by
+// name (a missing department is created first, then attached), and every row
+// is upserted by its exact employee_id from the spreadsheet. Returns a
+// per-row outcome report for the web UI.
+func (s *EmployeeService) ImportEmployees(ctx context.Context, req *dto.ImportEmployeesRequest) (*dto.ImportEmployeesResponse, error) {
+	if len(req.Employees) == 0 {
+		return &dto.ImportEmployeesResponse{Results: []dto.ImportRowResult{}}, nil
+	}
+
+	items := make([]repository.ImportEmployeeItem, 0, len(req.Employees))
+	results := make([]dto.ImportRowResult, 0, len(req.Employees))
+	seen := make(map[string]int) // lowercased employee_id → file row index
+
+	for i, row := range req.Employees {
+		res := dto.ImportRowResult{
+			RowIndex:   i + 1,
+			EmployeeID: strings.TrimSpace(row.EmployeeID),
+			Name:       strings.TrimSpace(row.Name),
+		}
+
+		reason := ""
+		switch {
+		case res.EmployeeID == "":
+			reason = "missing employee id"
+		case res.Name == "":
+			reason = "missing name"
+		case len(res.EmployeeID) > 20:
+			reason = "employee id exceeds 20 characters"
+		}
+		if reason != "" {
+			res.Status = "skipped"
+			res.Reason = reason
+			results = append(results, res)
+			continue
+		}
+
+		key := strings.ToLower(res.EmployeeID)
+		if prev, dup := seen[key]; dup {
+			res.Status = "skipped"
+			res.Reason = fmt.Sprintf("duplicate in file (row %d)", prev+1)
+			results = append(results, res)
+			continue
+		}
+		seen[key] = i
+		items = append(items, repository.ImportEmployeeItem{
+			EmployeeID: res.EmployeeID,
+			Name:       res.Name,
+			Email:      strings.TrimSpace(row.Email),
+			Department: strings.TrimSpace(row.Department),
+			Shift:      strings.TrimSpace(row.Shift),
+		})
+		res.Status = "pending"
+		results = append(results, res)
+	}
+
+	outcomes, err := s.repo.Import(ctx, items)
+	if err != nil {
+		return nil, fmt.Errorf("import employees: %w", err)
+	}
+
+	outcomeIdx := 0
+	for i := range results {
+		if results[i].Status != "pending" {
+			continue
+		}
+		out := outcomes[outcomeIdx]
+		outcomeIdx++
+		results[i].Status = out.Status
+		results[i].Reason = out.Reason
+	}
+
+	var imported, updated, skipped int
+	for _, r := range results {
+		switch r.Status {
+		case "imported":
+			imported++
+		case "updated":
+			updated++
+		case "skipped":
+			skipped++
+		}
+	}
+
+	return &dto.ImportEmployeesResponse{
+		Imported: imported,
+		Updated:  updated,
+		Skipped:  skipped,
+		Results:  results,
+	}, nil
+}
+
+// ExportEmployees returns every non-deleted employee as a flat row for the
+// Excel download.
+func (s *EmployeeService) ExportEmployees(ctx context.Context) ([]dto.EmployeeExportRow, error) {
+	emps, err := s.repo.ListAll(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list all employees: %w", err)
+	}
+	rows := make([]dto.EmployeeExportRow, len(emps))
+	for i, e := range emps {
+		rows[i] = dto.EmployeeExportRow{
+			EmployeeID: e.EmployeeID,
+			Name:       e.Name,
+			Email:      e.Email,
+			Department: e.Department,
+			Shift:      e.Shift,
+		}
+	}
+	return rows, nil
 }
 
 // GenerateSecret generates a one-time login secret for an employee and stores it in Redis.

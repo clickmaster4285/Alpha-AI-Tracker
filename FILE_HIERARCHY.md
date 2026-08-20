@@ -4,7 +4,7 @@ Annotated node tree for the whole monorepo. Every directory that holds source is
 
 **How to read it:** ⭐ marks an entry point or a single-source-of-truth file — start there. 🔒 marks a file with a rule attached; changing it without reading the rule breaks something in the field. Generated / vendored trees are marked and should never be edited by hand.
 
-*Last audited: 2026-08-10. Companion docs: [AGENTS.md](./AGENTS.md) (rules + completion state), [WORKFLOW.md](./WORKFLOW.md) (how work moves through the tree), [client/ARCHITECTURE.md](./client/ARCHITECTURE.md), [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md), [server/ARCHITECTURE.md](./server/ARCHITECTURE.md), [web/ARCHITECTURE.md](./web/ARCHITECTURE.md).*
+*Last audited: 2026-08-18. Companion docs: [AGENTS.md](./AGENTS.md) (rules + completion state), [WORKFLOW.md](./WORKFLOW.md) (how work moves through the tree), [client/ARCHITECTURE.md](./client/ARCHITECTURE.md), [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md), [server/ARCHITECTURE.md](./server/ARCHITECTURE.md), [web/ARCHITECTURE.md](./web/ARCHITECTURE.md).*
 
 ---
 
@@ -194,7 +194,13 @@ web/
     │   ├── login/ mfa/ forgot-password/ reset-password/    unauthenticated routes
     │   └── (app)/              ⭐ ~30 authenticated sections, sidebar-wrapped:
     │       ├── dashboard · executive-dashboard · employee-portal
-    │       ├── users (+ activity) · departments · roles · onboarding
+    │       ├── employees (+ activity) · departments · roles · onboarding
+    │       │                       (/employees/[id] detail page removed 2026-08-18)
+    │       ├── employee-journey    per-employee journey behind the shared EmployeePage shell +
+    │       │                       EmployeeSelector picker (?employeeId= deep-link): timeline ·
+    │       │                       apps · web are real-API; screenshots · location placeholders
+    │       ├── device-specs        per-employee machine picture over GET /employees/:id/detail:
+    │       │                       hardware · software · peripherals · permissions
     │       ├── apps · shadow-it · logs (comprehensive · graphical · insights)
     │       ├── charts (activity · productivity) · reports · ai-summary
     │       ├── attendance · shifts · timesheets · hours-insights
@@ -205,18 +211,23 @@ web/
     │                     security · tracking · user-management)
     │
     ├── components/
-    │   ├── layout/                AppLayout · AppSidebar · TopBar · ProtectedRoute
+    │   ├── layout/                AppLayout · AppSidebar (Device Specs + Employee Journey are
+    │   │                          collapsible sections) · TopBar · ProtectedRoute
+    │   ├── EmployeeSelector.tsx   searchable employee picker (shared query with EmployeePage)
+    │   ├── employees/             EmployeePage shell · InventoryTable · EmptyState · DeviceClassIcon
+    │   ├── journey/               FocusTime (foreground/background stacked bar)
     │   ├── NavLink.tsx · providers.tsx
     │   └── ui/                    ~50 shadcn primitives — generated; regenerate rather than hand-edit
     │
     ├── lib/
     │   ├── api.ts              ⭐ every server call goes through here — the client-side contract
+    │   ├── format.ts              shared formatters (duration · seconds · MB · dates)
     │   ├── auth.tsx               session context
     │   ├── permissions.tsx        role → capability gating
     │   ├── store.ts · store/      Redux store + typed hooks
     │   └── utils.ts
     │
-    ├── hooks/                     use-mobile · use-toast
+    ├── hooks/                     use-mobile · use-toast · use-employee-detail
     └── node_modules/           ⚠️ vendored
 ```
 
@@ -235,4 +246,4 @@ web/
 | New UI asset under `Assets/` | the asset only — the `AvaloniaResource` glob compiles it in |
 | New env var / secret | `.env` → re-run `encrypt-config.sh` before building the installer |
 | New API endpoint | `server/internal/router/router.go` + `handlers/` + `services/` + `repository/` (+ `dto/`, + a new numbered migration if the schema moves) |
-| New dashboard page | `web/src/app/(app)/<route>/` + `lib/api.ts` + a sidebar entry in `components/layout/AppSidebar.tsx` |
+| New dashboard page | `web/src/app/(app)/<route>/` + `lib/api.ts` + a sidebar entry in `components/layout/AppSidebar.tsx` + a module in `lib/permissions.tsx`; per-employee pages reuse the `EmployeePage` shell + `EmployeeSelector` |

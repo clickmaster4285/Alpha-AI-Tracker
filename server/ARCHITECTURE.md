@@ -1,7 +1,16 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-08-11 (employee detail endpoint + web user-detail page)
+> **Last audited:** 2026-08-18 (date-range filters on app-sessions + app-items)
 > **Changelog:**
+> - 2026-08-18: **Server-side date-range filtering on app-sessions + app-items list endpoints.**
+>   `GET /app-sessions` and `GET /app-items` now accept `dateFrom` and `dateTo` query parameters (RFC3339
+>   or date-only like `2026-08-18`). Sessions filter on `started_at`, items on `opened_at`. Combined with
+>   the existing `search`/`platform` params — all filters compose in one SQL WHERE. Zero-value/absent params
+>   mean "no bound" (backward compatible). The app-items search query was also extended to match `url` and
+>   `domain` columns (so searching "youtube" finds the exact page, not just the domain group).
+>   New repo params (`DateFrom`, `DateTo` as `*time.Time`) in `ListAppSessionsParams` and
+>   `ListAppItemsParams`; handler parses query params with `time.Parse`. Verified: `go build`/`go vet` clean,
+>   filtered SQL verified live against Postgres (EMP-10002 today = 70 sessions / 100 browser pages).
 > - 2026-08-11: **Employee detail aggregate endpoint** — `GET /api/v1/employees/:id/detail` (protected)
 >   returns the full machine picture for one employee in a single response: `employee` (UUID-resolved,
 >   then all sync-table reads keyed on the `EMP-XXXXX` id), latest `deviceHardware` + `storageDevices`
@@ -239,8 +248,8 @@ Employee token is carried in the request body (`{employeeId, token, entries: [..
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/app-sessions` | List sessions (paginated, filterable, replaces old activity-logs listing) |
-| GET | `/app-items` | List items (paginated, filterable by session/itemType/search) |
+| GET | `/app-sessions` | List sessions (paginated, filterable: `search`, `platform`, `dateFrom`, `dateTo`, `employeeId`) |
+| GET | `/app-items` | List items (paginated, filterable: `search` matches title/identifier/url/domain, `dateFrom`, `dateTo`, `itemType`, `session`) |
 
 ### Employee Detail (Protected)
 

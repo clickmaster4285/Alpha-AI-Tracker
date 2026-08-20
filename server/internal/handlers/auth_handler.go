@@ -1,14 +1,17 @@
 package handlers
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"time"
 
-	"github.com/labstack/echo/v4"
 	"github.com/alpha-ai-tracker/server/internal/config"
 	"github.com/alpha-ai-tracker/server/internal/dto"
 	"github.com/alpha-ai-tracker/server/internal/repository"
 	"github.com/alpha-ai-tracker/server/internal/services"
+	"github.com/labstack/echo/v4"
 )
 
 const (
@@ -18,17 +21,25 @@ const (
 
 // AuthHandler handles authentication endpoints.
 type AuthHandler struct {
-	authService      *services.AuthService
-	employeeRepo     *repository.EmployeeRepo
-	redisClient      services.RedisClientInterface
-	jwtCfg           config.JWTConfig
+	authService  *services.AuthService
+	employeeRepo *repository.EmployeeRepo
+	deviceRepo   *repository.DeviceRepo
+	redisClient  services.RedisClientInterface
+	jwtCfg       config.JWTConfig
 }
 
 // NewAuthHandler creates a new AuthHandler.
-func NewAuthHandler(authService *services.AuthService, employeeRepo *repository.EmployeeRepo, redisClient services.RedisClientInterface, jwtCfg config.JWTConfig) *AuthHandler {
+func NewAuthHandler(
+	authService *services.AuthService,
+	employeeRepo *repository.EmployeeRepo,
+	deviceRepo *repository.DeviceRepo,
+	redisClient services.RedisClientInterface,
+	jwtCfg config.JWTConfig,
+) *AuthHandler {
 	return &AuthHandler{
 		authService:  authService,
 		employeeRepo: employeeRepo,
+		deviceRepo:   deviceRepo,
 		redisClient:  redisClient,
 		jwtCfg:       jwtCfg,
 	}
@@ -247,7 +258,83 @@ func (h *AuthHandler) EmployeeLogin(c echo.Context) error {
 		Token: token,
 	}
 
+	// Issue long-lived device token if deviceRepo is available
+	if h.deviceRepo != nil {
+		tokenBytes := make([]byte, 32)
+		if _, err := rand.Read(tokenBytes); err == nil {
+			rawDeviceToken := "dev_tok_" + hex.EncodeToString(tokenBytes)
+			hasher := sha256.New()
+			hasher.Write([]byte(rawDeviceToken))
+			tokenHash := hex.EncodeToString(hasher.Sum(nil))
+
+			machineID := req.MachineID
+			if machineID == "" {
+				machineID = "default-" + emp.EmployeeID
+			}
+			platform := req.Platform
+			if platform == "" {
+				platform = "unknown"
+			}
+			clientVer := req.ClientVersion
+			if clientVer == "" {
+				clientVer = "1.0.0"
+			}
+
+			device, err := h.deviceRepo.UpsertDevice(
+				c.Request().Context(),
+				emp.EmployeeID,
+				machineID,
+				platform,
+				clientVer,
+				req.DeviceName,
+				tokenHash,
+				nil, // non-expiring by default (revocable)
+			)
+			if err == nil && device != nil {
+				resp.DeviceToken = rawDeviceToken
+				resp.DeviceID = device.ID
+			}
+		}
+	}
+
 	return c.JSON(http.StatusOK, resp)
+}
+
+// ListEmployeeDevices handles GET /api/v1/employees/:id/devices (web admin)
+func (h *AuthHandler) ListEmployeeDevices(c echo.Context) error {
+	employeeID := c.Param("id")
+	if employeeID == "" {
+		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Employee ID is required"})
+	}
+
+	if h.deviceRepo == nil {
+		return c.JSON(http.StatusOK, []interface{}{})
+	}
+
+	devices, err := h.deviceRepo.ListByEmployeeID(c.Request().Context(), employeeID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, dto.APIError{Code: http.StatusInternalServerError, Message: "Failed to list devices", Detail: err.Error()})
+	}
+
+	return c.JSON(http.StatusOK, devices)
+}
+
+// RevokeDevice handles POST /api/v1/devices/:id/revoke (web admin)
+func (h *AuthHandler) RevokeDevice(c echo.Context) error {
+	deviceID := c.Param("id")
+	if deviceID == "" {
+		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Device ID is required"})
+	}
+
+	if h.deviceRepo == nil {
+		return c.JSON(http.StatusInternalServerError, dto.APIError{Code: http.StatusInternalServerError, Message: "Device repository unavailable"})
+	}
+
+	if err := h.deviceRepo.RevokeDevice(c.Request().Context(), deviceID); err != nil {
+		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Failed to revoke device", Detail: err.Error()})
+	}
+
+	return c.JSON(http.StatusOK, map[string]string{"message": "Device access revoked successfully"})
 }
 
 

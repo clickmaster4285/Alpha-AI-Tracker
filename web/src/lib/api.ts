@@ -202,6 +202,37 @@ export interface GenerateSecretResponse {
   expiresIn: number;
 }
 
+export interface ImportEmployeeRow {
+  employeeId: string;
+  name: string;
+  email: string;
+  department: string;
+  shift?: string;
+}
+
+export interface ImportRowResult {
+  rowIndex: number;
+  employeeId: string;
+  name: string;
+  status: 'imported' | 'updated' | 'skipped';
+  reason?: string;
+}
+
+export interface ImportEmployeesResponse {
+  imported: number;
+  updated: number;
+  skipped: number;
+  results: ImportRowResult[];
+}
+
+export interface EmployeeExportRow {
+  employeeId: string;
+  name: string;
+  email: string;
+  department: string;
+  shift: string;
+}
+
 export const employeesApi = {
   list: (params?: { page?: number; perPage?: number; search?: string; department?: string; role?: string; status?: string }) =>
     request<EmployeeListResponse>('/employees', { params: params as Record<string, string | number | undefined> }),
@@ -223,6 +254,14 @@ export const employeesApi = {
 
   generateSecret: (id: string) =>
     request<GenerateSecretResponse>('/employees/' + id + '/generate-secret', { method: 'POST' }),
+
+  // Bulk Excel import — the server get-or-creates departments by name and upserts
+  // each row by its exact employee_id from the spreadsheet.
+  import: (rows: ImportEmployeeRow[]) =>
+    request<ImportEmployeesResponse>('/employees/import', { method: 'POST', body: { employees: rows } }),
+
+  // All non-deleted employees as flat rows for the Excel download.
+  export: () => request<EmployeeExportRow[]>('/employees/export'),
 };
 
 // ──────────────────────────
@@ -385,7 +424,10 @@ export interface AppSessionListResponse {
 }
 
 export const appSessionsApi = {
-  list: (params?: { page?: number; perPage?: number; employeeId?: string; search?: string; platform?: string }) =>
+  list: (params?: {
+    page?: number; perPage?: number; employeeId?: string; search?: string; platform?: string;
+    dateFrom?: string; dateTo?: string;
+  }) =>
     request<AppSessionListResponse>('/app-sessions', { params: params as Record<string, string | number | undefined> }),
 };
 
@@ -397,8 +439,20 @@ export interface AppItem {
   itemType: string;
   title: string;
   identifier: string;
+  url?: string;
+  domain?: string;
   openedAt: string;
   closedAt?: string;
+  processId?: number;
+  objectType?: string;
+  action?: string;
+  journeyId?: string;
+  sequence?: number;
+  previousPath?: string;
+  currentPath?: string;
+  windowId?: number;
+  tabId?: number;
+  metadataJson?: string;
   syncedAt?: string;
 }
 
@@ -411,7 +465,10 @@ export interface AppItemListResponse {
 }
 
 export const appItemsApi = {
-  list: (params?: { page?: number; perPage?: number; employeeId?: string; appSessionId?: string; itemType?: string; search?: string }) =>
+  list: (params?: {
+    page?: number; perPage?: number; employeeId?: string; appSessionId?: string; itemType?: string; search?: string;
+    dateFrom?: string; dateTo?: string;
+  }) =>
     request<AppItemListResponse>('/app-items', { params: params as Record<string, string | number | undefined> }),
 };
 

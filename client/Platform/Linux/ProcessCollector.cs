@@ -323,6 +323,24 @@ public partial class ProcessCollector : IActivityCollector
             var script = """"
 import dbus, dbus.bus, os, sys
 
+def is_active_window(states):
+    # AT-SPI state decoding. Older at-spi2-core returns a LIST of state ids
+    # (e.g. [1, 8, 24, 25]); at-spi2-core >= 2.50 returns a PACKED 64-bit
+    # bitmask (two uint32s, low word first) where bit N = state N. The focused
+    # window carries STATE_ACTIVE (1) and/or STATE_FOCUSED (12) in BOTH forms.
+    # (Checking for state 8 = ENABLED — the old code — matches every window and
+    # matched nothing once the format became a bitmask.)
+    try:
+        vals = list(states)
+    except Exception:
+        return False
+    if not vals:
+        return False
+    if max(vals) > 0xFFFF:
+        mask = vals[0] | (vals[1] << 32 if len(vals) > 1 else 0)
+        return bool(mask & ((1 << 1) | (1 << 12)))
+    return 1 in vals or 12 in vals
+
 try:
     raw = os.popen('gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus --method org.a11y.Bus.GetAddress 2>/dev/null').read().strip()
     start = raw.find(chr(39)) + 1
@@ -341,13 +359,12 @@ try:
             app_obj = bus.get_object(name, '/org/a11y/atspi/accessible/root')
             win_children = app_obj.GetChildren(dbus_interface='org.a11y.atspi.Accessible')
         except:
-            continue
-        for win_bus, win_path in win_children:
-            try:
-                win_obj = bus.get_object(str(win_bus), str(win_path))
-                state = win_obj.GetState(dbus_interface='org.a11y.atspi.Accessible')
-                if 8 not in state:
-                    continue
+            continue                for win_bus, win_path in win_children:
+                    try:
+                        win_obj = bus.get_object(str(win_bus), str(win_path))
+                        state = win_obj.GetState(dbus_interface='org.a11y.atspi.Accessible')
+                        if not is_active_window(state):
+                            continue
                 title = None
                 try:
                     title = str(win_obj.Get('org.a11y.atspi.Accessible', 'Name', dbus_interface='org.freedesktop.DBus.Properties'))
@@ -437,7 +454,7 @@ except:
                     var stateRaw = Run("gdbus", $"call --address \"{busAddr}\" --dest {winName} --object-path /org/a11y/atspi/accessible/root --method org.a11y.atspi.Accessible.GetState", 2000);
                     if (stateRaw == null) continue;
 
-                    if (stateRaw.Contains("8"))
+                    if (IsAtSpiActiveState(stateRaw))
                     {
                         var titleRaw = Run("gdbus", $"call --address \"{busAddr}\" --dest {winName} --object-path /org/a11y/atspi/accessible/root --method org.freedesktop.DBus.Properties.Get \"org.a11y.atspi.Accessible\" \"Name\"", 2000);
                         var title = titleRaw != null ? ExtractGvariantString(titleRaw) : null;
@@ -452,6 +469,32 @@ except:
         catch { }
 
         return null;
+    }
+
+    /// <summary>
+    /// Decode an AT-SPI GetState reply (GVariant text) into the focused-window test.
+    /// at-spi2-core &gt;= 2.50 returns a PACKED 64-bit bitmask of state flags
+    /// ("[uint32 1124073730, 0]" — low word first); older versions return a list of
+    /// state ids ("[1, 8, 24, 25]"). In BOTH forms the focused window carries
+    /// STATE_ACTIVE (1) and/or STATE_FOCUSED (12). (Checking for state 8 = ENABLED
+    /// — the old Contains("8") — matched every window and matched nothing once the
+    /// format became a bitmask.)
+    /// </summary>
+    private static bool IsAtSpiActiveState(string stateRaw)
+    {
+        var nums = new List<long>();
+        foreach (Match m in GvariantUInt32Regex().Matches(stateRaw))
+        {
+            if (long.TryParse(m.Groups[1].Value, out var v))
+                nums.Add(v);
+        }
+        if (nums.Count == 0) return false;
+        if (nums.Max() > 0xFFFF)
+        {
+            var mask = nums[0] | (nums.Count > 1 ? nums[1] << 32 : 0);
+            return (mask & ((1L << 1) | (1L << 12))) != 0;
+        }
+        return nums.Contains(1) || nums.Contains(12);
     }
 
     private static (int pid, string? title)? GetActiveViaPortal()
@@ -614,6 +657,8 @@ except:
 
     [GeneratedRegex(@"0x[0-9a-f]+", RegexOptions.IgnoreCase)]
     private static partial Regex WindowIdRegex();
+    [GeneratedRegex(@"uint32\s+(\d+)", RegexOptions.IgnoreCase)]
+    private static partial Regex GvariantUInt32Regex();
     [GeneratedRegex(@"=\s+(\d+)")]
     private static partial Regex PidRegex();
     [GeneratedRegex(@"""(.+?)""")]

@@ -25,8 +25,12 @@ type UpdateEmployeeRequest struct {
 
 // EmployeeLoginRequest is the payload for employee login via desktop client.
 type EmployeeLoginRequest struct {
-	EmployeeID string `json:"employeeId"`
-	SecretKey  string `json:"secretKey"`
+	EmployeeID    string `json:"employeeId"`
+	SecretKey     string `json:"secretKey"`
+	MachineID     string `json:"machineId,omitempty"`
+	Platform      string `json:"platform,omitempty"`
+	ClientVersion string `json:"clientVersion,omitempty"`
+	DeviceName    string `json:"deviceName,omitempty"`
 }
 
 // GenerateSecretResponse is returned when generating a login secret.
@@ -67,10 +71,57 @@ type EmployeeListResponse struct {
 	TotalPages int                `json:"totalPages"`
 }
 
+// ────────────────────────────────
+// Import / Export (web dashboard — Excel upload/download)
+// ────────────────────────────────
+
+// ImportEmployeeRow is a single normalized employee row from an Excel import.
+// The employeeId is preserved verbatim from the spreadsheet (upsert key).
+type ImportEmployeeRow struct {
+	EmployeeID string `json:"employeeId"`
+	Name       string `json:"name"`
+	Email      string `json:"email"`
+	Department string `json:"department"`
+	Shift      string `json:"shift,omitempty"`
+}
+
+// ImportEmployeesRequest is the payload for bulk employee import.
+type ImportEmployeesRequest struct {
+	Employees []ImportEmployeeRow `json:"employees"`
+}
+
+// ImportRowResult reports the outcome of one imported row.
+type ImportRowResult struct {
+	RowIndex   int    `json:"rowIndex"`
+	EmployeeID string `json:"employeeId"`
+	Name       string `json:"name"`
+	Status     string `json:"status"` // imported | updated | skipped
+	Reason     string `json:"reason,omitempty"`
+}
+
+// ImportEmployeesResponse is the result of a bulk import.
+type ImportEmployeesResponse struct {
+	Imported int               `json:"imported"`
+	Updated  int               `json:"updated"`
+	Skipped  int               `json:"skipped"`
+	Results  []ImportRowResult `json:"results"`
+}
+
+// EmployeeExportRow is a flat row for the Excel export.
+type EmployeeExportRow struct {
+	EmployeeID string `json:"employeeId"`
+	Name       string `json:"name"`
+	Email      string `json:"email"`
+	Department string `json:"department"`
+	Shift      string `json:"shift"`
+}
+
 // EmployeeLoginResponse is returned on successful employee login.
 type EmployeeLoginResponse struct {
-	Employee EmployeeResponse `json:"employee"`
-	Token    string           `json:"token,omitempty"`
+	Employee    EmployeeResponse `json:"employee"`
+	Token       string           `json:"token,omitempty"`
+	DeviceToken string           `json:"deviceToken,omitempty"`
+	DeviceID    string           `json:"deviceId,omitempty"`
 }
 
 // ────────────────────────────────

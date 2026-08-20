@@ -43,6 +43,7 @@ public sealed class MacOsAccessibilityBrowserReader : IAccessibilityBrowserReade
             script.AppendLine("    set pn to name of p");
             script.AppendLine($"    if pn is in {AppleScriptList(BrowserProcessNames)} then");
             script.AppendLine("      try");
+            script.AppendLine("        set fm to frontmost of p");
             script.AppendLine("        set wi to 0");
             script.AppendLine("        repeat with win in windows of p");
             script.AppendLine("          set wi to wi + 1");
@@ -52,7 +53,7 @@ public sealed class MacOsAccessibilityBrowserReader : IAccessibilityBrowserReade
             script.AppendLine("            try");
             script.AppendLine("              set urlv to value of text field 1 of win");
             script.AppendLine("            end try");
-            script.AppendLine("            set out to out & pn & \"\\t\" & wi & \"\\t\" & wt & \"\\t\" & urlv & linefeed");
+            script.AppendLine("            set out to out & pn & \"\\t\" & wi & \"\\t\" & wt & \"\\t\" & urlv & \"\\t\" & fm & linefeed");
             script.AppendLine("          end try");
             script.AppendLine("        end repeat");
             script.AppendLine("      end try");
@@ -86,6 +87,9 @@ public sealed class MacOsAccessibilityBrowserReader : IAccessibilityBrowserReade
 
                 var url = parts.Length > 3 ? parts[3] : string.Empty;
                 var pid = pids.GetValueOrDefault(appName, 0);
+                // macOS: the first window of the FRONTMOST browser process is the focused
+                // one (System Events enumerates windows in z-order); best effort.
+                var frontmost = parts.Length > 4 && string.Equals(parts[4], "true", StringComparison.OrdinalIgnoreCase);
 
                 result.Add(new AccessibilitySnapshot
                 {
@@ -97,6 +101,7 @@ public sealed class MacOsAccessibilityBrowserReader : IAccessibilityBrowserReade
                     WindowTitle = title,
                     Url = BrowserAccessibilityHelpers.NormalizeUrl(url),
                     IsIncognito = BrowserAccessibilityHelpers.TitleSuggestsIncognito(title),
+                    IsActive = frontmost && parts[1] == "1",
                 });
             }
         }

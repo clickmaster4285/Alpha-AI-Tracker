@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -97,7 +98,7 @@ func (r *EmployeeRepo) List(ctx context.Context, params EmployeeListParams) (*Em
 		FROM employees e
 		LEFT JOIN departments d ON e.department_id = d.id
 		%s
-		ORDER BY e.created_at DESC
+		ORDER BY e.created_at DESC, e.id DESC
 		LIMIT $%d OFFSET $%d
 	`, whereClause, argIdx, argIdx+1)
 	args = append(args, params.PerPage, offset)
@@ -221,6 +222,184 @@ func (r *EmployeeRepo) Create(ctx context.Context, e *models.Employee) (*models.
 		return nil, fmt.Errorf("commit tx: %w", err)
 	}
 	return emp, nil
+}
+
+// ListAll returns every non-deleted employee ordered by name (Excel export).
+func (r *EmployeeRepo) ListAll(ctx context.Context) ([]models.Employee, error) {
+	query := `
+		SELECT e.id, e.employee_id, e.name, e.email,
+		       COALESCE(d.name, '') AS department,
+		       e.department_id, e.shift,
+		       e.tracking_enabled, e.tracking_status, e.is_online,
+		           COALESCE(e.avatar, '') AS avatar, COALESCE(e.avatar_color, '') AS avatar_color,
+		       e.created_at, e.updated_at, e.deleted_at
+		FROM employees e
+		LEFT JOIN departments d ON e.department_id = d.id
+		WHERE e.deleted_at IS NULL
+		ORDER BY e.name ASC
+	`
+	rows, err := r.pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("list all employees: %w", err)
+	}
+	defer rows.Close()
+
+	var employees []models.Employee
+	for rows.Next() {
+		var e models.Employee
+		if err := rows.Scan(
+			&e.ID, &e.EmployeeID, &e.Name, &e.Email,
+			&e.Department, &e.DepartmentID, &e.Shift,
+			&e.TrackingEnabled, &e.TrackingStatus, &e.IsOnline,
+			&e.Avatar, &e.AvatarColor,
+			&e.CreatedAt, &e.UpdatedAt, &e.DeletedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan employee row: %w", err)
+		}
+		employees = append(employees, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate employees: %w", err)
+	}
+	return employees, nil
+}
+
+// ImportEmployeeItem is a single employee row to import (upsert by employee_id).
+type ImportEmployeeItem struct {
+	EmployeeID string
+	Name       string
+	Email      string
+	Department string
+	Shift      string
+}
+
+// ImportOutcome reports how a single import row was handled.
+type ImportOutcome struct {
+	Status string // imported | updated | skipped
+	Reason string
+}
+
+// Import upserts employees in ONE transaction: departments are get-or-created
+// (a missing name is created first, then attached via department_id) and every
+// row is upserted by its exact employee_id. Soft-deleted employees/departments
+// are revived so an Excel re-import is idempotent.
+func (r *EmployeeRepo) Import(ctx context.Context, items []ImportEmployeeItem) ([]ImportOutcome, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Resolve every referenced department once (get-or-create, revive if soft-deleted).
+	deptIDs := make(map[string]int)
+	for _, it := range items {
+		name := strings.TrimSpace(it.Department)
+		if name == "" {
+			name = "Engineering"
+		}
+		if _, ok := deptIDs[name]; ok {
+			continue
+		}
+		id, err := getOrCreateDepartment(ctx, tx, name)
+		if err != nil {
+			return nil, err
+		}
+		deptIDs[name] = id
+	}
+
+	outcomes := make([]ImportOutcome, len(items))
+	for i, it := range items {
+		deptName := strings.TrimSpace(it.Department)
+		if deptName == "" {
+			deptName = "Engineering"
+		}
+
+		// Email may only be reused by the same employee_id.
+		if it.Email != "" {
+			var existingID string
+			err := tx.QueryRow(ctx,
+				"SELECT employee_id FROM employees WHERE email = $1 AND deleted_at IS NULL", it.Email,
+			).Scan(&existingID)
+			if err == nil && existingID != it.EmployeeID {
+				outcomes[i] = ImportOutcome{Status: "skipped", Reason: "email already in use by " + existingID}
+				continue
+			} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return nil, fmt.Errorf("check email: %w", err)
+			}
+		}
+
+		shift := it.Shift
+		if shift == "" {
+			shift = "Day"
+		}
+
+		// xmax=0 → freshly inserted; xmax≠0 → updated by ON CONFLICT.
+		var inserted bool
+		err = tx.QueryRow(ctx, `
+			INSERT INTO employees (employee_id, name, email, department_id, shift,
+			                       tracking_enabled, tracking_status, is_online)
+			VALUES ($1, $2, $3, $4, $5, true, 'untracked', false)
+			ON CONFLICT (employee_id) DO UPDATE SET
+				name = EXCLUDED.name,
+				email = EXCLUDED.email,
+				department_id = EXCLUDED.department_id,
+				shift = EXCLUDED.shift,
+				deleted_at = NULL,
+				updated_at = NOW()
+			RETURNING (xmax = 0) AS inserted
+		`, it.EmployeeID, it.Name, it.Email, deptIDs[deptName], shift).Scan(&inserted)
+		if err != nil {
+			if isDuplicateKeyError(err) {
+				outcomes[i] = ImportOutcome{Status: "skipped", Reason: "duplicate record"}
+				continue
+			}
+			return nil, fmt.Errorf("import employee %s: %w", it.EmployeeID, err)
+		}
+
+		if inserted {
+			outcomes[i] = ImportOutcome{Status: "imported"}
+		} else {
+			outcomes[i] = ImportOutcome{Status: "updated"}
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit import tx: %w", err)
+	}
+	return outcomes, nil
+}
+
+// getOrCreateDepartment returns the id of the named department, creating it if
+// missing (or reviving it if it was soft-deleted). Runs inside a caller tx.
+func getOrCreateDepartment(ctx context.Context, tx pgx.Tx, name string) (int, error) {
+	var id int
+	var deletedAt *time.Time
+	err := tx.QueryRow(ctx, "SELECT id, deleted_at FROM departments WHERE name = $1", name).Scan(&id, &deletedAt)
+	if err == nil {
+		if deletedAt != nil {
+			if _, err := tx.Exec(ctx, "UPDATE departments SET deleted_at = NULL WHERE id = $1", id); err != nil {
+				return 0, fmt.Errorf("revive department: %w", err)
+			}
+		}
+		return id, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return 0, fmt.Errorf("find department: %w", err)
+	}
+
+	err = tx.QueryRow(ctx,
+		"INSERT INTO departments (name) VALUES ($1) ON CONFLICT (name) DO NOTHING RETURNING id", name,
+	).Scan(&id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) { // race: inserted between SELECT and INSERT
+			if err := tx.QueryRow(ctx, "SELECT id FROM departments WHERE name = $1", name).Scan(&id); err != nil {
+				return 0, fmt.Errorf("re-select department: %w", err)
+			}
+			return id, nil
+		}
+		return 0, fmt.Errorf("create department: %w", err)
+	}
+	return id, nil
 }
 
 // Update partially updates an employee and returns the updated record.

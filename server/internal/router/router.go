@@ -1,12 +1,13 @@
 package router
 
 import (
-	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
 	"github.com/alpha-ai-tracker/server/internal/config"
 	"github.com/alpha-ai-tracker/server/internal/handlers"
 	appMiddleware "github.com/alpha-ai-tracker/server/internal/middleware"
+	"github.com/alpha-ai-tracker/server/internal/repository"
 	"github.com/alpha-ai-tracker/server/internal/services"
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 )
 
 // Setup configures all routes and middleware on the Echo instance.
@@ -14,6 +15,7 @@ func Setup(
 	e *echo.Echo,
 	cfg *config.Config,
 	authService *services.AuthService,
+	deviceRepo *repository.DeviceRepo,
 	authHandler *handlers.AuthHandler,
 	userHandler *handlers.UserHandler,
 	employeeHandler *handlers.EmployeeHandler,
@@ -28,11 +30,7 @@ func Setup(
 	}))
 	e.Use(middleware.Recover())
 
-	// Sync ingestion (2026-08-11): the desktop client now sends adaptive byte-bounded
-	// batches (up to ~1MB raw, gzip-compressed) on its dedicated SyncService loop.
-	// 1) BodyLimit — raise Echo's default 2MB body cap so larger batches aren't rejected
-	//    (a 500-row app_items batch with URLs/metadata can exceed 2MB raw).
-	// 2) Decompress — transparently accept gzip-encoded request bodies (Content-Encoding: gzip).
+	// Sync ingestion: body cap 20MB & transparent gzip decompression
 	e.Use(middleware.BodyLimit("20M"))
 	e.Use(middleware.Decompress())
 
@@ -62,22 +60,30 @@ func Setup(
 	a.POST("/login", authHandler.Login)
 	a.POST("/employee-login", authHandler.EmployeeLogin)
 
-	// Phase 1 sync endpoints — authenticated by employee token in body (not cookie)
-	e.POST("/api/v1/device-hardware/sync", newSchemaHandler.SyncDeviceHardware)
-	e.POST("/api/v1/installed-apps/sync", newSchemaHandler.SyncInstalledApps)
-	e.POST("/api/v1/installed-packages/sync", newSchemaHandler.SyncInstalledPackages)
-	e.POST("/api/v1/network-info/sync", newSchemaHandler.SyncNetworkInfo)
-	e.POST("/api/v1/session-events/sync", newSchemaHandler.SyncSessionEvents)
+	// ─────────────────────────────
+	// Sync Ingestion Routes (Device Authorization Middleware)
+	// ─────────────────────────────
+	syncGroup := e.Group("/api/v1")
+	if deviceRepo != nil {
+		syncGroup.Use(appMiddleware.DeviceAuth(deviceRepo, authService))
+	}
+
+	// Phase 1 sync endpoints
+	syncGroup.POST("/device-hardware/sync", newSchemaHandler.SyncDeviceHardware)
+	syncGroup.POST("/installed-apps/sync", newSchemaHandler.SyncInstalledApps)
+	syncGroup.POST("/installed-packages/sync", newSchemaHandler.SyncInstalledPackages)
+	syncGroup.POST("/network-info/sync", newSchemaHandler.SyncNetworkInfo)
+	syncGroup.POST("/session-events/sync", newSchemaHandler.SyncSessionEvents)
 
 	// Phase 2 sync endpoints
-	e.POST("/api/v1/app-sessions/sync", newSchemaHandler.SyncAppSessions)
-	e.POST("/api/v1/app-items/sync", newSchemaHandler.SyncAppItems)
+	syncGroup.POST("/app-sessions/sync", newSchemaHandler.SyncAppSessions)
+	syncGroup.POST("/app-items/sync", newSchemaHandler.SyncAppItems)
 
-	// Phase 3 sync endpoints (2026-08-11 — previously local-only tables now synced)
-	e.POST("/api/v1/app-status/sync", newSchemaHandler.SyncAppStatus)
-	e.POST("/api/v1/hardware-devices/sync", newSchemaHandler.SyncHardwareDevices)
-	e.POST("/api/v1/permission-status/sync", newSchemaHandler.SyncPermissionStatus)
-	e.POST("/api/v1/storage-devices/sync", newSchemaHandler.SyncStorageDevices)
+	// Phase 3 sync endpoints
+	syncGroup.POST("/app-status/sync", newSchemaHandler.SyncAppStatus)
+	syncGroup.POST("/hardware-devices/sync", newSchemaHandler.SyncHardwareDevices)
+	syncGroup.POST("/permission-status/sync", newSchemaHandler.SyncPermissionStatus)
+	syncGroup.POST("/storage-devices/sync", newSchemaHandler.SyncStorageDevices)
 
 	// ─────────────────────────────
 	// Semi-Protected Routes (optional auth)
@@ -108,20 +114,23 @@ func Setup(
 	// Employees
 	employees := protected.Group("/employees")
 	employees.GET("", employeeHandler.ListEmployees)
-	// Aggregate machine picture (hardware, apps, packages, peripherals, permissions, stats)
-	// for a single employee — consumed by the web user-detail page. Registered BEFORE /:id is
-	// irrelevant to Echo (static segments win), but kept next to it for readability.
 	employees.GET("/:id/detail", newSchemaHandler.GetEmployeeDetail)
+	employees.GET("/:id/devices", authHandler.ListEmployeeDevices)
+	employees.POST("/import", employeeHandler.ImportEmployees)
+	employees.GET("/export", employeeHandler.ExportEmployees)
 	employees.GET("/:id", employeeHandler.GetEmployee)
 	employees.POST("", employeeHandler.CreateEmployee)
 	employees.PUT("/:id", employeeHandler.UpdateEmployee)
 	employees.DELETE("/:id", employeeHandler.DeleteEmployee)
 	employees.POST("/:id/generate-secret", employeeHandler.GenerateSecret)
 
-	// App Sessions listing (protected — web admin access, replaces old activity-logs)
+	// Device Revocation
+	protected.POST("/devices/:id/revoke", authHandler.RevokeDevice)
+
+	// App Sessions listing (protected — web admin access)
 	protected.GET("/app-sessions", newSchemaHandler.ListAppSessions)
 
-	// App Items listing (protected — web admin access, shows browser URLs, file paths, etc.)
+	// App Items listing (protected — web admin access)
 	protected.GET("/app-items", newSchemaHandler.ListAppItems)
 
 	// Departments

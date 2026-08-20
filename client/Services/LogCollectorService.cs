@@ -217,6 +217,24 @@ public class LogCollectorService : BackgroundService
         await _store.InitializeAsync(stoppingToken);
         await RefreshEmployeeInfo(stoppingToken);
 
+        // ─── Headless session restore (boot / --background mode) ───
+        // _trackingEnabled is ONLY ever set by StartTracking(), which was previously
+        // called exclusively from the Avalonia GUI (MainViewModel.InitializeAsync on
+        // session restore, LoginAsync on explicit login). At boot the client auto-starts
+        // with --background (services only — no window, no MainViewModel), so the main
+        // loop below spun on "waiting for login" forever: browser journeys kept flowing
+        // (AccessibilityBrowserTracker restores the login from SQLite itself) but ZERO
+        // app sessions were ever collected — the web dashboard showed browser activity
+        // only, with no installed-app activity or app sessions. Restore the persisted
+        // session here exactly like the GUI does: if employee credentials exist in
+        // SQLite, begin tracking immediately. The GUI then becomes login-only — opening
+        // or closing it can no longer start or stop the tracking services.
+        if (!string.IsNullOrEmpty(_currentEmployeeId) && !string.IsNullOrEmpty(_currentToken))
+        {
+            StartTracking();
+            _logger.LogInformation("Session restored from SQLite — tracking started in background mode");
+        }
+
         // ─── Reconcile stale sessions from previous crashes ───
         // Uses last_heartbeat_at timestamp to detect crashes/poweroffs and
         // close orphaned sessions with the correct approximate ended_at time.
@@ -313,8 +331,14 @@ public class LogCollectorService : BackgroundService
                 var duplicateCloseSessions = new List<AppSession>();
                 foreach (var rec in openRecords)
                 {
+                    // Skip tracker-owned sessions: real browsers (by process name) AND
+                    // embedded webview windows (browser_tab root on a non-browser process
+                    // like VS Code). Without the item-type check the webview session would
+                    // hydrate under the SAME key as the host app's own session and be
+                    // closed as a "duplicate" one cycle later.
                     if (BrowserAccessibilityHelpers.IsBrowserProcess(
-                            AppProcessClassifier.ExtractBaseProcessName(rec.ProcessName)))
+                            AppProcessClassifier.ExtractBaseProcessName(rec.ProcessName)) ||
+                        rec.ItemType == "browser_tab")
                         continue;
 
                     var scope = CgroupResolver.GetAppScope(rec.ProcessId);
@@ -594,9 +618,13 @@ public class LogCollectorService : BackgroundService
                 if (_cycleCount % 10 == 0)
                 {
                     await StorePermissionStatus(stoppingToken);
-                    // Periodic focus-duration flush (~every 5 min at the default 30s
-                    // interval) so the server learns growing totals even for long-running
-                    // sessions, not just at close.
+                }
+                // Periodic focus-duration flush every 2 cycles (~1 min at the default 30s
+                // interval — user rule 2026-08-18: push is_synced=0 rows to the server at
+                // least every minute, so the dashboard learns growing foreground/background
+                // totals for long-running sessions instead of only at close).
+                if (_cycleCount % 2 == 0)
+                {
                     await FlushSessionFocusAsync(stoppingToken);
                 }
 
