@@ -64,9 +64,11 @@ client/
 │   ├── Abstractions/                IActivityCollector · IInstalledAppDetector · ILogStore · IPackageDetector
 │   ├── Models/                      ActivityLog · AppSession · DeviceHardwareInfo · EmployeeInfo ·
 │   │                                HardwareDevice · SessionInfo
-│   ├── BrowserAccessibility/        9 files — URL capture with NO extension and NO debugger port:
+│   ├── BrowserAccessibility/        11 files — URL capture with NO extension and NO debugger port:
 │   │                                factory + tracker + snapshot + helpers + history reader, and one
-│   │                                reader per OS (LinuxAtSpi / WindowsUia / MacOsAccessibility)
+│   │                                reader per OS (LinuxAtSpi / WindowsUia / MacOsAccessibility).
+│   │                                Browser detection is now dynamic via IBrowserRegistry (sourced from
+│   │                                installed_applications.is_browser) — no hardcoded name lists.
 │   └── DesktopEventBus/             7 files — RawDesktopEvent → validator → EventCoordinator →
 │                                    JourneyEngine → JourneyRecord (the file/browser journey pipeline)
 │
