@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check, Eye, Monitor, Upload, Download, Pencil, Trash2 } from 'lucide-react';
+import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check, Eye, Monitor, Upload, Download, Pencil, Trash2, AlertTriangle } from 'lucide-react';
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import * as XLSX from 'xlsx';
@@ -52,7 +52,7 @@ export default function UsersList() {
   const [deptFilter, setDeptFilter] = useState('');
   const [showAdd, setShowAdd] = useState(false);
   const [showEdit, setShowEdit] = useState<string | null>(null);
-  const [showSecret, setShowSecret] = useState<string | null>(null);
+  const [showSecret, setShowSecret] = useState<Employee | null>(null);
   const [secretValue, setSecretValue] = useState('');
   const [copied, setCopied] = useState(false);
   const [importResult, setImportResult] = useState<ImportEmployeesResponse | null>(null);
@@ -277,17 +277,50 @@ export default function UsersList() {
     deleteMutation.mutate(id);
   };
 
-  const handleGenerateSecret = (id: string) => {
-    setShowSecret(id);
+  const handleGenerateSecret = (emp: Employee) => {
+    setShowSecret(emp);
     setSecretValue('');
     setCopied(false);
-    secretMutation.mutate(id);
+    secretMutation.mutate(emp.id);
   };
 
-  const handleCopySecret = () => {
-    navigator.clipboard.writeText(secretValue);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const copyToClipboard = async (text: string): Promise<boolean> => {
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch {
+        // fall through to legacy fallback
+      }
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.top = '0';
+    textarea.style.left = '0';
+    textarea.style.opacity = '0';
+    textarea.readOnly = true;
+    document.body.appendChild(textarea);
+    textarea.select();
+    let ok = false;
+    try {
+      ok = document.execCommand('copy');
+    } catch {
+      ok = false;
+    } finally {
+      document.body.removeChild(textarea);
+    }
+    return ok;
+  };
+
+  const handleCopySecret = async () => {
+    const ok = await copyToClipboard(secretValue);
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } else {
+      toast.error('Copy failed', { description: 'Your browser blocked clipboard access. Copy the secret manually.' });
+    }
   };
 
   // ── Loading state ──
@@ -471,7 +504,7 @@ export default function UsersList() {
                           <Pencil className="w-4 h-4 text-muted-foreground" />
                           Edit Details
                         </DropdownMenuItem>
-                        <DropdownMenuItem onSelect={() => handleGenerateSecret(emp.id)} className="cursor-pointer gap-2.5 px-2.5 py-2">
+                        <DropdownMenuItem onSelect={() => handleGenerateSecret(emp)} className="cursor-pointer gap-2.5 px-2.5 py-2">
                           <Key className="w-4 h-4 text-muted-foreground" />
                           Generate Login Secret
                         </DropdownMenuItem>
@@ -591,30 +624,58 @@ export default function UsersList() {
 
       {/* Secret Dialog */}
       <Dialog open={showSecret !== null} onOpenChange={(open) => { if (!open) { setShowSecret(null); setSecretValue(''); setCopied(false); } }}>
-        <DialogContent className="bg-card sm:max-w-[425px]">
+        <DialogContent className="bg-card sm:max-w-[460px]">
           <DialogHeader>
             <DialogTitle className="font-display">Login Secret Generated</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 mt-2">
-            <p className="text-sm text-muted-foreground">
-              Share this secret with the employee. It expires in 5 minutes and can only be used once.
-            </p>
+            {showSecret && (
+              <div className="flex items-center gap-3 bg-background border border-border rounded-xl p-3.5">
+                <div
+                  className="w-11 h-11 rounded-full flex items-center justify-center text-sm font-bold text-primary-foreground shrink-0"
+                  style={{ backgroundColor: showSecret.avatarColor || '#7C3AED' }}
+                >
+                  {showSecret.avatar || showSecret.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-foreground truncate">{showSecret.name}</p>
+                  <p className="text-xs text-muted-foreground truncate">{showSecret.email}</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">{showSecret.department}</p>
+                </div>
+                <div className="text-right shrink-0">
+                  <p className="text-[11px] uppercase tracking-wide text-muted-foreground font-medium">Employee ID</p>
+                  <p className="text-sm font-mono font-medium text-foreground">{showSecret.employeeId}</p>
+                </div>
+              </div>
+            )}
+
+            <div className="flex items-start gap-2.5 bg-warning/10 border border-warning/30 rounded-xl p-3">
+              <AlertTriangle className="w-4 h-4 text-warning mt-0.5 shrink-0" />
+              <p className="text-xs text-foreground">
+                This secret is <span className="font-semibold text-warning">valid for 5 minutes</span> and can only be
+                used once. It won't be shown again after you close this dialog — copy it now.
+              </p>
+            </div>
+
             {secretMutation.isPending ? (
               <div className="flex items-center justify-center py-6">
                 <Loader2 className="w-6 h-6 animate-spin text-primary" />
               </div>
             ) : secretValue ? (
-              <div className="flex items-center gap-2 bg-background border border-border rounded-lg p-3">
-                <code className="flex-1 text-sm font-mono font-bold text-foreground select-all">{secretValue}</code>
+              <div className="bg-background border border-border rounded-xl p-1.5 flex items-center gap-1.5">
+                <code className="flex-1 text-sm font-mono font-bold text-foreground select-all px-2.5 py-2 truncate">{secretValue}</code>
                 <button
                   onClick={handleCopySecret}
-                  className="p-2 rounded-lg hover:bg-muted transition-colors"
-                  title="Copy secret"
+                  className={`px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors shrink-0 ${
+                    copied
+                      ? 'bg-success/15 text-success'
+                      : 'bg-primary text-primary-foreground hover:opacity-90'
+                  }`}
                 >
                   {copied ? (
-                    <Check className="w-4 h-4 text-success" />
+                    <><Check className="w-3.5 h-3.5" /> Copied</>
                   ) : (
-                    <Copy className="w-4 h-4 text-muted-foreground" />
+                    <><Copy className="w-3.5 h-3.5" /> Copy</>
                   )}
                 </button>
               </div>
