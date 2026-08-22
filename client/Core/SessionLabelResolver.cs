@@ -12,15 +12,15 @@ namespace client.Core;
 /// </summary>
 public static class SessionLabelResolver
 {
-    public static string? Resolve(string processName, int rootPid)
+    public static string? Resolve(string processName, int rootPid, client.Core.BrowserAccessibility.IBrowserRegistry browserRegistry)
     {
-        return processName switch
-        {
-            "code" => ResolveVsCodeProject(rootPid),
-            "chrome" or "google-chrome" or "chromium" or "chromium-browser" or
-            "brave" or "microsoft-edge" or "vivaldi" or "opera" => ResolveChromeProfile(rootPid),
-            _ => null,
-        };
+        if (browserRegistry is null || !browserRegistry.IsBrowser(processName))
+            return processName switch
+            {
+                "code" => ResolveVsCodeProject(rootPid),
+                _ => null,
+            };
+        return ResolveBrowserProfile(rootPid);
     }
 
     /// <summary>
@@ -70,12 +70,20 @@ public static class SessionLabelResolver
         }
     }
 
-    /// <summary>Chrome profile: --profile-directory="Profile 1" / "Default"</summary>
-    private static string? ResolveChromeProfile(int pid)
+    /// <summary>Chrome/Firefox profile: --profile-directory="Profile 1" / -P "profile-name"</summary>
+    private static string? ResolveBrowserProfile(int pid)
     {
         var argv = ReadCmdline(pid);
-        var match = argv.FirstOrDefault(a => a.StartsWith("--profile-directory="));
-        return match?.Split('=', 2).ElementAtOrDefault(1)?.Trim('"');
+        var match = argv.FirstOrDefault(a => a.StartsWith("--profile-directory=", StringComparison.Ordinal));
+        if (match != null)
+            return match.Split('=', 2)[1].Trim('"');
+        match = argv.FirstOrDefault(a => a.StartsWith("-P", StringComparison.Ordinal));
+        if (match != null)
+            return match.Split(' ', 2).ElementAtOrDefault(1)?.Trim('"');
+        match = argv.FirstOrDefault(a => a.StartsWith("--profile=", StringComparison.Ordinal));
+        if (match != null)
+            return match.Split('=', 2)[1].Trim('"');
+        return null;
     }
 
     private static List<string> ReadCmdline(int pid)

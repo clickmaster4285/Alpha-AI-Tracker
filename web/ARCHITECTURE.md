@@ -1,7 +1,25 @@
 # Web Architecture — Alpha AI Tracker Dashboard
 
-> **Last audited:** 2026-08-18
+> **Last audited:** 2026-08-22
 > **Changelog:**
+> 2026-08-22: **Sidebar parent menus stay open when navigating to child pages.**
+>   `AppSidebar` now auto-expands any parent section whose `children` array contains the current
+>   `pathname`, so the menu stays open when the user opens a child page.
+> 2026-08-22: **Configuration pages UI/UX redesign + manual website creation.**
+>   `ClassifiedItemsTable` component redesigned with improved filter bar (status toggle chips, clearable filters,
+>   active count badge), better table spacing/hover states, per-row classification status badges
+>   (Classified/Unclassified/Partial), and richer empty/loading states. `websites/page.tsx` gains an
+>   **Add Website** button + modal dialog that posts to new `POST /api/v1/monitoring/websites` (server creates
+>   the row with optional type/category and normalizes the domain). Server: new `CreateWebsite` endpoint in
+>   `monitoring_handler.go` + `MonitoringService` + `MonitoringRepo`. Verified: `go build`/`go vet` clean,
+>   `tsc --noEmit` clean, `next build` passes.
+> 2026-08-22: **Dynamic browser badge names on Web Activity — removed hardcoded `BROWSER_NAMES` map.**
+>   `employee-journey/web/page.tsx` no longer translates `metadataJson.processName` through a hardcoded
+>   10-entry map. The server resolves the friendly browser name dynamically: `ListAppItems` extracts
+>   `processName` from `metadata_json` and looks it up in `installed_applications` (`binary_name` /
+>   `app_name` match, `is_browser = true`), returning `browserName` in the API response. The web page
+>   uses `item.browserName` directly; for embedded webviews (`source: "webview"`) the host app's
+>   process name is preserved as before. Verified: `go build`/`go vet` clean, `tsc --noEmit` clean.
 > 2026-08-18: **Server-side date/search filters on App Usage + Web Activity + structural browser detection + UX fixes.**
 > - **Server-side filters**: `GET /app-sessions` and `GET /app-items` now accept `dateFrom`/`dateTo` (RFC3339 or
 >   date-only) — sessions filtered on `started_at`, items on `opened_at`; combined with existing `search`/`platform`.

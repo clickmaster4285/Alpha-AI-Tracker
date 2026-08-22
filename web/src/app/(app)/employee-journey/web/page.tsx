@@ -33,23 +33,14 @@ function visitDurationSeconds(item: AppItem): number {
   return Math.max(0, (new Date(item.closedAt).getTime() - new Date(item.openedAt).getTime()) / 1000);
 }
 
-const BROWSER_NAMES: Record<string, string> = {
-  chrome: 'Chrome', chromium: 'Chromium', firefox: 'Firefox', 'firefox-esr': 'Firefox ESR',
-  msedge: 'Edge', edge: 'Edge', brave: 'Brave', opera: 'Opera', vivaldi: 'Vivaldi',
-  'microsoft-edge': 'Edge', 'google-chrome': 'Chrome', 'google-chrome-stable': 'Chrome',
-};
-
 /** Browser/source of a journey row, read from metadata_json.processName (e.g. "chrome"). */
 function browserOf(item: AppItem): string | null {
   try {
     const meta = item.metadataJson ? JSON.parse(item.metadataJson) as { processName?: string; source?: string } : null;
     const name = meta?.processName;
     if (!name) return null;
-    // Real browsers → friendly name. Embedded webviews (metadata "source":"webview") →
-    // the HOST APP's process name ("code" for VS Code, "slack", …) — data-driven,
-    // no hardcoded list.
     if (meta.source === 'webview') return name;
-    return BROWSER_NAMES[name.toLowerCase()] ?? null;
+    return item.browserName || name;
   } catch { return null; }
 }
 

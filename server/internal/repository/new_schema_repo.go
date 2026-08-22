@@ -673,10 +673,44 @@ func (r *NewSchemaRepo) ListAppItems(ctx context.Context, params AppItemListPara
 // ────────────────────────────────
 
 // UpsertApplicationCatalog inserts or updates the deduplicated app catalog row keyed by
-// app_fingerprint and returns its id.
+// app_fingerprint and returns its id. Before inserting, it checks for an existing
+// non-deleted row with the same normalized app_name (cross-OS dedup: same product
+// arriving from Linux .desktop + Windows Start Menu gets one catalog row).
 func (r *NewSchemaRepo) UpsertApplicationCatalog(ctx context.Context, tx pgx.Tx, e models.InstalledApplication) (string, error) {
 	var id string
+
+	// 1. Look for an existing non-deleted row by normalized app_name.
+	normalizedName := normalizeAppName(e.AppName)
 	err := tx.QueryRow(ctx, `
+		SELECT id FROM installed_applications
+		WHERE deleted_at IS NULL
+		  AND regexp_replace(lower(app_name), '[^a-z0-9]', '', 'g') = $1
+		LIMIT 1
+	`, normalizedName).Scan(&id)
+	if err == nil {
+		// Found existing row — update metadata in place, return its id.
+		err = tx.QueryRow(ctx, `
+			UPDATE installed_applications SET
+				app_name = $2,
+				binary_name = COALESCE(NULLIF($3, ''), binary_name),
+				is_browser = is_browser OR $4,
+				desktop_id = COALESCE(NULLIF($5, ''), desktop_id),
+				categories = COALESCE(NULLIF($6, ''), categories),
+				detected_at = $7,
+				synced_at = $8
+			WHERE id = $1
+			RETURNING id
+		`, id, e.AppName, e.BinaryName, e.IsBrowser, e.DesktopID, e.Categories, e.DetectedAt, e.SyncedAt).Scan(&id)
+		if err == nil {
+			return id, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("update existing catalog: %w", err)
+		}
+	}
+
+	// 2. No existing row — insert new.
+	err = tx.QueryRow(ctx, `
 		INSERT INTO installed_applications
 			(id, employee_id, app_name, app_version, publisher, install_path,
 			 install_date, uninstall_string, change_type, detected_at, synced_at,
@@ -700,6 +734,18 @@ func (r *NewSchemaRepo) UpsertApplicationCatalog(ctx context.Context, tx pgx.Tx,
 		return "", fmt.Errorf("upsert application catalog: %w", err)
 	}
 	return id, nil
+}
+
+// normalizeAppName produces the cross-OS merge key for an app display name:
+// lowercase, strip every non-alphanumeric character.
+func normalizeAppName(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // UpsertPackageCatalog inserts or updates the deduplicated package catalog row keyed by
@@ -1196,4 +1242,29 @@ func (r *NewSchemaRepo) GetEmployeeActivityStats(ctx context.Context, employeeID
 		return nil, fmt.Errorf("get employee activity stats: %w", err)
 	}
 	return &s, nil
+}
+
+// GetBrowserNameByProcessName returns the friendly app_name from installed_applications
+// for a given process/binary name where is_browser = true. Returns empty string when
+// no catalog entry exists (the caller should fall back to the raw process name).
+func (r *NewSchemaRepo) GetBrowserNameByProcessName(ctx context.Context, processName string) (string, error) {
+	if strings.TrimSpace(processName) == "" {
+		return "", nil
+	}
+	var name string
+	err := r.pool.QueryRow(ctx, `
+		SELECT app_name
+		FROM installed_applications
+		WHERE deleted_at IS NULL
+		  AND is_browser = true
+		  AND (binary_name = $1 OR app_name = $1)
+		LIMIT 1
+	`, processName).Scan(&name)
+	if err == pgx.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("lookup browser name for %s: %w", processName, err)
+	}
+	return name, nil
 }

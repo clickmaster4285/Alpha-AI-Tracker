@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -484,6 +485,22 @@ func (s *NewSchemaService) ListAppItems(ctx context.Context, params repository.A
 			t := *item.ParentItemID
 			parentItemID = &t
 		}
+
+		browserName := ""
+		if item.MetadataJSON != "" {
+			var meta map[string]interface{}
+			if err := json.Unmarshal([]byte(item.MetadataJSON), &meta); err == nil {
+				if processName, ok := meta["processName"].(string); ok && processName != "" {
+					if meta["source"] != "webview" {
+						resolved, _ := s.repo.GetBrowserNameByProcessName(ctx, processName)
+						browserName = resolved
+					} else {
+						browserName = processName
+					}
+				}
+			}
+		}
+
 		items[i] = dto.AppItemResponse{
 			ID:           item.ID,
 			EmployeeID:   item.EmployeeID,
@@ -506,6 +523,7 @@ func (s *NewSchemaService) ListAppItems(ctx context.Context, params repository.A
 			WindowID:     item.WindowID,
 			TabID:        item.TabID,
 			MetadataJSON: item.MetadataJSON,
+			BrowserName:  browserName,
 			SyncedAt:     syncedAt,
 		}
 	}

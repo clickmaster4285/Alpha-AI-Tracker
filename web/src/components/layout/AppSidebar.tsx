@@ -43,15 +43,25 @@ interface NavSection {
 // weight — each section title is a quiet all-caps label, not a heading.
 
 const navSections: NavSection[] = [
-  // ── No label — top-level entry points ──
+  // ── Top-level ──────────────────────────────────────────────────────────────
   {
     items: [
-      { label: "Dashboard", icon: LayoutDashboard, path: "/dashboard", module: "dashboard" },
-      { label: "Employee Portal", icon: Briefcase, path: "/employee-portal", module: "employee-portal" },
+      {
+        label: "Dashboard",
+        icon: LayoutDashboard,
+        path: "/dashboard",
+        module: "dashboard",
+      },
+      {
+        label: "Employee Portal",
+        icon: Briefcase,
+        path: "/employee-portal",
+        module: "employee-portal",
+      },
     ],
   },
 
-  // ── People ──
+  // ── People ─────────────────────────────────────────────────────────────────
   {
     title: "People",
     items: [
@@ -59,70 +69,207 @@ const navSections: NavSection[] = [
         label: "HR",
         icon: Users,
         children: [
-          { label: "Employees", path: "/employees", module: "users" },
-          { label: "Activity Status", path: "/employees/activity", module: "users/activity" },
-          { label: "Departments", path: "/departments", module: "departments" },
-          { label: "Roles", path: "/roles", module: "roles" },
-          { label: "KPIs & KRAs", path: "/kpis", module: "kpis" },
-          { label: "Onboarding", path: "/onboarding", module: "onboarding" },
-          { label: "Shift Management", path: "/shifts", module: "shifts" },
+          {
+            label: "Employees",
+            path: "/employees",
+            module: "users",
+          },
+          {
+            label: "Activity Status",
+            path: "/employees/activity",
+            module: "users/activity",
+          },
+          {
+            label: "Departments",
+            path: "/departments",
+            module: "departments",
+          },
+          {
+            label: "Roles",
+            path: "/roles",
+            module: "roles",
+          },
+          {
+            label: "KPIs & KRAs",
+            path: "/kpis",
+            module: "kpis",
+          },
+          {
+            label: "Onboarding",
+            path: "/onboarding",
+            module: "onboarding",
+          },
+          {
+            label: "Shift Management",
+            path: "/shifts",
+            module: "shifts",
+          },
         ],
       },
+
       {
         label: "Time & Attendance",
         icon: CalendarDays,
         children: [
-          { label: "Timesheets", path: "/timesheets", module: "timesheets" },
-          { label: "Attendance Log", path: "/attendance", module: "attendance" },
-          { label: "GPS & Location", path: "/gps-location", module: "gps-location" },
-          { label: "Hours Insights", path: "/hours-insights", module: "hours-insights" },
+          {
+            label: "Timesheets",
+            path: "/timesheets",
+            module: "timesheets",
+          },
+          {
+            label: "Attendance Log",
+            path: "/attendance",
+            module: "attendance",
+          },
+          {
+            label: "GPS & Location",
+            path: "/gps-location",
+            module: "gps-location",
+          },
+          {
+            label: "Hours Insights",
+            path: "/hours-insights",
+            module: "hours-insights",
+          },
         ],
       },
+
       {
         label: "Productivity",
         icon: Trophy,
         children: [
-          { label: "Score Card", path: "/productivity-scoring", module: "productivity-scoring" },
-          { label: "Goals & OKRs", path: "/goals", module: "goals" },
+          {
+            label: "Score Card",
+            path: "/productivity-scoring",
+            module: "productivity-scoring",
+          },
+          {
+            label: "Goals & OKRs",
+            path: "/goals",
+            module: "goals",
+          },
         ],
       },
     ],
   },
 
-  // ── Monitoring ──
+  // ── Monitoring ─────────────────────────────────────────────────────────────
   {
     title: "Monitoring",
     items: [
-      // ── NEW: Employee Journey ────────────────────────────────────────────
-      // Per-employee chronological activity view: everything a single user did
-      // during a session — apps, websites, screenshots, location — in one place.
       {
         label: "Employee Journey",
         icon: Route,
         children: [
-          { label: "Session Timeline", path: "/employee-journey/timeline", module: "employee-journey" },
-          { label: "App Usage", path: "/employee-journey/apps", module: "employee-journey" },
-          { label: "Web Activity", path: "/employee-journey/web", module: "employee-journey" },
-          { label: "Screenshots", path: "/employee-journey/screenshots", module: "employee-journey" },
-          { label: "Location Trail", path: "/employee-journey/location", module: "employee-journey" },
+          {
+            label: "Session Timeline",
+            path: "/employee-journey/timeline",
+            module: "employee-journey",
+          },
+          {
+            label: "App Usage",
+            path: "/employee-journey/apps",
+            module: "employee-journey",
+          },
+          {
+            label: "Web Activity",
+            path: "/employee-journey/web",
+            module: "employee-journey",
+          },
+          {
+            label: "Screenshots",
+            path: "/employee-journey/screenshots",
+            module: "employee-journey",
+          },
+          {
+            label: "Location Trail",
+            path: "/employee-journey/location",
+            module: "employee-journey",
+          },
         ],
       },
+
       {
         label: "Device Specs",
         icon: Monitor,
         children: [
-          { label: "Hardware Overview", path: "/device-specs", module: "device-specs" },
-          { label: "Installed Software", path: "/device-specs/software", module: "device-specs" },
-          { label: "Peripherals", path: "/device-specs/peripherals", module: "device-specs" },
-          { label: "Permissions", path: "/device-specs/permissions", module: "device-specs" },
+          {
+            label: "Hardware Overview",
+            path: "/device-specs",
+            module: "device-specs",
+          },
+          {
+            label: "Installed Software",
+            path: "/device-specs/software",
+            module: "device-specs",
+          },
+          {
+            label: "Peripherals",
+            path: "/device-specs/peripherals",
+            module: "device-specs",
+          },
+          {
+            label: "Permissions",
+            path: "/device-specs/permissions",
+            module: "device-specs",
+          },
         ],
-      }, { label: "Apps & Websites", icon: AppWindow, path: "/apps", module: "apps" },
-      { label: "Screenshots", icon: Camera, path: "/screenshots", module: "screenshots" },
-      { label: "Live Stream", icon: Radio, path: "/live-stream", module: "live-stream" },
+      },
+
+      {
+        label: "Screenshots",
+        icon: Camera,
+        path: "/screenshots",
+        module: "screenshots",
+      },
+
+      {
+        label: "Live Stream",
+        icon: Radio,
+        path: "/live-stream",
+        module: "live-stream",
+      },
     ],
   },
 
-  // ── Insights ──
+  // ── Configuration ──────────────────────────────────────────────────────────
+  {
+    title: "Configuration",
+    items: [
+      {
+        label: "Apps & Websites",
+        icon: AppWindow,
+        children: [
+          {
+            label: "Applications",
+            path: "/configuration/apps",
+            module: "configuration/apps",
+          },
+          {
+            label: "Websites",
+            path: "/configuration/websites",
+            module: "configuration/websites",
+          },
+        ],
+      },
+
+      {
+        label: "Categories",
+        icon: FolderKanban,
+        path: "/configuration/categories",
+        module: "configuration/categories",
+      },
+
+      {
+        label: "Productivity Rules",
+        icon: Target,
+        path: "/configuration/productivity-rules",
+        module: "configuration/productivity-rules",
+      },
+    ],
+  },
+
+  // ── Insights ───────────────────────────────────────────────────────────────
   {
     title: "Insights",
     items: [
@@ -130,32 +277,66 @@ const navSections: NavSection[] = [
         label: "Logs",
         icon: FileText,
         children: [
-          { label: "User Insights", path: "/logs/insights", module: "logs" },
-          { label: "Graphical Logs", path: "/logs/graphical", module: "logs" },
-          { label: "Comprehensive Logs", path: "/logs/comprehensive", module: "logs" },
+          {
+            label: "User Insights",
+            path: "/logs/insights",
+            module: "logs",
+          },
+          {
+            label: "Graphical Logs",
+            path: "/logs/graphical",
+            module: "logs",
+          },
+          {
+            label: "Comprehensive Logs",
+            path: "/logs/comprehensive",
+            module: "logs",
+          },
         ],
       },
+
       {
         label: "Charts",
         icon: BarChart3,
         children: [
-          { label: "Productivity", path: "/charts/productivity", module: "charts" },
-          { label: "Activity", path: "/charts/activity", module: "charts" },
+          {
+            label: "Productivity",
+            path: "/charts/productivity",
+            module: "charts",
+          },
+          {
+            label: "Activity",
+            path: "/charts/activity",
+            module: "charts",
+          },
         ],
       },
+
       {
         label: "Reports & Analytics",
         icon: FileBarChart,
         children: [
-          { label: "Reports", path: "/reports", module: "reports" },
-          { label: "Audit Log", path: "/audit-log", module: "audit-log" },
-          { label: "Executive Dashboard", path: "/executive-dashboard", module: "executive-dashboard" },
+          {
+            label: "Reports",
+            path: "/reports",
+            module: "reports",
+          },
+          {
+            label: "Audit Log",
+            path: "/audit-log",
+            module: "audit-log",
+          },
+          {
+            label: "Executive Dashboard",
+            path: "/executive-dashboard",
+            module: "executive-dashboard",
+          },
         ],
       },
     ],
   },
 
-  // ── Security ──
+  // ── Security ───────────────────────────────────────────────────────────────
   {
     title: "Security",
     items: [
@@ -163,39 +344,98 @@ const navSections: NavSection[] = [
         label: "Security & DLP",
         icon: AlertTriangle,
         children: [
-          { label: "DLP Alerts", path: "/dlp-alerts", module: "dlp-alerts" },
-          { label: "DLP Rules", path: "/dlp-rules", module: "dlp-rules" },
-          { label: "Shadow IT", path: "/shadow-it", module: "shadow-it" },
+          {
+            label: "DLP Alerts",
+            path: "/dlp-alerts",
+            module: "dlp-alerts",
+          },
+          {
+            label: "DLP Rules",
+            path: "/dlp-rules",
+            module: "dlp-rules",
+          },
+          {
+            label: "Shadow IT",
+            path: "/shadow-it",
+            module: "shadow-it",
+          },
         ],
       },
     ],
   },
 
-  // ── Workspace ──
+  // ── Workspace ──────────────────────────────────────────────────────────────
   {
     title: "Workspace",
     items: [
-      { label: "Projects", icon: FolderKanban, path: "/projects", module: "projects" },
-      { label: "Emails & Alerts", icon: Mail, path: "/emails", module: "emails" },
-      { label: "AI Summary", icon: Sparkles, path: "/ai-summary", module: "ai-summary" },
+      {
+        label: "Projects",
+        icon: FolderKanban,
+        path: "/projects",
+        module: "projects",
+      },
+      {
+        label: "Emails & Alerts",
+        icon: Mail,
+        path: "/emails",
+        module: "emails",
+      },
+      {
+        label: "AI Summary",
+        icon: Sparkles,
+        path: "/ai-summary",
+        module: "ai-summary",
+      },
     ],
   },
 
-  // ── No label — bottom utilities ──
+  // ── Settings ────────────────────────────────────────────────────────────────
   {
     items: [
       {
         label: "Settings",
         icon: Settings,
         children: [
-          { label: "General", path: "/settings", module: "settings" },
-          { label: "Permissions", path: "/settings/permissions", module: "settings" },
-          { label: "Tracking", path: "/settings/tracking", module: "settings/tracking" },
-          { label: "User Management", path: "/settings/user-management", module: "settings/user-management" },
-          { label: "Notifications", path: "/settings/notifications", module: "settings/notifications" },
-          { label: "Billing", path: "/settings/billing", module: "settings/billing" },
-          { label: "Compliance", path: "/settings/compliance", module: "settings/compliance" },
-          { label: "Security", path: "/settings/security", module: "settings/security" },
+          {
+            label: "General",
+            path: "/settings",
+            module: "settings",
+          },
+          {
+            label: "Permissions",
+            path: "/settings/permissions",
+            module: "settings",
+          },
+          {
+            label: "Tracking",
+            path: "/settings/tracking",
+            module: "settings/tracking",
+          },
+          {
+            label: "User Management",
+            path: "/settings/user-management",
+            module: "settings/user-management",
+          },
+          {
+            label: "Notifications",
+            path: "/settings/notifications",
+            module: "settings/notifications",
+          },
+          {
+            label: "Billing",
+            path: "/settings/billing",
+            module: "settings/billing",
+          },
+          {
+            label: "Compliance",
+            path: "/settings/compliance",
+            module: "settings/compliance",
+          },
+          {
+            label: "Security",
+            path: "/settings/security",
+            module: "settings/security",
+          },
         ],
       },
     ],
@@ -226,6 +466,26 @@ export default function AppSidebar({
   useEffect(() => {
     if (user) setOpenMenus([]);
   }, [user]);
+
+  // Keep parent menus open when the current path is inside one of their children.
+  // This prevents the sidebar section from collapsing just because the user
+  // navigated to a child page.
+  useEffect(() => {
+    if (!user) return;
+    const expanded = navSections.flatMap(s => s.items).reduce<string[]>((acc, item) => {
+      if (item.children && item.children.some(c => c.path === pathname)) {
+        acc.push(item.label);
+      }
+      return acc;
+    }, []);
+    if (expanded.length > 0) {
+      setOpenMenus(prev => {
+        const next = new Set(prev);
+        expanded.forEach(label => next.add(label));
+        return Array.from(next);
+      });
+    }
+  }, [pathname, user]);
 
   const toggleMenu = (label: string) => {
     setOpenMenus(prev =>

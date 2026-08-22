@@ -226,6 +226,25 @@ All endpoints are under `/api/v1`. Full route inventory (30 routes):
 | PUT | `/departments/:id` | Rename |
 | DELETE | `/departments/:id` | Soft-delete |
 
+### Monitoring Configuration (Protected — web admin reads)
+
+Classification of the detected app catalog and observed website domains. Types are the Productive/Unproductive/Neutral-style references; categories are scoped by kind (`application` | `website` | `both`). `PATCH` classification bodies use nullable presence — `{"typeId": n}` sets, `{"typeId": null}` clears, an absent key leaves the value untouched.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/monitoring/types` | List types (seeded + custom) |
+| POST | `/monitoring/types` | Create type |
+| PUT | `/monitoring/types/:id` | Update type |
+| DELETE | `/monitoring/types/:id` | Soft-delete (409 while any app/site references it) |
+| GET | `/monitoring/categories?kind=` | List categories, optionally by kind |
+| POST | `/monitoring/categories` | Create category |
+| PUT | `/monitoring/categories/:id` | Update category |
+| DELETE | `/monitoring/categories/:id` | Soft-delete (classifications detach via ON DELETE SET NULL) |
+| GET | `/monitoring/apps` | List classified catalog apps (`search`, `typeId`, `categoryId`, `unclassified`, `page`, `perPage`) |
+| PATCH | `/monitoring/apps/:id` | Set/clear an app's type + category |
+| GET | `/monitoring/websites` | List classified observed domains (auto-syncs new domains from `app_items` first; same filters) |
+| PATCH | `/monitoring/websites/:id` | Set/clear a site's type + category |
+
 ### Client Ingestion (Public — JWT in body)
 
 Employee token is carried in the request body (`{employeeId, token, entries: [...]}`), not a cookie. Server validates the token and returns `SyncBatchResponse{accepted, rejected}`.

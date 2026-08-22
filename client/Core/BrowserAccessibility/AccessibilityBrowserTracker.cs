@@ -29,6 +29,7 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
     private readonly BrowserHistoryReader? _history;
     private readonly ILogStore _store;
     private readonly ILogger<AccessibilityBrowserTracker> _logger;
+    private readonly IBrowserRegistry? _browserRegistry;
 
     private sealed class TrackedWindow
     {
@@ -98,13 +99,15 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
         IAccessibilityBrowserReader reader,
         ILogStore store,
         ILogger<AccessibilityBrowserTracker> logger,
-        BrowserHistoryReader? history = null)
+        BrowserHistoryReader? history = null,
+        IBrowserRegistry? browserRegistry = null)
     {
         _config = config;
         _reader = reader;
         _history = history;
         _store = store;
         _logger = logger;
+        _browserRegistry = browserRegistry;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -204,7 +207,8 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
                 // latter carry a browser_tab root but a non-browser process (e.g. VS Code
                 // Simple Browser). The main loop skips browser_tab-rooted sessions too, so
                 // both stay owned by this tracker across a fast relaunch.
-                if (!BrowserAccessibilityHelpers.IsBrowserProcess(
+                if (_browserRegistry is not null &&
+                    !_browserRegistry.IsBrowser(
                         AppProcessClassifier.ExtractBaseProcessName(rec.ProcessName)) &&
                     rec.ItemType != "browser_tab") continue;
 
@@ -375,14 +379,14 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
         var samePid = _tracked.Where(kv => kv.Value.ProcessId == snap.ProcessId).ToList();
         if (samePid.Count == 0) return snap.WindowKey;
 
-        var incoming = BrowserAccessibilityHelpers.StripBrowserSuffix(snap.WindowTitle).Trim();
+        var incoming = BrowserAccessibilityHelpers.StripBrowserSuffix(snap.WindowTitle, _browserRegistry?.GetDisplayName(snap.ProcessName)).Trim();
 
         // Exact page-title match — identity is proven by (pid, page). Works for the
         // multi-window case (Chrome/Edge/Firefox share one PID) when a key churns
         // without a navigation.
         foreach (var kv in samePid)
         {
-            var tracked = BrowserAccessibilityHelpers.StripBrowserSuffix(kv.Value.LastTitle).Trim();
+            var tracked = BrowserAccessibilityHelpers.StripBrowserSuffix(kv.Value.LastTitle, null).Trim();
             if (tracked.Length > 0 && string.Equals(tracked, incoming, StringComparison.OrdinalIgnoreCase))
                 return ReKey(kv, snap.WindowKey, snap.ProcessId);
         }
@@ -441,7 +445,7 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
             Id = sessionId,
             ProcessName = snap.ProcessName,
             AppDisplayName = string.IsNullOrWhiteSpace(displayName)
-                ? BrowserAccessibilityHelpers.StripBrowserSuffix(snap.WindowTitle)
+                ? BrowserAccessibilityHelpers.StripBrowserSuffix(snap.WindowTitle, _browserRegistry?.GetDisplayName(snap.ProcessName))
                 : displayName,
             StartedAt = now,
             MachineId = _config.ClientId,

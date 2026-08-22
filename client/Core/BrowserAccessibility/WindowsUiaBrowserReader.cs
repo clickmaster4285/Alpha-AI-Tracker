@@ -34,13 +34,15 @@ public sealed class WindowsUiaBrowserReader : IAccessibilityBrowserReader
     private static extern IntPtr GetForegroundWindow();
 
     private readonly ILogger<WindowsUiaBrowserReader> _logger;
+    private readonly IBrowserRegistry _browserRegistry;
 
     public string Platform => "Windows";
     public bool IsAvailable => OperatingSystem.IsWindows();
 
-    public WindowsUiaBrowserReader(ILogger<WindowsUiaBrowserReader> logger)
+    public WindowsUiaBrowserReader(ILogger<WindowsUiaBrowserReader> logger, IBrowserRegistry browserRegistry)
     {
         _logger = logger;
+        _browserRegistry = browserRegistry;
     }
 
     public Task<IReadOnlyList<AccessibilitySnapshot>> ReadAsync(CancellationToken ct)
@@ -84,7 +86,7 @@ public sealed class WindowsUiaBrowserReader : IAccessibilityBrowserReader
                         continue;
                     }
 
-                    var isBrowser = BrowserAccessibilityHelpers.IsBrowserProcess(processName);
+                    var isBrowser = _browserRegistry.IsBrowser(processName);
                     string url;
                     if (isBrowser)
                     {

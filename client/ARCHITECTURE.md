@@ -1,7 +1,11 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-08-18 (focus-time root causes §8 + browser focus accounting §11 + webview tracking §11)
+> **Last audited:** 2026-08-22
 > **Changelog:**
+> - 2026-08-22: **Flatpak `bwrap` PPID chain walk in embedded Python probe.**
+>   `resolve_app_name(pid)` in `LinuxAtSpiBrowserReader.cs` now detects when the AT-SPI PID belongs to Flatpak's `bwrap` or `xdg-dbus-proxy` and walks up the PPID chain (via `/proc/<pid>/stat`) until it reaches the real app process. The FLATPAK_ID / snap / comm resolution then runs against the real PID, so Floorp/LibreWolf/Waterfox Flatpak installs resolve to their short app ID (`floorp`, `librewolf`, `waterfox`) instead of the proxy name. Verified: `dotnet build` 0/0, 0 warnings.
+> - 2026-08-21: **All hardcoded browser names removed — dynamic `IBrowserRegistry` replaces `BrowserProcessHints` / `IsBrowserProcess` / `BROWSER_HINTS` / `ResolveFamily`.**
+>   New `IBrowserRegistry` interface + `BrowserRegistry` implementation source browser classification from `installed_applications.is_browser` (set via `.desktop` `Categories=WebBrowser`, Windows registry `URLAssociations`, macOS `CFBundleURLSchemes`) and cache it for 5 minutes. Every reader, tracker, history fallback, session label resolver, and the main collector loop now resolves browsers through the registry instead of hardcoded name lists. The Linux embedded Python probe's `BROWSER_HINTS` tuple is deleted; the probe uses `_browser_exes` (already built from `.desktop` files) for both AT-SPI browser detection and Firefox sessionstore discovery. `StripBrowserSuffix` is now dynamic — it strips ` - {appDisplayName}` using the registry's display name instead of a 10-entry hardcoded suffix list. `BrowserHistoryReader.ResolveFamily()` is removed; URL resolution searches all visits without a family filter (exact-title match is the primary signal). `SessionLabelResolver` accepts the registry as a parameter and runs profile extraction (`--profile-directory`, `-P`, `--profile=`) for ANY browser the registry knows, not just a hardcoded Chromium-family switch. `InstalledAppDetector.ScanStartMenuShortcuts` no longer pre-classifies shortcuts as browsers — the subsequent registry scan sets `IsBrowser` from URL associations. `IBrowserRegistry` is registered unconditionally in DI (outside the `BrowserTrackingEnabled` guard) because `LogCollectorService` and `SessionLabelResolver` consume it regardless of the tracking master switch. Verified: `dotnet build` 0/0, 0 warnings; zero remaining references to `BrowserProcessHints`, `IsBrowserProcess`, `BROWSER_HINTS`, `ResolveFamily`, or `ResolveChromeProfile` in the client.
 > - 2026-08-18: **Embedded-webview journeys (VS Code Simple Browser, Electron apps) — structural detection, no hardcoded names.**
 >   Readers no longer gate on a browser-process list alone: any window whose a11y tree exposes a
 >   DOCUMENT_WEB node (AT-SPI role 95) with an **http(s) DocURL** is tracked (UIA on Windows: a
@@ -12,14 +16,7 @@
 >   are skipped structurally. The tracker hydrates browser_tab-rooted sessions, and the main loop skips
 >   them too (webview session + host-app session coexist; no duplicate-close).
 > - 2026-08-18: **Structural process name resolution — Flatpak/snap browsers get correct names + structural browser detection.**
->   The Python probe's `resolve_app_name(pid)` checks FLATPAK_ID in `/proc/<pid>/environ` (extracts
->   short name: `org.mozilla.Floorp` -> `floorp`) and snap path in `/proc/<pid>/exe` (`/snap/firefox/...`
->   -> `firefox`), falling back to `/proc/comm` for native apps. No name lists: Flatpak/snap are the only
->   sandboxing systems that inject proxy PIDs (e.g. `xdg-dbus-proxy`). Structural browser detection:
->   `.desktop` files with `Categories=WebBrowser` are scanned (cached 5 min) and the resolved process name
->   is matched against browser exe names from the desktop files + Flatpak app IDs. C# `ReadComm()` checks
->   a `_pidNameCache` (populated from probe results each poll) before `/proc/comm`, so WM-only Flatpak/snap
->   windows also get the correct name. `StripBrowserSuffix` gains Floorp/LibreWolf/Waterfox.
+>   The Python probe's `resolve_app_name(pid)` now walks up the `bwrap`/`xdg-dbus-proxy` PPID chain (via `/proc/<pid>/stat`) to reach the real app process before checking FLATPAK_ID in `/proc/<pid>/environ` (extracts short name: `org.mozilla.Floorp` -> `floorp`) and snap path in `/proc/<pid>/exe` (`/snap/firefox/...` -> `firefox`), falling back to `/proc/comm` for native apps. No name lists: Flatpak/snap are the only sandboxing systems that inject proxy PIDs (e.g. `xdg-dbus-proxy`). Structural browser detection: `.desktop` files with `Categories=WebBrowser` are scanned (cached 5 min) and the resolved process name is matched against browser exe names from the desktop files + Flatpak app IDs. C# `ReadComm()` checks a `_pidNameCache` (populated from probe results each poll) before `/proc/comm`, so WM-only Flatpak/snap windows also get the correct name. `StripBrowserSuffix` gains Floorp/LibreWolf/Waterfox.
 > - 2026-08-18: **Focus totals frozen (~0s on the web) fixed — flush is now ADDITIVE + every-minute push.**
 >   Root cause: `UpdateAppSessionFocusSql` OVERWROTE the row with the in-memory delta and the counter was
 >   then cleared — each flush wrote only the last ~10-cycle window (300s main / 30s browser), never the
@@ -200,15 +197,17 @@ client/
 │   │   ├── IInstalledAppDetector.cs# GUI app detection + MissingPermissions / grant instructions
 │   │   └── IPackageDetector.cs     # CLI tool/runtime/library detection from package managers
 │   ├── BrowserAccessibility/       # ⭐ Browser journey (Option B)
+│   │   ├── IBrowserRegistry.cs         # interface: IsBrowser / GetDisplayName / GetAllBrowserProcessNames / GetAllBrowserDisplayNames
+│   │   ├── BrowserRegistry.cs          # implementation: caches IsBrowser apps from IInstalledAppDetector, refreshes every 5 min
 │   │   ├── IAccessibilityBrowserReader.cs   # snapshot contract (Platform, IsAvailable, ReadAsync)
-│   │   ├── AccessibilitySnapshot.cs         # windowKey, pid, process, title, Url, UrlSource, incognito
+│   │   ├── AccessibilitySnapshot.cs         # windowKey, pid, process, title, Url, UrlSource, incognito, IsActive, IsWebview
 │   │   ├── LinuxAtSpiBrowserReader.cs       # ONE embedded python3 probe: AT-SPI + Firefox sessionstore (mozLz4) + WM window list
 │   │   ├── WindowsUiaBrowserReader.cs       # UIA via Interop.UIAutomationClient
 │   │   ├── MacOsAccessibilityBrowserReader.cs # osascript/System Events (Accessibility grant required)
 │   │   ├── AccessibilityBrowserReaderFactory.cs # platform picker
 │   │   ├── BrowserHistoryReader.cs          # profile History/places.sqlite URL fallback (copy+WAL, title-match)
 │   │   ├── AccessibilityBrowserTracker.cs   # BackgroundService: poll → enrich → sessions/items → idle/vanished close → downloads
-│   │   └── BrowserAccessibilityHelpers.cs   # browser hints, NormalizeUrl, ExtractDomain, StripBrowserSuffix, StableInt32
+│   │   └── BrowserAccessibilityHelpers.cs   # NormalizeUrl, ExtractDomain, StripBrowserSuffix(title, appDisplayName), TitleSuggestsIncognito, StableInt32
 │   ├── DesktopEventBus/            # ⭐ File-explorer journey
 │   │   ├── IObservableEventSource.cs   # common watcher contract (SourceName, IsActive, EventRaised, Start/Stop)
 │   │   ├── RawDesktopEvent.cs          # raw OS-level event from a watcher
@@ -328,7 +327,7 @@ shell state binds through the window:
 
 | Lifetime | Services |
 |---|---|
-| **Singleton** | `AppConfig`, `ILogStore` (SqliteLogStore), `HttpClient` (30s timeout), `IInstalledAppDetector`, `IPackageDetector`, `IActivityCollector` (per-platform), `AutoStartService`, `LogCollectorService`, `EventCoordinator`, `JourneyEngine`, `ATSPIEventWatcher`, `WindowsExplorerWatcher`, `IExplorerWindowProvider`, `FileSystemEventWatcher`, `RecentFilesWatcher`, `AppUpdateService` |
+| **Singleton** | `AppConfig`, `ILogStore` (SqliteLogStore), `HttpClient` (30s timeout), `IInstalledAppDetector`, `IPackageDetector`, `IActivityCollector` (per-platform), `AutoStartService`, `LogCollectorService`, `EventCoordinator`, `JourneyEngine`, `ATSPIEventWatcher`, `WindowsExplorerWatcher`, `IExplorerWindowProvider`, `FileSystemEventWatcher`, `RecentFilesWatcher`, `AppUpdateService`, `IBrowserRegistry` (unconditional — consumed by `LogCollectorService` + `SessionLabelResolver` regardless of `ALPHA_BROWSER_TRACKING_ENABLED`) |
 | **Singleton (conditional)** | `IAccessibilityBrowserReader` (platform reader) + `BrowserHistoryReader` — only when `ALPHA_BROWSER_TRACKING_ENABLED` |
 | **Hosted** | `BackgroundGuardService`, `LogCollectorService`, `DesktopEventService`, `AccessibilityBrowserTracker` (conditional), `HardwareDeviceWatcherService`, `AppUpdateService` |
 | **Transient** | `DashboardViewModel`, `SystemSpecsViewModel`, `InstalledAppsViewModel`, `MainViewModel` |
@@ -484,14 +483,14 @@ All platforms filter **headless Chromium/Electron subprocesses** (`--type=render
 4. **Fuzzy match** (`GetInstalledAppByBinaryNameFuzzyAsync`, process name >3 chars): `binary_name LIKE` with corrected AND/OR precedence; prefers `is_browser` rows + shortest binary name. Also rejects non-GUI rows.
 5. **Auto-detect GUI app** (`IsGuiApplication` → `AutoDetectInstalledGuiApp`): executable in standard paths (Linux `/usr/bin`, `/opt`, `/snap/bin`, flatpak, `/home/*`, `/media/*`; Windows Program Files/WindowsApps; macOS `.app`/`/Applications`) or a matching `.desktop` `Exec=` → registers into `installed_applications`.
 6. **Anything else is skipped** — CLI tools, shells, build tools, runtimes, and daemons never become sessions/items.
-7. **Browsers are skipped when `ALPHA_BROWSER_TRACKING_ENABLED`** (owned by the accessibility tracker; hint-based skip covers the post-DB-wipe window before the catalog scan marks `is_browser=1`).
+7. **Browsers are skipped when `ALPHA_BROWSER_TRACKING_ENABLED`** (owned by the accessibility tracker; `IBrowserRegistry.IsBrowser()` covers the post-DB-wipe window before the catalog scan marks `is_browser=1`).
 
 ### Session identity & hierarchy
 
 - **`BuildSessionKey`**: scoped processes → `scope|{scope}|{installedAppId}|{machine}|{session}` (collapses all subprocesses of one logical window); unscoped → `{pid}|{machine}|{session}`.
 - **`CgroupResolver`** reads `/proc/<pid>/cgroup` for `app-*.scope` (systemd transient scope per `.desktop` launch) — VS Code's ~11 PIDs become ONE session; two windows get different scopes.
 - **`SessionHierarchyResolver`** walks the PPID chain (through shells, terminals, build tools, runtimes, IDE subprocesses) and links sessions under their parent via `parent_item_id`. Duplicate-PID open sessions (browser tracker + main loop overlap) are deduped keeping the earliest per PID.
-- **`SessionLabelResolver`** derives `context_label` (VS Code workspace folder from argv, Chrome `--profile-directory`).
+- **`SessionLabelResolver`** derives `context_label` (VS Code workspace folder from argv, browser `--profile-directory`/`-P`/`--profile=` for any browser the `IBrowserRegistry` knows).
 - **Close:** `CloseSessionsAndAppItemsAsync` closes sessions + their open items in ONE transaction; crash recovery reuses it at boot.
 
 ### Root item type (`AppProcessClassifier.ResolveRootItemType`)
@@ -562,7 +561,7 @@ Both detectors are forced-rechecked every scan (`ForceRecheck`) and upsert into 
 
 ## 11. Browser Journey (Option B — accessibility tree + history fallback)
 
-`AccessibilityBrowserTracker` (BackgroundService, gated on `ALPHA_BROWSER_TRACKING_ENABLED`) captures the REAL browser journey — **no debugger, no extension, no catalog dependency** (works for install→use→uninstall-in-5-min browsers).
+`AccessibilityBrowserTracker` (BackgroundService, gated on `ALPHA_BROWSER_TRACKING_ENABLED`) captures the REAL browser journey — **no debugger, no extension, no catalog dependency** (works for install→use→uninstall-in-5-min browsers). Browser detection is dynamic via `IBrowserRegistry` (sourced from `installed_applications.is_browser`, refreshed every 5 min) — any browser with a `.desktop` `Categories=WebBrowser` / Windows `URLAssociations` http+https / macOS `CFBundleURLSchemes` http+https is automatically detected without hardcoded name lists.
 
 ### Poll loop (every `ALPHA_BROWSER_ACCESSIBILITY_POLL_SECONDS`, default 3s)
 

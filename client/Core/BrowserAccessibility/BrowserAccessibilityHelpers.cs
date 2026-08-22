@@ -6,54 +6,27 @@ namespace client.Core.BrowserAccessibility;
 public static class BrowserAccessibilityHelpers
 {
     /// <summary>
-    /// Process-name hints used to decide whether a window belongs to a web browser.
-    /// Matched case-insensitively against the process name (comm) and command line.
+    /// Strip the browser suffix from a window title ("YouTube - Google Chrome" → "YouTube").
+    /// Uses the dynamic app display name from the browser registry — no hardcoded list.
     /// </summary>
-    public static readonly string[] BrowserProcessHints =
+    public static string StripBrowserSuffix(string title, string? appDisplayName)
     {
-        "chrome", "chromium", "firefox", "brave", "edge", "msedge",
-        "vivaldi", "opera", "safari", "arc", "microsoft-edge", "iexplore",
-    };
+        if (string.IsNullOrWhiteSpace(title)) return string.Empty;
+        if (string.IsNullOrEmpty(appDisplayName)) return title.Trim();
 
-    /// <summary>True if the process name/command line looks like a browser.</summary>
-    /// <remarks>
-    /// Matches each hint as a STANDALONE word: "arc" must not match "SearchApp",
-    /// "edge" must not match "medged" — a 3-letter hint inside a longer unrelated
-    /// process name was leaking non-browser processes (SearchApp) into the browser
-    /// tracker, which then wrote fake browser sessions + history URLs for them.
-    /// </remarks>
-    public static bool IsBrowserProcess(string processName, string? commandLine = null)
-    {
-        var name = processName ?? string.Empty;
-        if (BrowserProcessHints.Any(h => ContainsStandaloneWord(name, h)))
-            return true;
-        if (!string.IsNullOrWhiteSpace(commandLine))
-            return BrowserProcessHints.Any(h => ContainsStandaloneWord(commandLine, h));
-        return false;
+        var suffix1 = $" - {appDisplayName}";
+        var suffix2 = $" — {appDisplayName}";
+
+        var idx1 = title.IndexOf(suffix1, StringComparison.OrdinalIgnoreCase);
+        if (idx1 > 0) return title[..idx1].Trim();
+
+        var idx2 = title.IndexOf(suffix2, StringComparison.OrdinalIgnoreCase);
+        if (idx2 > 0) return title[..idx2].Trim();
+
+        return title.Trim();
     }
 
-    /// <summary>True when <paramref name="word"/> appears in <paramref name="text"/> as a
-    /// standalone token (not as a substring of a longer word, e.g. "arc" inside "SearchApp").</summary>
-    private static bool ContainsStandaloneWord(string text, string word)
-    {
-        var idx = text.IndexOf(word, StringComparison.OrdinalIgnoreCase);
-        while (idx >= 0)
-        {
-            var beforeOk = idx == 0 || !char.IsLetterOrDigit(text[idx - 1]);
-            var end = idx + word.Length;
-            var afterOk = end >= text.Length || !char.IsLetterOrDigit(text[end]);
-            if (beforeOk && afterOk) return true;
-            idx = text.IndexOf(word, idx + 1, StringComparison.OrdinalIgnoreCase);
-        }
-        return false;
-    }
-
-    /// <summary>
-    /// Normalize the text read from a browser address bar into a full URL.
-    /// Browsers display the omnibox without the scheme (e.g. "google.com/search?q=x"
-    /// or "www.youtube.com/watch?v=abc"); we prepend https:// when the text looks
-    /// like a host/path. Non-URL text (e.g. the user mid-typing keywords) is dropped.
-    /// </summary>
+    /// <summary>Normalize the text read from a browser address bar into a full URL.</summary>
     public static string NormalizeUrl(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
@@ -67,13 +40,12 @@ public static class BrowserAccessibilityHelpers
         if (low.Contains("://", StringComparison.Ordinal))
             return t;
 
-        // A URL-ish string has no whitespace and contains a dot (host/path).
         if (t.Any(char.IsWhiteSpace)) return string.Empty;
         if (!t.Contains('.')) return string.Empty;
         return "https://" + t;
     }
 
-    /// <summary>Extract the registrable-ish host from a URL (best effort: Uri host, www stripped).</summary>
+    /// <summary>Extract the registrable-ish host from a URL.</summary>
     public static string ExtractDomain(string? url)
     {
         if (string.IsNullOrWhiteSpace(url)) return string.Empty;
@@ -89,26 +61,6 @@ public static class BrowserAccessibilityHelpers
         }
         catch { }
         return string.Empty;
-    }
-
-    /// <summary>
-    /// Strip the browser suffix from a window title ("YouTube - Google Chrome" → "YouTube").
-    /// Used both for display names and for matching a window title against history titles.
-    /// </summary>
-    public static string StripBrowserSuffix(string title)
-    {
-        if (string.IsNullOrWhiteSpace(title)) return "Browser";
-        foreach (var marker in new[]
-                 {
-                     " - Google Chrome", " - Mozilla Firefox", " - Microsoft Edge",
-                     " - Brave", " - Opera", " - Vivaldi", " - Chromium",
-                     " - Floorp", " - LibreWolf", " - Waterfox",
-                 })
-        {
-            var idx = title.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-            if (idx > 0) return title[..idx].Trim();
-        }
-        return title.Trim();
     }
 
     /// <summary>Heuristic incognito detection from window title text.</summary>

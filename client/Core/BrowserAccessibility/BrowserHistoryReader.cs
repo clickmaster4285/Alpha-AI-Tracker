@@ -33,6 +33,7 @@ public sealed class BrowserHistoryReader
 
     private readonly AppConfig _config;
     private readonly ILogger<BrowserHistoryReader> _logger;
+    private readonly IBrowserRegistry _browserRegistry;
     private readonly object _gate = new();
 
     // Profile db path → state (last-read signature so unchanged files are skipped).
@@ -53,10 +54,11 @@ public sealed class BrowserHistoryReader
         public string? LastSignature { get; set; }     // "size:mtime" of main + sidecars
     }
 
-    public BrowserHistoryReader(AppConfig config, ILogger<BrowserHistoryReader> logger)
+    public BrowserHistoryReader(AppConfig config, ILogger<BrowserHistoryReader> logger, IBrowserRegistry browserRegistry)
     {
         _config = config;
         _logger = logger;
+        _browserRegistry = browserRegistry;
     }
 
     /// <summary>
@@ -118,18 +120,13 @@ public sealed class BrowserHistoryReader
     public HistoryVisit? TryResolveUrl(string? processName, string windowTitle, DateTime capturedAt)
     {
         if (!_config.BrowserHistoryEnabled) return null;
-        var family = ResolveFamily(processName);
-        var pageTitle = BrowserAccessibilityHelpers.StripBrowserSuffix(windowTitle);
+        var pageTitle = BrowserAccessibilityHelpers.StripBrowserSuffix(windowTitle, _browserRegistry.GetDisplayName(processName ?? string.Empty));
 
         lock (_gate)
         {
             if (_visits.Count == 0) return null;
 
-            var candidates = family is null
-                ? _visits
-                : _visits.Where(v => v.Family == family);
-
-            var list = candidates.ToList();
+            var list = _visits.ToList();
             if (list.Count == 0) return null;
 
             // 1. Exact title match (newest first) — the page title in history usually
@@ -315,17 +312,6 @@ public sealed class BrowserHistoryReader
             }
             seen.Add($"{v.Url}|{v.Title}|{v.VisitedAtUtc.Ticks}");
         }
-    }
-
-    private static string? ResolveFamily(string? processName)
-    {
-        if (string.IsNullOrEmpty(processName)) return null;
-        var n = processName.ToLowerInvariant();
-        if (n.Contains("firefox")) return "firefox";
-        if (n.Contains("chrome") || n.Contains("chromium") || n.Contains("edge") ||
-            n.Contains("brave") || n.Contains("opera") || n.Contains("vivaldi") || n.Contains("arc"))
-            return "chromium";
-        return null;
     }
 
     // ─── Profile discovery (all platforms) ───

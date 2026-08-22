@@ -294,6 +294,7 @@ type AppItemResponse struct {
 	WindowID     *int       `json:"windowId,omitempty"`
 	TabID        *int       `json:"tabId,omitempty"`
 	MetadataJSON string     `json:"metadataJson"`
+	BrowserName  string     `json:"browserName"`
 	SyncedAt     *time.Time `json:"syncedAt,omitempty"`
 }
 

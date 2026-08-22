@@ -34,6 +34,7 @@ namespace client.Core.BrowserAccessibility;
 public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
 {
     private readonly ILogger<LinuxAtSpiBrowserReader> _logger;
+    private readonly IBrowserRegistry _browserRegistry;
     private bool? _checked;
     private int _pollCount;
 
@@ -51,9 +52,10 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
     public string Platform => "Linux";
     public bool IsAvailable => OperatingSystem.IsLinux();
 
-    public LinuxAtSpiBrowserReader(ILogger<LinuxAtSpiBrowserReader> logger)
+    public LinuxAtSpiBrowserReader(ILogger<LinuxAtSpiBrowserReader> logger, IBrowserRegistry browserRegistry)
     {
         _logger = logger;
+        _browserRegistry = browserRegistry;
     }
 
     public async Task<IReadOnlyList<AccessibilitySnapshot>> ReadAsync(CancellationToken ct)
@@ -157,16 +159,17 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
         //    a11y-less setups) → title-only snapshots; history fills the URL later.
         var seenTitles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var s in result)
-            seenTitles.Add($"{s.ProcessId}|{BrowserAccessibilityHelpers.StripBrowserSuffix(s.WindowTitle)}");
+            seenTitles.Add($"{s.ProcessId}|{BrowserAccessibilityHelpers.StripBrowserSuffix(s.WindowTitle, _browserRegistry.GetDisplayName(s.ProcessName))}");
 
         foreach (var wm in wmWindows)
         {
             if (string.IsNullOrWhiteSpace(wm.Title)) continue;
             var processName = ReadComm(wm.Pid);
-            if (!BrowserAccessibilityHelpers.IsBrowserProcess(processName))
+            if (!_browserRegistry.IsBrowser(processName))
                 continue;
 
-            var t = BrowserAccessibilityHelpers.StripBrowserSuffix(wm.Title);
+            var displayName = _browserRegistry.GetDisplayName(processName) ?? processName;
+            var t = BrowserAccessibilityHelpers.StripBrowserSuffix(wm.Title, displayName);
             if (seenTitles.Contains($"{wm.Pid}|{t}")) continue;
 
             result.Add(new AccessibilitySnapshot
@@ -314,13 +317,14 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
         return windows;
     }
 
-    private static List<WmWindow> IndexWmWindows(List<WmWindow> windows)
+    private List<WmWindow> IndexWmWindows(List<WmWindow> windows)
     {
         var dedup = new List<WmWindow>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var w in windows)
         {
-            var t = BrowserAccessibilityHelpers.StripBrowserSuffix(w.Title);
+            var displayName = _browserRegistry.GetDisplayName(ReadComm(w.Pid)) ?? ReadComm(w.Pid);
+            var t = BrowserAccessibilityHelpers.StripBrowserSuffix(w.Title, displayName);
             if (seen.Add($"{w.Pid}|{t}"))
                 dedup.Add(w);
         }
@@ -453,11 +457,37 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
 
         def resolve_app_name(pid):
             # Resolve the real application name from a PID using OS metadata.
-            # Flatpak apps register with xdg-dbus-proxy as their AT-SPI PID, so
-            # /proc/<pid>/comm gives the proxy name instead of the real app.
+            # Flatpak apps may surface as xdg-dbus-proxy or bwrap at the AT-SPI layer,
+            # so walk up the bwrap PPID chain to reach the real app process before
+            # applying FLATPAK_ID / snap / comm resolution.
+            real_pid = pid
+            is_proxy = False
+            try:
+                _comm = read_comm(pid)
+                if _comm in ('bwrap', 'xdg-dbus-proxy'):
+                    is_proxy = True
+                    seen = set()
+                    while True:
+                        seen.add(real_pid)
+                        try:
+                            with open('/proc/%d/stat' % real_pid, 'rb') as _sf:
+                                _stat = _sf.read().split(b' ')
+                                _ppid = int(_stat[3])
+                        except Exception:
+                            break
+                        if _ppid == 0 or _ppid in seen:
+                            break
+                        _pcomm = read_comm(_ppid)
+                        if _pcomm != 'bwrap':
+                            real_pid = _ppid
+                            break
+                        real_pid = _ppid
+            except Exception:
+                real_pid = pid
+
             # Flatpak: FLATPAK_ID in /proc/<pid>/environ -> extract short app name
             try:
-                with open('/proc/%d/environ' % pid, 'rb') as f:
+                with open('/proc/%d/environ' % real_pid, 'rb') as f:
                     for part in f.read().split(b'\0'):
                         if part.startswith(b'FLATPAK_ID='):
                             app_id = part.split(b'=', 1)[1].decode('utf-8', 'replace')
@@ -468,7 +498,7 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                 pass
             # Snap: exe path contains /snap/<name>/
             try:
-                exe = os.readlink('/proc/%d/exe' % pid)
+                exe = os.readlink('/proc/%d/exe' % real_pid)
                 idx = exe.find('/snap/')
                 if idx >= 0:
                     snap_name = exe[idx + 6:].split('/')[0]
@@ -476,7 +506,30 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                         return snap_name.lower()
             except Exception:
                 pass
-            return read_comm(pid)
+            
+            # Fallback for Flatpak proxies whose bwrap chain doesn't lead to the app:
+            # scan all running processes for FLATPAK_ID. This covers the case where
+            # xdg-dbus-proxy's bwrap is a sibling of the app's bwrap (both children
+            # of the same parent) rather than a child of it.
+            if is_proxy:
+                try:
+                    for _p in os.listdir('/proc'):
+                        if not _p.isdigit():
+                            continue
+                        try:
+                            with open('/proc/%s/environ' % _p, 'rb') as f:
+                                for part in f.read().split(b'\0'):
+                                    if part.startswith(b'FLATPAK_ID='):
+                                        app_id = part.split(b'=', 1)[1].decode('utf-8', 'replace')
+                                        short = app_id.rsplit('.', 1)[-1]
+                                        if short:
+                                            return short.lower()
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+            
+            return read_comm(real_pid)
 
         # Structural browser detection: scan .desktop files for Categories=WebBrowser.
         # Cached on disk for 5 minutes to avoid rescanning every 3s poll.
@@ -554,7 +607,6 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                 A11Y = 'org.a11y.atspi.Accessible'
                 PROPS = 'org.freedesktop.DBus.Properties'
                 TEXT = 'org.a11y.atspi.Text'
-                BROWSER_HINTS = ('chrome', 'chromium', 'firefox', 'brave', 'edge', 'msedge', 'vivaldi', 'opera', 'safari', 'arc', 'iexplore')
 
                 def getp(obj, name):
                     try:
@@ -691,9 +743,7 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                         # frames are not real OS windows — skipping them structurally keeps
                         # Electron apps' internal panes out of the journey stream.
                         continue
-                    is_browser = (any(h in comm for h in BROWSER_HINTS) or
-                                  any(h in cmd for h in BROWSER_HINTS) or
-                                  comm in _browser_exes)
+                    is_browser = comm in _browser_exes
                     # Non-browser apps (Electron webviews etc.) are only scanned on the
                     # throttled cadence above.
                     if not is_browser and not webview_scan:
@@ -855,11 +905,14 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
             ]
             # A running Firefox main process? (sessionstore may linger after exit)
             ff_pid = 0
+            ff_proc = ''
             for pid in os.listdir('/proc'):
                 if not pid.isdigit():
                     continue
-                if read_comm(int(pid)) == 'firefox':
+                comm = read_comm(int(pid))
+                if comm in _browser_exes:
                     ff_pid = int(pid)
+                    ff_proc = comm
                     break
 
             if ff_pid > 0:
@@ -911,7 +964,7 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                                     'src': 'ff',
                                     'key': win_key,
                                     'pid': ff_pid,
-                                    'proc': 'firefox',
+                                    'proc': ff_proc,
                                     'title': title,
                                     'url': url,
                                     'incognito': ispriv,
@@ -982,8 +1035,8 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
     /// browser flavor, quotes, or the a11y tree exposes one without the suffix).</summary>
     private static bool TitlesOverlap(string a, string b)
     {
-        var x = BrowserAccessibilityHelpers.StripBrowserSuffix(a).Trim();
-        var y = BrowserAccessibilityHelpers.StripBrowserSuffix(b).Trim();
+        var x = BrowserAccessibilityHelpers.StripBrowserSuffix(a, null).Trim();
+        var y = BrowserAccessibilityHelpers.StripBrowserSuffix(b, null).Trim();
         if (x.Length == 0 || y.Length == 0) return false;
         if (string.Equals(x, y, StringComparison.OrdinalIgnoreCase)) return true;
         return x.Contains(y, StringComparison.OrdinalIgnoreCase) ||

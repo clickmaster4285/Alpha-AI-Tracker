@@ -19,13 +19,15 @@ public sealed class MacOsAccessibilityBrowserReader : IAccessibilityBrowserReade
     };
 
     private readonly ILogger<MacOsAccessibilityBrowserReader> _logger;
+    private readonly IBrowserRegistry _browserRegistry;
 
     public string Platform => "macOS";
     public bool IsAvailable => OperatingSystem.IsMacOS();
 
-    public MacOsAccessibilityBrowserReader(ILogger<MacOsAccessibilityBrowserReader> logger)
+    public MacOsAccessibilityBrowserReader(ILogger<MacOsAccessibilityBrowserReader> logger, IBrowserRegistry browserRegistry)
     {
         _logger = logger;
+        _browserRegistry = browserRegistry;
     }
 
     public async Task<IReadOnlyList<AccessibilitySnapshot>> ReadAsync(CancellationToken ct)
@@ -41,7 +43,7 @@ public sealed class MacOsAccessibilityBrowserReader : IAccessibilityBrowserReade
             script.AppendLine("  set out to \"\"");
             script.AppendLine("  repeat with p in (every process whose background only is false)");
             script.AppendLine("    set pn to name of p");
-            script.AppendLine($"    if pn is in {AppleScriptList(BrowserProcessNames)} then");
+            script.AppendLine($"    if pn is in {AppleScriptList(_browserRegistry.GetAllBrowserDisplayNames().ToArray())} then");
             script.AppendLine("      try");
             script.AppendLine("        set fm to frontmost of p");
             script.AppendLine("        set wi to 0");
@@ -114,8 +116,9 @@ public sealed class MacOsAccessibilityBrowserReader : IAccessibilityBrowserReade
         return result;
     }
 
-    private static Dictionary<string, int> ResolveBrowserPids()
+    private Dictionary<string, int> ResolveBrowserPids()
     {
+        var displayNames = _browserRegistry.GetAllBrowserDisplayNames();
         var map = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         try
         {
@@ -124,7 +127,7 @@ public sealed class MacOsAccessibilityBrowserReader : IAccessibilityBrowserReade
                 try
                 {
                     var name = proc.ProcessName;
-                    foreach (var browser in BrowserProcessNames)
+                    foreach (var browser in displayNames)
                     {
                         var hint = browser.Replace(" ", string.Empty);
                         if (name.Contains(hint, StringComparison.OrdinalIgnoreCase))

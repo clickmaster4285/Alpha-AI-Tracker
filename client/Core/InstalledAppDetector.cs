@@ -551,7 +551,7 @@ foreach ($d in $dirs) {
                 if (!_binaryToDisplayName.ContainsKey(binaryName))
                     _binaryToDisplayName[binaryName] = lnkName;
 
-                var isBrowser = BrowserAccessibilityHelpers.IsBrowserProcess(binaryName);
+                var isBrowser = false;
                 _installedApps.Add(new InstalledApplication
                 {
                     AppName = lnkName,

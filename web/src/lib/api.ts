@@ -453,6 +453,7 @@ export interface AppItem {
   windowId?: number;
   tabId?: number;
   metadataJson?: string;
+  browserName?: string;
   syncedAt?: string;
 }
 
@@ -470,6 +471,136 @@ export const appItemsApi = {
     dateFrom?: string; dateTo?: string;
   }) =>
     request<AppItemListResponse>('/app-items', { params: params as Record<string, string | number | undefined> }),
+};
+
+// ──────────────────────────
+// Monitoring Configuration API
+// (types, categories, and app/site classification)
+// ──────────────────────────
+
+export type MonitoringCategoryKind = 'application' | 'website' | 'both';
+
+export interface MonitoringType {
+  id: number;
+  name: string;
+  color: string;
+  description: string;
+}
+
+export interface MonitoringCategory {
+  id: number;
+  name: string;
+  kind: MonitoringCategoryKind;
+}
+
+export interface MonitoredApp {
+  id: string;
+  appName: string;
+  binaryName: string;
+  categories: string;
+  isBrowser: boolean;
+  typeId?: number;
+  typeName: string;
+  typeColor: string;
+  categoryId?: number;
+  categoryName: string;
+}
+
+export interface MonitoredSite {
+  id: number;
+  domain: string;
+  typeId?: number;
+  typeName: string;
+  typeColor: string;
+  categoryId?: number;
+  categoryName: string;
+}
+
+export interface MonitoredAppListResponse {
+  data: MonitoredApp[];
+  total: number;
+  page: number;
+  perPage: number;
+  totalPages: number;
+}
+
+export interface MonitoredSiteListResponse {
+  data: MonitoredSite[];
+  total: number;
+  page: number;
+  perPage: number;
+  totalPages: number;
+}
+
+export interface MonitoringTypePayload {
+  name: string;
+  color?: string;
+  description?: string;
+}
+
+export interface MonitoringCategoryPayload {
+  name: string;
+  kind: MonitoringCategoryKind;
+}
+
+export interface ClassificationPayload {
+  typeId?: number | null;
+  categoryId?: number | null;
+}
+
+export const monitoringApi = {
+  types: {
+    list: () =>
+      request<{ types: MonitoringType[]; total: number }>('/monitoring/types'),
+
+    create: (data: MonitoringTypePayload) =>
+      request<MonitoringType>('/monitoring/types', { method: 'POST', body: data }),
+
+    update: (id: number, data: MonitoringTypePayload) =>
+      request<MonitoringType>('/monitoring/types/' + id, { method: 'PUT', body: data }),
+
+    delete: (id: number) =>
+      request<{ message: string }>('/monitoring/types/' + id, { method: 'DELETE' }),
+  },
+
+  categories: {
+    list: (kind?: MonitoringCategoryKind) =>
+      request<{ categories: MonitoringCategory[]; total: number }>('/monitoring/categories', { params: { kind } }),
+
+    create: (data: MonitoringCategoryPayload) =>
+      request<MonitoringCategory>('/monitoring/categories', { method: 'POST', body: data }),
+
+    update: (id: number, data: MonitoringCategoryPayload) =>
+      request<MonitoringCategory>('/monitoring/categories/' + id, { method: 'PUT', body: data }),
+
+    delete: (id: number) =>
+      request<{ message: string }>('/monitoring/categories/' + id, { method: 'DELETE' }),
+  },
+
+  apps: {
+    list: (params?: {
+      search?: string; typeId?: number; categoryId?: number; unclassified?: boolean;
+      page?: number; perPage?: number;
+    }) =>
+      request<MonitoredAppListResponse>('/monitoring/apps', { params: params as Record<string, string | number | boolean | undefined> }),
+
+    classify: (id: string, data: ClassificationPayload) =>
+      request<{ message: string }>('/monitoring/apps/' + id, { method: 'PATCH', body: data }),
+  },
+
+  websites: {
+    list: (params?: {
+      search?: string; typeId?: number; categoryId?: number; unclassified?: boolean;
+      page?: number; perPage?: number;
+    }) =>
+      request<MonitoredSiteListResponse>('/monitoring/websites', { params: params as Record<string, string | number | boolean | undefined> }),
+
+    classify: (id: number, data: ClassificationPayload) =>
+      request<{ message: string }>('/monitoring/websites/' + id, { method: 'PATCH', body: data }),
+
+    create: (data: { domain: string; typeId?: number | null; categoryId?: number | null }) =>
+      request<MonitoredSite>('/monitoring/websites', { method: 'POST', body: data }),
+  },
 };
 
 // ──────────────────────────

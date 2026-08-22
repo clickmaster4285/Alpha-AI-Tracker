@@ -43,6 +43,7 @@ public class LogCollectorService : BackgroundService
     private readonly HttpClient _httpClient;
     private readonly IInstalledAppDetector _appDetector;
     private readonly IPackageDetector _packageDetector;
+    private readonly IBrowserRegistry _browserRegistry;
     private int _cycleCount;
     private string? _currentEmployeeId;
     private string? _currentEmployeeName;
@@ -154,7 +155,8 @@ public class LogCollectorService : BackgroundService
         ILogger<LogCollectorService> logger,
         HttpClient httpClient,
         IInstalledAppDetector appDetector,
-        IPackageDetector packageDetector)
+        IPackageDetector packageDetector,
+        IBrowserRegistry browserRegistry)
     {
         _config = config;
         _collector = collector;
@@ -163,6 +165,7 @@ public class LogCollectorService : BackgroundService
         _httpClient = httpClient;
         _appDetector = appDetector;
         _packageDetector = packageDetector;
+        _browserRegistry = browserRegistry;
     }
 
     public void StartTracking()
@@ -336,7 +339,7 @@ public class LogCollectorService : BackgroundService
                     // like VS Code). Without the item-type check the webview session would
                     // hydrate under the SAME key as the host app's own session and be
                     // closed as a "duplicate" one cycle later.
-                    if (BrowserAccessibilityHelpers.IsBrowserProcess(
+                    if (_browserRegistry.IsBrowser(
                             AppProcessClassifier.ExtractBaseProcessName(rec.ProcessName)) ||
                         rec.ItemType == "browser_tab")
                         continue;
@@ -390,7 +393,7 @@ public class LogCollectorService : BackgroundService
                         // (auto-registered entries start with IsBrowser=false).
                         if (_config.BrowserTrackingEnabled &&
                             (isBrowser ||
-                             BrowserAccessibilityHelpers.IsBrowserProcess(
+                             _browserRegistry.IsBrowser(
                                  AppProcessClassifier.ExtractBaseProcessName(log.ProcessName))))
                             continue;
 
@@ -492,7 +495,7 @@ public class LogCollectorService : BackgroundService
                         ParentProcessId = parentLink?.ParentProcessId,
                         GroupedBy = string.IsNullOrEmpty(scope) ? "pid" : "cgroup",
                         CgroupScope = scope,
-                        ContextLabel = SessionLabelResolver.Resolve(baseProcessName, log.ProcessId),
+                        ContextLabel = SessionLabelResolver.Resolve(baseProcessName, log.ProcessId, _browserRegistry),
                     };
                     newSessions.Add(session);
                     currentKeys[key] = session.Id;
@@ -1181,7 +1184,7 @@ public class LogCollectorService : BackgroundService
                     execPath.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase) ||
                     execPath.Contains("\\Microsoft\\", StringComparison.OrdinalIgnoreCase))
                 {
-                    var isBrowser = BrowserAccessibilityHelpers.IsBrowserProcess(processName);
+                    var isBrowser = _browserRegistry.IsBrowser(processName);
                     return new InstalledApplication
                     {
                         AppName = _appDetector.ResolveDisplayName(processName) ?? processName,
@@ -2105,7 +2108,7 @@ public class LogCollectorService : BackgroundService
                 var junkBinary = junkBinaries.Contains(processName);
                 var structuralJunk = false;
                 if (!hasLegitApp && !linkedToJunk && !junkBinary &&
-                    !BrowserAccessibilityHelpers.IsBrowserProcess(processName))
+                    !_browserRegistry.IsBrowser(processName))
                 {
                     var path = GetCachedExecutablePath(processName);
                     if (!string.IsNullOrEmpty(path))
