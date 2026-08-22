@@ -467,6 +467,26 @@ export default function AppSidebar({
     if (user) setOpenMenus([]);
   }, [user]);
 
+  // Keep parent menus open when the current path is inside one of their children.
+  // This prevents the sidebar section from collapsing just because the user
+  // navigated to a child page.
+  useEffect(() => {
+    if (!user) return;
+    const expanded = navSections.flatMap(s => s.items).reduce<string[]>((acc, item) => {
+      if (item.children && item.children.some(c => c.path === pathname)) {
+        acc.push(item.label);
+      }
+      return acc;
+    }, []);
+    if (expanded.length > 0) {
+      setOpenMenus(prev => {
+        const next = new Set(prev);
+        expanded.forEach(label => next.add(label));
+        return Array.from(next);
+      });
+    }
+  }, [pathname, user]);
+
   const toggleMenu = (label: string) => {
     setOpenMenus(prev =>
       prev.includes(label) ? prev.filter(l => l !== label) : [...prev, label]
