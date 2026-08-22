@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check, Eye, Monitor, Upload, Download } from 'lucide-react';
+import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check, Eye, Monitor, Upload, Download, Pencil, Trash2 } from 'lucide-react';
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import * as XLSX from 'xlsx';
@@ -15,6 +15,7 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuLabel,
 } from '@/components/ui/dropdown-menu';
 
 // Excel header aliases → canonical field. Headers are matched case-insensitively
@@ -433,37 +434,55 @@ export default function UsersList() {
                   <td className="px-4 py-3">
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
-                        <button className="p-1.5 rounded hover:bg-muted transition-colors" aria-label="Employee actions">
-                          <MoreVertical className="w-4 h-4 text-muted-foreground" />
+                        <button
+                          className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/70 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                          aria-label={`Actions for ${emp.name}`}
+                        >
+                          <MoreVertical className="w-4 h-4" />
                         </button>
                       </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end" className="bg-card border-border rounded-lg min-w-[180px]">
-                        <DropdownMenuItem asChild className="cursor-pointer">
-                          <Link href={`/employee-journey/timeline?employeeId=${emp.id}`} className="flex items-center gap-2">
-                            <Eye className="w-3.5 h-3.5" />
+                      <DropdownMenuContent align="end" sideOffset={8} className="w-56 rounded-xl bg-card border-border shadow-xl p-1.5">
+                        <DropdownMenuLabel className="flex items-center gap-3 px-2.5 py-2.5">
+                          <div
+                            className="w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold text-primary-foreground shrink-0"
+                            style={{ backgroundColor: emp.avatarColor || '#7C3AED' }}
+                          >
+                            {emp.avatar || emp.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)}
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-foreground truncate">{emp.name}</p>
+                            <p className="text-xs text-muted-foreground truncate">{emp.email}</p>
+                          </div>
+                        </DropdownMenuLabel>
+                        <DropdownMenuSeparator className="my-1.5" />
+                        <DropdownMenuItem asChild className="cursor-pointer gap-2.5 px-2.5 py-2">
+                          <Link href={`/employee-journey/timeline?employeeId=${emp.id}`}>
+                            <Eye className="w-4 h-4 text-muted-foreground" />
                             View Journey
                           </Link>
                         </DropdownMenuItem>
-                        <DropdownMenuItem asChild className="cursor-pointer">
-                          <Link href={`/device-specs?employeeId=${emp.id}`} className="flex items-center gap-2">
-                            <Monitor className="w-3.5 h-3.5" />
+                        <DropdownMenuItem asChild className="cursor-pointer gap-2.5 px-2.5 py-2">
+                          <Link href={`/device-specs?employeeId=${emp.id}`}>
+                            <Monitor className="w-4 h-4 text-muted-foreground" />
                             Device Specs
                           </Link>
                         </DropdownMenuItem>
-                        <DropdownMenuItem onSelect={() => handleEdit(emp)} className="cursor-pointer">
-                          Edit
+                        <DropdownMenuItem onSelect={() => handleEdit(emp)} className="cursor-pointer gap-2.5 px-2.5 py-2">
+                          <Pencil className="w-4 h-4 text-muted-foreground" />
+                          Edit Details
                         </DropdownMenuItem>
-                        <DropdownMenuItem onSelect={() => handleGenerateSecret(emp.id)} className="cursor-pointer flex items-center gap-2">
-                          <Key className="w-3.5 h-3.5" />
+                        <DropdownMenuItem onSelect={() => handleGenerateSecret(emp.id)} className="cursor-pointer gap-2.5 px-2.5 py-2">
+                          <Key className="w-4 h-4 text-muted-foreground" />
                           Generate Login Secret
                         </DropdownMenuItem>
-                        <DropdownMenuSeparator />
+                        <DropdownMenuSeparator className="my-1.5" />
                         <DropdownMenuItem
                           onSelect={() => handleDelete(emp.id)}
                           disabled={deleteMutation.isPending}
-                          className="cursor-pointer text-destructive focus:text-destructive focus:bg-destructive/10"
+                          className="cursor-pointer gap-2.5 px-2.5 py-2 text-destructive focus:text-destructive focus:bg-destructive/10"
                         >
-                          {deleteMutation.isPending ? 'Deleting...' : 'Delete'}
+                          <Trash2 className="w-4 h-4" />
+                          {deleteMutation.isPending ? 'Deleting...' : 'Delete Employee'}
                         </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
