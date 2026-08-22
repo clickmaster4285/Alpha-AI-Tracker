@@ -46,7 +46,7 @@ public partial class MainWindow : Window
             return;
 
         var work = screen.WorkingArea;
-        Width = Math.Max(MinWidth, work.Width * 0.9);
-        Height = Math.Max(MinHeight, work.Height * 0.9);
+        Width = Math.Max(MinWidth, work.Width);
+        Height = Math.Max(MinHeight, work.Height);
     }
 }
