@@ -461,9 +461,11 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
             # so walk up the bwrap PPID chain to reach the real app process before
             # applying FLATPAK_ID / snap / comm resolution.
             real_pid = pid
+            is_proxy = False
             try:
                 _comm = read_comm(pid)
                 if _comm in ('bwrap', 'xdg-dbus-proxy'):
+                    is_proxy = True
                     seen = set()
                     while True:
                         seen.add(real_pid)
@@ -504,6 +506,29 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                         return snap_name.lower()
             except Exception:
                 pass
+            
+            # Fallback for Flatpak proxies whose bwrap chain doesn't lead to the app:
+            # scan all running processes for FLATPAK_ID. This covers the case where
+            # xdg-dbus-proxy's bwrap is a sibling of the app's bwrap (both children
+            # of the same parent) rather than a child of it.
+            if is_proxy:
+                try:
+                    for _p in os.listdir('/proc'):
+                        if not _p.isdigit():
+                            continue
+                        try:
+                            with open('/proc/%s/environ' % _p, 'rb') as f:
+                                for part in f.read().split(b'\0'):
+                                    if part.startswith(b'FLATPAK_ID='):
+                                        app_id = part.split(b'=', 1)[1].decode('utf-8', 'replace')
+                                        short = app_id.rsplit('.', 1)[-1]
+                                        if short:
+                                            return short.lower()
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+            
             return read_comm(real_pid)
 
         # Structural browser detection: scan .desktop files for Categories=WebBrowser.
