@@ -1,13 +1,11 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Search, Loader2 } from 'lucide-react';
+import { Search, Loader2, Plus, X, Filter, Globe, Monitor } from 'lucide-react';
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { monitoringApi, type MonitoringCategoryKind, type ClassificationPayload } from '@/lib/api';
 
-// Row shape the table renders and classifies. Both the app catalog and the
-// website registry implement this contract.
 export interface ClassifiedItemRow {
   id: string | number;
   typeId?: number;
@@ -25,7 +23,6 @@ export interface ClassifiedListResponse<T> {
   totalPages: number;
 }
 
-// The on-disk shape of a TanStack infinite query cache for this table.
 interface InfiniteListData<T> {
   pages: ClassifiedListResponse<T>[];
   pageParams: unknown[];
@@ -35,7 +32,6 @@ interface Props<T extends ClassifiedItemRow> {
   title: string;
   description: string;
   queryKeyPrefix: string;
-  // Restricts the assignable categories (application vs website vs both).
   scope: Exclude<MonitoringCategoryKind, 'both'>;
   listFn: (params: {
     search?: string;
@@ -47,13 +43,14 @@ interface Props<T extends ClassifiedItemRow> {
   }) => Promise<ClassifiedListResponse<T>>;
   classifyFn: (id: string | number, payload: ClassificationPayload) => Promise<{ message: string }>;
   nameOf: (item: T) => string;
-  // Header label for the first (name) column.
   nameHeader: string;
-  // Optional badge rendered next to the item name (e.g. the browser chip).
   badge?: (item: T) => React.ReactNode;
+  createButton?: React.ReactNode;
 }
 
 const PER_PAGE = 30;
+
+type ClassificationStatus = 'all' | 'classified' | 'unclassified';
 
 export default function ClassifiedItemsTable<T extends ClassifiedItemRow>({
   title,
@@ -65,32 +62,33 @@ export default function ClassifiedItemsTable<T extends ClassifiedItemRow>({
   nameOf,
   nameHeader,
   badge,
+  createButton,
 }: Props<T>) {
   const queryClient = useQueryClient();
 
-  // ── Filters ──
   const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
   useEffect(() => {
     const t = setTimeout(() => setSearch(searchInput), 400);
     return () => clearTimeout(t);
   }, [searchInput]);
+
   const [typeFilter, setTypeFilter] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
-  const [unclassifiedOnly, setUnclassifiedOnly] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<ClassificationStatus>('all');
 
   const filters = useMemo(
     () => ({
       search,
       typeId: typeFilter || undefined,
       categoryId: categoryFilter || undefined,
-      unclassified: unclassifiedOnly || undefined,
+      unclassified: statusFilter === 'unclassified' || undefined,
+      page: 1,
       perPage: PER_PAGE,
     }),
-    [search, typeFilter, categoryFilter, unclassifiedOnly],
+    [search, typeFilter, categoryFilter, statusFilter],
   );
 
-  // ── Reference data (types + categories) ──
   const { data: typesResponse } = useQuery({
     queryKey: ['monitoring-types'],
     queryFn: () => monitoringApi.types.list(),
@@ -107,7 +105,6 @@ export default function ClassifiedItemsTable<T extends ClassifiedItemRow>({
   const typeMap = useMemo(() => new Map(types.map(t => [t.id, t])), [types]);
   const categoryMap = useMemo(() => new Map(categories.map(c => [c.id, c])), [categories]);
 
-  // ── Infinite-scroll list (Web Infinite-Scroll Rule — AGENTS.md §6) ──
   const {
     data: listData,
     isLoading,
@@ -122,7 +119,7 @@ export default function ClassifiedItemsTable<T extends ClassifiedItemRow>({
         search,
         typeId: typeFilter ? Number(typeFilter) : undefined,
         categoryId: categoryFilter ? Number(categoryFilter) : undefined,
-        unclassified: unclassifiedOnly || undefined,
+        unclassified: statusFilter === 'unclassified' || undefined,
         page: pageParam as number,
         perPage: PER_PAGE,
       }),
@@ -150,7 +147,6 @@ export default function ClassifiedItemsTable<T extends ClassifiedItemRow>({
     return () => observer.disconnect();
   }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
-  // ── Classification ──
   const classifyMutation = useMutation({
     mutationFn: ({ id, payload }: { id: string | number; payload: ClassificationPayload }) =>
       classifyFn(id, payload),
@@ -166,8 +162,6 @@ export default function ClassifiedItemsTable<T extends ClassifiedItemRow>({
   const isRowPending = (id: string | number) =>
     classifyMutation.isPending && classifyMutation.variables?.id === id;
 
-  // Apply the classification to the cached row in place so the infinite list
-  // keeps its scroll position (no full refetch needed).
   const updateCache = (id: string | number, payload: ClassificationPayload) => {
     queryClient.setQueryData<InfiniteListData<T>>([queryKeyPrefix, filters], (old) => {
       if (!old) return old;
@@ -203,6 +197,38 @@ export default function ClassifiedItemsTable<T extends ClassifiedItemRow>({
     classifyMutation.mutate({ id: item.id, payload: { typeId: item.typeId ?? null, categoryId } });
   };
 
+  const clearFilters = () => {
+    setSearchInput('');
+    setSearch('');
+    setTypeFilter('');
+    setCategoryFilter('');
+    setStatusFilter('all');
+  };
+
+  const hasActiveFilters = searchInput || typeFilter || categoryFilter || statusFilter !== 'all';
+
+  const getStatusBadge = (item: T) => {
+    if (item.typeId && item.categoryId) {
+      return (
+        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+          Classified
+        </span>
+      );
+    }
+    if (!item.typeId && !item.categoryId) {
+      return (
+        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-500/10 text-amber-600 dark:text-amber-400">
+          Unclassified
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-blue-500/10 text-blue-600 dark:text-blue-400">
+        Partial
+      </span>
+    );
+  };
+
   if (isLoading && !listData) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
@@ -220,128 +246,207 @@ export default function ClassifiedItemsTable<T extends ClassifiedItemRow>({
   }
 
   return (
-    <div className="space-y-4 animate-fade-in">
+    <div className="space-y-5 animate-fade-in">
       {/* Header */}
-      <div>
-        <h1 className="font-display font-bold text-2xl text-foreground">{title}</h1>
-        <p className="text-sm text-muted-foreground mt-1">{description}</p>
+      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+        <div>
+          <h1 className="font-display font-bold text-2xl text-foreground">{title}</h1>
+          <p className="text-sm text-muted-foreground mt-1">{description}</p>
+        </div>
+        {createButton}
       </div>
 
       {/* Filters */}
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="flex items-center bg-card border border-border rounded-lg px-3 py-2 gap-2 flex-1 min-w-[220px] max-w-sm">
-          <Search className="w-4 h-4 text-muted-foreground" />
-          <input
-            value={searchInput}
-            onChange={e => setSearchInput(e.target.value)}
-            placeholder="Search..."
-            className="bg-transparent border-none outline-none text-sm flex-1 text-foreground placeholder:text-muted-foreground"
-          />
+      <div className="bg-card rounded-xl border border-border p-4 space-y-4">
+        <div className="flex flex-col md:flex-row gap-3">
+          {/* Search */}
+          <div className="flex items-center bg-background border border-border rounded-lg px-3 py-2 gap-2 flex-1 min-w-[240px]">
+            <Search className="w-4 h-4 text-muted-foreground shrink-0" />
+            <input
+              value={searchInput}
+              onChange={e => setSearchInput(e.target.value)}
+              placeholder="Search..."
+              className="bg-transparent border-none outline-none text-sm flex-1 text-foreground placeholder:text-muted-foreground"
+            />
+            {searchInput && (
+              <button onClick={() => { setSearchInput(''); setSearch(''); }} className="text-muted-foreground hover:text-foreground">
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
+          {/* Status filter */}
+          <div className="flex items-center gap-1 bg-background border border-border rounded-lg p-0.5">
+            {[
+              { key: 'all', label: 'All', icon: null },
+              { key: 'classified', label: 'Classified', icon: null },
+              { key: 'unclassified', label: 'Unclassified', icon: null },
+            ].map(opt => (
+              <button
+                key={opt.key}
+                onClick={() => setStatusFilter(opt.key as ClassificationStatus)}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  statusFilter === opt.key
+                    ? 'bg-primary text-primary-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
         </div>
-        <select
-          value={typeFilter}
-          onChange={e => setTypeFilter(e.target.value)}
-          className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground"
-        >
-          <option value="">All Types</option>
-          {types.map(t => (
-            <option key={t.id} value={t.id}>{t.name}</option>
-          ))}
-        </select>
-        <select
-          value={categoryFilter}
-          onChange={e => setCategoryFilter(e.target.value)}
-          className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground"
-        >
-          <option value="">All Categories</option>
-          {categories.map(c => (
-            <option key={c.id} value={c.id}>{c.name}</option>
-          ))}
-        </select>
-        <label className="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={unclassifiedOnly}
-            onChange={e => setUnclassifiedOnly(e.target.checked)}
-            className="rounded border-border"
-          />
-          Only unclassified
-        </label>
+
+        <div className="flex flex-col sm:flex-row gap-3">
+          {/* Type filter */}
+          <select
+            value={typeFilter}
+            onChange={e => setTypeFilter(e.target.value)}
+            className="bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground"
+          >
+            <option value="">All Types</option>
+            {types.map(t => (
+              <option key={t.id} value={t.id}>
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: t.color || '#888' }} />
+                  {t.name}
+                </span>
+              </option>
+            ))}
+          </select>
+
+          {/* Category filter */}
+          <select
+            value={categoryFilter}
+            onChange={e => setCategoryFilter(e.target.value)}
+            className="bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground"
+          >
+            <option value="">All Categories</option>
+            {categories.map(c => (
+              <option key={c.id} value={c.id}>{c.name}</option>
+            ))}
+          </select>
+
+          {/* Clear filters */}
+          {hasActiveFilters && (
+            <button
+              onClick={clearFilters}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <X className="w-3.5 h-3.5" />
+              Clear filters
+            </button>
+          )}
+
+          {/* Active filter count */}
+          {hasActiveFilters && (
+            <span className="inline-flex items-center px-2 py-1 rounded-md bg-primary/10 text-primary text-xs font-medium">
+              {total.toLocaleString()} result{total === 1 ? '' : 's'}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Table */}
-      <div className="bg-card rounded-xl border border-border overflow-x-auto">
-        <table className="w-full min-w-[720px]">
-          <thead>
-            <tr className="border-b border-border">
-              <th className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground">{nameHeader}</th>
-              <th className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground">Type</th>
-              <th className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground">Category</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.length === 0 ? (
-              <tr>
-                <td colSpan={3} className="text-center py-12 text-muted-foreground text-sm">
-                  No {title.toLowerCase()} found
-                </td>
+      <div className="bg-card rounded-xl border border-border overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[720px]">
+            <thead>
+              <tr className="border-b border-border bg-muted/30">
+                <th className="text-left px-5 py-3.5 text-sm font-semibold text-muted-foreground">{nameHeader}</th>
+                <th className="text-left px-5 py-3.5 text-sm font-semibold text-muted-foreground">Status</th>
+                <th className="text-left px-5 py-3.5 text-sm font-semibold text-muted-foreground">Type</th>
+                <th className="text-left px-5 py-3.5 text-sm font-semibold text-muted-foreground">Category</th>
               </tr>
-            ) : (
-              rows.map((item, i) => (
-                <tr
-                  key={item.id}
-                  className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors"
-                >
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-2.5">
-                      <span className="text-sm font-medium text-foreground">{nameOf(item)}</span>
-                      {badge?.(item)}
+            </thead>
+            <tbody>
+              {rows.length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="px-5 py-16">
+                    <div className="flex flex-col items-center justify-center text-center">
+                      <div className="w-16 h-16 rounded-full bg-muted/50 flex items-center justify-center mb-4">
+                        {scope === 'application' ? (
+                          <Monitor className="w-8 h-8 text-muted-foreground" />
+                        ) : (
+                          <Globe className="w-8 h-8 text-muted-foreground" />
+                        )}
+                      </div>
+                      <p className="text-sm font-medium text-foreground mb-1">No {title.toLowerCase()} found</p>
+                      <p className="text-xs text-muted-foreground max-w-sm">
+                        {searchInput || typeFilter || categoryFilter || statusFilter !== 'all'
+                          ? 'Try adjusting your filters to see more results.'
+                          : scope === 'application'
+                          ? 'Applications will appear here once detected on employee machines.'
+                          : 'Websites will appear here once employees visit them.'}
+                      </p>
                     </div>
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-2">
-                      {item.typeColor && (
-                        <span
-                          className="w-2.5 h-2.5 rounded-full shrink-0"
-                          style={{ backgroundColor: item.typeColor }}
-                        />
-                      )}
-                      <select
-                        value={item.typeId ? String(item.typeId) : ''}
-                        onChange={e => handleTypeChange(item, e.target.value)}
-                        disabled={isRowPending(item.id)}
-                        className="bg-background border border-border rounded-lg px-2 py-1.5 text-sm text-foreground disabled:opacity-50"
-                        aria-label={`Type for ${nameOf(item)}`}
-                      >
-                        <option value="">None</option>
-                        {types.map(t => (
-                          <option key={t.id} value={t.id}>{t.name}</option>
-                        ))}
-                      </select>
-                    </div>
-                  </td>
-                  <td className="px-4 py-3">
-                    <select
-                      value={item.categoryId ? String(item.categoryId) : ''}
-                      onChange={e => handleCategoryChange(item, e.target.value)}
-                      disabled={isRowPending(item.id)}
-                      className="bg-background border border-border rounded-lg px-2 py-1.5 text-sm text-foreground disabled:opacity-50"
-                      aria-label={`Category for ${nameOf(item)}`}
-                    >
-                      <option value="">None</option>
-                      {categories.map(c => (
-                        <option key={c.id} value={c.id}>{c.name}</option>
-                      ))}
-                    </select>
                   </td>
                 </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+              ) : (
+                rows.map((item, i) => (
+                  <tr
+                    key={item.id}
+                    className="border-b border-border last:border-0 hover:bg-muted/20 transition-colors group"
+                  >
+                    <td className="px-5 py-3.5">
+                      <div className="flex items-center gap-3">
+                        <span className="text-sm font-medium text-foreground">{nameOf(item)}</span>
+                        {badge?.(item)}
+                      </div>
+                    </td>
+                    <td className="px-5 py-3.5">
+                      {getStatusBadge(item)}
+                    </td>
+                    <td className="px-5 py-3.5">
+                      <div className="flex items-center gap-2">
+                        {item.typeColor && (
+                          <span
+                            className="w-2.5 h-2.5 rounded-full shrink-0 ring-2 ring-transparent group-hover:ring-primary/20 transition-all"
+                            style={{ backgroundColor: item.typeColor }}
+                          />
+                        )}
+                        <select
+                          value={item.typeId ? String(item.typeId) : ''}
+                          onChange={e => handleTypeChange(item, e.target.value)}
+                          disabled={isRowPending(item.id)}
+                          className="bg-background border border-border rounded-lg px-2.5 py-1.5 text-sm text-foreground disabled:opacity-50 hover:border-primary/30 focus:border-primary focus:ring-1 focus:ring-primary/20 transition-colors"
+                          aria-label={`Type for ${nameOf(item)}`}
+                        >
+                          <option value="">None</option>
+                          {types.map(t => (
+                            <option key={t.id} value={t.id}>
+                              <span className="inline-flex items-center gap-1.5">
+                                <span className="w-2 h-2 rounded-full inline-block" style={{ backgroundColor: t.color || '#888' }} />
+                                {t.name}
+                              </span>
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </td>
+                    <td className="px-5 py-3.5">
+                      <select
+                        value={item.categoryId ? String(item.categoryId) : ''}
+                        onChange={e => handleCategoryChange(item, e.target.value)}
+                        disabled={isRowPending(item.id)}
+                        className="bg-background border border-border rounded-lg px-2.5 py-1.5 text-sm text-foreground disabled:opacity-50 hover:border-primary/30 focus:border-primary focus:ring-1 focus:ring-primary/20 transition-colors"
+                        aria-label={`Category for ${nameOf(item)}`}
+                      >
+                        <option value="">None</option>
+                        {categories.map(c => (
+                          <option key={c.id} value={c.id}>{c.name}</option>
+                        ))}
+                      </select>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
-      {/* Infinite scroll footer (server-side pagination; no Next/Previous buttons) */}
+      {/* Infinite scroll footer */}
       {hasNextPage ? (
         <div ref={sentinelRef} className="h-12 flex items-center justify-center text-xs text-muted-foreground">
           {isFetchingNextPage ? (

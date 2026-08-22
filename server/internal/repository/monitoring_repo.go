@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -434,6 +435,25 @@ func (r *MonitoringRepo) SyncWebsiteDomains(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("sync website domains: %w", err)
 	}
 	return int(tag.RowsAffected()), nil
+}
+
+// CreateWebsite inserts a new monitoring_sites row and returns the created site.
+func (r *MonitoringRepo) CreateWebsite(ctx context.Context, domain string, typeID, categoryID *int) (*MonitoredSite, error) {
+	now := time.Now()
+	var site MonitoredSite
+	err := r.pool.QueryRow(ctx, `
+		INSERT INTO monitoring_sites (domain, type_id, category_id, first_seen_at, last_seen_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (domain) WHERE deleted_at IS NULL
+		DO UPDATE SET updated_at = $7
+		RETURNING id, domain, type_id, category_id
+	`, domain, nullableInt(typeID), nullableInt(categoryID), now, now, now, now).Scan(
+		&site.ID, &site.Domain, &site.TypeID, &site.CategoryID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create website: %w", err)
+	}
+	return &site, nil
 }
 
 // ListWebsites returns the paginated site registry joined with type/category names.

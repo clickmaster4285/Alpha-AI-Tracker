@@ -229,6 +229,52 @@ func (h *MonitoringHandler) UpdateSiteClassification(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]interface{}{"message": "website classification updated"})
 }
 
+// CreateWebsite handles POST /api/v1/monitoring/websites
+func (h *MonitoringHandler) CreateWebsite(c echo.Context) error {
+	var req struct {
+		Domain     string `json:"domain"`
+		TypeID     *int   `json:"typeId"`
+		CategoryID *int   `json:"categoryId"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return errorResponse(c, http.StatusBadRequest, "Invalid request body", err)
+	}
+	domain := strings.TrimSpace(req.Domain)
+	if domain == "" {
+		return errorResponse(c, http.StatusBadRequest, "Domain is required", nil)
+	}
+	// Normalize domain: strip protocol, path, query, fragment, and lowercase.
+	domain = normalizeDomain(domain)
+	if domain == "" {
+		return errorResponse(c, http.StatusBadRequest, "Invalid domain", nil)
+	}
+	site, err := h.monitoringService.CreateWebsite(c.Request().Context(), domain, req.TypeID, req.CategoryID)
+	if err != nil {
+		return errorResponse(c, http.StatusBadRequest, "Failed to create website", err)
+	}
+	return c.JSON(http.StatusOK, site)
+}
+
+// normalizeDomain strips protocol, path, query, and fragment from a URL/domain
+// and lowercases the result. E.g. "HTTPS://WWW.Example.COM/path" → "example.com".
+func normalizeDomain(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	// Strip protocol if present.
+	raw = strings.TrimPrefix(raw, "https://")
+	raw = strings.TrimPrefix(raw, "http://")
+	raw = strings.TrimPrefix(raw, "//")
+	// Strip everything after the first slash (path/query/fragment).
+	if idx := strings.IndexAny(raw, "/?#"); idx >= 0 {
+		raw = raw[:idx]
+	}
+	// Remove www. prefix for consistency.
+	raw = strings.TrimPrefix(raw, "www.")
+	return strings.ToLower(strings.TrimSpace(raw))
+}
+
 // parseListParams reads the shared search/type/category/unclassified/page/perPage
 // query parameters used by both app and website listings.
 func parseListParams(c echo.Context) (repository.MonitoredAppListParams, error) {

@@ -154,5 +154,6 @@ func Setup(
 	monitoring.GET("/apps", monitoringHandler.ListApps)
 	monitoring.PATCH("/apps/:id", monitoringHandler.UpdateAppClassification)
 	monitoring.GET("/websites", monitoringHandler.ListWebsites)
+	monitoring.POST("/websites", monitoringHandler.CreateWebsite)
 	monitoring.PATCH("/websites/:id", monitoringHandler.UpdateSiteClassification)
 }

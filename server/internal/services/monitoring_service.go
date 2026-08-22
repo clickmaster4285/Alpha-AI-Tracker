@@ -275,6 +275,30 @@ func (s *MonitoringService) UpdateSiteClassification(ctx context.Context, id int
 	return s.repo.UpdateSiteClassification(ctx, id, typeID, categoryID)
 }
 
+// CreateWebsite adds a new website to the monitoring registry with optional classification.
+func (s *MonitoringService) CreateWebsite(ctx context.Context, domain string, typeID, categoryID *int) (*MonitoredSiteInfo, error) {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return nil, fmt.Errorf("domain is required")
+	}
+	if err := s.validateClassificationRefs(ctx, typeID, categoryID); err != nil {
+		return nil, err
+	}
+	site, err := s.repo.CreateWebsite(ctx, domain, typeID, categoryID)
+	if err != nil {
+		return nil, err
+	}
+	return &MonitoredSiteInfo{
+		ID:           site.ID,
+		Domain:       site.Domain,
+		TypeID:       site.TypeID,
+		TypeName:     "",
+		TypeColor:    "",
+		CategoryID:   site.CategoryID,
+		CategoryName: "",
+	}, nil
+}
+
 func toSiteInfos(sites []repository.MonitoredSite) []MonitoredSiteInfo {
 	info := make([]MonitoredSiteInfo, len(sites))
 	for i, st := range sites {
