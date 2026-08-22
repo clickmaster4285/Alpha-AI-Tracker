@@ -1243,3 +1243,28 @@ func (r *NewSchemaRepo) GetEmployeeActivityStats(ctx context.Context, employeeID
 	}
 	return &s, nil
 }
+
+// GetBrowserNameByProcessName returns the friendly app_name from installed_applications
+// for a given process/binary name where is_browser = true. Returns empty string when
+// no catalog entry exists (the caller should fall back to the raw process name).
+func (r *NewSchemaRepo) GetBrowserNameByProcessName(ctx context.Context, processName string) (string, error) {
+	if strings.TrimSpace(processName) == "" {
+		return "", nil
+	}
+	var name string
+	err := r.pool.QueryRow(ctx, `
+		SELECT app_name
+		FROM installed_applications
+		WHERE deleted_at IS NULL
+		  AND is_browser = true
+		  AND (binary_name = $1 OR app_name = $1)
+		LIMIT 1
+	`, processName).Scan(&name)
+	if err == pgx.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("lookup browser name for %s: %w", processName, err)
+	}
+	return name, nil
+}

@@ -453,6 +453,7 @@ export interface AppItem {
   windowId?: number;
   tabId?: number;
   metadataJson?: string;
+  browserName?: string;
   syncedAt?: string;
 }
 

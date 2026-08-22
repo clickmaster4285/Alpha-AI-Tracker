@@ -68,4 +68,27 @@ Process tree (live): `gnome-shell(2712) → bwrap(53844) "bwrap --args 41 -- flo
 - Server: `go build`, `go vet`, `go test ./...`, migration applied + smoke tested on
   dev DB (apps count, live sync, classification intact).
 - Client: `dotnet build` 0/0.
-- Web (untouched, sanity): `tsc --noEmit`, `next build`.
+- Web: `tsc --noEmit` clean.
+
+## Part 3 — Web: dynamic browser badge names (removed hardcoded `BROWSER_NAMES`) — COMPLETED (2026-08-22)
+
+`web/src/app/(app)/employee-journey/web/page.tsx` carried a 10-entry hardcoded
+`BROWSER_NAMES` map (`chrome`→`Chrome`, `msedge`→`Edge`, …) that violated the
+No-Hardcoded-Names Rule. Removed the map entirely.
+
+**New flow:** `ListAppItems` in `new_schema_service.go` now parses each row's
+`metadata_json`, extracts `processName`, and looks up `installed_applications`
+(`binary_name` or `app_name` match, `is_browser = true`) to derive the friendly
+`browserName`. The web page reads `item.browserName` directly. For embedded
+webviews (`source: "webview"`) the host app's process name is preserved as before
+(data-driven, no list).
+
+**Server changes:**
+- `new_schema_repo.go` — added `GetBrowserNameByProcessName`
+- `new_schema_service.go` — `ListAppItems` resolves `browserName` per item
+- `new_schema_dto.go` — `AppItemResponse` gains `BrowserName` field
+
+**Web changes:**
+- `web/src/app/(app)/employee-journey/web/page.tsx` — removed `BROWSER_NAMES` map;
+  `browserOf()` uses `item.browserName || name` fallback
+- `web/src/lib/api.ts` — `AppItem` interface gains `browserName?: string`
