@@ -412,7 +412,7 @@ export default function UsersList() {
                         {emp.avatar || emp.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)}
                       </div>
                       <div
-                        className="text-sm font-medium text-foreground hover:text-primary hover:underline underline-offset-4 transition-colors"
+                        className="text-sm font-medium text-foreground hover:text-primary transition-colors"
                       >
                         {emp.name}
                       </div>

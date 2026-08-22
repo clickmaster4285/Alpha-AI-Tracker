@@ -98,7 +98,7 @@ func (r *EmployeeRepo) List(ctx context.Context, params EmployeeListParams) (*Em
 		FROM employees e
 		LEFT JOIN departments d ON e.department_id = d.id
 		%s
-		ORDER BY e.created_at DESC
+		ORDER BY e.created_at DESC, e.id DESC
 		LIMIT $%d OFFSET $%d
 	`, whereClause, argIdx, argIdx+1)
 	args = append(args, params.PerPage, offset)
