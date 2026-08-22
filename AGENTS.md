@@ -3,6 +3,8 @@
 > **Last audited:** 2026-08-22
 > **Changelog:**
 >
+> - 2026-08-22: **Web: Sidebar parent menus stay open when navigating to child pages.**
+>   `AppSidebar` now auto-expands any parent section whose `children` array contains the current `pathname`, so the menu stays open when the user opens a child page. Verified: `tsc --noEmit` clean, `next build` passes.
 > - 2026-08-22: **Web: Configuration pages UI/UX redesign + manual website creation.**
 >   `ClassifiedItemsTable` component redesigned with improved filter bar (status toggle chips, clearable filters, active count badge), better table spacing/hover states, per-row classification status badges (Classified/Unclassified/Partial), and richer empty/loading states. `websites/page.tsx` gains an **Add Website** button + modal dialog that posts to new `POST /api/v1/monitoring/websites` (server creates the row with optional type/category and normalizes the domain). Server: new `CreateWebsite` endpoint in `monitoring_handler.go` + `MonitoringService` + `MonitoringRepo`. Fixed 400 error on manual website creation: server now normalizes domain (strips protocol/path/lowercases) and the dialog fetches types/categories dynamically instead of hardcoding IDs. Added live duplicate detection. Verified: `go build`/`go vet` clean, `tsc --noEmit` clean, `next build` passes.
 > - 2026-08-22: **Web: Dynamic browser badge names on Web Activity — removed hardcoded `BROWSER_NAMES` map.**

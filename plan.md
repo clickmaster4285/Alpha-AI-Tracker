@@ -54,3 +54,8 @@ lacked duplicate detection.
 3. Frontend: domain input auto-normalizes on every keystroke.
 4. Frontend: blur/change checks the registry for duplicates and disables submit with
    an "Already exists" warning.
+
+## Part 5 — Sidebar parent menus stay open when navigating to child pages (2026-08-22)
+
+`AppSidebar` now auto-expands any parent section whose `children` array contains
+the current `pathname`, so the menu stays open when the user opens a child page.

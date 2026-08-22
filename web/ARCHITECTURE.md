@@ -2,6 +2,9 @@
 
 > **Last audited:** 2026-08-22
 > **Changelog:**
+> 2026-08-22: **Sidebar parent menus stay open when navigating to child pages.**
+>   `AppSidebar` now auto-expands any parent section whose `children` array contains the current
+>   `pathname`, so the menu stays open when the user opens a child page.
 > 2026-08-22: **Configuration pages UI/UX redesign + manual website creation.**
 >   `ClassifiedItemsTable` component redesigned with improved filter bar (status toggle chips, clearable filters,
 >   active count badge), better table spacing/hover states, per-row classification status badges
