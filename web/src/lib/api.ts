@@ -597,6 +597,9 @@ export const monitoringApi = {
 
     classify: (id: number, data: ClassificationPayload) =>
       request<{ message: string }>('/monitoring/websites/' + id, { method: 'PATCH', body: data }),
+
+    create: (data: { domain: string; typeId?: number | null; categoryId?: number | null }) =>
+      request<MonitoredSite>('/monitoring/websites', { method: 'POST', body: data }),
   },
 };
 

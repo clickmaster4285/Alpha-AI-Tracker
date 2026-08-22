@@ -2,6 +2,14 @@
 
 > **Last audited:** 2026-08-22
 > **Changelog:**
+> 2026-08-22: **Configuration pages UI/UX redesign + manual website creation.**
+>   `ClassifiedItemsTable` component redesigned with improved filter bar (status toggle chips, clearable filters,
+>   active count badge), better table spacing/hover states, per-row classification status badges
+>   (Classified/Unclassified/Partial), and richer empty/loading states. `websites/page.tsx` gains an
+>   **Add Website** button + modal dialog that posts to new `POST /api/v1/monitoring/websites` (server creates
+>   the row with optional type/category and normalizes the domain). Server: new `CreateWebsite` endpoint in
+>   `monitoring_handler.go` + `MonitoringService` + `MonitoringRepo`. Verified: `go build`/`go vet` clean,
+>   `tsc --noEmit` clean, `next build` passes.
 > 2026-08-22: **Dynamic browser badge names on Web Activity — removed hardcoded `BROWSER_NAMES` map.**
 >   `employee-journey/web/page.tsx` no longer translates `metadataJson.processName` through a hardcoded
 >   10-entry map. The server resolves the friendly browser name dynamically: `ListAppItems` extracts
