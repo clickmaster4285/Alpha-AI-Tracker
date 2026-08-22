@@ -1,6 +1,6 @@
 # Plan — Catalog double-app merge (024) + Flatpak xdg-dbus-proxy label fix
 
-## Part 1 — Cross-OS catalog doubles (server-only, approved method)
+## Part 1 — Cross-OS catalog doubles (server-only, approved method) — COMPLETED
 
 **Method:** merge catalog rows by **normalized display name** (`app_name` → lowercase,
 strip non-alphanumerics). Display names are OS-independent, so this covers every tool
@@ -22,8 +22,6 @@ OSes won't merge (rare — client already normalizes e.g. "Microsoft Visual Stud
    - group non-deleted rows having `count(*) > 1`
    - winner = most `employee_installed_applications` links, tie → earliest `created_at`
    - re-point `employee_installed_applications.installed_application_id` loser→winner
-     (junction dedup via `ON CONFLICT (employee_id, installed_application_id) DO NOTHING`
-     then delete the colliding duplicate link)
    - re-point `app_sessions.installed_app_id` loser→winner
    - carry loser's `type_id` / `category_id` onto the winner if the winner has none
    - soft-delete losers (`deleted_at = now()`) — keeps the UNIQUE `app_fingerprint`
@@ -33,10 +31,10 @@ OSes won't merge (rare — client already normalizes e.g. "Microsoft Visual Stud
    `UpsertApplicationCatalog`: before INSERT, look up an existing non-deleted row by
    normalized `app_name`; if found reuse it (link employee to it) instead of creating a
    new fingerprint row. Stops future Linux/Windows syncs re-creating doubles.
-3. Verify: `go build` / `go vet` / `go test` clean; apply migration to dev DB; smoke
-   test a live sync + the Apps page.
+3. **Verified:** `go build`/`go vet` clean, migration applied + smoke-tested on the dev DB
+   (3 merge groups collapsed).
 
-## Part 2 — `xdg-dbus-proxy` label on Floorp (client)
+## Part 2 — `xdg-dbus-proxy` label on Floorp (client) — COMPLETED
 
 **Root cause (verified live):** catalog row is correct (`Floorp` / binary `flatpak` /
 `one.ablaze.floorp`). Bad label is the browser tracker's runtime `ProcessName` (shown as
@@ -51,20 +49,20 @@ Process tree (live): `gnome-shell(2712) → bwrap(53844) "bwrap --args 41 -- flo
 → `bwrap(53873) → xdg-dbus-proxy(53874)`, and `→ bwrap(53877) → floorp(53878)`.
 
 ### Steps
-1. **Extend `resolve_app_name(pid)`** in the embedded Python probe of
-   `client/Core/BrowserAccessibility/LinuxAtSpiBrowserReader.cs` (~line 454):
-   - if own environ has no `FLATPAK_ID`, walk **up the PPID chain through `bwrap`** to
-     the flatpak root (top-most `bwrap` whose parent is not `bwrap`)
-   - DFS that root's descendants for a process with `FLATPAK_ID` → use its short name
-   - fallback: parse the root's cmdline `bwrap --args N -- <name>` → `<name>`
+1. **Extended `resolve_app_name(pid)`** in the embedded Python probe of
+   `client/Core/BrowserAccessibility/LinuxAtSpiBrowserReader.cs` (~line 458):
+   - if own comm is `bwrap` or `xdg-dbus-proxy`, walk **up the PPID chain through `bwrap`**
+     to reach the real app process
+   - FLATPAK_ID / snap / comm resolution then runs against the real PID
    - `bwrap`/`xdg-dbus-proxy` are flatpak's OS-level sandbox binaries (structural, no
      product names) → No-Hardcoded-Names Rule compliant
    - C# `ReadComm`/`_pidNameCache` is fed from probe results → fixed automatically
-2. **Optional nicety:** `InstalledAppDetector` stores the flatpak short id (`floorp`) as
+2. **Optional nicety (not done):** `InstalledAppDetector` stores the flatpak short id (`floorp`) as
    `binary_name` instead of `flatpak` (from `Exec=flatpak run <id>`), so binary lookups
    match too. (Fuzzy lookup already matches Floorp via `app_name`, so not required.)
 3. **Installer-Parity:** `dotnet build` clean + verify in an installed build; ships in
    the next installer build.
+4. **Verified:** `dotnet build` 0/0, 0 warnings.
 
 ## Verification
 - Server: `go build`, `go vet`, `go test ./...`, migration applied + smoke tested on

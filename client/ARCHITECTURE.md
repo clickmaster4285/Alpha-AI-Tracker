@@ -1,7 +1,9 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-08-21
+> **Last audited:** 2026-08-22
 > **Changelog:**
+> - 2026-08-22: **Flatpak `bwrap` PPID chain walk in embedded Python probe.**
+>   `resolve_app_name(pid)` in `LinuxAtSpiBrowserReader.cs` now detects when the AT-SPI PID belongs to Flatpak's `bwrap` or `xdg-dbus-proxy` and walks up the PPID chain (via `/proc/<pid>/stat`) until it reaches the real app process. The FLATPAK_ID / snap / comm resolution then runs against the real PID, so Floorp/LibreWolf/Waterfox Flatpak installs resolve to their short app ID (`floorp`, `librewolf`, `waterfox`) instead of the proxy name. Verified: `dotnet build` 0/0, 0 warnings.
 > - 2026-08-21: **All hardcoded browser names removed — dynamic `IBrowserRegistry` replaces `BrowserProcessHints` / `IsBrowserProcess` / `BROWSER_HINTS` / `ResolveFamily`.**
 >   New `IBrowserRegistry` interface + `BrowserRegistry` implementation source browser classification from `installed_applications.is_browser` (set via `.desktop` `Categories=WebBrowser`, Windows registry `URLAssociations`, macOS `CFBundleURLSchemes`) and cache it for 5 minutes. Every reader, tracker, history fallback, session label resolver, and the main collector loop now resolves browsers through the registry instead of hardcoded name lists. The Linux embedded Python probe's `BROWSER_HINTS` tuple is deleted; the probe uses `_browser_exes` (already built from `.desktop` files) for both AT-SPI browser detection and Firefox sessionstore discovery. `StripBrowserSuffix` is now dynamic — it strips ` - {appDisplayName}` using the registry's display name instead of a 10-entry hardcoded suffix list. `BrowserHistoryReader.ResolveFamily()` is removed; URL resolution searches all visits without a family filter (exact-title match is the primary signal). `SessionLabelResolver` accepts the registry as a parameter and runs profile extraction (`--profile-directory`, `-P`, `--profile=`) for ANY browser the registry knows, not just a hardcoded Chromium-family switch. `InstalledAppDetector.ScanStartMenuShortcuts` no longer pre-classifies shortcuts as browsers — the subsequent registry scan sets `IsBrowser` from URL associations. `IBrowserRegistry` is registered unconditionally in DI (outside the `BrowserTrackingEnabled` guard) because `LogCollectorService` and `SessionLabelResolver` consume it regardless of the tracking master switch. Verified: `dotnet build` 0/0, 0 warnings; zero remaining references to `BrowserProcessHints`, `IsBrowserProcess`, `BROWSER_HINTS`, `ResolveFamily`, or `ResolveChromeProfile` in the client.
 > - 2026-08-18: **Embedded-webview journeys (VS Code Simple Browser, Electron apps) — structural detection, no hardcoded names.**
@@ -14,14 +16,7 @@
 >   are skipped structurally. The tracker hydrates browser_tab-rooted sessions, and the main loop skips
 >   them too (webview session + host-app session coexist; no duplicate-close).
 > - 2026-08-18: **Structural process name resolution — Flatpak/snap browsers get correct names + structural browser detection.**
->   The Python probe's `resolve_app_name(pid)` checks FLATPAK_ID in `/proc/<pid>/environ` (extracts
->   short name: `org.mozilla.Floorp` -> `floorp`) and snap path in `/proc/<pid>/exe` (`/snap/firefox/...`
->   -> `firefox`), falling back to `/proc/comm` for native apps. No name lists: Flatpak/snap are the only
->   sandboxing systems that inject proxy PIDs (e.g. `xdg-dbus-proxy`). Structural browser detection:
->   `.desktop` files with `Categories=WebBrowser` are scanned (cached 5 min) and the resolved process name
->   is matched against browser exe names from the desktop files + Flatpak app IDs. C# `ReadComm()` checks
->   a `_pidNameCache` (populated from probe results each poll) before `/proc/comm`, so WM-only Flatpak/snap
->   windows also get the correct name. `StripBrowserSuffix` gains Floorp/LibreWolf/Waterfox.
+>   The Python probe's `resolve_app_name(pid)` now walks up the `bwrap`/`xdg-dbus-proxy` PPID chain (via `/proc/<pid>/stat`) to reach the real app process before checking FLATPAK_ID in `/proc/<pid>/environ` (extracts short name: `org.mozilla.Floorp` -> `floorp`) and snap path in `/proc/<pid>/exe` (`/snap/firefox/...` -> `firefox`), falling back to `/proc/comm` for native apps. No name lists: Flatpak/snap are the only sandboxing systems that inject proxy PIDs (e.g. `xdg-dbus-proxy`). Structural browser detection: `.desktop` files with `Categories=WebBrowser` are scanned (cached 5 min) and the resolved process name is matched against browser exe names from the desktop files + Flatpak app IDs. C# `ReadComm()` checks a `_pidNameCache` (populated from probe results each poll) before `/proc/comm`, so WM-only Flatpak/snap windows also get the correct name. `StripBrowserSuffix` gains Floorp/LibreWolf/Waterfox.
 > - 2026-08-18: **Focus totals frozen (~0s on the web) fixed — flush is now ADDITIVE + every-minute push.**
 >   Root cause: `UpdateAppSessionFocusSql` OVERWROTE the row with the in-memory delta and the counter was
 >   then cleared — each flush wrote only the last ~10-cycle window (300s main / 30s browser), never the

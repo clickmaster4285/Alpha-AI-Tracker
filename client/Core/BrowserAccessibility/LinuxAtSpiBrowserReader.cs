@@ -457,11 +457,35 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
 
         def resolve_app_name(pid):
             # Resolve the real application name from a PID using OS metadata.
-            # Flatpak apps register with xdg-dbus-proxy as their AT-SPI PID, so
-            # /proc/<pid>/comm gives the proxy name instead of the real app.
+            # Flatpak apps may surface as xdg-dbus-proxy or bwrap at the AT-SPI layer,
+            # so walk up the bwrap PPID chain to reach the real app process before
+            # applying FLATPAK_ID / snap / comm resolution.
+            real_pid = pid
+            try:
+                _comm = read_comm(pid)
+                if _comm in ('bwrap', 'xdg-dbus-proxy'):
+                    seen = set()
+                    while True:
+                        seen.add(real_pid)
+                        try:
+                            with open('/proc/%d/stat' % real_pid, 'rb') as _sf:
+                                _stat = _sf.read().split(b' ')
+                                _ppid = int(_stat[3])
+                        except Exception:
+                            break
+                        if _ppid == 0 or _ppid in seen:
+                            break
+                        _pcomm = read_comm(_ppid)
+                        if _pcomm != 'bwrap':
+                            real_pid = _ppid
+                            break
+                        real_pid = _ppid
+            except Exception:
+                real_pid = pid
+
             # Flatpak: FLATPAK_ID in /proc/<pid>/environ -> extract short app name
             try:
-                with open('/proc/%d/environ' % pid, 'rb') as f:
+                with open('/proc/%d/environ' % real_pid, 'rb') as f:
                     for part in f.read().split(b'\0'):
                         if part.startswith(b'FLATPAK_ID='):
                             app_id = part.split(b'=', 1)[1].decode('utf-8', 'replace')
@@ -472,7 +496,7 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                 pass
             # Snap: exe path contains /snap/<name>/
             try:
-                exe = os.readlink('/proc/%d/exe' % pid)
+                exe = os.readlink('/proc/%d/exe' % real_pid)
                 idx = exe.find('/snap/')
                 if idx >= 0:
                     snap_name = exe[idx + 6:].split('/')[0]
@@ -480,7 +504,7 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                         return snap_name.lower()
             except Exception:
                 pass
-            return read_comm(pid)
+            return read_comm(real_pid)
 
         # Structural browser detection: scan .desktop files for Categories=WebBrowser.
         # Cached on disk for 5 minutes to avoid rescanning every 3s poll.
