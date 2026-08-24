@@ -1,0 +1,12 @@
+[0;1;31m×[0m xvfb.service - X Virtual Frame Buffer Service
+     Loaded: loaded (]8;;file://srv1275533/etc/systemd/system/xvfb.service/etc/systemd/system/xvfb.service]8;;; [0;1;32menabled[0m; preset: [0;1;32menabled[0m)
+     Active: [0;1;31mfailed[0m (Result: exit-code) since Mon 2026-08-24 11:24:06 PKT; 5min ago
+   Duration: 13ms
+    Process: 255163 ExecStart=/usr/bin/Xvfb :99 -screen 0 1024x768x24 [0;1;31m(code=exited, status=1/FAILURE)[0m
+   Main PID: 255163 (code=exited, status=1/FAILURE)
+        CPU: 12ms
+
+Aug 24 11:24:06 srv1275533 systemd[1]: xvfb.service: Scheduled restart job, restart counter is at 5.
+Aug 24 11:24:06 srv1275533 systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mxvfb.service: Start request repeated too quickly.[0m
+Aug 24 11:24:06 srv1275533 systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mxvfb.service: Failed with result 'exit-code'.[0m
+Aug 24 11:24:06 srv1275533 systemd[1]: [0;1;31m[0;1;39m[0;1;31mFailed to start xvfb.service - X Virtual Frame Buffer Service.[0m
