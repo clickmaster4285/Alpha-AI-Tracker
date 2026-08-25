@@ -442,6 +442,40 @@ const navSections: NavSection[] = [
   },
 ];
 
+// ─── Path → permission-module resolution ─────────────────────────────────────
+//
+// Single source of truth for navigation guards: every guarded route maps to the
+// same module key the sidebar uses, so hidden nav items and blocked pages agree.
+
+function collectModulePaths(): { path: string; module?: string }[] {
+  return navSections.flatMap(s => s.items).flatMap(item => {
+    const own = item.path ? [{ path: item.path, module: item.module }] : [];
+    const children = (item.children ?? []).map(c => ({ path: c.path, module: c.module }));
+    return [...own, ...children];
+  });
+}
+
+const MODULE_PATHS = collectModulePaths();
+
+/** Resolve the permission module key guarding a pathname (undefined = unguarded). */
+export function findModuleForPath(pathname: string): string | undefined {
+  for (const entry of MODULE_PATHS) {
+    if (!entry.module) continue;
+    if (entry.path === pathname) return entry.module;
+  }
+  // Nested/deep routes inherit the closest parent's module (e.g. /roles/sub → roles).
+  let best: { length: number; module: string } | undefined;
+  for (const entry of MODULE_PATHS) {
+    if (!entry.module) continue;
+    if (pathname.startsWith(entry.path + "/")) {
+      if (!best || entry.path.length > best.length) {
+        best = { length: entry.path.length, module: entry.module };
+      }
+    }
+  }
+  return best?.module;
+}
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 interface AppSidebarProps {
