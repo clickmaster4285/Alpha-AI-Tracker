@@ -147,9 +147,8 @@ export function PermissionsProvider({ children }: { children: ReactNode }) {
     authUser?.permissions && authUser.permissions.length > 0
       ? new Set(authUser.permissions)
       : null;
-
   const legacyHasPermission = useCallback((role: UserRole, module: string): Permission => {
-    if (role === 'super_admin' || role === 'company_admin') return 'full';
+    if (role === 'company_admin') return 'full';
     return permissions[module]?.[role] || 'none';
   }, [permissions]);
 
