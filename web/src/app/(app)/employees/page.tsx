@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check, Eye, Monitor, Upload, Download, Pencil, Trash2, AlertTriangle } from 'lucide-react';
+import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check, Eye, Monitor, Upload, Download, Pencil, Trash2, AlertTriangle, UserPlus } from 'lucide-react';
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import * as XLSX from 'xlsx';
@@ -503,6 +503,12 @@ export default function UsersList() {
                         <DropdownMenuItem onSelect={() => handleEdit(emp)} className="cursor-pointer gap-2.5 px-2.5 py-2">
                           <Pencil className="w-4 h-4 text-muted-foreground" />
                           Edit Details
+                        </DropdownMenuItem>
+                        <DropdownMenuItem asChild className="cursor-pointer gap-2.5 px-2.5 py-2">
+                          <Link href={`/settings/user-management?create=1&employeeId=${encodeURIComponent(emp.employeeId)}&name=${encodeURIComponent(emp.name)}&email=${encodeURIComponent(emp.email)}`}>
+                            <UserPlus className="w-4 h-4 text-muted-foreground" />
+                            Login Credential
+                          </Link>
                         </DropdownMenuItem>
                         <DropdownMenuItem onSelect={() => handleGenerateSecret(emp)} className="cursor-pointer gap-2.5 px-2.5 py-2">
                           <Key className="w-4 h-4 text-muted-foreground" />

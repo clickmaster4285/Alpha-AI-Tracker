@@ -11,9 +11,12 @@ export interface AuthUser {
   id: string;
   name: string;
   email: string;
-  role: UserRole;
+  role: UserRole | string;
+  roleId?: number;
+  /** Granted submodule keys for the user's role (server-driven RBAC). */
+  permissions?: string[];
   employeeId: string;
-  department: string;
+  department?: string;
   avatar: string;
   avatarColor: string;
 }
@@ -23,15 +26,17 @@ function mapAuthUser(user: import('./api').AuthUser): AuthUser {
     id: user.id,
     name: user.name,
     email: user.email,
-    role: user.role as UserRole,
+    role: user.role,
+    roleId: user.roleId,
+    permissions: user.permissions,
     employeeId: user.employeeId,
-    department: user.department,
+    department: (user as { department?: string }).department,
     avatar: user.avatar || user.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2),
     avatarColor: user.avatarColor || '#7C3AED',
   };
 }
 
-export function getRoleName(role: UserRole): string {
+export function getRoleName(role: UserRole | string): string {
   const names: Record<string, string> = {
     super_admin: 'Super Admin',
     org_admin: 'Org Admin',

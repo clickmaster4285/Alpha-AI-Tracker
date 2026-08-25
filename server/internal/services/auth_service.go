@@ -23,14 +23,16 @@ import (
 // AuthService handles authentication and company admin initialization.
 type AuthService struct {
 	repo      *repository.UserRepo
+	rbacRepo  *repository.RBACRepo
 	jwtConfig config.JWTConfig
 	adminCfg  config.AdminConfig
 }
 
 // NewAuthService creates a new AuthService.
-func NewAuthService(repo *repository.UserRepo, jwtCfg config.JWTConfig, adminCfg config.AdminConfig) *AuthService {
+func NewAuthService(repo *repository.UserRepo, rbacRepo *repository.RBACRepo, jwtCfg config.JWTConfig, adminCfg config.AdminConfig) *AuthService {
 	return &AuthService{
 		repo:      repo,
+		rbacRepo:  rbacRepo,
 		jwtConfig: jwtCfg,
 		adminCfg:  adminCfg,
 	}
@@ -104,9 +106,9 @@ func decryptToken(encrypted string, secret string) (string, error) {
 	return string(plaintext), nil
 }
 
-// EnsureCompanyAdmin checks if a company admin exists, and if not, creates one.
+// EnsureCompanyAdmin checks if a user on the system role exists, and if not, creates one.
 func (s *AuthService) EnsureCompanyAdmin(ctx context.Context) error {
-	count, err := s.repo.CountCompanyAdmins(ctx)
+	count, err := s.repo.CountUsersWithRole(ctx, SystemRoleName)
 	if err != nil {
 		return fmt.Errorf("check company admins: %w", err)
 	}
@@ -118,6 +120,14 @@ func (s *AuthService) EnsureCompanyAdmin(ctx context.Context) error {
 
 	log.Printf("[auth] no company admin found — auto-initializing with credentials from .env")
 
+	role, err := s.rbacRepo.GetRoleByName(ctx, SystemRoleName)
+	if err != nil {
+		return fmt.Errorf("find system role: %w", err)
+	}
+	if role == nil {
+		return fmt.Errorf("system role %q is missing — run RBAC seed first", SystemRoleName)
+	}
+
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(s.adminCfg.Password), bcrypt.DefaultCost)
 	if err != nil {
 		return fmt.Errorf("hash admin password: %w", err)
@@ -127,13 +137,11 @@ func (s *AuthService) EnsureCompanyAdmin(ctx context.Context) error {
 		Name:            s.adminCfg.Name,
 		Email:           s.adminCfg.Email,
 		PasswordHash:    string(hashedPassword),
-		Role:            "company_admin",
-		Department:      "Executive",
+		RoleID:          role.ID,
 		Shift:           "Day",
 		TrackingEnabled: false,
 		TrackingStatus:  "untracked",
 		IsOnline:        false,
-		IsCompanyAdmin:  true,
 	}
 
 	created, err := s.repo.Create(ctx, admin)
@@ -164,10 +172,24 @@ func (s *AuthService) Login(ctx context.Context, req *dto.LoginRequest) (*dto.Lo
 		return nil, fmt.Errorf("generate token: %w", err)
 	}
 
-	return &dto.LoginResponse{
+	resp := &dto.LoginResponse{
 		User:  userToResponse(user),
 		Token: token,
-	}, nil
+	}
+	s.attachPermissions(ctx, user.ID, &resp.User)
+
+	return resp, nil
+}
+
+// attachPermissions resolves the granted submodule keys for the user's role and
+// embeds them into the response so the web client can guard navigation.
+func (s *AuthService) attachPermissions(ctx context.Context, userID string, out *dto.UserResponse) {
+	keys, err := s.rbacRepo.PermissionKeysForUser(ctx, userID)
+	if err != nil {
+		log.Printf("[auth] WARNING: could not resolve permissions for %s: %v", userID, err)
+		return
+	}
+	out.Permissions = keys
 }
 
 // ValidateToken decrypts and validates a JWT token, returning the claims.
@@ -198,6 +220,20 @@ func (s *AuthService) ValidateToken(tokenString string) (*Claims, error) {
 // GetUserByID returns a full user model (for middleware use).
 func (s *AuthService) GetUserByID(ctx context.Context, id string) (*models.User, error) {
 	return s.repo.GetByID(ctx, id)
+}
+
+// GetUserResponseByID returns the user response with role permissions attached.
+func (s *AuthService) GetUserResponseByID(ctx context.Context, id string) (*dto.UserResponse, error) {
+	user, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if user == nil {
+		return nil, nil
+	}
+	resp := userToResponse(user)
+	s.attachPermissions(ctx, user.ID, &resp)
+	return &resp, nil
 }
 
 // GenerateEmployeeToken generates a JWT token for an employee desktop client session.

@@ -54,7 +54,7 @@ func (s *UserService) GetByID(ctx context.Context, id string) (*dto.UserResponse
 	return &resp, nil
 }
 
-// Create creates a new user with bcrypt-hashed password.
+// Create creates a new user with bcrypt-hashed password, attached to a role.
 func (s *UserService) Create(ctx context.Context, req *dto.CreateUserRequest) (*dto.UserResponse, error) {
 	// Check email uniqueness
 	unique, err := s.repo.IsUniqueEmail(ctx, req.Email, "")
@@ -63,6 +63,9 @@ func (s *UserService) Create(ctx context.Context, req *dto.CreateUserRequest) (*
 	}
 	if !unique {
 		return nil, fmt.Errorf("email already exists")
+	}
+	if req.RoleID <= 0 {
+		return nil, fmt.Errorf("a valid role is required")
 	}
 
 	// Default password if not provided
@@ -76,19 +79,9 @@ func (s *UserService) Create(ctx context.Context, req *dto.CreateUserRequest) (*
 		return nil, fmt.Errorf("hash password: %w", err)
 	}
 
-	role := req.Role
-	if role == "" {
-		role = "employee"
-	}
-
 	shift := req.Shift
 	if shift == "" {
 		shift = "Day"
-	}
-
-	department := req.Department
-	if department == "" {
-		department = "Engineering"
 	}
 
 	trackingEnabled := true
@@ -99,14 +92,13 @@ func (s *UserService) Create(ctx context.Context, req *dto.CreateUserRequest) (*
 	user := &models.User{
 		Name:            req.Name,
 		Email:           req.Email,
+		EmployeeID:      req.EmployeeID,
 		PasswordHash:    string(hashedPassword),
-		Role:            role,
-		Department:      department,
+		RoleID:          req.RoleID,
 		Shift:           shift,
 		TrackingEnabled: trackingEnabled,
 		TrackingStatus:  "untracked",
 		IsOnline:        false,
-		IsCompanyAdmin:  false,
 	}
 
 	created, err := s.repo.Create(ctx, user)
@@ -145,11 +137,19 @@ func (s *UserService) Update(ctx context.Context, id string, req *dto.UpdateUser
 		}
 		updates["email"] = *req.Email
 	}
-	if req.Department != nil {
-		updates["department"] = *req.Department
+	if req.RoleID != nil {
+		if *req.RoleID <= 0 {
+			return nil, fmt.Errorf("a valid role is required")
+		}
+		updates["role_id"] = *req.RoleID
 	}
-	if req.Role != nil {
-		updates["role"] = *req.Role
+	if req.Password != nil && *req.Password != "" {
+		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(*req.Password), bcrypt.DefaultCost)
+		if err != nil {
+			return nil, fmt.Errorf("hash password: %w", err)
+		}
+		passwordHash := string(hashedPassword)
+		updates["password_hash"] = passwordHash
 	}
 	if req.Shift != nil {
 		updates["shift"] = *req.Shift
@@ -176,7 +176,7 @@ func (s *UserService) Update(ctx context.Context, id string, req *dto.UpdateUser
 	return &resp, nil
 }
 
-// Delete removes a user by ID. Prevents deleting the company admin.
+// Delete removes a user by ID. Prevents deleting users on system roles (company_admin).
 func (s *UserService) Delete(ctx context.Context, id string) error {
 	user, err := s.repo.GetByID(ctx, id)
 	if err != nil {
@@ -185,7 +185,11 @@ func (s *UserService) Delete(ctx context.Context, id string) error {
 	if user == nil {
 		return fmt.Errorf("user not found")
 	}
-	if user.IsCompanyAdmin {
+	isSystem, err := s.repo.IsUserRoleSystem(ctx, id)
+	if err != nil {
+		return err
+	}
+	if isSystem {
 		return fmt.Errorf("cannot delete company admin")
 	}
 	return s.repo.Delete(ctx, id)
@@ -197,8 +201,8 @@ func userToResponse(u *models.User) dto.UserResponse {
 		EmployeeID:      u.EmployeeID,
 		Name:            u.Name,
 		Email:           u.Email,
-		Role:            u.Role,
-		Department:      u.Department,
+		RoleID:          u.RoleID,
+		Role:            u.RoleName,
 		Shift:           u.Shift,
 		TrackingEnabled: u.TrackingEnabled,
 		TrackingStatus:  u.TrackingStatus,

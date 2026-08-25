@@ -86,13 +86,15 @@ export interface AuthUser {
   name: string;
   email: string;
   role: string;
-  department: string;
+  roleId?: number;
   shift: string;
   trackingEnabled: boolean;
   trackingStatus: string;
   isOnline: boolean;
   avatar: string;
   avatarColor: string;
+  /** Granted submodule keys for the user's role (server-driven RBAC). */
+  permissions?: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -601,6 +603,137 @@ export const monitoringApi = {
     create: (data: { domain: string; typeId?: number | null; categoryId?: number | null }) =>
       request<MonitoredSite>('/monitoring/websites', { method: 'POST', body: data }),
   },
+};
+
+// ──────────────────────────
+// RBAC API (roles + module/submodule catalog)
+// ──────────────────────────
+
+export interface SubmoduleNode {
+  id: number;
+  moduleId: number;
+  key: string;
+  name: string;
+  routePath: string;
+}
+
+export interface ModuleNode {
+  id: number;
+  key: string;
+  name: string;
+  sortOrder: number;
+  submodules: SubmoduleNode[];
+}
+
+export interface ModuleTreeResponse {
+  modules: ModuleNode[];
+  total: number;
+}
+
+export interface Role {
+  id: number;
+  name: string;
+  description: string;
+  isSystem: boolean;
+  userCount: number;
+  submoduleIds: number[];
+  permissions: string[];
+}
+
+export interface RoleListResponse {
+  roles: Role[];
+  total: number;
+}
+
+export interface CreateRolePayload {
+  name: string;
+  description?: string;
+  submoduleIds?: number[];
+}
+
+export interface UpdateRolePayload {
+  name?: string;
+  description?: string;
+  submoduleIds?: number[];
+}
+
+export const modulesApi = {
+  tree: () => request<ModuleTreeResponse>('/modules'),
+};
+
+export const rolesApi = {
+  list: () => request<RoleListResponse>('/roles'),
+
+  create: (data: CreateRolePayload) =>
+    request<Role>('/roles', { method: 'POST', body: data }),
+
+  update: (id: number, data: UpdateRolePayload) =>
+    request<Role>('/roles/' + id, { method: 'PUT', body: data }),
+
+  delete: (id: number) =>
+    request<{ message: string }>('/roles/' + id, { method: 'DELETE' }),
+};
+
+// ──────────────────────────
+// Users API (web-dashboard login accounts)
+// ──────────────────────────
+
+export interface User {
+  id: string;
+  employeeId: string;
+  name: string;
+  email: string;
+  roleId: number;
+  role: string;
+  shift: string;
+  trackingEnabled: boolean;
+  trackingStatus: string;
+  isOnline: boolean;
+  avatar: string;
+  avatarColor: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UserListResponse {
+  data: User[];
+  total: number;
+  page: number;
+  perPage: number;
+  totalPages: number;
+}
+
+export interface CreateUserPayload {
+  name: string;
+  email: string;
+  password?: string;
+  employeeId?: string;
+  roleId: number;
+  shift?: string;
+}
+
+export interface UpdateUserPayload {
+  name?: string;
+  email?: string;
+  password?: string;
+  roleId?: number;
+  shift?: string;
+}
+
+export const usersApi = {
+  list: (params?: { page?: number; perPage?: number; search?: string; roleId?: number; status?: string }) =>
+    request<UserListResponse>('/users', { params: params as Record<string, string | number | undefined> }),
+
+  get: (id: string) => request<User>('/users/' + id),
+
+  create: (data: CreateUserPayload) =>
+    request<User>('/users', { method: 'POST', body: data }),
+
+  update: (id: string, data: UpdateUserPayload) =>
+    request<User>('/users/' + id, { method: 'PUT', body: data }),
+
+  delete: (id: string) =>
+    request<{ message: string }>('/users/' + id, { method: 'DELETE' }),
 };
 
 // ──────────────────────────
