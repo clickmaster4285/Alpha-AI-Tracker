@@ -60,6 +60,7 @@ func Setup(
 	// ─────────────────────────────
 	a := e.Group("/api/v1/auth")
 	a.POST("/login", authHandler.Login)
+	a.POST("/refresh", authHandler.Refresh)
 	a.POST("/employee-login", authHandler.EmployeeLogin)
 
 	// ─────────────────────────────

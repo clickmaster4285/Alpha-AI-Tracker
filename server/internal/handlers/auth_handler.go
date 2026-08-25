@@ -15,9 +15,59 @@ import (
 )
 
 const (
-	authCookieName = "auth_token"
-	authCookiePath = "/"
+	authCookieName    = "auth_token"
+	refreshCookieName = "refresh_token"
+	authCookiePath    = "/"
 )
+
+func setAuthCookies(c echo.Context, accessValue string, accessExpiry time.Time, refreshValue string, refreshExpiry time.Time) {
+	access := &http.Cookie{
+		Name:     authCookieName,
+		Value:    accessValue,
+		Path:     authCookiePath,
+		HttpOnly: true,
+		Secure:   false, // Set to true in production with HTTPS
+		SameSite: http.SameSiteLaxMode,
+		Expires:  accessExpiry,
+	}
+	c.SetCookie(access)
+
+	if refreshValue != "" {
+		refresh := &http.Cookie{
+			Name:     refreshCookieName,
+			Value:    refreshValue,
+			Path:     authCookiePath,
+			HttpOnly: true,
+			Secure:   false, // Set to true in production with HTTPS
+			SameSite: http.SameSiteLaxMode,
+			Expires:  refreshExpiry,
+		}
+		c.SetCookie(refresh)
+	}
+}
+
+func clearAuthCookies(c echo.Context) {
+	for _, name := range []string{authCookieName, refreshCookieName} {
+		c.SetCookie(&http.Cookie{
+			Name:     name,
+			Value:    "",
+			Path:     authCookiePath,
+			HttpOnly: true,
+			Secure:   false,
+			SameSite: http.SameSiteLaxMode,
+			MaxAge:   -1,
+			Expires:  time.Unix(0, 0),
+		})
+	}
+}
+
+func readCookie(c echo.Context, name string) string {
+	cookie, err := c.Cookie(name)
+	if err != nil {
+		return ""
+	}
+	return cookie.Value
+}
 
 // AuthHandler handles authentication endpoints.
 type AuthHandler struct {
@@ -70,17 +120,35 @@ func (h *AuthHandler) Login(c echo.Context) error {
 		})
 	}
 
-	// Set httpOnly secure cookie
-	cookie := &http.Cookie{
-		Name:     authCookieName,
-		Value:    resp.Token,
-		Path:     authCookiePath,
-		HttpOnly: true,
-		Secure:   false, // Set to true in production with HTTPS
-		SameSite: http.SameSiteLaxMode,
-		Expires:  time.Now().Add(h.jwtCfg.AccessExpiry),
+	setAuthCookies(c, resp.Token, time.Now().Add(h.jwtCfg.AccessExpiry), resp.RefreshToken, resp.RefreshExpiresAt)
+
+	return c.JSON(http.StatusOK, dto.LoginResponse{
+		User: resp.User,
+	})
+}
+
+// Refresh handles POST /api/v1/auth/refresh — public route.
+// Validates + rotates the refresh-token cookie and re-mints both cookies.
+// A 401 here means the session is gone for good; the web client force-redirects to /login.
+func (h *AuthHandler) Refresh(c echo.Context) error {
+	rawRefresh := readCookie(c, refreshCookieName)
+	if rawRefresh == "" {
+		return c.JSON(http.StatusUnauthorized, dto.APIError{
+			Code:    http.StatusUnauthorized,
+			Message: "Refresh token missing",
+		})
 	}
-	c.SetCookie(cookie)
+
+	resp, err := h.authService.RefreshSession(c.Request().Context(), rawRefresh)
+	if err != nil {
+		clearAuthCookies(c)
+		return c.JSON(http.StatusUnauthorized, dto.APIError{
+			Code:    http.StatusUnauthorized,
+			Message: "Invalid or expired refresh token",
+		})
+	}
+
+	setAuthCookies(c, resp.Token, time.Now().Add(h.jwtCfg.AccessExpiry), resp.RefreshToken, resp.RefreshExpiresAt)
 
 	return c.JSON(http.StatusOK, dto.LoginResponse{
 		User: resp.User,
@@ -89,18 +157,12 @@ func (h *AuthHandler) Login(c echo.Context) error {
 
 // Logout handles POST /api/v1/auth/logout
 func (h *AuthHandler) Logout(c echo.Context) error {
-	// Clear the auth cookie
-	cookie := &http.Cookie{
-		Name:     authCookieName,
-		Value:    "",
-		Path:     authCookiePath,
-		HttpOnly: true,
-		Secure:   false,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   -1,
-		Expires:  time.Unix(0, 0),
+	// Revoke the presented refresh token so it can never mint another access token
+	if err := h.authService.RevokeRefreshToken(c.Request().Context(), readCookie(c, refreshCookieName)); err != nil {
+		c.Logger().Errorf("failed to revoke refresh token: %v", err)
 	}
-	c.SetCookie(cookie)
+
+	clearAuthCookies(c)
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "logged out successfully",

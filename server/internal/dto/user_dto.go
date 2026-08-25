@@ -72,6 +72,11 @@ type UserListResponse struct {
 type LoginResponse struct {
 	User  UserResponse `json:"user"`
 	Token string       `json:"token,omitempty"` // Token is returned for reference; actual auth is via cookie
+
+	// Refresh-token fields are transport-only (the handler turns them into an
+	// httpOnly cookie) and are deliberately excluded from JSON bodies.
+	RefreshToken     string    `json:"-"`
+	RefreshExpiresAt time.Time `json:"-"`
 }
 
 // AuthCheckResponse is returned when checking current auth status.

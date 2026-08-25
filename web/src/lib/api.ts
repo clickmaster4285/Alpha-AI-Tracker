@@ -11,6 +11,8 @@ interface RequestOptions {
   headers?: Record<string, string>;
   /** Skip JSON parse for blob/download responses */
   raw?: boolean;
+  /** Internal: this call already went through one refresh-retry cycle */
+  _retried?: boolean;
 }
 
 class ApiError extends Error {
@@ -22,6 +24,32 @@ class ApiError extends Error {
     this.name = 'ApiError';
     this.status = status;
     this.detail = detail;
+  }
+}
+
+// ──────────────────────────
+// Access-token refresh (single-flight).
+// The auth_token cookie lives ~15 minutes; POST /auth/refresh validates and
+// rotates the 30-day refresh_token cookie and re-mints both. Concurrent 401s
+// share one refresh; when it fails the session is dead → force back to /login.
+// ──────────────────────────
+let refreshInFlight: Promise<boolean> | null = null;
+
+async function performRefresh(): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_BASE}/auth/refresh`, {
+      method: 'POST',
+      credentials: 'include',
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+function forceLoginRedirect() {
+  if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+    window.location.replace('/login');
   }
 }
 
@@ -55,7 +83,26 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
     fetchOptions.body = JSON.stringify(body);
   }
 
-  const response = await fetch(url, fetchOptions);
+  let response = await fetch(url, fetchOptions);
+
+  // Access token expired → try one silent refresh, then replay the request once
+  if (
+    response.status === 401 &&
+    !options._retried &&
+    endpoint !== '/auth/login' &&
+    endpoint !== '/auth/refresh'
+  ) {
+    if (!refreshInFlight) {
+      refreshInFlight = performRefresh().finally(() => {
+        refreshInFlight = null;
+      });
+    }
+    const refreshed = await refreshInFlight;
+    if (refreshed) {
+      return request<T>(endpoint, { ...options, _retried: true });
+    }
+    forceLoginRedirect();
+  }
 
   if (!response.ok) {
     let errorData: { message?: string; detail?: string } = {};
@@ -123,6 +170,10 @@ export const authApi = {
   me: () => request<AuthUser>('/auth/me'),
 
   check: () => request<AuthCheckResponse>('/auth/check'),
+
+  /** Rotate the refresh_token cookie into a fresh access_token cookie.
+   * Resolves true when the session was revived; false when it is unrecoverable. */
+  refresh: (): Promise<boolean> => performRefresh(),
 };
 
 // ──────────────────────────

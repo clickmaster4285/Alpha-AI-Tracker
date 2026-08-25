@@ -72,8 +72,9 @@ func main() {
 	newSchemaRepo := repository.NewNewSchemaRepo(pool)
 	monitoringRepo := repository.NewMonitoringRepo(pool)
 	rbacRepo := repository.NewRBACRepo(pool)
+	refreshTokenRepo := repository.NewRefreshTokenRepo(pool)
 
-	authService := services.NewAuthService(userRepo, rbacRepo, cfg.JWT, cfg.Admin)
+	authService := services.NewAuthService(userRepo, rbacRepo, refreshTokenRepo, cfg.JWT, cfg.Admin)
 	userService := services.NewUserService(userRepo)
 	employeeService := services.NewEmployeeService(employeeRepo, redisClient)
 	departmentService := services.NewDepartmentService(departmentRepo, employeeRepo)

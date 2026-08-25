@@ -19,10 +19,19 @@ const initialState: AuthState = {
   error: null,
 };
 
-// Async thunk: check auth status from server cookie
+// Async thunk: check auth status from server cookie.
+// /auth/check answers 200 {authenticated:false} for an EXPIRED access token
+// (optional-auth middleware), so before giving up we try to revive the session
+// via the rotating refresh-token cookie and re-check once.
 export const checkAuth = createAsyncThunk('auth/check', async (_, { rejectWithValue }) => {
   try {
-    const response = await authApi.check();
+    let response = await authApi.check();
+    if (!response.authenticated) {
+      const revived = await authApi.refresh();
+      if (revived) {
+        response = await authApi.check();
+      }
+    }
     return response;
   } catch (err: unknown) {
     if (err instanceof Error) {

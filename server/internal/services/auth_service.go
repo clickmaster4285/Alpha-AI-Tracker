@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
@@ -22,19 +23,21 @@ import (
 
 // AuthService handles authentication and company admin initialization.
 type AuthService struct {
-	repo      *repository.UserRepo
-	rbacRepo  *repository.RBACRepo
-	jwtConfig config.JWTConfig
-	adminCfg  config.AdminConfig
+	repo        *repository.UserRepo
+	rbacRepo    *repository.RBACRepo
+	refreshRepo *repository.RefreshTokenRepo
+	jwtConfig   config.JWTConfig
+	adminCfg    config.AdminConfig
 }
 
 // NewAuthService creates a new AuthService.
-func NewAuthService(repo *repository.UserRepo, rbacRepo *repository.RBACRepo, jwtCfg config.JWTConfig, adminCfg config.AdminConfig) *AuthService {
+func NewAuthService(repo *repository.UserRepo, rbacRepo *repository.RBACRepo, refreshRepo *repository.RefreshTokenRepo, jwtCfg config.JWTConfig, adminCfg config.AdminConfig) *AuthService {
 	return &AuthService{
-		repo:      repo,
-		rbacRepo:  rbacRepo,
-		jwtConfig: jwtCfg,
-		adminCfg:  adminCfg,
+		repo:        repo,
+		rbacRepo:    rbacRepo,
+		refreshRepo: refreshRepo,
+		jwtConfig:   jwtCfg,
+		adminCfg:    adminCfg,
 	}
 }
 
@@ -178,7 +181,106 @@ func (s *AuthService) Login(ctx context.Context, req *dto.LoginRequest) (*dto.Lo
 	}
 	s.attachPermissions(ctx, user.ID, &resp.User)
 
+	refreshRaw, refreshExpiresAt, err := s.issueRefreshToken(ctx, user.ID)
+	if err != nil {
+		// Access token is already valid — log and continue without a refresh cookie
+		// rather than failing the login.
+		log.Printf("[auth] WARNING: could not issue refresh token for %s: %v", user.ID, err)
+	} else {
+		resp.RefreshToken = refreshRaw
+		resp.RefreshExpiresAt = refreshExpiresAt
+	}
+
 	return resp, nil
+}
+
+// issueRefreshToken mints a fresh opaque refresh token, persists its SHA-256 hash
+// and returns the raw value (for the cookie) with its expiry.
+func (s *AuthService) issueRefreshToken(ctx context.Context, userID string) (string, time.Time, error) {
+	if s.refreshRepo == nil {
+		return "", time.Time{}, fmt.Errorf("refresh token repository unavailable")
+	}
+
+	rawBytes := make([]byte, 32)
+	if _, err := rand.Read(rawBytes); err != nil {
+		return "", time.Time{}, fmt.Errorf("generate refresh token: %w", err)
+	}
+	raw := base64.URLEncoding.EncodeToString(rawBytes)
+	hash := hashRefreshToken(raw)
+
+	expiresAt := time.Now().Add(s.jwtConfig.RefreshExpiry)
+	if err := s.refreshRepo.Create(ctx, userID, hash, expiresAt); err != nil {
+		return "", time.Time{}, err
+	}
+	return raw, expiresAt, nil
+}
+
+// RefreshSession validates a presented refresh token, ROTATES it (old row revoked,
+// a new one issued) and returns a fresh access JWT + replacement refresh token.
+func (s *AuthService) RefreshSession(ctx context.Context, rawRefreshToken string) (*dto.LoginResponse, error) {
+	if s.refreshRepo == nil {
+		return nil, fmt.Errorf("refresh token repository unavailable")
+	}
+	if rawRefreshToken == "" {
+		return nil, fmt.Errorf("refresh token missing")
+	}
+
+	stored, err := s.refreshRepo.GetValidByHash(ctx, hashRefreshToken(rawRefreshToken))
+	if err != nil {
+		return nil, fmt.Errorf("look up refresh token: %w", err)
+	}
+	if stored == nil {
+		return nil, fmt.Errorf("invalid or expired refresh token")
+	}
+
+	user, err := s.repo.GetByID(ctx, stored.UserID)
+	if err != nil {
+		return nil, fmt.Errorf("find user: %w", err)
+	}
+	if user == nil || user.DeletedAt != nil {
+		return nil, fmt.Errorf("user no longer exists")
+	}
+
+	access, err := s.generateToken(user)
+	if err != nil {
+		return nil, fmt.Errorf("generate token: %w", err)
+	}
+
+	newRefreshRaw, refreshExpiresAt, err := s.issueRefreshToken(ctx, user.ID)
+	if err != nil {
+		return nil, fmt.Errorf("rotate refresh token: %w", err)
+	}
+
+	// Revoke only after the replacement exists — a crash between the two writes
+	// leaves the old row valid rather than locking the user out.
+	if _, err := s.refreshRepo.RevokeByHash(ctx, hashRefreshToken(rawRefreshToken)); err != nil {
+		log.Printf("[auth] WARNING: could not revoke rotated refresh token for %s: %v", user.ID, err)
+	}
+
+	resp := &dto.LoginResponse{
+		User:             userToResponse(user),
+		Token:            access,
+		RefreshToken:     newRefreshRaw,
+		RefreshExpiresAt: refreshExpiresAt,
+	}
+	s.attachPermissions(ctx, user.ID, &resp.User)
+
+	return resp, nil
+}
+
+// RevokeRefreshToken revokes the presented refresh token (logout).
+func (s *AuthService) RevokeRefreshToken(ctx context.Context, rawRefreshToken string) error {
+	if s.refreshRepo == nil || rawRefreshToken == "" {
+		return nil
+	}
+	_, err := s.refreshRepo.RevokeByHash(ctx, hashRefreshToken(rawRefreshToken))
+	return err
+}
+
+// hashRefreshToken derives the at-rest identifier for a raw refresh token.
+func hashRefreshToken(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
 }
 
 // attachPermissions resolves the granted submodule keys for the user's role and
@@ -237,12 +339,14 @@ func (s *AuthService) GetUserResponseByID(ctx context.Context, id string) (*dto.
 }
 
 // GenerateEmployeeToken generates a JWT token for an employee desktop client session.
+// Deliberately long-lived: employees send it in sync request bodies and have no
+// refresh mechanism — the 15-minute web-admin TTL must never apply here.
 func (s *AuthService) GenerateEmployeeToken(emp *models.Employee) (string, error) {
 	now := time.Now()
 	claims := &Claims{
 		UserID: emp.ID,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(now.Add(s.jwtConfig.AccessExpiry)),
+			ExpiresAt: jwt.NewNumericDate(now.Add(s.jwtConfig.EmployeeAccessExpiry)),
 			IssuedAt:  jwt.NewNumericDate(now),
 			NotBefore: jwt.NewNumericDate(now),
 			Issuer:    "alpha-ai-tracker-employee",
