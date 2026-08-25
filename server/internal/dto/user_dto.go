@@ -8,25 +8,25 @@ import "time"
 
 // CreateUserRequest is the payload for creating a new user.
 type CreateUserRequest struct {
-	Name           string `json:"name" validate:"required,min=2,max=255"`
-	Email          string `json:"email" validate:"required,email"`
-	Password       string `json:"password,omitempty" validate:"omitempty,min=6"`
-	Department     string `json:"department" validate:"required"`
-	Role           string `json:"role" validate:"required"`
-	Shift          string `json:"shift" validate:"omitempty"`
+	Name            string `json:"name" validate:"required,min=2,max=255"`
+	Email           string `json:"email" validate:"required,email"`
+	Password        string `json:"password,omitempty" validate:"omitempty,min=6"`
+	EmployeeID      string `json:"employeeId,omitempty"`
+	RoleID          int    `json:"roleId" validate:"required"`
+	Shift           string `json:"shift,omitempty" validate:"omitempty"`
 	TrackingEnabled *bool  `json:"trackingEnabled"`
 }
 
 // UpdateUserRequest is the payload for updating a user.
 type UpdateUserRequest struct {
-	Name           *string `json:"name,omitempty" validate:"omitempty,min=2,max=255"`
-	Email          *string `json:"email,omitempty" validate:"omitempty,email"`
-	Department     *string `json:"department,omitempty"`
-	Role           *string `json:"role,omitempty"`
-	Shift          *string `json:"shift,omitempty"`
+	Name            *string `json:"name,omitempty" validate:"omitempty,min=2,max=255"`
+	Email           *string `json:"email,omitempty" validate:"omitempty,email"`
+	RoleID          *int    `json:"roleId,omitempty"`
+	Password        *string `json:"password,omitempty" validate:"omitempty,min=6"`
+	Shift           *string `json:"shift,omitempty" validate:"omitempty"`
 	TrackingEnabled *bool   `json:"trackingEnabled"`
-	TrackingStatus *string `json:"trackingStatus,omitempty"`
-	IsOnline       *bool   `json:"isOnline,omitempty"`
+	TrackingStatus  *string `json:"trackingStatus,omitempty"`
+	IsOnline        *bool   `json:"isOnline,omitempty"`
 }
 
 // LoginRequest is the payload for user authentication.
@@ -41,21 +41,22 @@ type LoginRequest struct {
 
 // UserResponse is the public API response for a user.
 type UserResponse struct {
-	ID              string    `json:"id"`
-	EmployeeID      string    `json:"employeeId"`
-	Name            string    `json:"name"`
-	Email           string    `json:"email"`
-	Role            string    `json:"role"`
-	Department      string    `json:"department"`
-	Shift           string    `json:"shift"`
-	TrackingEnabled bool      `json:"trackingEnabled"`
-	TrackingStatus  string    `json:"trackingStatus"`
-	IsOnline        bool      `json:"isOnline"`
-	Avatar          string    `json:"avatar"`
-	AvatarColor     string    `json:"avatarColor"`
-	CreatedAt       time.Time    `json:"createdAt"`
-	UpdatedAt       time.Time    `json:"updatedAt"`
-	DeletedAt       *time.Time   `json:"deletedAt"`
+	ID              string      `json:"id"`
+	EmployeeID      string      `json:"employeeId"`
+	Name            string      `json:"name"`
+	Email           string      `json:"email"`
+	RoleID          int         `json:"roleId"`
+	Role            string      `json:"role"` // role NAME resolved from roles table
+	Shift           string      `json:"shift"`
+	TrackingEnabled bool        `json:"trackingEnabled"`
+	TrackingStatus  string      `json:"trackingStatus"`
+	IsOnline        bool        `json:"isOnline"`
+	Avatar          string      `json:"avatar"`
+	AvatarColor     string      `json:"avatarColor"`
+	Permissions     []string    `json:"permissions,omitempty"`
+	CreatedAt       time.Time   `json:"createdAt"`
+	UpdatedAt       time.Time   `json:"updatedAt"`
+	DeletedAt       *time.Time  `json:"deletedAt"`
 }
 
 // UserListResponse is a paginated list response.

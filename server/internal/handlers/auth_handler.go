@@ -107,7 +107,7 @@ func (h *AuthHandler) Logout(c echo.Context) error {
 	})
 }
 
-// Me handles GET /api/v1/auth/me — returns current user from cookie
+// Me handles GET /api/v1/auth/me — returns current user (with role permissions) from cookie
 func (h *AuthHandler) Me(c echo.Context) error {
 	userID, ok := c.Get("user_id").(string)
 	if !ok || userID == "" {
@@ -117,7 +117,7 @@ func (h *AuthHandler) Me(c echo.Context) error {
 		})
 	}
 
-	user, err := h.authService.GetUserByID(c.Request().Context(), userID)
+	user, err := h.authService.GetUserResponseByID(c.Request().Context(), userID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, dto.APIError{
 			Code:    http.StatusInternalServerError,
@@ -131,7 +131,7 @@ func (h *AuthHandler) Me(c echo.Context) error {
 		})
 	}
 
-	return c.JSON(http.StatusOK, user.ToPublic())
+	return c.JSON(http.StatusOK, user)
 }
 
 // CheckAuth handles GET /api/v1/auth/check — lightweight auth status check (optional auth)
@@ -143,17 +143,16 @@ func (h *AuthHandler) CheckAuth(c echo.Context) error {
 		})
 	}
 
-	user, err := h.authService.GetUserByID(c.Request().Context(), userID)
+	user, err := h.authService.GetUserResponseByID(c.Request().Context(), userID)
 	if err != nil || user == nil {
 		return c.JSON(http.StatusOK, dto.AuthCheckResponse{
 			Authenticated: false,
 		})
 	}
 
-	resp := user.ToPublic()
 	return c.JSON(http.StatusOK, dto.AuthCheckResponse{
 		Authenticated: true,
-		User:          &resp,
+		User:          user,
 	})
 }
 
