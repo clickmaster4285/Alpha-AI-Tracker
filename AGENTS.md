@@ -1,8 +1,70 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-08-22
+> **Last audited:** 2026-08-25
 > **Changelog:**
 >
+> - 2026-08-25: **Core: Rotating refresh tokens for the web-admin session — 15-min access JWT, 30-day refresh cookie, transparent regeneration, forced logout to /login.**
+>   Migration **026_refresh_tokens.sql** adds `refresh_tokens` (user_id FK CASCADE, UNIQUE `token_hash`
+>   = hex(sha256(raw)), expires_at, revoked_at, deleted_at + user/expires indexes). The raw token is a
+>   32-byte random base64url string that NEVER touches the DB or JSON bodies — only its SHA-256 hash is
+>   stored, and it travels ONLY in the httpOnly `refresh_token` cookie (DTO fields are `json:"-"`).
+>   `JWTConfig` split into three TTLs: `JWT_ACCESS_EXPIRY=15m` (web admin), `JWT_REFRESH_EXPIRY=720h`
+>   (30 days), `JWT_EMPLOYEE_ACCESS_EXPIRY=24h` — the desktop client has NO refresh mechanism, so its
+>   TTL deliberately stays 24h (never lower it; documented in server/ARCHITECTURE.md §6). New public
+>   endpoint **POST /auth/refresh**: validates the cookie's hash → mints the replacement access+refresh
+>   pair FIRST → revokes the old row AFTER (crash-safe rotation — a mid-refresh failure leaves the old
+>   row valid); replaying a rotated cookie returns 401. Login now sets BOTH cookies; logout REVOKES the
+>   refresh row server-side (real session invalidation) before clearing both cookies. Web: `api.ts`
+>   request wrapper catches 401s (except login/refresh) → single-flight POST /auth/refresh → replays
+>   the original request once (`_retried` cap, no loops) → on failure `window.location.replace('/login')`;
+>   the `checkAuth` thunk also tries refresh + re-check once when `/auth/check` answers
+>   `{authenticated:false}`. Verified: `go build`/`go vet` clean, `tsc --noEmit` clean, `next build`
+>   passes; live curl lifecycle against the dev server proved login sets BOTH cookies (+15m/+30d,
+>   HttpOnly), `/auth/refresh` rotates (old cookie replay → 401), and logout revokes (post-logout
+>   refresh → 401).
+> - 2026-08-25: **Web: ALL localStorage mock data removed — zero localStorage references remain in web/src.**
+>   `web/src/lib/store.ts` (the 328-line mock factory: 12 fake employees, activity/system logs,
+>   productivity rows, screenshots, settings CRUD, `initializeData` seeder) is deleted, as is the
+>   legacy localStorage permission-matrix editor `settings/permissions/page.tsx` (+ its sidebar child
+>   entry and breadcrumb key). Seven no-backend pages (screenshots, live-stream, hours-insights,
+>   employees/activity, logs/graphical, logs/insights, ai-summary) became honest empty states — header
+>   + `EmptyState` explaining there is no endpoint yet. `/dashboard` is fully live-API: Total Employees
+>   (+ tracked/untracked split), Departments count, App Sessions ·24h (`GET /app-sessions?dateFrom=`),
+>   Web Pages ·24h (`GET /app-items?itemType=browser_tab&dateFrom=`); the mock chart/Best-Performer
+>   cards are replaced by an empty-state analytics card linking the real journey routes.
+>   `/settings/tracking` keeps in-memory state only with an explicit non-persistence notice.
+>   `app/page.tsx` runs a one-time sweep that purges every orphaned `alpha_ai_tracker_*`
+>   (`STORAGE_PREFIX`) key from localStorage. Auth persistence was already cookie-based
+>   (httpOnly cookie → `/auth/check` → Redux), so nothing else read localStorage. Verified:
+>   `tsc --noEmit` clean, `next build` passes, grep confirms zero `localStorage` usage in src.
+> - 2026-08-25: **Server: GET /api/v1/users 500 root-caused via live testing — ambiguous `deleted_at` under the roles JOIN.**
+>   After two wrong static hypotheses, a live loop (build → run → login → reproduce → read the raw
+>   PostgreSQL error from the APIError `detail`) exposed SQLSTATE 42702: `user_repo.List` filtered on a
+>   bare `deleted_at IS NULL` while its `LEFT JOIN roles r` introduced `roles.deleted_at`, making the
+>   reference ambiguous. All List conditions are now qualified (`u.deleted_at`, `LOWER(u.name)`, …).
+>   Hardening kept alongside the true fix: every projection COALESCEs nullable `avatar`/`avatar_color`,
+>   and Update's RETURNING replaced an invalid `COALESCE(r.name,'')` (no alias `r` exists in
+>   UPDATE…RETURNING — would have 500'd every user edit) with a scalar subquery
+>   `(SELECT name FROM roles WHERE id = u.role_id)`. Known follow-up: creating a user with a
+>   nonexistent `roleId` surfaces as FK 23503 → 500 instead of a friendly 400.
+> - 2026-08-25: **Core: Dynamic RBAC end-to-end — server-driven roles/modules/submodules replace the client-side permission matrix.**
+>   Migration **025_rbac_roles_modules.sql** adds `roles` (seeded SYSTEM `company_admin`),
+>   `modules`, `submodules` (concrete permission keys carrying `route_path`), and the
+>   `role_submodule_permissions` junction; `users.role_id` becomes the sole role source of truth
+>   (legacy `users.role` / `is_company_admin` dropped). A Go seeder
+>   (`RBACService.SeedCatalog`, idempotent, runs at boot) re-ensures the module/submodule catalog +
+>   grants. New protected endpoints: `GET /modules` (full module→submodule tree) and `/roles` CRUD —
+>   role payloads carry both `submoduleIds` (grants) and derived `permissions` keys; user
+>   create/update accept `roleId`. Web: `/roles` rebuilt as a real-API CRUD page with per-submodule
+>   permission toggles; `/settings/user-management` rebuilt on the live `/users` API (infinite scroll
+>   per the §6 rule, create/edit/delete dialogs, role assignment). `permissions.tsx` rewritten to be
+>   SERVER-driven only: the granted submodule keys ride every auth response (`user.permissions`) into
+>   `PermissionsProvider`; `RouteGuard` resolves the current pathname to a module and redirects
+>   unauthorized access to a new `/unauthorized` page. Semantics: absent/null permissions array =
+>   fail-open (pre-RBAC sessions keep working), present array = strict allow-list,
+>   `company_admin` always full. Server-side enforcement of these permissions is still NOT
+>   implemented (middleware has no role checks yet). Verified: `go build`/`go vet` clean,
+>   `tsc --noEmit` clean, `next build` passes.
 > - 2026-08-22: **Web: Sidebar parent menus stay open when navigating to child pages.**
 >   `AppSidebar` now auto-expands any parent section whose `children` array contains the current `pathname`, so the menu stays open when the user opens a child page. Verified: `tsc --noEmit` clean, `next build` passes.
 > - 2026-08-22: **Web: Configuration pages UI/UX redesign + manual website creation.**
@@ -843,7 +905,8 @@ flowchart LR
 
 **What works:**
 
-- Migrations 001-017 run on startup (16 files; 010 adds `process_id`/`parent_process_id`, 013 adds session identity, 014 adds journey fields, 015/016 add app/package catalogs + junction tables, 017 adds app_status/hardware_devices/permission_status/storage_devices)
+- Migrations 001-025 run on startup (24 files; latest: 023 monitoring config tables, 024 catalog merge, 025 RBAC roles/modules/submodules + users.role_id)
+- **Dynamic RBAC** (2026-08-25): roles/modules/submodules catalog seeded idempotently at boot (`RBACService.SeedCatalog`); protected `GET /modules` + `/roles` CRUD endpoints; `users.role_id` is the sole role source of truth; every auth/user response carries the granted submodule permission keys
 - Full CRUD for users, employees, departments
 - Web admin auth (email/password → httpOnly cookie with encrypted JWT)
 - Employee auth (Redis one-time secret → JWT token)
@@ -919,28 +982,28 @@ flowchart LR
 - **macOS window titles** — only captures foreground window
 - **Six-page GUI not yet ship-tested** — it needs no packaging change (hero images and `APP_IDENTIFIERS` both compile into `client.dll`), but per the Installer-Parity Rule it is not "done" until verified from an installed build
 
-### Web — ~20% complete
+### Web — ~30% complete
 
 **What works:**
 
 - ~50 page routes exist with polished UI
 - Login page with animated hero section
-- Auth check on mount (Redux + server cookie)
+- Auth check on mount (Redux + server cookie); **zero localStorage dependencies in web/src** (2026-08-25 mock purge)
+- **Server-driven RBAC** (2026-08-25) — `user.permissions` (submodule keys) from every auth response gate the sidebar (`AppSidebar` via `PermissionsProvider`) and routes (`RouteGuard` → `/unauthorized`); `/roles` is a real-API CRUD page with per-submodule permission toggles over `GET /modules` + `/roles`; fail-open for pre-RBAC sessions, strict allow-list otherwise, `company_admin` always full
 - Employees page — real API calls via TanStack Query (CRUD + generate secret, portal-rendered Radix action menu); each row's action menu deep-links to **View Journey** and **Device Specs** (2026-08-18)
+- User Management (`/settings/user-management`) — real-API CRUD on `/users` with role assignment, server-side infinite scroll (2026-08-25)
 - **Employee Journey module** (2026-08-18) — three real-API pages behind the shared `EmployeePage` shell + `EmployeeSelector` picker: Session Timeline (`useInfiniteQuery` on `GET /app-sessions`, 30/page, fg/bg stacked bar), App Usage (per-app foreground/background aggregation of the latest 500 sessions), Web Activity (`GET /app-items?itemType=browser_tab`); Screenshots and Location Trail are shell placeholders (the desktop client collects neither yet)
 - **Device Specs module** (2026-08-18) — four real-API pages over the aggregate `GET /employees/:id/detail`: Hardware Overview, Installed Software (Applications/Packages tabs + search), Peripherals, Permissions. This replaced the old `/users/[id]` single-page detail view (deleted)
 - Shared building blocks: `EmployeePage` shell (header + picker + loading/error/no-selection states, optional `fetchDetail`), `hooks/use-employee-detail.ts`, `lib/format.ts`, `EmployeeSelector`, `EmptyState`/`InventoryTable`/`FocusTime`/`DeviceClassIcon`
 - Departments page — real API calls (CRUD)
 - Logs/Comprehensive page — real API calls (now using new app_sessions API)
-- Sidebar with permission-based filtering (client-side only); Device Specs and Employee Journey are collapsible sections
-- Dashboard shows mock stats and chart
+- Dashboard — fully live-API stat tiles (employees total + tracked/untracked split, departments count, app sessions ·24h, web pages ·24h) since the 2026-08-25 mock purge; analytics cards link the journey modules until chart endpoints exist
 
 **What's missing (most pages):**
 
-- **~40 of 50 pages use mock localStorage data** — not connected to real API
-- **Client-side only permissions** — no server enforcement
+- **~35 of ~50 pages are scaffolding** — no backend endpoint exists yet; the former localStorage mocks were removed 2026-08-25 and those pages now render honest empty states instead
+- **Server-side permission enforcement** — RBAC grants are enforced only in the web client (sidebar + RouteGuard); API middleware has no role checks
 - **No error boundaries** — uncaught React errors crash the page
-- **No loading/empty/error states** on most mock-data pages
 - **No real-time updates** — no polling, WebSocket, or SSE
 - **No accessibility testing** — many interactive elements lack aria attributes
 - **No unit tests** — 0 test files
@@ -1045,11 +1108,11 @@ flowchart LR
 | ----------------------------------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **No tests anywhere**         | 🔴 High   | 0 test files across all 3 projects. Any refactor is blind.                                                                                                                       |
 | **No observability**          | 🟠 Medium | No structured logging, metrics, tracing. Debugging production issues requires SSH + log scraping.                                                                                |
-| **Client-side only RBAC**     | 🟠 Medium | Permissions are enforced only in the web frontend localStorage. A malicious user can trivially bypass them.                                                                      |
+| **Client-side RBAC grants**    | 🟠 Medium | RBAC grants (roles/modules/submodules, migration 025) are enforced only in the web frontend (sidebar + RouteGuard). A malicious user can bypass them — API middleware still has no role checks.                                                                   |
 | **No rate limiting**          | 🟠 Medium | Login endpoint and all sync endpoints have no rate limiting. Brute-force / DoS is trivial.                                                                                       |
 | **No server permission model**| 🟠 Medium | Any authenticated user can access all protected endpoints; no role checks server-side.                                                                                           |
 | **Cross-account injection**   | 🟠 Medium | Sync handlers validate the JWT but don't verify the body `employeeId` matches the JWT subject.                                                                                   |
-| **Mock data dominance**       | 🟠 Medium | ~80% of web pages use mock data (~40 of ~50; employees list, departments, logs, Employee Journey + Device Specs are real-API), giving a false sense of completeness.                                                                          |
+| **Scaffolding pages dominate** | 🟠 Medium | ~35 of ~50 web pages have no backend endpoint; since 2026-08-25 they render honest empty states (the localStorage mocks were deleted). Real-API: login, dashboard tiles, employees, user-management, roles, departments, logs/comprehensive, Employee Journey + Device Specs.                                                                          |
 | **Default passwords**         | 🟠 Medium | `AlphaAI@2024!` is the compiled-in default. Easy to forget to change.                                                                                                          |
 | **No offline/retry strategy** | 🟢 Low    | Client retries sync every cycle but has no exponential backoff or dedup.                                                                                                         |
 | **No data-pruning job**       | 🟢 Low    | Server's only background job (`staleness_sweep.go`) deactivates stale catalog links but never deletes old app_sessions/app_items data.                                            |

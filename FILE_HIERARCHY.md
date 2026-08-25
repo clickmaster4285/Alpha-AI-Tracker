@@ -4,7 +4,7 @@ Annotated node tree for the whole monorepo. Every directory that holds source is
 
 **How to read it:** ⭐ marks an entry point or a single-source-of-truth file — start there. 🔒 marks a file with a rule attached; changing it without reading the rule breaks something in the field. Generated / vendored trees are marked and should never be edited by hand.
 
-*Last audited: 2026-08-18. Companion docs: [AGENTS.md](./AGENTS.md) (rules + completion state), [WORKFLOW.md](./WORKFLOW.md) (how work moves through the tree), [client/ARCHITECTURE.md](./client/ARCHITECTURE.md), [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md), [server/ARCHITECTURE.md](./server/ARCHITECTURE.md), [web/ARCHITECTURE.md](./web/ARCHITECTURE.md).*
+*Last audited: 2026-08-25. Companion docs: [AGENTS.md](./AGENTS.md) (rules + completion state), [WORKFLOW.md](./WORKFLOW.md) (how work moves through the tree), [client/ARCHITECTURE.md](./client/ARCHITECTURE.md), [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md), [server/ARCHITECTURE.md](./server/ARCHITECTURE.md), [web/ARCHITECTURE.md](./web/ARCHITECTURE.md).*
 
 ---
 
@@ -147,31 +147,37 @@ server/
 ├── internal/
 │   ├── config/config.go         env → typed config
 │   ├── database/postgres.go     pool + connection lifecycle
-│   ├── redis/redis.go           client (sessions, cache)
+│   ├── redis/redis.go           client (employee one-time secrets)
 │   ├── router/router.go      ⭐ ALL routes under /api/v1 — the definitive endpoint list
 │   ├── middleware/auth.go       cookie (web) and JWT-in-body (client) auth paths
+│   ├── middleware/device_auth.go  Device <token> auth for the 11 sync endpoints
 │   │
 │   ├── handlers/                HTTP edge — decode, validate, delegate. Never touch the DB.
-│   │   ├── auth_handler.go          login, refresh, MFA
-│   │   ├── user_handler.go          console users
-│   │   ├── employee_handler.go      tracked employees
+│   │   ├── auth_handler.go          login, logout, me, check, employee-login, device revoke
+│   │   ├── user_handler.go          console users (roleId-aware)
+│   │   ├── employee_handler.go      tracked employees (+ import/export)
 │   │   ├── department_handler.go
+│   │   ├── monitoring_handler.go    types/categories/apps/websites classification
+│   │   ├── rbac_handler.go          GET /modules + roles CRUD
 │   │   └── new_schema_handler.go    the client-ingest surface (sessions, apps, packages, hardware)
 │   │
 │   ├── services/                business rules — the only layer allowed to orchestrate repos
 │   │   ├── auth_service.go · user_service.go · employee_service.go
-│   │   ├── department_service.go · new_schema_service.go
+│   │   ├── department_service.go · new_schema_service.go · monitoring_service.go · rbac_service.go
 │   │   └── redis_interface.go       seam that keeps services testable without a live Redis
 │   │
 │   ├── repository/              SQL only — one file per aggregate
 │   │   └── user_repo.go · employee_repo.go · department_repo.go · new_schema_repo.go
+│   │      · device_repo.go · monitoring_repo.go · rbac_repo.go · refresh_token_repo.go
 │   │
 │   ├── models/                  DB row shapes: user · employee · app_session ·
-│   │                            device_hardware_info · employee_app_link
-│   ├── dto/                     wire shapes: user_dto · employee_dto · new_schema_dto
-│   └── jobs/staleness_sweep.go  background job closing sessions the client stopped reporting
+│   │                            device_hardware_info · employee_app_link · device ·
+│   │                            status_tables · rbac · refresh_token
+│   ├── dto/                     wire shapes: user_dto · employee_dto · new_schema_dto · rbac_dto
+│   └── jobs/                    staleness_sweep.go (stale catalog links)
+│                                · retention_sweep.go (hourly data purge, RETENTION_DAYS)
 │
-├── migrations/               ⭐ 16 sequential SQL files, 001_init → 016_employee_package_links.
+├── migrations/               ⭐ 25 sequential SQL files, 001_init → 026_refresh_tokens.
 │                                Append-only: never edit a migration that has been applied.
 └── bin/                      ⚠️ build output
 ```
@@ -193,24 +199,26 @@ web/
     ├── globals.css                Tailwind layers + CSS variables
     │
     ├── app/
-    │   ├── login/ mfa/ forgot-password/ reset-password/    unauthenticated routes
+    │   ├── login/ mfa/ forgot-password/ reset-password/ unauthorized/    unauthenticated routes
     │   └── (app)/              ⭐ ~30 authenticated sections, sidebar-wrapped:
     │       ├── dashboard · executive-dashboard · employee-portal
     │       ├── employees (+ activity) · departments · roles · onboarding
-    │       │                       (/employees/[id] detail page removed 2026-08-18)
+    │       │                       (/employees/[id] detail page removed 2026-08-18;
+    │       │                        /roles is a real-API CRUD page since 2026-08-25)
     │       ├── employee-journey    per-employee journey behind the shared EmployeePage shell +
     │       │                       EmployeeSelector picker (?employeeId= deep-link): timeline ·
     │       │                       apps · web are real-API; screenshots · location placeholders
     │       ├── device-specs        per-employee machine picture over GET /employees/:id/detail:
     │       │                       hardware · software · peripherals · permissions
-    │       ├── apps · shadow-it · logs (comprehensive · graphical · insights)
+    │       ├── configuration       apps · websites · categories (monitoring classification, 2026-08-22)
+    │       ├── shadow-it · logs (comprehensive · graphical · insights)
     │       ├── charts (activity · productivity) · reports · ai-summary
     │       ├── attendance · shifts · timesheets · hours-insights
     │       ├── goals · kpis · projects · productivity-scoring
     │       ├── dlp-alerts · dlp-rules · audit-log · emails
     │       ├── screenshots · live-stream · gps-location
-    │       └── settings (billing · compliance · notifications · permissions ·
-    │                     security · tracking · user-management)
+    │       └── settings (billing · compliance · notifications · security ·
+    │                     tracking · user-management)  ← legacy permissions page deleted 2026-08-25
     │
     ├── components/
     │   ├── layout/                AppLayout · AppSidebar (Device Specs + Employee Journey are
@@ -225,8 +233,8 @@ web/
     │   ├── api.ts              ⭐ every server call goes through here — the client-side contract
     │   ├── format.ts              shared formatters (duration · seconds · MB · dates)
     │   ├── auth.tsx               session context
-    │   ├── permissions.tsx        role → capability gating
-    │   ├── store.ts · store/      Redux store + typed hooks
+    │   ├── permissions.tsx        SERVER-driven RBAC gating (submodule keys from user.permissions)
+    │   ├── store/                 Redux store + typed hooks (legacy mock store.ts deleted 2026-08-25)
     │   └── utils.ts
     │
     ├── hooks/                     use-mobile · use-toast · use-employee-detail

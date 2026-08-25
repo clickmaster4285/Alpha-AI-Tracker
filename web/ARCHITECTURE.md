@@ -280,9 +280,9 @@ web/
 | Strategy | Usage |
 |---|---|
 | **CSR (Client-Side Rendering)** | All pages use `"use client"` — no SSR, no ISR |
-| **TanStack Query** | Employees, Departments, Logs, Employee Journey, Device Specs pages (real API data) |
-| **Infinite scroll** | `useInfiniteQuery` + IntersectionObserver sentinel — **the only allowed list pagination** on every list page (Session Timeline, Web Activity, Employees, …), server-side pagination via `page`/`perPage` (see *Web Infinite-Scroll Rule* below) |
-| **localStorage (mock data)** | ~25+ pages (dashboard, screenshots, charts, etc.) |
+| **TanStack Query** | Employees, Departments, Logs, Dashboard tiles, User Management, Roles, Employee Journey, Device Specs pages (real API data) |
+| **Infinite scroll** | `useInfiniteQuery` + IntersectionObserver sentinel — **the only allowed list pagination** on every list page (Session Timeline, Web Activity, Employees, User Management, …), server-side pagination via `page`/`perPage` (see *Web Infinite-Scroll Rule* below) |
+| **Honest empty states** | Pages whose backend doesn't exist yet render a header + `EmptyState` explaining the gap (2026-08-25 removed all localStorage mock data — none remains) |
 | **Next.js Rewrites** | `/api/:path*` → `http://localhost:8080/api/:path*` (or `NEXT_PUBLIC_API_URL`) |
 | **Redux** | Auth state only (user, loading, auth status) |
 
@@ -314,9 +314,10 @@ web/
 | Route | Page | Data Source | Real API? |
 |---|---|---|---|
 | `/login` | Login | Server (auth) | ✅ |
-| `/dashboard` | Dashboard | localStorage mock | ❌ |
+| `/unauthorized` | Access denied (RouteGuard target) | — | ✅ |
+| `/dashboard` | Dashboard | Server (`GET /employees`, `/departments`, `/app-sessions?dateFrom=`, `/app-items?itemType=browser_tab&dateFrom=`) | ✅ |
 | `/employees` | Employee list | Server | ✅ |
-| `/employees/activity` | Activity status | localStorage mock | ❌ |
+| `/employees/activity` | Activity status | Honest empty state (no endpoint) | ❌ |
 | `/employee-journey/timeline` | Session timeline | Server (`GET /app-sessions`, infinite scroll) | ✅ |
 | `/employee-journey/apps` | App usage | Server (aggregated `GET /app-sessions`) | ✅ |
 | `/employee-journey/web` | Web activity | Server (`GET /app-items?itemType=browser_tab`) | ✅ |
@@ -327,55 +328,50 @@ web/
 | `/device-specs/peripherals` | Peripherals | Server (detail payload) | ✅ |
 | `/device-specs/permissions` | Permissions | Server (detail payload) | ✅ |
 | `/departments` | Departments | Server | ✅ |
+| `/roles` | Roles + per-submodule permission toggles | Server (`GET /modules`, `/roles` CRUD) | ✅ |
 | `/logs/comprehensive` | Activity logs | Server | ✅ |
-| `/logs/insights` | User insights | localStorage mock | ❌ |
-| `/logs/graphical` | Graphical logs | localStorage mock | ❌ |
-| `/charts/productivity` | Productivity chart | localStorage mock | ❌ |
-| `/charts/activity` | Activity chart | localStorage mock | ❌ |
-| `/apps` | Apps & Websites | localStorage mock | ❌ |
-| `/screenshots` | Screenshots | localStorage mock | ❌ |
-| `/live-stream` | Live stream | localStorage mock | ❌ |
-| `/kpis` | KPIs & KRAs | localStorage mock | ❌ |
-| `/roles` | Roles | localStorage mock | ❌ |
-| `/shifts` | Shift management | localStorage mock | ❌ |
-| `/timesheets` | Timesheets | localStorage mock | ❌ |
-| `/attendance` | Attendance | localStorage mock | ❌ |
-| `/gps-location` | GPS & Location | localStorage mock | ❌ |
-| `/hours-insights` | Hours insights | localStorage mock | ❌ |
-| `/productivity-scoring` | Score card | localStorage mock | ❌ |
-| `/goals` | Goals & OKRs | localStorage mock | ❌ |
-| `/reports` | Reports | localStorage mock | ❌ |
-| `/audit-log` | Audit log | localStorage mock | ❌ |
-| `/executive-dashboard` | Exec dashboard | localStorage mock | ❌ |
-| `/dlp-alerts` | DLP Alerts | localStorage mock | ❌ |
-| `/dlp-rules` | DLP Rules | localStorage mock | ❌ |
-| `/shadow-it` | Shadow IT | localStorage mock | ❌ |
-| `/emails` | Emails & Alerts | localStorage mock | ❌ |
-| `/projects` | Projects | localStorage mock | ❌ |
-| `/ai-summary` | AI Summary | localStorage mock | ❌ |
-| `/onboarding` | Onboarding | localStorage mock | ❌ |
-| `/employee-portal` | Employee portal | localStorage mock | ❌ |
-| `/settings` | General settings | localStorage mock | ❌ |
-| `/settings/permissions` | Permissions | localStorage (client-only) | ❌ |
-| `/settings/tracking` | Tracking settings | localStorage mock | ❌ |
-| `/settings/user-management` | User management | localStorage mock | ❌ |
-| `/settings/notifications` | Notifications | localStorage mock | ❌ |
+| `/logs/insights` | Log insights | Honest empty state (no endpoint) | ❌ |
+| `/logs/graphical` | Graphical logs | Honest empty state (no endpoint) | ❌ |
+| `/charts/productivity` | Productivity chart | Hardcoded Recharts demo data | ❌ |
+| `/charts/activity` | Activity chart | Hardcoded Recharts demo data | ❌ |
+| `/configuration/apps` | Applications classification | Server (`GET/PATCH /monitoring/apps`) | ✅ |
+| `/configuration/websites` | Websites classification | Server (`GET/POST/PATCH /monitoring/websites`) | ✅ |
+| `/configuration/categories` | Categories & Types CRUD | Server (`/monitoring/types`, `/monitoring/categories`) | ✅ |
+| `/screenshots` | Screenshots | Honest empty state (no endpoint) | ❌ |
+| `/live-stream` | Live stream | Honest empty state (no endpoint) | ❌ |
+| `/kpis` | KPIs & KRAs | Hardcoded demo data (scaffolding) | ❌ |
+| `/shifts` | Shift management | Hardcoded demo data (scaffolding) | ❌ |
+| `/timesheets` | Timesheets | Hardcoded demo data (scaffolding) | ❌ |
+| `/attendance` | Attendance | Hardcoded demo data (scaffolding) | ❌ |
+| `/gps-location` | GPS & Location | Hardcoded demo data (scaffolding) | ❌ |
+| `/hours-insights` | Hours insights | Honest empty state (no endpoint) | ❌ |
+| `/productivity-scoring` | Score card | Hardcoded demo data (scaffolding) | ❌ |
+| `/goals` | Goals & OKRs | Hardcoded demo data (scaffolding) | ❌ |
+| `/reports` | Reports | Hardcoded demo data (scaffolding) | ❌ |
+| `/audit-log` | Audit log | Hardcoded demo data (scaffolding) | ❌ |
+| `/executive-dashboard` | Exec dashboard | Hardcoded demo data (scaffolding) | ❌ |
+| `/dlp-alerts` | DLP Alerts | Hardcoded demo data (scaffolding) | ❌ |
+| `/dlp-rules` | DLP Rules | Hardcoded demo data (scaffolding) | ❌ |
+| `/shadow-it` | Shadow IT | Hardcoded demo data (scaffolding) | ❌ |
+| `/emails` | Emails & Alerts | Hardcoded demo data (scaffolding) | ❌ |
+| `/projects` | Projects | Hardcoded demo data (scaffolding) | ❌ |
+| `/ai-summary` | AI Summary | Honest empty state (no endpoint) | ❌ |
+| `/onboarding` | Onboarding | Hardcoded demo data (scaffolding) | ❌ |
+| `/employee-portal` | Employee portal | Hardcoded demo data (scaffolding) | ❌ |
+| `/settings` | General settings | Static hub page | ❌ |
+| `/settings/tracking` | Tracking settings | In-memory session state only (explicit non-persistence notice) | ❌ |
+| `/settings/user-management` | User management (CRUD + role assignment, infinite scroll) | Server (`/users`, `/roles`) | ✅ |
+| `/settings/notifications` | Notifications | Hardcoded demo data (scaffolding) | ❌ |
 | `/settings/billing` | Billing | Placeholder | ❌ |
 | `/settings/compliance` | Compliance | Placeholder | ❌ |
 | `/settings/security` | Security | Placeholder | ❌ |
 
-### Mock Data (from `src/lib/store.ts`)
-
-The mock data store is seeded on first visit with:
-- 12 sample employees with names, departments, tracking statuses
-- Activity log entries for each employee × 5 apps
-- System logs (charging, lock, suspend, status)
-- Productivity entries (categorized as productive/unproductive/neutral)
-- Screenshots (timestamps)
-- 8 departments
-- Settings defaults (screenshot interval, idle time, etc.)
-
-All mock data is stored in **localStorage** with key prefix `alpha_ai_tracker_`.
+> The former `src/lib/store.ts` localStorage mock-data factory was **deleted 2026-08-25**. Pages that
+> had no real backend were converted to honest empty states rather than keeping fake data; pages
+> marked "Hardcoded demo data (scaffolding)" above keep their in-file demo constants and await endpoints.
+> `app/page.tsx` purges orphaned `alpha_ai_tracker_*` keys from visitors' localStorage on first hit.
+> The legacy client-side permission matrix (`/settings/permissions` page + its localStorage store)
+> was deleted in the same pass — permissions are now server-driven only (§6).
 
 ---
 
@@ -384,27 +380,43 @@ All mock data is stored in **localStorage** with key prefix `alpha_ai_tracker_`.
 ### Auth Provider (`auth.tsx`)
 
 - Wraps the entire app (inside `Providers.tsx`)
-- On mount: dispatches `checkAuth()` thunk → calls `GET /api/v1/auth/check`
+- On mount: dispatches `checkAuth()` thunk → calls `GET /api/v1/auth/check`; if it reports
+  `authenticated:false` (which an EXPIRED access token also produces — `/auth/check` is optional-auth
+  and never returns 401), the thunk first tries `POST /api/v1/auth/refresh` and re-checks once before
+  declaring the session dead
 - Redux `auth` slice tracks: `user`, `isLoading`, `isAuthenticated`, `error`
 - `ProtectedRoute` component reads `isAuthenticated` and either renders children or redirects to `/login?redirect=<path>`
-- `Login` page calls `loginUser()` thunk → `POST /api/v1/auth/login` → server sets httpOnly cookie
-- `Logout` calls `logoutUser()` → `POST /api/v1/auth/logout` → clears cookie + resets Redux state
+- `Login` page calls `loginUser()` thunk → `POST /api/v1/auth/login` → server sets BOTH cookies (`auth_token` access ~15 min + `refresh_token` 30 days, both httpOnly)
+- `Logout` calls `logoutUser()` → `POST /api/v1/auth/logout` → server REVOKES the refresh row + clears both cookies; Redux resets
+
+### Access-Token Refresh (`api.ts` request wrapper)
+
+- Every API call goes through `request()`; on a **401** (except `/auth/login` and
+  `/auth/refresh` themselves) it runs ONE single-flight `performRefresh()`
+  (module-level promise so concurrent 401s share a rotation) and replays the original request once
+- Refresh success → transparent retry, user never notices the 15-minute expiry
+- Refresh failure → session is unrecoverable → `window.location.replace('/login')`
+  forces the full reload that also resets Redux state (the "force to login" rule)
+- A `_retried` flag guarantees at most one refresh-replay cycle per call (no loops)
 
 ### Fallback Users
 
-`auth.tsx` defines 8 hardcoded fallback users (`FALLBACK_USERS`) with roles:
-`super_admin`, `org_admin`, `hr_admin`, `manager`, `employee`, `security_analyst`, `it_admin`, `auditor`
+`auth.tsx` still exports `FALLBACK_USERS` (8 sample identities) on the context for legacy consumers,
+but nothing in the permission system uses them anymore.
 
-These are used by the permissions system as sample roles, not real users.
+### Permission System (`permissions.tsx` — SERVER-driven since 2026-08-25)
 
-### Permission System (`permissions.tsx`)
-
-- Defines a matrix of `module → role → permission` where permission is `'full' | 'view' | 'self' | 'config' | 'none'`
-- 38 modules defined (dashboard, users, employees, departments, apps, employee-journey, device-specs, screenshots, logs, etc.)
-- 9 roles defined
-- Stored in localStorage under `alpha_ai_tracker_dynamic_permissions`
-- **Entirely client-side** — the server has no knowledge of this permission system
-- `Sidebar` filters nav items based on `canAccess(user.role, module)`
+- The server embeds the user's granted **submodule keys** (RBAC `role_submodule_permissions`,
+  migration 025) into every auth response as `user.permissions: string[]`
+- `PermissionsProvider` turns that array into an allow-list `Set`; `canAccess(role, module)` returns
+  `'full'` for `company_admin`, `'full'` when the set is absent/null (**fail-open** — sessions from
+  before the RBAC rollout keep working), otherwise `'full' | 'none'` by set membership
+- **Entirely removed**: the old localStorage matrix (`ALL_MODULES` / `DEFAULT_PERMISSIONS` /
+  `alpha_ai_tracker_dynamic_permissions`) and the `/settings/permissions` editor page — the server's
+  `/roles` CRUD page (Settings ▸ Roles) is now the only place permissions are edited
+- `AppSidebar` filters nav entries through `canAccess`; `RouteGuard` resolves the current pathname to
+  a sidebar module (`findModuleForPath`) and redirects denied routes to `/unauthorized`
+- ⚠️ Enforcement is CLIENT-side only — API middleware performs no role checks yet
 
 ---
 
@@ -412,11 +424,10 @@ These are used by the permissions system as sample roles, not real users.
 
 | Gap | Severity | Details |
 |---|---|---|
-| **Mock data dominance** | 🔴 High | ~40 of ~50 pages use fake localStorage data (employees list, departments, logs, Employee Journey + Device Specs are real-API). They look functional but don't connect to the real server. A demo trap. |
+| **Scaffolding pages dominate** | 🟠 Medium | ~35 of ~50 pages have no backend endpoint; most render hardcoded demo constants or honest empty states. Real-API: login, dashboard tiles, employees, user-management, roles, departments, logs/comprehensive, configuration/*, Employee Journey + Device Specs. |
 | **No tests** | 🔴 High | 0 test files. No unit, integration, or e2e tests. |
-| **Client-side only auth** | 🟠 Medium | Permission checks are in the browser. Any user can modify localStorage or bypass the sidebar to access any route. |
+| **Client-side only permission enforcement** | 🟠 Medium | RBAC grants are checked only in the browser (sidebar + RouteGuard). Any crafted request with a valid cookie reaches every protected endpoint. Server middleware has no role checks. |
 | **No error boundaries** | 🟠 Medium | Uncaught React errors crash the entire page. No per-page error boundaries. |
-| **No loading/empty states** | 🟠 Medium | Mock-data pages have no loading spinners, empty states, or error displays. Real-API pages handle these better. |
 | **No SEO** | 🟢 Low | All pages are `"use client"` — no SSR, no metadata beyond the root layout. Fine for an admin dashboard. |
 | **No accessibility** | 🟠 Medium | Many interactive elements lack `aria-label`, `role`, or keyboard navigation. The sidebar menus are `<button>` elements with no aria-expanded. |
 | **No API error boundary** | 🟢 Low | If the server is down, the API client throws `ApiError` but only login and users pages handle it gracefully. Other pages would show blank/error states. |
@@ -428,11 +439,10 @@ These are used by the permissions system as sample roles, not real users.
 
 ## 8. Immediate Next Steps
 
-1. **Connect real API to dashboard** — at minimum, show real employee count and stats
+1. ~~Connect real API to dashboard~~ ✅ done 2026-08-25 — dashboard tiles are live-API; charts still demo data pending productivity endpoints
 2. **Add tests** — start with the `api.ts` client and auth flows using MSW or similar
 3. **Add error boundaries** — wrap each page section in `React.ErrorBoundary`
-4. **Add server-side permission enforcement** — the web app already sends the cookie; add role checks on the server
+4. **Server-side permission enforcement** — validate `user.permissions`/role per route in Echo middleware; client checks are UX only
 5. **Enable `strict: true` in tsconfig** — fix the TypeScript errors it reveals
-6. **Add loading/empty/error states to all pages** — especially the mock-data ones that will eventually use real APIs
-7. **Consider replacing localStorage mock data with MSW** — use Mock Service Worker for development instead of seeded localStorage data
-8. **Add code splitting** — dynamic imports for chart libraries, heavy pages
+6. **Wire the empty-state pages to real endpoints** as they ship (screenshots, insights, graphical logs, activity status)
+7. **Add code splitting** — dynamic imports for chart libraries, heavy pages
