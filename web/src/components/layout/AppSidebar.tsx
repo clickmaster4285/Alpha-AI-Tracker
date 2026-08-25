@@ -402,11 +402,6 @@ const navSections: NavSection[] = [
             module: "settings",
           },
           {
-            label: "Permissions",
-            path: "/settings/permissions",
-            module: "settings",
-          },
-          {
             label: "Tracking",
             path: "/settings/tracking",
             module: "settings/tracking",
