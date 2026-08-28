@@ -1,0 +1,3 @@
+lets start to dynamic the @web/src/app/(app)/shifts/page.tsx module
+make relational table don't use json on the db 
+and then attach with employee , on @web/src/app/(app)/employees/page.tsx form add the shift also , and also shown on @web/src/app/(app)/settings/profile/page
