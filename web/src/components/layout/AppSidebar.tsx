@@ -94,11 +94,11 @@ const navSections: NavSection[] = [
             path: "/kpis",
             module: "kpis",
           },
-          {
-            label: "Onboarding",
-            path: "/onboarding",
-            module: "onboarding",
-          },
+          // {
+          //   label: "Onboarding",
+          //   path: "/onboarding",
+          //   module: "onboarding",
+          // },
           {
             label: "Shift Management",
             path: "/shifts",
