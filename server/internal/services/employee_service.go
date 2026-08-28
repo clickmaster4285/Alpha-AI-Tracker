@@ -323,6 +323,7 @@ func employeeToResponse(e *models.Employee) dto.EmployeeResponse {
 		IsOnline:        e.IsOnline,
 		Avatar:          e.Avatar,
 		AvatarColor:     e.AvatarColor,
+		HasUserLogin:    e.HasUserLogin,
 		CreatedAt:       e.CreatedAt,
 		UpdatedAt:       e.UpdatedAt,
 		DeletedAt:       e.DeletedAt,

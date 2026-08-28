@@ -1,23 +1,34 @@
 'use client';
 
 import { useState } from 'react';
-import { getSettings, saveSettings } from '@/lib/store';
 import { APP_SHORT_NAME } from '@/config';
 import { toast } from 'sonner';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, Info } from 'lucide-react';
 import { useRouter } from 'next/navigation';
+
+const DEFAULT_SETTINGS: Record<string, unknown> = {
+  screenshotTime: 5,
+  appTime: 5,
+  geoLocationTime: 5,
+  systemStatusTime: 10,
+  maxIdleTime: 5,
+  offlineTime: 60,
+  blurImage: false,
+  appVisibility: 'visible',
+};
 
 export default function TrackingSettings() {
   const router = useRouter();
-  const [settings, setSettings] = useState(() => getSettings());
+  const [settings, setSettings] = useState<Record<string, unknown>>({ ...DEFAULT_SETTINGS });
 
   const update = (key: string, value: unknown) => {
-    setSettings((prev: Record<string, unknown>) => ({ ...prev, [key]: value }));
+    setSettings(prev => ({ ...prev, [key]: value }));
   };
 
   const handleSave = () => {
-    saveSettings(settings);
-    toast.success('Settings saved successfully!');
+    toast.info('Saved for this session', {
+      description: 'Server-side config sync is not wired yet — values reset on reload.',
+    });
   };
 
   const timeOptions = [1, 2, 3, 5, 10, 15, 30, 60];
@@ -30,7 +41,10 @@ export default function TrackingSettings() {
 
       <div className="bg-card rounded-xl border border-border p-6">
         <h2 className="font-display font-bold text-lg text-foreground mb-1">Tracking Settings</h2>
-        <p className="text-sm text-muted-foreground mb-6">Set up various time tracking options.</p>
+        <p className="text-sm text-muted-foreground mb-2">Set up various time tracking options.</p>
+        <p className="text-xs text-muted-foreground flex items-center gap-1.5 mb-6">
+          <Info className="w-3.5 h-3.5" /> Not persisted yet — these will sync to tracked clients once server-side configuration ships.
+        </p>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {[
@@ -46,7 +60,7 @@ export default function TrackingSettings() {
                 <input type="checkbox" defaultChecked className="rounded border-border accent-primary" />
                 <span className="text-sm font-medium text-foreground">{label}</span>
               </label>
-              <select value={settings[key] || 5} onChange={e => update(key, Number(e.target.value))} className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground">
+              <select value={(settings[key] as number) || 5} onChange={e => update(key, Number(e.target.value))} className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground">
                 {timeOptions.map(t => <option key={t} value={t}>{t} minutes</option>)}
               </select>
             </div>
@@ -55,7 +69,7 @@ export default function TrackingSettings() {
 
         <div className="mt-4">
           <label className="flex items-center gap-2">
-            <input type="checkbox" checked={settings.blurImage || false} onChange={e => update('blurImage', e.target.checked)} className="rounded border-border accent-primary" />
+            <input type="checkbox" checked={!!settings.blurImage} onChange={e => update('blurImage', e.target.checked)} className="rounded border-border accent-primary" />
             <span className="text-sm font-medium text-foreground">Blur Image</span>
           </label>
         </div>

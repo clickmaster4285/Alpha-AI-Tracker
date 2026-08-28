@@ -94,7 +94,10 @@ func (r *EmployeeRepo) List(ctx context.Context, params EmployeeListParams) (*Em
 		       e.department_id, e.shift,
 		       e.tracking_enabled, e.tracking_status, e.is_online,
 		           COALESCE(e.avatar, '') AS avatar, COALESCE(e.avatar_color, '') AS avatar_color,
-		       e.created_at, e.updated_at, e.deleted_at
+		       e.created_at, e.updated_at, e.deleted_at,
+		       EXISTS(SELECT 1 FROM users u
+		              WHERE u.employee_id = e.employee_id
+		                AND u.deleted_at IS NULL) AS has_user_login
 		FROM employees e
 		LEFT JOIN departments d ON e.department_id = d.id
 		%s
@@ -118,6 +121,7 @@ func (r *EmployeeRepo) List(ctx context.Context, params EmployeeListParams) (*Em
 			&e.TrackingEnabled, &e.TrackingStatus, &e.IsOnline,
 			&e.Avatar, &e.AvatarColor,
 			&e.CreatedAt, &e.UpdatedAt, &e.DeletedAt,
+			&e.HasUserLogin,
 		); err != nil {
 			return nil, fmt.Errorf("scan employee row: %w", err)
 		}
@@ -149,7 +153,10 @@ func (r *EmployeeRepo) GetByID(ctx context.Context, id string) (*models.Employee
 		       e.department_id, e.shift,
 		       e.tracking_enabled, e.tracking_status, e.is_online,
 		           COALESCE(e.avatar, '') AS avatar, COALESCE(e.avatar_color, '') AS avatar_color,
-		       e.created_at, e.updated_at, e.deleted_at
+		       e.created_at, e.updated_at, e.deleted_at,
+		       EXISTS(SELECT 1 FROM users u
+		              WHERE u.employee_id = e.employee_id
+		                AND u.deleted_at IS NULL) AS has_user_login
 		FROM employees e
 		LEFT JOIN departments d ON e.department_id = d.id
 		WHERE e.id = $1 AND e.deleted_at IS NULL
@@ -164,7 +171,10 @@ func (r *EmployeeRepo) GetByEmployeeID(ctx context.Context, employeeID string) (
 		       e.department_id, e.shift,
 		       e.tracking_enabled, e.tracking_status, e.is_online,
 		           COALESCE(e.avatar, '') AS avatar, COALESCE(e.avatar_color, '') AS avatar_color,
-		       e.created_at, e.updated_at, e.deleted_at
+		       e.created_at, e.updated_at, e.deleted_at,
+		       EXISTS(SELECT 1 FROM users u
+		              WHERE u.employee_id = e.employee_id
+		                AND u.deleted_at IS NULL) AS has_user_login
 		FROM employees e
 		LEFT JOIN departments d ON e.department_id = d.id
 		WHERE e.employee_id = $1 AND e.deleted_at IS NULL
@@ -179,7 +189,10 @@ func (r *EmployeeRepo) GetByEmail(ctx context.Context, email string) (*models.Em
 		       e.department_id, e.shift,
 		       e.tracking_enabled, e.tracking_status, e.is_online,
 		           COALESCE(e.avatar, '') AS avatar, COALESCE(e.avatar_color, '') AS avatar_color,
-		       e.created_at, e.updated_at, e.deleted_at
+		       e.created_at, e.updated_at, e.deleted_at,
+		       EXISTS(SELECT 1 FROM users u
+		              WHERE u.employee_id = e.employee_id
+		                AND u.deleted_at IS NULL) AS has_user_login
 		FROM employees e
 		LEFT JOIN departments d ON e.department_id = d.id
 		WHERE e.email = $1 AND e.deleted_at IS NULL
@@ -204,7 +217,10 @@ func (r *EmployeeRepo) Create(ctx context.Context, e *models.Employee) (*models.
 		          $4 AS department_id, shift,
 		          tracking_enabled, tracking_status, is_online,
 		          COALESCE(avatar, '') AS avatar, COALESCE(avatar_color, '') AS avatar_color,
-		          created_at, updated_at, deleted_at
+		          created_at, updated_at, deleted_at,
+		          EXISTS(SELECT 1 FROM users u
+		                 WHERE u.employee_id = employees.employee_id
+		                   AND u.deleted_at IS NULL) AS has_user_login
 	`
 	emp, err := execGetByID(ctx, tx, query,
 		e.EmployeeID, e.Name, e.Email, e.DepartmentID, e.Shift,
@@ -232,7 +248,10 @@ func (r *EmployeeRepo) ListAll(ctx context.Context) ([]models.Employee, error) {
 		       e.department_id, e.shift,
 		       e.tracking_enabled, e.tracking_status, e.is_online,
 		           COALESCE(e.avatar, '') AS avatar, COALESCE(e.avatar_color, '') AS avatar_color,
-		       e.created_at, e.updated_at, e.deleted_at
+		       e.created_at, e.updated_at, e.deleted_at,
+		       EXISTS(SELECT 1 FROM users u
+		              WHERE u.employee_id = e.employee_id
+		                AND u.deleted_at IS NULL) AS has_user_login
 		FROM employees e
 		LEFT JOIN departments d ON e.department_id = d.id
 		WHERE e.deleted_at IS NULL
@@ -253,6 +272,7 @@ func (r *EmployeeRepo) ListAll(ctx context.Context) ([]models.Employee, error) {
 			&e.TrackingEnabled, &e.TrackingStatus, &e.IsOnline,
 			&e.Avatar, &e.AvatarColor,
 			&e.CreatedAt, &e.UpdatedAt, &e.DeletedAt,
+			&e.HasUserLogin,
 		); err != nil {
 			return nil, fmt.Errorf("scan employee row: %w", err)
 		}
@@ -449,7 +469,10 @@ func (r *EmployeeRepo) Update(ctx context.Context, id string, updates map[string
 		          department_id, shift,
 		          tracking_enabled, tracking_status, is_online,
 		          COALESCE(avatar, '') AS avatar, COALESCE(avatar_color, '') AS avatar_color,
-		          created_at, updated_at, deleted_at
+		          created_at, updated_at, deleted_at,
+		          EXISTS(SELECT 1 FROM users u
+		                 WHERE u.employee_id = employees.employee_id
+		                   AND u.deleted_at IS NULL) AS has_user_login
 	`, strings.Join(setClauses, ", "))
 
 	emp, err := execGetByID(ctx, tx, query, args...)
@@ -530,6 +553,7 @@ func scanEmployeeRow(rows pgx.Rows) (*models.Employee, error) {
 			&e.TrackingEnabled, &e.TrackingStatus, &e.IsOnline,
 			&e.Avatar, &e.AvatarColor,
 			&e.CreatedAt, &e.UpdatedAt, &e.DeletedAt,
+			&e.HasUserLogin,
 		)
 		return e, err
 	})

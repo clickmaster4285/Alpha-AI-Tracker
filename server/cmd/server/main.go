@@ -71,13 +71,16 @@ func main() {
 	departmentRepo := repository.NewDepartmentRepo(pool)
 	newSchemaRepo := repository.NewNewSchemaRepo(pool)
 	monitoringRepo := repository.NewMonitoringRepo(pool)
+	rbacRepo := repository.NewRBACRepo(pool)
+	refreshTokenRepo := repository.NewRefreshTokenRepo(pool)
 
-	authService := services.NewAuthService(userRepo, cfg.JWT, cfg.Admin)
-	userService := services.NewUserService(userRepo)
+	authService := services.NewAuthService(userRepo, rbacRepo, refreshTokenRepo, cfg.JWT, cfg.Admin)
+	userService := services.NewUserService(userRepo, rbacRepo, employeeRepo)
 	employeeService := services.NewEmployeeService(employeeRepo, redisClient)
 	departmentService := services.NewDepartmentService(departmentRepo, employeeRepo)
 	newSchemaService := services.NewNewSchemaService(newSchemaRepo, employeeRepo)
 	monitoringService := services.NewMonitoringService(monitoringRepo)
+	rbacService := services.NewRBACService(rbacRepo)
 
 	// Cast Redis client to interface
 	var redisInterface services.RedisClientInterface
@@ -85,17 +88,25 @@ func main() {
 		redisInterface = redisClient
 	}
 
-	authHandler := handlers.NewAuthHandler(authService, employeeRepo, deviceRepo, redisInterface, cfg.JWT)
+	authHandler := handlers.NewAuthHandler(authService, userService, employeeRepo, deviceRepo, redisInterface, cfg.JWT)
 	userHandler := handlers.NewUserHandler(userService)
 	employeeHandler := handlers.NewEmployeeHandler(employeeService)
 	departmentHandler := handlers.NewDepartmentHandler(departmentService)
 	newSchemaHandler := handlers.NewNewSchemaHandler(newSchemaService, authService)
 	monitoringHandler := handlers.NewMonitoringHandler(monitoringService)
+	rbacHandler := handlers.NewRBACHandler(rbacService)
+
+	// ────────────────
+	// Seed RBAC catalog (modules, submodules, system role) — idempotent
+	// ────────────────
+	ctx := context.Background()
+	if err := rbacService.SeedCatalog(ctx); err != nil {
+		log.Fatalf("[server] failed to seed RBAC catalog: %v", err)
+	}
 
 	// ────────────────
 	// Auto-initialize Company Admin
 	// ────────────────
-	ctx := context.Background()
 	if err := authService.EnsureCompanyAdmin(ctx); err != nil {
 		log.Fatalf("[server] failed to ensure company admin: %v", err)
 	}
@@ -119,7 +130,7 @@ func main() {
 	e.HideBanner = true
 	e.HidePort = true
 
-	router.Setup(e, cfg, authService, deviceRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler)
+	router.Setup(e, cfg, authService, deviceRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler, rbacHandler)
 
 	// ────────────────
 	// Graceful Shutdown

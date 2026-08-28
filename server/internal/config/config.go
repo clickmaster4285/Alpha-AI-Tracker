@@ -42,8 +42,16 @@ type DatabaseConfig struct {
 }
 
 type JWTConfig struct {
-	Secret       string
+	Secret string
+	// AccessExpiry is the WEB ADMIN access-token TTL (auth_token cookie).
+	// Short-lived by design; re-minted via the rotating refresh token.
 	AccessExpiry time.Duration
+	// RefreshExpiry is the WEB ADMIN refresh-token lifetime (refresh_token cookie,
+	// rotated on every successful refresh).
+	RefreshExpiry time.Duration
+	// EmployeeAccessExpiry is the DESKTOP CLIENT session JWT TTL. Employees send it
+	// in sync request bodies (no cookie), so it stays long-lived.
+	EmployeeAccessExpiry time.Duration
 }
 
 type RedisConfig struct {
@@ -102,8 +110,10 @@ func Load() (*Config, error) {
 			DB:       getEnvInt("REDIS_DB", 0),
 		},
 		JWT: JWTConfig{
-			Secret:       getEnv("JWT_SECRET", ""),
-			AccessExpiry: getEnvDuration("JWT_ACCESS_EXPIRY", 24*time.Hour),
+			Secret:               getEnv("JWT_SECRET", ""),
+			AccessExpiry:         getEnvDuration("JWT_ACCESS_EXPIRY", 15*time.Minute),
+			RefreshExpiry:        getEnvDuration("JWT_REFRESH_EXPIRY", 30*24*time.Hour),
+			EmployeeAccessExpiry: getEnvDuration("JWT_EMPLOYEE_ACCESS_EXPIRY", 24*time.Hour),
 		},
 		Admin: AdminConfig{
 			Email:    getEnv("ADMIN_EMAIL", "admin@alphai.com"),

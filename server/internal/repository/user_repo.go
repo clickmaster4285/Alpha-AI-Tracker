@@ -24,12 +24,11 @@ func NewUserRepo(pool *pgxpool.Pool) *UserRepo {
 
 // ListParams defines query parameters for listing users.
 type ListParams struct {
-	Search     string
-	Department string
-	Role       string
-	Status     string // "tracked" or "untracked"
-	Page       int
-	PerPage    int
+	Search  string
+	RoleID  int
+	Status  string // "tracked" or "untracked"
+	Page    int
+	PerPage int
 }
 
 // ListResult holds paginated results.
@@ -54,27 +53,24 @@ func (r *UserRepo) List(ctx context.Context, params ListParams) (*ListResult, er
 	var args []interface{}
 	argIdx := 1
 
-	conditions = append(conditions, "deleted_at IS NULL")
+	// Qualified with u. — roles also has deleted_at, so a bare reference is
+	// ambiguous once the roles JOIN is applied.
+	conditions = append(conditions, "u.deleted_at IS NULL")
 
 	if params.Search != "" {
-		conditions = append(conditions, fmt.Sprintf("(LOWER(name) LIKE LOWER($%d) OR LOWER(email) LIKE LOWER($%d) OR LOWER(employee_id) LIKE LOWER($%d))", argIdx, argIdx, argIdx))
+		conditions = append(conditions, fmt.Sprintf("(LOWER(u.name) LIKE LOWER($%d) OR LOWER(u.email) LIKE LOWER($%d) OR LOWER(u.employee_id) LIKE LOWER($%d))", argIdx, argIdx, argIdx))
 		args = append(args, "%"+params.Search+"%")
 		argIdx++
 	}
-	if params.Department != "" {
-		conditions = append(conditions, fmt.Sprintf("department = $%d", argIdx))
-		args = append(args, params.Department)
-		argIdx++
-	}
-	if params.Role != "" {
-		conditions = append(conditions, fmt.Sprintf("role = $%d", argIdx))
-		args = append(args, params.Role)
+	if params.RoleID > 0 {
+		conditions = append(conditions, fmt.Sprintf("u.role_id = $%d", argIdx))
+		args = append(args, params.RoleID)
 		argIdx++
 	}
 	if params.Status == "tracked" {
-		conditions = append(conditions, "tracking_status = 'tracked'")
+		conditions = append(conditions, "u.tracking_status = 'tracked'")
 	} else if params.Status == "untracked" {
-		conditions = append(conditions, "tracking_status = 'untracked'")
+		conditions = append(conditions, "u.tracking_status = 'untracked'")
 	}
 
 	whereClause := ""
@@ -83,7 +79,7 @@ func (r *UserRepo) List(ctx context.Context, params ListParams) (*ListResult, er
 	}
 
 	// Count total
-	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM users %s", whereClause)
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM users u %s", whereClause)
 	var total int
 	if err := r.pool.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
 		return nil, fmt.Errorf("count users: %w", err)
@@ -92,13 +88,18 @@ func (r *UserRepo) List(ctx context.Context, params ListParams) (*ListResult, er
 	offset := (params.Page - 1) * params.PerPage
 	totalPages := (total + params.PerPage - 1) / params.PerPage
 
-	// Fetch page
+	// Fetch page (role name resolved via JOIN — never stored on the row).
+	// avatar/avatar_color are NULLable in the schema (001_init.sql) — COALESCE
+	// keeps pgx from failing to scan NULL into a plain string.
 	query := fmt.Sprintf(`
-		SELECT id, employee_id, name, email, password_hash, role, department, shift,
-		       tracking_enabled, tracking_status, is_online, avatar, avatar_color,
-		       is_company_admin, created_at, updated_at, deleted_at
-		FROM users %s
-		ORDER BY created_at DESC
+		SELECT u.id, u.employee_id, u.name, u.email, u.password_hash,
+		       u.role_id, COALESCE(r.name, ''), u.shift,
+		       u.tracking_enabled, u.tracking_status, u.is_online,
+		       COALESCE(u.avatar, ''), COALESCE(u.avatar_color, ''),
+		       u.created_at, u.updated_at, u.deleted_at
+		FROM users u LEFT JOIN roles r ON r.id = u.role_id
+		%s
+		ORDER BY u.created_at DESC
 		LIMIT $%d OFFSET $%d
 	`, whereClause, argIdx, argIdx+1)
 	args = append(args, params.PerPage, offset)
@@ -114,10 +115,10 @@ func (r *UserRepo) List(ctx context.Context, params ListParams) (*ListResult, er
 		var u models.User
 		if err := rows.Scan(
 			&u.ID, &u.EmployeeID, &u.Name, &u.Email, &u.PasswordHash,
-			&u.Role, &u.Department, &u.Shift,
+			&u.RoleID, &u.RoleName, &u.Shift,
 			&u.TrackingEnabled, &u.TrackingStatus, &u.IsOnline,
 			&u.Avatar, &u.AvatarColor,
-			&u.IsCompanyAdmin, &u.CreatedAt, &u.UpdatedAt, &u.DeletedAt,
+			&u.CreatedAt, &u.UpdatedAt, &u.DeletedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan user row: %w", err)
 		}
@@ -142,10 +143,10 @@ func scanUserRow(rows pgx.Rows) (*models.User, error) {
 		var u models.User
 		err := row.Scan(
 			&u.ID, &u.EmployeeID, &u.Name, &u.Email, &u.PasswordHash,
-			&u.Role, &u.Department, &u.Shift,
+			&u.RoleID, &u.RoleName, &u.Shift,
 			&u.TrackingEnabled, &u.TrackingStatus, &u.IsOnline,
 			&u.Avatar, &u.AvatarColor,
-			&u.IsCompanyAdmin, &u.CreatedAt, &u.UpdatedAt, &u.DeletedAt,
+			&u.CreatedAt, &u.UpdatedAt, &u.DeletedAt,
 		)
 		return u, err
 	})
@@ -174,23 +175,26 @@ func (r *UserRepo) getByID(ctx context.Context, query string, args ...interface{
 	return execUserQuery(ctx, r.pool, query, args...)
 }
 
+// userSelectColumns is the shared projection for single-user reads.
+const userSelectColumns = `
+		SELECT u.id, u.employee_id, u.name, u.email, u.password_hash,
+		       u.role_id, COALESCE(r.name, ''), u.shift,
+		       u.tracking_enabled, u.tracking_status, u.is_online,
+		       COALESCE(u.avatar, ''), COALESCE(u.avatar_color, ''),
+		       u.created_at, u.updated_at, u.deleted_at
+		FROM users u LEFT JOIN roles r ON r.id = u.role_id`
+
 // GetByID returns a user by their UUID.
 func (r *UserRepo) GetByID(ctx context.Context, id string) (*models.User, error) {
-	return r.getByID(ctx, `
-		SELECT id, employee_id, name, email, password_hash, role, department, shift,
-		       tracking_enabled, tracking_status, is_online, avatar, avatar_color,
-		       is_company_admin, created_at, updated_at, deleted_at
-		FROM users WHERE id = $1 AND deleted_at IS NULL
+	return r.getByID(ctx, userSelectColumns+`
+		WHERE u.id = $1 AND u.deleted_at IS NULL
 	`, id)
 }
 
 // GetByEmail returns a user by their email.
 func (r *UserRepo) GetByEmail(ctx context.Context, email string) (*models.User, error) {
-	return r.getByID(ctx, `
-		SELECT id, employee_id, name, email, password_hash, role, department, shift,
-		       tracking_enabled, tracking_status, is_online, avatar, avatar_color,
-		       is_company_admin, created_at, updated_at, deleted_at
-		FROM users WHERE email = $1 AND deleted_at IS NULL
+	return r.getByID(ctx, userSelectColumns+`
+		WHERE u.email = $1 AND u.deleted_at IS NULL
 	`, email)
 }
 
@@ -203,16 +207,18 @@ func (r *UserRepo) Create(ctx context.Context, u *models.User) (*models.User, er
 	defer tx.Rollback(ctx)
 
 	query := `
-		INSERT INTO users (name, email, password_hash, role, department, shift,
-		                   tracking_enabled, tracking_status, is_online, is_company_admin)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		RETURNING id, employee_id, name, email, password_hash, role, department, shift,
-		          tracking_enabled, tracking_status, is_online, avatar, avatar_color,
-		          is_company_admin, created_at, updated_at, deleted_at
+		INSERT INTO users (name, email, password_hash, employee_id, role_id, shift,
+		                   tracking_enabled, tracking_status, is_online)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		RETURNING id, employee_id, name, email, password_hash,
+		          role_id, (SELECT name FROM roles WHERE id = role_id), shift,
+		          tracking_enabled, tracking_status, is_online,
+		          COALESCE(avatar, ''), COALESCE(avatar_color, ''),
+		          created_at, updated_at, deleted_at
 	`
 	user, err := execUserQuery(ctx, tx, query,
-		u.Name, u.Email, u.PasswordHash, u.Role, u.Department, u.Shift,
-		u.TrackingEnabled, u.TrackingStatus, u.IsOnline, u.IsCompanyAdmin,
+		u.Name, u.Email, u.PasswordHash, u.EmployeeID, u.RoleID, u.Shift,
+		u.TrackingEnabled, u.TrackingStatus, u.IsOnline,
 	)
 	if err != nil {
 		if isDuplicateKeyErr(err) {
@@ -245,9 +251,10 @@ func (r *UserRepo) Update(ctx context.Context, id string, updates map[string]int
 	args = append(args, id)
 
 	allowedFields := map[string]string{
-		"name": "name", "email": "email", "department": "department",
-		"role": "role", "shift": "shift", "tracking_enabled": "tracking_enabled",
-		"tracking_status": "tracking_status", "is_online": "is_online",
+		"name": "name", "email": "email", "role_id": "role_id",
+		"password_hash": "password_hash", "shift": "shift",
+		"tracking_enabled": "tracking_enabled",
+		"tracking_status":  "tracking_status", "is_online": "is_online",
 	}
 
 	for field, dbCol := range allowedFields {
@@ -265,11 +272,13 @@ func (r *UserRepo) Update(ctx context.Context, id string, updates map[string]int
 	setClauses = append(setClauses, "updated_at = NOW()")
 
 	query := fmt.Sprintf(`
-		UPDATE users SET %s
-		WHERE id = $1 AND deleted_at IS NULL
-		RETURNING id, employee_id, name, email, password_hash, role, department, shift,
-		          tracking_enabled, tracking_status, is_online, avatar, avatar_color,
-		          is_company_admin, created_at, updated_at, deleted_at
+		UPDATE users u SET %s
+		WHERE u.id = $1 AND u.deleted_at IS NULL
+		RETURNING u.id, u.employee_id, u.name, u.email, u.password_hash,
+		          u.role_id, (SELECT name FROM roles WHERE id = u.role_id), u.shift,
+		          u.tracking_enabled, u.tracking_status, u.is_online,
+		          COALESCE(u.avatar, ''), COALESCE(u.avatar_color, ''),
+		          u.created_at, u.updated_at, u.deleted_at
 	`, strings.Join(setClauses, ", "))
 
 	user, err := execUserQuery(ctx, tx, query, args...)
@@ -308,16 +317,6 @@ func (r *UserRepo) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-// CountCompanyAdmins returns the number of company_admin users.
-func (r *UserRepo) CountCompanyAdmins(ctx context.Context) (int, error) {
-	var count int
-	err := r.pool.QueryRow(ctx, "SELECT COUNT(*) FROM users WHERE is_company_admin = true AND deleted_at IS NULL").Scan(&count)
-	if err != nil {
-		return 0, fmt.Errorf("count company admins: %w", err)
-	}
-	return count, nil
-}
-
 // IsUniqueEmail checks if an email is already taken (excluding a given user ID).
 func (r *UserRepo) IsUniqueEmail(ctx context.Context, email, excludeID string) (bool, error) {
 	var exists bool
@@ -331,11 +330,6 @@ func (r *UserRepo) IsUniqueEmail(ctx context.Context, email, excludeID string) (
 		return false, fmt.Errorf("check email uniqueness: %w", err)
 	}
 	return !exists, nil
-}
-
-// EnsureCompanyAdminExists is a helper type for the service layer
-type CompanyAdminCheck struct {
-	Exists bool
 }
 
 // isDuplicateKeyErr checks if an error is a PostgreSQL unique constraint violation.

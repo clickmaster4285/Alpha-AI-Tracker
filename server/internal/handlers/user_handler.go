@@ -24,14 +24,14 @@ func NewUserHandler(userService *services.UserService) *UserHandler {
 func (h *UserHandler) ListUsers(c echo.Context) error {
 	page, _ := strconv.Atoi(c.QueryParam("page"))
 	perPage, _ := strconv.Atoi(c.QueryParam("perPage"))
+	roleID, _ := strconv.Atoi(c.QueryParam("roleId"))
 
 	params := repository.ListParams{
-		Search:     c.QueryParam("search"),
-		Department: c.QueryParam("department"),
-		Role:       c.QueryParam("role"),
-		Status:     c.QueryParam("status"),
-		Page:       page,
-		PerPage:    perPage,
+		Search:  c.QueryParam("search"),
+		RoleID:  roleID,
+		Status:  c.QueryParam("status"),
+		Page:    page,
+		PerPage: perPage,
 	}
 
 	result, err := h.userService.List(c.Request().Context(), params)
@@ -78,10 +78,10 @@ func (h *UserHandler) CreateUser(c echo.Context) error {
 		})
 	}
 
-	if req.Name == "" || req.Email == "" || req.Department == "" || req.Role == "" {
+	if req.Name == "" || req.Email == "" || req.RoleID <= 0 {
 		return c.JSON(http.StatusBadRequest, dto.APIError{
 			Code:    http.StatusBadRequest,
-			Message: "Name, email, department, and role are required",
+			Message: "Name, email, and roleId are required",
 		})
 	}
 

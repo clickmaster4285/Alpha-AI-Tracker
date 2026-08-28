@@ -3,11 +3,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check, Eye, Monitor, Upload, Download, Pencil, Trash2, AlertTriangle } from 'lucide-react';
+import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check, Eye, Monitor, Upload, Download, Pencil, Trash2, AlertTriangle, UserPlus } from 'lucide-react';
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import * as XLSX from 'xlsx';
-import { employeesApi, departmentsApi, type Employee, type CreateEmployeePayload, type UpdateEmployeePayload, type ImportEmployeeRow, type ImportEmployeesResponse } from '@/lib/api';
+import { employeesApi, departmentsApi, usersApi, type Employee, type CreateEmployeePayload, type UpdateEmployeePayload, type ImportEmployeeRow, type ImportEmployeesResponse } from '@/lib/api';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import {
   DropdownMenu,
@@ -116,6 +116,10 @@ export default function UsersList() {
 
   const departments = deptResponse?.departments || [];
 
+  // hasUserLogin comes from the server (indexed EXISTS() per row) — no
+  // client-side map or extra round-trips needed, and it scales with the
+  // paginated list instead of growing with total user count.
+
   // ── Mutations ──
   const createMutation = useMutation({
     mutationFn: (data: CreateEmployeePayload) => employeesApi.create(data),
@@ -131,9 +135,37 @@ export default function UsersList() {
   });
 
   const updateMutation = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: UpdateEmployeePayload }) => employeesApi.update(id, data),
+    mutationFn: async ({ id, data }: { id: string; data: UpdateEmployeePayload }) => {
+      const updated = await employeesApi.update(id, data);
+      // If this employee has a linked login account, propagate name/email
+      // changes to the user record so the two surfaces stay in sync. The
+      // employeeId is immutable from both sides, so it never needs syncing.
+      // The hasUserLogin flag is projected by the server's UPDATE…RETURNING
+      // so this check is free (no extra round-trip) and always fresh.
+      if (updated.hasUserLogin) {
+        try {
+          const userList = await usersApi.list({ search: updated.employeeId, perPage: 1 });
+          const linkedUser = userList.data.find(u => u.employeeId === updated.employeeId);
+          if (linkedUser) {
+            const payload: { name?: string; email?: string } = {};
+            if (data.name !== undefined) payload.name = updated.name;
+            if (data.email !== undefined) payload.email = updated.email;
+            if (Object.keys(payload).length > 0) {
+              await usersApi.update(linkedUser.id, payload);
+            }
+          }
+        } catch (e) {
+          // Non-fatal: the employee update succeeded; the user sync failed.
+          toast.warning('Attached login account not synced', {
+            description: (e as Error).message,
+          });
+        }
+      }
+      return updated;
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['employees'] });
+      queryClient.invalidateQueries({ queryKey: ['users'] });
       toast.success('Employee updated', { description: 'The employee has been updated successfully.' });
       setShowEdit(null);
     },
@@ -504,6 +536,14 @@ export default function UsersList() {
                           <Pencil className="w-4 h-4 text-muted-foreground" />
                           Edit Details
                         </DropdownMenuItem>
+                        {!emp.hasUserLogin && (
+                          <DropdownMenuItem asChild className="cursor-pointer gap-2.5 px-2.5 py-2">
+                            <Link href={`/settings/user-management?create=1&employeeId=${encodeURIComponent(emp.employeeId)}&name=${encodeURIComponent(emp.name)}&email=${encodeURIComponent(emp.email)}`}>
+                              <UserPlus className="w-4 h-4 text-muted-foreground" />
+                              Login Credential
+                            </Link>
+                          </DropdownMenuItem>
+                        )}
                         <DropdownMenuItem onSelect={() => handleGenerateSecret(emp)} className="cursor-pointer gap-2.5 px-2.5 py-2">
                           <Key className="w-4 h-4 text-muted-foreground" />
                           Generate Login Secret

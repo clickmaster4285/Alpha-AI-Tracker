@@ -85,7 +85,7 @@ server/
 ├── go.mod / go.sum              # Go module: github.com/alpha-ai-tracker/server
 ├── .env.example                 # Environment variable template
 │
-├── migrations/                  # SQL migration files, run in sorted order on startup (001,002,004–016 = 15 files; 003 deleted)
+├── migrations/                  # SQL migration files, run in sorted order on startup (001–025 = 24 files; 003 deleted)
 │   ├── 001_init.sql             # users, departments, employee_id_seq, triggers, seed departments
 │   ├── 002_employees.sql        # Separate employees table, migrate non-admin users out of users
 │   ├── 004_employee_department_id.sql  # FK employees.department_id → departments.id
@@ -101,48 +101,69 @@ server/
 │   ├── 014_app_items_journey.sql# process_id + 9 journey fields on app_items
 │   ├── 015_employee_app_links.sql   # app_fingerprint + employee_installed_applications junction
 │   └── 016_employee_package_links.sql # package_fingerprint + employee_installed_packages junction
+│   ├── 017_status_hardware_permission_storage.sql # app_status, hardware_devices, permission_status, storage_devices
+│   ├── 018_drop_employee_role.sql / 019_drop_employee_department.sql # denormalized columns removed
+│   ├── 020_app_session_focus.sql    # foreground_seconds / background_seconds on app_sessions
+│   ├── 021_employee_devices.sql     # opaque device tokens for sync endpoints (DeviceAuth middleware)
+│   ├── 022_sequence_retention_indexes.sql # retention-purge support indexes
+│   ├── 023_monitoring_config.sql    # monitoring_types, monitoring_categories + classification columns + monitoring_sites
+│   ├── 024_catalog_merge.sql        # cross-OS catalog dedup by normalized name
+│   └── 025_rbac_roles_modules.sql   # roles/modules/submodules/role_submodule_permissions; users.role_id sole source of truth
 │
 └── internal/
     ├── config/config.go         # Loads env vars, builds Config struct (incl. LINK_STALE_DAYS)
     ├── database/postgres.go     # pgxpool creation, migration runner
     ├── redis/redis.go           # Redis client wrapper (StoreSecret, ValidateSecret, DeleteSecret)
     ├── jobs/staleness_sweep.go  # Hourly background job deactivating stale employee↔catalog links
+    ├── jobs/retention_sweep.go  # Hourly purge of stale app_items and ended app_sessions (RETENTION_DAYS)
     │
     ├── models/                  # Database models (structs with db/json tags)
     │   ├── user.go              # User + UserPublic (safe for API)
     │   ├── employee.go          # Employee + EmployeePublic
     │   ├── device_hardware_info.go # DeviceHardwareInfo, InstalledApplication, NetworkInfo, InstalledPackage, SessionEvent (+ unused ShellCommand)
     │   ├── app_session.go       # AppSession + AppItem (replaces BrowserContext/FileExplorerContext/UrlRecord/UrlVisit)
-    │   └── employee_app_link.go # EmployeeInstalledApplication / EmployeeInstalledPackage junction rows
+    │   ├── employee_app_link.go # EmployeeInstalledApplication / EmployeeInstalledPackage junction rows
+    │   ├── status_tables.go     # AppStatus, PermissionStatus rows
+    │   ├── device.go            # EmployeeDevice (opaque device-token auth)
+    │   └── rbac.go              # Role, Module, Submodule, RoleSubmodulePermission
     │
     ├── dto/                     # Request/Response DTOs
-    │   ├── user_dto.go          # LoginRequest, CreateUserRequest, UserResponse, etc.
+    │   ├── user_dto.go          # LoginRequest, CreateUserRequest (roleId), UserResponse (+ permissions), etc.
     │   ├── employee_dto.go      # EmployeeLoginRequest, GenerateSecretResponse, etc.
-    │   └── new_schema_dto.go    # Sync DTOs for all 7 tables + AppSessionListResponse + AppItemListResponse
+    │   ├── new_schema_dto.go    # Sync DTOs for all 7 tables + AppSessionListResponse + AppItemListResponse
     │                             # (still contains unused legacy DTOs: BrowserContext/FileExplorerContext/Url/UrlVisit/ShellCommand)
+    │   └── rbac_dto.go          # ModuleTreeResponse, RoleResponse (submoduleIds + permissions keys), role CRUD payloads
     │
     ├── repository/              # Data access layer (raw SQL via pgx)
-    │   ├── user_repo.go         # User CRUD, CountCompanyAdmins, IsUniqueEmail
+    │   ├── user_repo.go         # User CRUD (roles JOIN; qualified u.* columns), CountUsersWithRole, IsUniqueEmail
     │   ├── employee_repo.go     # Employee CRUD, GenerateEmployeeID, GetDepartments
     │   ├── department_repo.go   # Department CRUD with employee count (LEFT JOIN)
-    │   └── new_schema_repo.go   # Bulk inserts for 7 tables, ListAppSessions/ListAppItems, Begin() tx + 4 catalog-upsert methods
+    │   ├── new_schema_repo.go   # Bulk inserts for 7 tables, ListAppSessions/ListAppItems, Begin() tx + catalog-upsert methods
+    │   ├── device_repo.go       # UpsertDevice / ListByEmployeeID / RevokeDevice (employee_devices)
+    │   ├── monitoring_repo.go   # Types/categories CRUD, classified apps/sites listing + SyncWebsiteDomains
+    │   └── rbac_repo.go         # Module/submodule catalog, roles CRUD, grants replace, PermissionKeysForUser, SeedCatalog queries
     │
     ├── services/                # Business logic layer
-    │   ├── auth_service.go      # Login, token generation/validation, EnsureCompanyAdmin
+    │   ├── auth_service.go      # Login, token generation/validation, EnsureCompanyAdmin, attachPermissions
     │   ├── user_service.go      # User CRUD with email uniqueness checks
     │   ├── employee_service.go  # Employee CRUD, GenerateSecret (Redis)
     │   ├── department_service.go # Department CRUD
     │   ├── new_schema_service.go # Sync handlers for 7 tables (catalog-upsert for apps/packages) + 2 list queries
+    │   ├── monitoring_service.go # Monitoring configuration business rules (409 type-in-use guard etc.)
+    │   ├── rbac_service.go      # SeedCatalog (idempotent module/submodule/grant seeding) + roles CRUD orchestration
     │   └── redis_interface.go   # Interface for Redis operations (decouples auth handler)
     │
     ├── handlers/                # HTTP handlers (Echo context)
-    │   ├── auth_handler.go      # Login, Logout, Me, CheckAuth, EmployeeLogin
+    │   ├── auth_handler.go      # Login, Logout, Me, CheckAuth, EmployeeLogin, device listing/revocation
     │   ├── user_handler.go      # List, Get, Create, Update, Delete users
-    │   ├── employee_handler.go  # List, Get, Create, Update, Delete, GenerateSecret
+    │   ├── employee_handler.go  # List, Get, Create, Update, Delete, GenerateSecret, Import/Export
     │   ├── department_handler.go # List, Create, Update, Delete departments
-    │   └── new_schema_handler.go # 7 sync endpoints + ListAppSessions + ListAppItems
+    │   ├── new_schema_handler.go # 11 sync endpoints + ListAppSessions + ListAppItems
+    │   ├── monitoring_handler.go # Types/categories/apps/websites configuration endpoints
+    │   └── rbac_handler.go      # ListModules, roles List/Create/Update/Delete
     │
     ├── middleware/auth.go       # JWTAuth (required), OptionalAuth (optional)
+    ├── middleware/device_auth.go # Device <token> auth for the 11 sync endpoints
     │
     └── router/router.go         # Route definitions grouped by auth level
 ```
@@ -167,7 +188,7 @@ server/
 
 ## 4. API Surface
 
-All endpoints are under `/api/v1`. Full route inventory (30 routes):
+All endpoints are under `/api/v1`. Full route inventory (~46 routes):
 
 ### Health
 
@@ -179,8 +200,9 @@ All endpoints are under `/api/v1`. Full route inventory (30 routes):
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| POST | `/auth/login` | None | Web admin login. Sets httpOnly cookie. |
-| POST | `/auth/employee-login` | None | Employee desktop login. Returns JWT. |
+| POST | `/auth/login` | None | Web admin login. Sets `auth_token` (15-min access) + `refresh_token` (30-day) httpOnly cookies. |
+| POST | `/auth/refresh` | Refresh cookie | Validates + ROTATES the refresh token, re-mints both cookies. 401 ⇒ session unrecoverable. |
+| POST | `/auth/employee-login` | None | Employee desktop login. Returns long-lived JWT + device token. |
 
 ### Auth (Semi-Protected — validates token if present)
 
@@ -193,6 +215,7 @@ All endpoints are under `/api/v1`. Full route inventory (30 routes):
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | GET | `/auth/me` | Required | Returns current user profile |
+| GET | `/auth/profile` | Required | Aggregate profile payload (user + role + RBAC module breakdown + linked employee) for `/settings/profile` — single-shot, no client-side fan-out |
 | POST | `/auth/logout` | Required | Clears httpOnly cookie |
 
 ### Users (Protected)
@@ -209,13 +232,26 @@ All endpoints are under `/api/v1`. Full route inventory (30 routes):
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/employees` | List employees (paginated, filterable, JOIN department) |
-| GET | `/employees/:id` | Get employee by ID |
+| GET | `/employees` | List employees (paginated, filterable, JOIN department; every row projects `hasUserLogin` — see below) |
+| GET | `/employees/:id` | Get employee by ID (with `hasUserLogin`) |
 | GET | `/employees/:id/detail` | Aggregate machine picture (hardware, storage, network, apps, packages, peripherals, permissions, stats) |
-| POST | `/employees` | Create employee |
-| PUT | `/employees/:id` | Update employee |
+| POST | `/employees` | Create employee (RETURNING includes `hasUserLogin`) |
+| PUT | `/employees/:id` | Update employee (RETURNING includes `hasUserLogin`) |
 | DELETE | `/employees/:id` | Soft-delete employee |
 | POST | `/employees/:id/generate-secret` | Generate one-time secret → Redis (5-min TTL) |
+
+> **`hasUserLogin` projection (2026-08-28).** Every employee SELECT path
+> (`List`, `GetByID`, `GetByEmployeeID`, `GetByEmail`, `ListAll`, `Create` and `Update`
+> `RETURNING`, and the `scanEmployeeRow` helper) adds
+> `EXISTS(SELECT 1 FROM users u WHERE u.employee_id = e.employee_id AND u.deleted_at IS NULL) AS has_user_login`
+> to the projection. The probe runs against the UNIQUE `users.employee_id` index
+> — it does **not** scan the `users` table. The cost is one indexed lookup per
+> page row (10/page by default), so it stays O(1) regardless of the total
+> employee or user count. The web employees page uses this flag to hide the
+> "Login Credential" dropdown item for employees who already have a login
+> account, and the employees `updateMutation` uses `updated.hasUserLogin` from
+> `PUT /employees/:id` to decide whether to propagate the name/email change to
+> the linked user — no extra round-trips, no client-side maps.
 
 ### Departments (Protected)
 
@@ -244,6 +280,27 @@ Classification of the detected app catalog and observed website domains. Types a
 | PATCH | `/monitoring/apps/:id` | Set/clear an app's type + category |
 | GET | `/monitoring/websites` | List classified observed domains (auto-syncs new domains from `app_items` first; same filters) |
 | PATCH | `/monitoring/websites/:id` | Set/clear a site's type + category |
+
+### RBAC (Protected — web admin manages)
+
+Dynamic role-based access control backed by migration 025 (`roles`, `modules`, `submodules`,
+`role_submodule_permissions`; `users.role_id`). The module/submodule catalog + the SYSTEM
+`company_admin` role's grants are re-seeded idempotently on every boot (`RBACService.SeedCatalog`).
+A granted `(role, submodule)` pair means "allowed"; submodule keys are what the web client receives
+as `user.permissions`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/modules` | Full module→submodule tree (the permission catalog for the roles UI + nav guards) |
+| GET | `/roles` | List roles with `userCount`, granted `submoduleIds` and derived `permissions` keys |
+| POST | `/roles` | Create role `{name, description?, submoduleIds?}` |
+| PUT | `/roles/:id` | Partial update — nil fields untouched; `submoduleIds` present ⇒ grants replaced wholesale |
+| DELETE | `/roles/:id` | Soft-delete; SYSTEM roles and roles with assigned users are rejected |
+
+Users carry `roleId` on create/update; every user-bearing response (`login`, `/auth/me`,
+`/auth/check`, users CRUD) embeds the resolved permission keys via
+`RBACRepo.PermissionKeysForUser`. ⚠️ These permissions are NOT enforced by any middleware yet —
+they only drive the web client's sidebar/route gating.
 
 ### Client Ingestion (Public — JWT in body)
 
@@ -290,29 +347,77 @@ Employee token is carried in the request body (`{employeeId, token, entries: [..
 
 ## 5. Database Schema
 
-### Tables (16 tracked tables + `schema_migrations`)
+### Tables (16 tracked tables + RBAC/monitoring/status tables + `schema_migrations`)
 
 > 2026-08-11: +4 sync tables — `app_status` (key/value per employee), `hardware_devices`
 > (USB/peripheral hotplug), `permission_status` (one row per permission method), and
 > `storage_devices` (children of `device_hardware_info`). Migration 017.
+>
+> 2026-08-25: migration 025 adds the RBAC cluster (`roles`, `modules`, `submodules`,
+> `role_submodule_permissions`) and drops the legacy `users.role` / `users.department` /
+> `users.is_company_admin` columns — **`users.role_id` is now the sole role source of truth**.
 
-**`users`** — Web admin users (company_admin role)
+**`users`** — Web admin users (role via role_id)
 ```
 id              UUID PK (gen_random_uuid())
 employee_id     VARCHAR(20) UNIQUE (EMP-XXXXX)
 name            VARCHAR(255) NOT NULL
 email           VARCHAR(255) UNIQUE NOT NULL
 password_hash   VARCHAR(255) NOT NULL (bcrypt)
-role            VARCHAR(50) DEFAULT 'employee'
-department      VARCHAR(100) DEFAULT 'Engineering'
+role_id         INTEGER → FK → roles(id)          ← migration 025; legacy role/is_company_admin dropped
 shift           VARCHAR(20) DEFAULT 'Day'
 tracking_enabled BOOLEAN DEFAULT true
 tracking_status VARCHAR(20) DEFAULT 'untracked'
 is_online       BOOLEAN DEFAULT false
-avatar          VARCHAR(10) (auto-generated initials)
-avatar_color    VARCHAR(10) (random from palette)
-is_company_admin BOOLEAN DEFAULT false
+avatar          VARCHAR(10) NULL (auto-generated initials)
+avatar_color    VARCHAR(10) NULL (random from palette)
 created_at / updated_at / deleted_at TIMESTAMPTZ (updated_at auto-trigger)
+```
+
+**`roles`** — RBAC role reference (migration 025)
+```
+id              SERIAL PK
+name            VARCHAR(100) UNIQUE ('company_admin' seeded as SYSTEM, is_system=true)
+description     TEXT
+is_system       BOOLEAN (system roles cannot be deleted)
+created_at / updated_at / deleted_at TIMESTAMPTZ
+```
+
+**`modules`** — Navigation module groups (General, HR, Monitoring, Settings, …)
+```
+id              SERIAL PK
+key             VARCHAR(100) UNIQUE (permission module key)
+name            VARCHAR(100) NOT NULL
+sort_order      INTEGER DEFAULT 0
+created_at / updated_at TIMESTAMPTZ (updated_at auto-trigger; no soft delete — catalog is seeded code-side)
+```
+
+**`submodules`** — Concrete permission keys under a module (carry route_path for nav guards)
+```
+id              SERIAL PK
+module_id       INTEGER → FK → modules(id) ON DELETE CASCADE
+key             VARCHAR(100) UNIQUE  ← what ships to the client as user.permissions entries
+name            VARCHAR(100) NOT NULL
+route_path      VARCHAR(200) (web route the key guards)
+sort_order      INTEGER DEFAULT 0
+created_at / updated_at TIMESTAMPTZ
+```
+
+**`role_submodule_permissions`** — Junction: a granted (role, submodule) pair means "allowed"
+```
+role_id         INTEGER → FK → roles(id) ON DELETE CASCADE
+submodule_id    INTEGER → FK → submodules(id) ON DELETE CASCADE
+PRIMARY KEY (role_id, submodule_id)
+```
+
+**`refresh_tokens`** — Web-admin rotating refresh tokens, hashed at rest (migration 026)
+```
+id              BIGSERIAL PK
+user_id         UUID → FK → users(id) ON DELETE CASCADE
+token_hash      VARCHAR(64) UNIQUE NOT NULL   ← hex(sha256(raw_token)); raw value lives ONLY in the cookie
+expires_at      TIMESTAMPTZ NOT NULL          ← JWT_REFRESH_EXPIRY (default 30d) from creation
+revoked_at      TIMESTAMPTZ                   ← set on rotation or logout; NULL = live
+created_at / deleted_at TIMESTAMPTZ
 ```
 
 **`departments`** — Reference table for employee departments
@@ -482,10 +587,11 @@ applied_at      TIMESTAMPTZ DEFAULT NOW()
 - app_items: `(employee_id, opened_at DESC)`, `(app_session_id)`, `(parent_item_id)`, `(employee_id, item_type, identifier)`, `(journey_id, sequence)`, `(url)`, `(domain)`
 - installed_applications: `app_fingerprint` UNIQUE, `binary_name`, `(employee_id, detected_at DESC)`, `app_name`
 - installed_packages: `package_fingerprint` UNIQUE, `source_manager`, `category`, `(employee_id, detected_at DESC)`
+- refresh_tokens: `(user_id)`, `(expires_at)`
 
 ### Migration Tool
 
-**Custom runner** in `database/postgres.go`. Reads `.sql` files from `migrations/` directory (currently 15 files: 001, 002, 004–016), tracks applied migrations in `schema_migrations` table, runs in transaction order. Each file runs in its own transaction.
+**Custom runner** in `database/postgres.go`. Reads `.sql` files from `migrations/` directory (currently 25 files: 001, 002, 004–026), tracks applied migrations in `schema_migrations` table, runs in transaction order. Each file runs in its own transaction.
 
 ---
 
@@ -495,10 +601,15 @@ applied_at      TIMESTAMPTZ DEFAULT NOW()
 
 1. Admin submits email + password to `POST /api/v1/auth/login`
 2. Server looks up user by email, compares bcrypt hash
-3. Valid: generates JWT with claims `{userId}`, signs with HMAC-SHA256, then **encrypts the signed JWT with AES-256-GCM** using a key derived from JWT secret
-4. Encrypted token is set as an httpOnly cookie (`auth_token`)
-5. Subsequent requests: `JWTAuth` middleware reads cookie, decrypts AES layer, then validates JWT signature
-6. **Double encryption rationale**: protects against JWT secret leakage from log files (JWT is AES-encrypted until the middleware decrypts it)
+3. Valid: generates access JWT with claims `{userId}`, signs with HMAC-SHA256, then **encrypts the signed JWT with AES-256-GCM** using a key derived from JWT secret
+4. Two httpOnly cookies are set:
+   - `auth_token` — the encrypted access JWT, **short-lived** (`JWT_ACCESS_EXPIRY`, default **15m**)
+   - `refresh_token` — an opaque 32-byte random value (base64url); only its SHA-256 hash is stored in `refresh_tokens` with `expires_at = now + JWT_REFRESH_EXPIRY` (default **30 days**)
+5. Subsequent requests: `JWTAuth` middleware reads `auth_token`, decrypts the AES layer, then validates the JWT signature
+6. When the access token expires, any API call gets 401 → the web client calls `POST /auth/refresh`: server validates the presented hash (not revoked/expired/deleted), loads + re-authenticates the user, mints a NEW access JWT AND a replacement refresh token (**rotation** — old row revoked after the replacement insert succeeds, so a mid-refresh crash can never lock the user out), and re-mints both cookies
+7. A 401 from `/auth/refresh` itself means the session is gone (refresh expired/revoked/user deleted) — the handler also clears both cookies and the web client force-redirects to `/login`
+8. `POST /auth/logout` revokes the presented refresh row (it can never mint another token) and clears both cookies
+9. **Double encryption rationale**: protects against JWT secret leakage from log files (JWT is AES-encrypted until the middleware decrypts it)
 
 ### Employee Auth Flow
 
@@ -507,8 +618,9 @@ applied_at      TIMESTAMPTZ DEFAULT NOW()
 3. Employee enters emp_id + secret in desktop client
 4. Client sends `POST /api/v1/auth/employee-login` with `{employeeId, secretKey}`
 5. Server validates secret from Redis, deletes it (one-time use)
-6. Returns an encrypted JWT (same mechanism as admin, but with issuer `alpha-ai-tracker-employee`)
-7. Client embeds this token in all sync requests
+6. Returns an encrypted JWT (same mechanism as admin, but issuer `alpha-ai-tracker-employee`) with its OWN TTL (`JWT_EMPLOYEE_ACCESS_EXPIRY`, default 24h)
+7. ⚠️ Desktop clients have NO refresh mechanism — they embed this one token in every sync request body until the process stops. Never lower this TTL to the web-admin value.
+8. Additionally returns a non-expiring opaque device token (`dev_tok_…`, hash stored in `employee_devices`) used by the DeviceAuth middleware on all 11 sync endpoints
 
 ### Token Security
 
@@ -516,16 +628,20 @@ applied_at      TIMESTAMPTZ DEFAULT NOW()
 |---|---|
 | **Signing** | HMAC-SHA256 via `golang-jwt/jwt/v5` |
 | **Encryption** | AES-256-GCM, key = SHA256(JWT_SECRET) |
-| **Expiry** | Configurable, default 24h (`JWT_ACCESS_EXPIRY`) |
-| **Cookie** | httpOnly, SameSite=Lax, Secure=false in dev |
+| **Web-admin access expiry** | `JWT_ACCESS_EXPIRY`, default **15m** (`auth_token` cookie) |
+| **Web-admin refresh expiry** | `JWT_REFRESH_EXPIRY`, default **720h / 30 days** (`refresh_token` cookie, rotated on every refresh) |
+| **Employee token expiry** | `JWT_EMPLOYEE_ACCESS_EXPIRY`, default 24h (body-carried, no refresh) |
+| **Cookies** | httpOnly, SameSite=Lax, Secure=false in dev |
+| **Refresh storage** | `refresh_tokens` table — SHA-256 hex hash UNIQUE, `revoked_at` on rotate/logout, FK → users ON DELETE CASCADE |
 | **Employee token** | Returned in response body, stored locally by client |
 
 ### Missing Security Controls
 
-- **No rate limiting** on login or any endpoint
+- **No rate limiting** on login/refresh or any endpoint
 - **No CSRF protection** (SameSite=Lax provides partial coverage)
 - **No brute-force protection** for login attempts
-- **No session invalidation** beyond clearing the cookie
+- **Refresh-token reuse detection not implemented** — a revoked-but-still-presented token should ideally revoke the whole family; today rotation simply fails the stale token
+- **Expired `refresh_tokens` rows are not auto-purged yet** (one row per login/rotation; retention hook exists as `RefreshTokenRepo.DeleteExpired`)
 - **No audit log** of who performed what action
 - **No permission model** on the server — any authenticated user can access all endpoints
 

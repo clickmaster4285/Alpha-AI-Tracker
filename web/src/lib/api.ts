@@ -11,6 +11,8 @@ interface RequestOptions {
   headers?: Record<string, string>;
   /** Skip JSON parse for blob/download responses */
   raw?: boolean;
+  /** Internal: this call already went through one refresh-retry cycle */
+  _retried?: boolean;
 }
 
 class ApiError extends Error {
@@ -22,6 +24,32 @@ class ApiError extends Error {
     this.name = 'ApiError';
     this.status = status;
     this.detail = detail;
+  }
+}
+
+// ──────────────────────────
+// Access-token refresh (single-flight).
+// The auth_token cookie lives ~15 minutes; POST /auth/refresh validates and
+// rotates the 30-day refresh_token cookie and re-mints both. Concurrent 401s
+// share one refresh; when it fails the session is dead → force back to /login.
+// ──────────────────────────
+let refreshInFlight: Promise<boolean> | null = null;
+
+async function performRefresh(): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_BASE}/auth/refresh`, {
+      method: 'POST',
+      credentials: 'include',
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+function forceLoginRedirect() {
+  if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+    window.location.replace('/login');
   }
 }
 
@@ -55,7 +83,26 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
     fetchOptions.body = JSON.stringify(body);
   }
 
-  const response = await fetch(url, fetchOptions);
+  let response = await fetch(url, fetchOptions);
+
+  // Access token expired → try one silent refresh, then replay the request once
+  if (
+    response.status === 401 &&
+    !options._retried &&
+    endpoint !== '/auth/login' &&
+    endpoint !== '/auth/refresh'
+  ) {
+    if (!refreshInFlight) {
+      refreshInFlight = performRefresh().finally(() => {
+        refreshInFlight = null;
+      });
+    }
+    const refreshed = await refreshInFlight;
+    if (refreshed) {
+      return request<T>(endpoint, { ...options, _retried: true });
+    }
+    forceLoginRedirect();
+  }
 
   if (!response.ok) {
     let errorData: { message?: string; detail?: string } = {};
@@ -86,19 +133,61 @@ export interface AuthUser {
   name: string;
   email: string;
   role: string;
-  department: string;
+  roleId?: number;
   shift: string;
   trackingEnabled: boolean;
   trackingStatus: string;
   isOnline: boolean;
   avatar: string;
   avatarColor: string;
+  /** Granted submodule keys for the user's role (server-driven RBAC). */
+  permissions?: string[];
   createdAt: string;
   updatedAt: string;
 }
 
 export interface LoginResponse {
   user: AuthUser;
+}
+
+// ── Self-service profile (GET /api/v1/auth/profile) ────────────────────────
+
+/** One navigation module surfaced on the profile page, with the count of
+ *  granted submodules under it. No hardcoded module names — derived from
+ *  the RBAC catalog joined with the user's granted permission keys. */
+export interface ProfileModule {
+  id: number;
+  key: string;
+  name: string;
+  grantedCount: number;
+  submoduleCount: number;
+}
+
+/** RBAC view attached to the profile. */
+export interface ProfilePermissions {
+  submoduleKeys: string[];
+  modules: ProfileModule[];
+  /** True when the user holds the system `company_admin` role. Drives the
+   *  lock messaging in the profile UI. */
+  isSystemAdmin: boolean;
+}
+
+/** Aggregate profile payload returned by GET /api/v1/auth/profile. The
+ *  /settings/profile page renders User, Role, Permissions and Employee
+ *  directly from this shape. */
+export interface ProfileResponse {
+  user: AuthUser;
+  role?: {
+    id: number;
+    name: string;
+    description: string;
+    isSystem: boolean;
+    userCount: number;
+    submoduleIds: number[];
+    permissions: string[];
+  };
+  permissions: ProfilePermissions;
+  employee?: Employee;
 }
 
 export interface AuthCheckResponse {
@@ -120,7 +209,16 @@ export const authApi = {
 
   me: () => request<AuthUser>('/auth/me'),
 
+  /** Aggregate self-service profile: user + role + RBAC view + linked
+   *  employee. Identity is resolved from the httpOnly cookie on the
+   *  server. */
+  profile: () => request<ProfileResponse>('/auth/profile'),
+
   check: () => request<AuthCheckResponse>('/auth/check'),
+
+  /** Rotate the refresh_token cookie into a fresh access_token cookie.
+   * Resolves true when the session was revived; false when it is unrecoverable. */
+  refresh: (): Promise<boolean> => performRefresh(),
 };
 
 // ──────────────────────────
@@ -168,6 +266,9 @@ export interface Employee {
   isOnline: boolean;
   avatar: string;
   avatarColor: string;
+  /** True when a row in the users table exists for this employee's employee_id.
+   *  Projected server-side via an indexed EXISTS() so it costs O(1) per row. */
+  hasUserLogin: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -601,6 +702,137 @@ export const monitoringApi = {
     create: (data: { domain: string; typeId?: number | null; categoryId?: number | null }) =>
       request<MonitoredSite>('/monitoring/websites', { method: 'POST', body: data }),
   },
+};
+
+// ──────────────────────────
+// RBAC API (roles + module/submodule catalog)
+// ──────────────────────────
+
+export interface SubmoduleNode {
+  id: number;
+  moduleId: number;
+  key: string;
+  name: string;
+  routePath: string;
+}
+
+export interface ModuleNode {
+  id: number;
+  key: string;
+  name: string;
+  sortOrder: number;
+  submodules: SubmoduleNode[];
+}
+
+export interface ModuleTreeResponse {
+  modules: ModuleNode[];
+  total: number;
+}
+
+export interface Role {
+  id: number;
+  name: string;
+  description: string;
+  isSystem: boolean;
+  userCount: number;
+  submoduleIds: number[];
+  permissions: string[];
+}
+
+export interface RoleListResponse {
+  roles: Role[];
+  total: number;
+}
+
+export interface CreateRolePayload {
+  name: string;
+  description?: string;
+  submoduleIds?: number[];
+}
+
+export interface UpdateRolePayload {
+  name?: string;
+  description?: string;
+  submoduleIds?: number[];
+}
+
+export const modulesApi = {
+  tree: () => request<ModuleTreeResponse>('/modules'),
+};
+
+export const rolesApi = {
+  list: () => request<RoleListResponse>('/roles'),
+
+  create: (data: CreateRolePayload) =>
+    request<Role>('/roles', { method: 'POST', body: data }),
+
+  update: (id: number, data: UpdateRolePayload) =>
+    request<Role>('/roles/' + id, { method: 'PUT', body: data }),
+
+  delete: (id: number) =>
+    request<{ message: string }>('/roles/' + id, { method: 'DELETE' }),
+};
+
+// ──────────────────────────
+// Users API (web-dashboard login accounts)
+// ──────────────────────────
+
+export interface User {
+  id: string;
+  employeeId: string;
+  name: string;
+  email: string;
+  roleId: number;
+  role: string;
+  shift: string;
+  trackingEnabled: boolean;
+  trackingStatus: string;
+  isOnline: boolean;
+  avatar: string;
+  avatarColor: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UserListResponse {
+  data: User[];
+  total: number;
+  page: number;
+  perPage: number;
+  totalPages: number;
+}
+
+export interface CreateUserPayload {
+  name: string;
+  email: string;
+  password?: string;
+  employeeId?: string;
+  roleId: number;
+  shift?: string;
+}
+
+export interface UpdateUserPayload {
+  name?: string;
+  email?: string;
+  password?: string;
+  roleId?: number;
+  shift?: string;
+}
+
+export const usersApi = {
+  list: (params?: { page?: number; perPage?: number; search?: string; roleId?: number; status?: string }) =>
+    request<UserListResponse>('/users', { params: params as Record<string, string | number | undefined> }),
+
+  get: (id: string) => request<User>('/users/' + id),
+
+  create: (data: CreateUserPayload) =>
+    request<User>('/users', { method: 'POST', body: data }),
+
+  update: (id: string, data: UpdateUserPayload) =>
+    request<User>('/users/' + id, { method: 'PUT', body: data }),
+
+  delete: (id: string) =>
+    request<{ message: string }>('/users/' + id, { method: 'DELETE' }),
 };
 
 // ──────────────────────────

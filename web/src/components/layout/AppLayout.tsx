@@ -49,7 +49,7 @@ const pageTitles: Record<string, string> = {
   "/settings/security": "Security Settings",
   "/settings/notifications": "Notification Config",
   "/settings/user-management": "User Management",
-  "/settings/permissions": "Permission Management",
+  "/settings/profile": "My Profile",
 };
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {

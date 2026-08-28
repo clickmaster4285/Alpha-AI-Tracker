@@ -22,6 +22,7 @@ func Setup(
 	departmentHandler *handlers.DepartmentHandler,
 	newSchemaHandler *handlers.NewSchemaHandler,
 	monitoringHandler *handlers.MonitoringHandler,
+	rbacHandler *handlers.RBACHandler,
 ) {
 	// ─────────────────────────────
 	// Global Middleware
@@ -59,6 +60,7 @@ func Setup(
 	// ─────────────────────────────
 	a := e.Group("/api/v1/auth")
 	a.POST("/login", authHandler.Login)
+	a.POST("/refresh", authHandler.Refresh)
 	a.POST("/employee-login", authHandler.EmployeeLogin)
 
 	// ─────────────────────────────
@@ -102,6 +104,7 @@ func Setup(
 
 	// Auth
 	protected.GET("/auth/me", authHandler.Me)
+	protected.GET("/auth/profile", authHandler.GetProfile)
 	protected.POST("/auth/logout", authHandler.Logout)
 
 	// Users
@@ -156,4 +159,13 @@ func Setup(
 	monitoring.GET("/websites", monitoringHandler.ListWebsites)
 	monitoring.POST("/websites", monitoringHandler.CreateWebsite)
 	monitoring.PATCH("/websites/:id", monitoringHandler.UpdateSiteClassification)
+
+	// RBAC: module catalog + roles with per-submodule permissions
+	protected.GET("/modules", rbacHandler.ListModules)
+
+	rolesGroup := protected.Group("/roles")
+	rolesGroup.GET("", rbacHandler.ListRoles)
+	rolesGroup.POST("", rbacHandler.CreateRole)
+	rolesGroup.PUT("/:id", rbacHandler.UpdateRole)
+	rolesGroup.DELETE("/:id", rbacHandler.DeleteRole)
 }
