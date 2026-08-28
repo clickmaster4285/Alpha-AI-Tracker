@@ -1,5 +1,6 @@
 import { Bell, Menu, Search, LogOut } from 'lucide-react';
 import { useAuth, getRoleName } from '@/lib/auth';
+import Link from 'next/link';
 
 interface TopBarProps {
   title: string;
@@ -28,13 +29,29 @@ export default function TopBar({ title, onMenuClick }: TopBarProps) {
         </button>
         {user && (
           <div className="flex items-center gap-2 ml-1">
-            <div className="hidden sm:flex flex-col items-end mr-1">
-              <span className="text-xs font-semibold text-foreground">{user.name}</span>
-              <span className="text-[10px] text-muted-foreground">{getRoleName(user.role)}</span>
-            </div>
-            <div className="w-9 h-9 rounded-full flex items-center justify-center text-white text-sm font-bold" style={{ backgroundColor: user.avatarColor }}>
-              {user.avatar}
-            </div>
+            {/* <div className="group flex items-center cursor-pointer"> */}
+<Link
+  href="/settings/profile"
+  className="group flex items-center cursor-pointer"
+>
+  <div className="hidden sm:flex flex-col items-end mr-1">
+    <span className="text-xs font-semibold text-foreground group-hover:text-primary transition-colors">
+      {user.name}
+    </span>
+
+    <span className="text-[10px] text-muted-foreground group-hover:text-primary transition-colors">
+      {getRoleName(user.role)}
+    </span>
+  </div>
+
+  <div
+    className="w-9 h-9 rounded-full flex items-center justify-center text-white text-sm font-bold"
+    style={{ backgroundColor: user.avatarColor }}
+  >
+    {user.avatar}
+  </div>
+</Link>
+{/* </div> */}
             <button onClick={logout} className="p-2 rounded-lg hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors" title="Logout">
               <LogOut className="w-4 h-4" />
             </button>
