@@ -72,6 +72,7 @@ func readCookie(c echo.Context, name string) string {
 // AuthHandler handles authentication endpoints.
 type AuthHandler struct {
 	authService  *services.AuthService
+	userService  *services.UserService
 	employeeRepo *repository.EmployeeRepo
 	deviceRepo   *repository.DeviceRepo
 	redisClient  services.RedisClientInterface
@@ -81,6 +82,7 @@ type AuthHandler struct {
 // NewAuthHandler creates a new AuthHandler.
 func NewAuthHandler(
 	authService *services.AuthService,
+	userService *services.UserService,
 	employeeRepo *repository.EmployeeRepo,
 	deviceRepo *repository.DeviceRepo,
 	redisClient services.RedisClientInterface,
@@ -88,6 +90,7 @@ func NewAuthHandler(
 ) *AuthHandler {
 	return &AuthHandler{
 		authService:  authService,
+		userService:  userService,
 		employeeRepo: employeeRepo,
 		deviceRepo:   deviceRepo,
 		redisClient:  redisClient,
@@ -194,6 +197,36 @@ func (h *AuthHandler) Me(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, user)
+}
+
+// GetProfile handles GET /api/v1/auth/profile — returns the aggregate
+// profile payload (user + role + RBAC view + linked employee) for the
+// /settings/profile page. The JWT cookie supplies identity; no path param.
+func (h *AuthHandler) GetProfile(c echo.Context) error {
+	userID, ok := c.Get("user_id").(string)
+	if !ok || userID == "" {
+		return c.JSON(http.StatusUnauthorized, dto.APIError{
+			Code:    http.StatusUnauthorized,
+			Message: "Authentication required",
+		})
+	}
+
+	profile, err := h.userService.GetProfile(c.Request().Context(), userID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, dto.APIError{
+			Code:    http.StatusInternalServerError,
+			Message: "Failed to load profile",
+			Detail:  err.Error(),
+		})
+	}
+	if profile == nil {
+		return c.JSON(http.StatusNotFound, dto.APIError{
+			Code:    http.StatusNotFound,
+			Message: "User not found",
+		})
+	}
+
+	return c.JSON(http.StatusOK, profile)
 }
 
 // CheckAuth handles GET /api/v1/auth/check — lightweight auth status check (optional auth)

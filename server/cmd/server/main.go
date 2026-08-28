@@ -75,7 +75,7 @@ func main() {
 	refreshTokenRepo := repository.NewRefreshTokenRepo(pool)
 
 	authService := services.NewAuthService(userRepo, rbacRepo, refreshTokenRepo, cfg.JWT, cfg.Admin)
-	userService := services.NewUserService(userRepo)
+	userService := services.NewUserService(userRepo, rbacRepo, employeeRepo)
 	employeeService := services.NewEmployeeService(employeeRepo, redisClient)
 	departmentService := services.NewDepartmentService(departmentRepo, employeeRepo)
 	newSchemaService := services.NewNewSchemaService(newSchemaRepo, employeeRepo)
@@ -88,7 +88,7 @@ func main() {
 		redisInterface = redisClient
 	}
 
-	authHandler := handlers.NewAuthHandler(authService, employeeRepo, deviceRepo, redisInterface, cfg.JWT)
+	authHandler := handlers.NewAuthHandler(authService, userService, employeeRepo, deviceRepo, redisInterface, cfg.JWT)
 	userHandler := handlers.NewUserHandler(userService)
 	employeeHandler := handlers.NewEmployeeHandler(employeeService)
 	departmentHandler := handlers.NewDepartmentHandler(departmentService)

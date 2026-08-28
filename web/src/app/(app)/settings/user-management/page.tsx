@@ -108,13 +108,17 @@ function UsersTable({
                   </td>
                   <td className="px-4 py-3 text-xs text-muted-foreground">{formatDate(u.createdAt)}</td>
                   <td className="px-4 py-3 text-right">
-                    <button
-                      onClick={() => onEdit(u)}
-                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium text-foreground hover:bg-muted transition-colors"
-                      aria-label={`Edit ${u.name}`}
-                    >
-                      <Pencil className="w-3.5 h-3.5" /> Edit
-                    </button>
+                    {/* The system `company_admin` is a bootstrap-only account and
+                        must not be editable from this surface. Locked. */}
+                    {u.role !== 'company_admin' && (
+                      <button
+                        onClick={() => onEdit(u)}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium text-foreground hover:bg-muted transition-colors"
+                        aria-label={`Edit ${u.name}`}
+                      >
+                        <Pencil className="w-3.5 h-3.5" /> Edit
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -244,6 +248,18 @@ function UserManagementInner() {
   useEffect(() => {
     if (editingUserId && editTargetQuery.data) {
       const u = editTargetQuery.data;
+      // Defense in depth: the table hides the Edit button for company_admin
+      // and the role dropdown excludes it, but a crafted ?edit=1&userId=… URL
+      // could still target the bootstrap admin. Refuse the open here.
+      if (u.role === 'company_admin') {
+        toast.error('Company Admin cannot be edited', {
+          description: 'The system admin account is locked from this surface.',
+        });
+        setEditingUserId(null);
+        setEditingOriginalUser(null);
+        setShowDialog(false);
+        return;
+      }
       setName(u.name);
       setEmail(u.email);
       setEmployeeId(u.employeeId || '');

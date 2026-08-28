@@ -104,6 +104,7 @@ func Setup(
 
 	// Auth
 	protected.GET("/auth/me", authHandler.Me)
+	protected.GET("/auth/profile", authHandler.GetProfile)
 	protected.POST("/auth/logout", authHandler.Logout)
 
 	// Users

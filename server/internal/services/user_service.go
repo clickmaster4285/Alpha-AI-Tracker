@@ -12,12 +12,14 @@ import (
 
 // UserService handles business logic for user operations.
 type UserService struct {
-	repo *repository.UserRepo
+	repo        *repository.UserRepo
+	rbacRepo    *repository.RBACRepo
+	employeeRepo *repository.EmployeeRepo
 }
 
 // NewUserService creates a new UserService.
-func NewUserService(repo *repository.UserRepo) *UserService {
-	return &UserService{repo: repo}
+func NewUserService(repo *repository.UserRepo, rbacRepo *repository.RBACRepo, employeeRepo *repository.EmployeeRepo) *UserService {
+	return &UserService{repo: repo, rbacRepo: rbacRepo, employeeRepo: employeeRepo}
 }
 
 // List returns a paginated list of users (as response DTOs).
@@ -193,6 +195,84 @@ func (s *UserService) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("cannot delete company admin")
 	}
 	return s.repo.Delete(ctx, id)
+}
+
+// GetProfile returns the aggregate profile payload (user + role + RBAC view
+// + linked employee) for the /settings/profile page. It is a single-shot
+// composition so the web only needs one request to render the entire view.
+func (s *UserService) GetProfile(ctx context.Context, userID string) (*dto.ProfileResponse, error) {
+	user, err := s.repo.GetByID(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("get user: %w", err)
+	}
+	if user == nil {
+		return nil, nil
+	}
+	resp := &dto.ProfileResponse{User: userToResponse(user)}
+
+	// Role details (id, name, description, isSystem). `company_admin` is the
+	// only system role; users on it are locked from the admin edit surface
+	// but can still use the self-service profile page.
+	if s.rbacRepo != nil {
+		role, err := s.rbacRepo.GetRoleByIDWithPerms(ctx, user.RoleID)
+		if err == nil && role != nil {
+			r := roleToResponse(role)
+			resp.Role = &r
+		}
+	}
+
+	// Granted submodule keys + a per-module breakdown of "how many submodules
+	// you can reach inside this navigation section". Derived from the RBAC
+	// catalog joined with PermissionKeysForUser — no hardcoded module names.
+	granted := map[string]bool{}
+	if s.rbacRepo != nil {
+		if keys, err := s.rbacRepo.PermissionKeysForUser(ctx, user.ID); err == nil {
+			for _, k := range keys {
+				granted[k] = true
+			}
+		}
+		modules, err := s.rbacRepo.ListModules(ctx)
+		if err == nil {
+			profileMods := make([]dto.ProfileModule, 0, len(modules))
+			for _, m := range modules {
+				grantedCount := 0
+				for _, sub := range m.Submodules {
+					if granted[sub.Key] {
+						grantedCount++
+					}
+				}
+				profileMods = append(profileMods, dto.ProfileModule{
+					ID:             m.ID,
+					Key:            m.Key,
+					Name:           m.Name,
+					GrantedCount:   grantedCount,
+					SubmoduleCount: len(m.Submodules),
+				})
+			}
+			resp.Permissions.Modules = profileMods
+		}
+	}
+	if resp.Permissions.SubmoduleKeys == nil {
+		resp.Permissions.SubmoduleKeys = []string{}
+	}
+	// isSystemAdmin is the only company-wide bypass — the role has every
+	// submodule granted at seed time. The flag drives the company_admin lock
+	// messaging in the profile UI.
+	isSystemAdmin := resp.Role != nil && resp.Role.IsSystem
+	resp.Permissions.IsSystemAdmin = isSystemAdmin
+
+	// Linked employee record (department, shift, hasUserLogin). Resolved by
+	// the public employee_id (e.g. EMP-00001) — the same join key the user
+	// rows carry. Nil when the user has no employee link.
+	if s.employeeRepo != nil && user.EmployeeID != "" {
+		emp, err := s.employeeRepo.GetByEmployeeID(ctx, user.EmployeeID)
+		if err == nil && emp != nil {
+			er := employeeToResponse(emp)
+			resp.Employee = &er
+		}
+	}
+
+	return resp, nil
 }
 
 func userToResponse(u *models.User) dto.UserResponse {

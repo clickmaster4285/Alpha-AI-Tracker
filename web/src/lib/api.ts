@@ -150,6 +150,46 @@ export interface LoginResponse {
   user: AuthUser;
 }
 
+// ── Self-service profile (GET /api/v1/auth/profile) ────────────────────────
+
+/** One navigation module surfaced on the profile page, with the count of
+ *  granted submodules under it. No hardcoded module names — derived from
+ *  the RBAC catalog joined with the user's granted permission keys. */
+export interface ProfileModule {
+  id: number;
+  key: string;
+  name: string;
+  grantedCount: number;
+  submoduleCount: number;
+}
+
+/** RBAC view attached to the profile. */
+export interface ProfilePermissions {
+  submoduleKeys: string[];
+  modules: ProfileModule[];
+  /** True when the user holds the system `company_admin` role. Drives the
+   *  lock messaging in the profile UI. */
+  isSystemAdmin: boolean;
+}
+
+/** Aggregate profile payload returned by GET /api/v1/auth/profile. The
+ *  /settings/profile page renders User, Role, Permissions and Employee
+ *  directly from this shape. */
+export interface ProfileResponse {
+  user: AuthUser;
+  role?: {
+    id: number;
+    name: string;
+    description: string;
+    isSystem: boolean;
+    userCount: number;
+    submoduleIds: number[];
+    permissions: string[];
+  };
+  permissions: ProfilePermissions;
+  employee?: Employee;
+}
+
 export interface AuthCheckResponse {
   authenticated: boolean;
   user?: AuthUser;
@@ -168,6 +208,11 @@ export const authApi = {
     }),
 
   me: () => request<AuthUser>('/auth/me'),
+
+  /** Aggregate self-service profile: user + role + RBAC view + linked
+   *  employee. Identity is resolved from the httpOnly cookie on the
+   *  server. */
+  profile: () => request<ProfileResponse>('/auth/profile'),
 
   check: () => request<AuthCheckResponse>('/auth/check'),
 

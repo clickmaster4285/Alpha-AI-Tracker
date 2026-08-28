@@ -98,3 +98,41 @@ type HealthResponse struct {
 	Timestamp string `json:"timestamp"`
 	Database  string `json:"database"`
 }
+
+// ────────────────────────────────
+// Self-service profile (web → GET /api/v1/auth/profile)
+// ────────────────────────────────
+
+// ProfileModule is a navigation module the user can see, with the count of
+// granted submodules under it. Drives the "Modules you can access" view on
+// the /settings/profile page (no hardcoded module names — derived from the
+// RBAC catalog joined with the granted permission keys).
+type ProfileModule struct {
+	ID              int    `json:"id"`
+	Key             string `json:"key"`
+	Name            string `json:"name"`
+	GrantedCount    int    `json:"grantedCount"`
+	SubmoduleCount  int    `json:"submoduleCount"`
+}
+
+// ProfilePermissions is the read-only RBAC view attached to the profile:
+// the granted submodule keys, the list of navigation modules the user can
+// reach (and how many submodules are granted inside each), plus a
+// isSystemAdmin convenience flag used by the UI to render the company_admin
+// lock state.
+type ProfilePermissions struct {
+	SubmoduleKeys []string        `json:"submoduleKeys"`
+	Modules       []ProfileModule `json:"modules"`
+	IsSystemAdmin bool            `json:"isSystemAdmin"`
+}
+
+// ProfileResponse is the aggregate read-only payload returned by
+// GET /api/v1/auth/profile. The web `/settings/profile` page renders the
+// User, Role, Permissions, and Employee blocks directly from this shape
+// (and falls back to /auth/me if it 404s on older server builds).
+type ProfileResponse struct {
+	User        UserResponse        `json:"user"`
+	Role        *RoleResponse       `json:"role,omitempty"`
+	Permissions ProfilePermissions  `json:"permissions"`
+	Employee    *EmployeeResponse   `json:"employee,omitempty"`
+}

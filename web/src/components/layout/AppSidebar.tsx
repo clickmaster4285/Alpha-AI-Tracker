@@ -402,6 +402,14 @@ const navSections: NavSection[] = [
             module: "settings",
           },
           {
+            // Self-service profile: visible to every authenticated user. No
+            // `module` key means the sidebar's `isItemVisible` skips the
+            // canAccess check, and `findModuleForPath` returns undefined for
+            // RouteGuard — the page is reachable without a permission grant.
+            label: "My Profile",
+            path: "/settings/profile",
+          },
+          {
             label: "Tracking",
             path: "/settings/tracking",
             module: "settings/tracking",
