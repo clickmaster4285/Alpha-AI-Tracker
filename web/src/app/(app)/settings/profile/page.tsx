@@ -296,7 +296,7 @@ export default function ProfilePage() {
   const totalModuleCount = perms.modules.length;
 
   return (
-    <div className="space-y-5 max-w-5xl pb-24 animate-fade-in">
+    <div className="space-y-5  pb-24 animate-fade-in">
       {/* ─── Hero / identity header ──────────────────────────────────────── */}
       <motion.section
         initial={{ opacity: 0, y: 8 }}
@@ -404,7 +404,6 @@ export default function ProfilePage() {
             <Badge variant="outline" className="text-[10px] uppercase tracking-wide font-medium">Read-only</Badge>
           </header>
           <div className="space-y-2.5">
-            <InfoTile icon={KeyRound} label="User ID" value={me.id} />
             <InfoTile icon={Link2} label="Employee Link" value={me.employeeId} emptyText="Not linked" />
             <InfoTile icon={ShieldCheck} label="Role" value={role?.name ?? me.role} />
             <InfoTile icon={Building2} label="Department" value={emp?.department} emptyText="No department" />
