@@ -1,0 +1,7 @@
+1.
+now add the profile option under the setting module where the user update there own profile name|email|password
+
+and the setting/profile are visibile for all user no need permission
+
+2.
+on settings/user-management remove the edit btn on company admin
