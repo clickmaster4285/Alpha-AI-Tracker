@@ -215,6 +215,7 @@ All endpoints are under `/api/v1`. Full route inventory (~46 routes):
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | GET | `/auth/me` | Required | Returns current user profile |
+| GET | `/auth/profile` | Required | Aggregate profile payload (user + role + RBAC module breakdown + linked employee) for `/settings/profile` — single-shot, no client-side fan-out |
 | POST | `/auth/logout` | Required | Clears httpOnly cookie |
 
 ### Users (Protected)
