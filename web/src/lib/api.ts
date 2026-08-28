@@ -260,6 +260,9 @@ export interface Employee {
   email: string;
   department: string;
   departmentId: number;
+  /** FK to the shifts catalog (null when the employee has no shift). */
+  shiftId: number | null;
+  /** Resolved shift name (joined from shifts). Empty when shiftId is null. */
   shift: string;
   trackingEnabled: boolean;
   trackingStatus: string;
@@ -285,14 +288,18 @@ export interface CreateEmployeePayload {
   name: string;
   email: string;
   departmentId: number;
-  shift?: string;
+  /** FK to the shifts catalog. null/undefined → "no shift". */
+  shiftId?: number | null;
 }
 
 export interface UpdateEmployeePayload {
   name?: string;
   email?: string;
   departmentId?: number;
-  shift?: string;
+  /** FK to the shifts catalog. 0 / null / undefined → no change; pass `0`
+   *  explicitly to clear an existing assignment (the service maps it to
+   *  NULL on the DB). */
+  shiftId?: number | null;
   trackingEnabled?: boolean;
   trackingStatus?: string;
   isOnline?: boolean;
@@ -308,6 +315,8 @@ export interface ImportEmployeeRow {
   name: string;
   email: string;
   department: string;
+  /** Spreadsheet column header. The server resolves the name to a
+   *  shifts.id at import time; a blank cell falls back to "Day Shift". */
   shift?: string;
 }
 
@@ -363,6 +372,67 @@ export const employeesApi = {
 
   // All non-deleted employees as flat rows for the Excel download.
   export: () => request<EmployeeExportRow[]>('/employees/export'),
+};
+
+// ──────────────────────────
+// Shifts API (relational CRUD)
+// ──────────────────────────
+
+export interface Shift {
+  id: number;
+  name: string;
+  /** "HH:MM" 24-hour time. */
+  startTime: string;
+  endTime: string;
+  /** Comma-separated weekday short names (e.g. "Mon,Tue,Wed,Thu,Fri"). */
+  workingDays: string;
+  graceMinutes: number;
+  overtimeHours: number;
+  description: string;
+  employeeCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ShiftListResponse {
+  data: Shift[];
+  total: number;
+  page: number;
+  perPage: number;
+  totalPages: number;
+}
+
+export interface ShiftAllResponse {
+  shifts: Shift[];
+  total: number;
+}
+
+export interface CreateShiftPayload {
+  name: string;
+  startTime: string;
+  endTime: string;
+  workingDays: string;
+  graceMinutes: number;
+  overtimeHours: number;
+  description?: string;
+}
+
+export const shiftsApi = {
+  /** Paginated, searchable list (admin /shifts page). */
+  list: (params?: { page?: number; perPage?: number; search?: string }) =>
+    request<ShiftListResponse>('/shifts', { params: params as Record<string, string | number | undefined> }),
+
+  /** Unpaged list of every non-deleted shift — used by dropdowns. */
+  listAll: () => request<ShiftAllResponse>('/shifts/all'),
+
+  create: (data: CreateShiftPayload) =>
+    request<Shift>('/shifts', { method: 'POST', body: data }),
+
+  update: (id: number, data: CreateShiftPayload) =>
+    request<Shift>('/shifts/' + id, { method: 'PUT', body: data }),
+
+  delete: (id: number) =>
+    request<{ message: string }>('/shifts/' + id, { method: 'DELETE' }),
 };
 
 // ──────────────────────────
