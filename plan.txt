@@ -1,1 +1,0 @@
-now i want when i logout then on frontend|web remove all the cashe like tanstack|redux etc... data 
