@@ -1,8 +1,11 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-08-25
+> **Last audited:** 2026-08-28
 > **Changelog:**
 >
+> - 2026-08-28: **Web + Server: User-Management edit flow + server-projected `hasUserLogin` flag on every employee row.**
+>   The `/settings/user-management` page is now a full CRUD surface — not just a create-from-employee form. A per-row **Edit** button (new "Action" column in the users table) opens the same dialog in edit mode, driven by `?edit=1&userId=…` deep-links. Identity fields (`name`, `email`, `employeeId`) are **locked** in both create-from-employee and edit modes (they mirror the employee record and are immutable from this surface); the **role dropdown excludes the system `company_admin` role**; the password field gains an **eye toggle** (lucide `Eye`/`EyeOff`); a new **Confirm password** field sits beneath Password and the two must match (≥6 chars). On a successful user edit, if the user has a non-empty `employeeId`, the web client also calls `employeesApi.update` to propagate any name/email change to the attached employee record (employeeId is never sent — it is immutable). The reverse sync fires in the employees page `updateMutation` — editing an employee's name/email propagates to the linked user.
+>   The scalability fix that made the **"Login Credential" dropdown item** (on the employees page) hide for employees who already have a login account is **server-projected, not client-mapped**: every employee SELECT path (`List`, `GetByID`, `GetByEmployeeID`, `GetByEmail`, `ListAll`, `Create` RETURNING, `Update` RETURNING, `scanEmployeeRow`) now projects `EXISTS(SELECT 1 FROM users u WHERE u.employee_id = e.employee_id AND u.deleted_at IS NULL) AS has_user_login`. The expression is a **single indexed probe per row** against the UNIQUE `users.employee_id` index — it does **not** scan the users table, and the cost is O(1) per page row regardless of total employee or user count. The previous draft of this change (a web-side `useQuery` that pulled up to 200 users and built a `Set<string>` of employeeIds) was rejected as a non-scalable workaround and is **fully removed** — no `usersCheckData`, no `employeesWithUsers` Set, no `['employee-users-map']` query key anywhere in `web/src`. The web dropdown now uses the server-projected `emp.hasUserLogin` directly, and the `updateMutation`'s "is this employee linked to a user?" guard reads `updated.hasUserLogin` from the `UPDATE…RETURNING` response — no extra round-trip. Web API type (`Employee.hasUserLogin`) and the `EmployeeResponse.hasUserLogin` JSON field (camelCase) are added in lockstep. Verified: `go build`/`go vet` clean, `npx tsc --noEmit` clean, `next build` passes. The `/users` list is still queried once per save on the user-management page to look up the linked user by employeeId (necessary because we need the user's UUID to PUT) — that path is unchanged and the lookup uses the existing `search` parameter (already indexed on `users.employee_id`).
 > - 2026-08-25: **Core: Rotating refresh tokens for the web-admin session — 15-min access JWT, 30-day refresh cookie, transparent regeneration, forced logout to /login.**
 >   Migration **026_refresh_tokens.sql** adds `refresh_tokens` (user_id FK CASCADE, UNIQUE `token_hash`
 >   = hex(sha256(raw)), expires_at, revoked_at, deleted_at + user/expires indexes). The raw token is a
@@ -908,6 +911,7 @@ flowchart LR
 - Migrations 001-025 run on startup (24 files; latest: 023 monitoring config tables, 024 catalog merge, 025 RBAC roles/modules/submodules + users.role_id)
 - **Dynamic RBAC** (2026-08-25): roles/modules/submodules catalog seeded idempotently at boot (`RBACService.SeedCatalog`); protected `GET /modules` + `/roles` CRUD endpoints; `users.role_id` is the sole role source of truth; every auth/user response carries the granted submodule permission keys
 - Full CRUD for users, employees, departments
+- **`Employee.hasUserLogin` projection** (2026-08-28): every employee SELECT path projects an indexed `EXISTS()` against `users.employee_id` so the web can answer "does this employee have a login?" in O(1) per page row, with no client-side map (see *Server-Projected Flags Rule* in §6)
 - Web admin auth (email/password → httpOnly cookie with encrypted JWT)
 - Employee auth (Redis one-time secret → JWT token)
 - 11 sync endpoints: device_hardware, installed_apps, installed_packages, network_info, session_events, app_sessions, app_items, app_status, hardware_devices, permission_status, storage_devices (+ synced_at for all; 2026-08-11 added the last four)
@@ -990,8 +994,8 @@ flowchart LR
 - Login page with animated hero section
 - Auth check on mount (Redux + server cookie); **zero localStorage dependencies in web/src** (2026-08-25 mock purge)
 - **Server-driven RBAC** (2026-08-25) — `user.permissions` (submodule keys) from every auth response gate the sidebar (`AppSidebar` via `PermissionsProvider`) and routes (`RouteGuard` → `/unauthorized`); `/roles` is a real-API CRUD page with per-submodule permission toggles over `GET /modules` + `/roles`; fail-open for pre-RBAC sessions, strict allow-list otherwise, `company_admin` always full
-- Employees page — real API calls via TanStack Query (CRUD + generate secret, portal-rendered Radix action menu); each row's action menu deep-links to **View Journey** and **Device Specs** (2026-08-18)
-- User Management (`/settings/user-management`) — real-API CRUD on `/users` with role assignment, server-side infinite scroll (2026-08-25)
+- Employees page — real API calls via TanStack Query (CRUD + generate secret, portal-rendered Radix action menu); each row's action menu deep-links to **View Journey** and **Device Specs** (2026-08-18); the **"Login Credential"** dropdown item is hidden when `emp.hasUserLogin` is true (server-projected flag, 2026-08-28); the `updateMutation` propagates name/email to the linked user via `usersApi.update` when the server's `UPDATE…RETURNING` reports `hasUserLogin`
+- User Management (`/settings/user-management`) — real-API CRUD on `/users` with role assignment, server-side infinite scroll (2026-08-25), and a full edit flow (2026-08-28): per-row **Edit** button → same dialog in edit mode, identity fields (`name`/`email`/`employeeId`) locked, `company_admin` excluded from the role dropdown, password + confirm-password with eye toggles; on save, if the edited user has an `employeeId`, the client also calls `employeesApi.update` to sync name/email to the attached employee
 - **Employee Journey module** (2026-08-18) — three real-API pages behind the shared `EmployeePage` shell + `EmployeeSelector` picker: Session Timeline (`useInfiniteQuery` on `GET /app-sessions`, 30/page, fg/bg stacked bar), App Usage (per-app foreground/background aggregation of the latest 500 sessions), Web Activity (`GET /app-items?itemType=browser_tab`); Screenshots and Location Trail are shell placeholders (the desktop client collects neither yet)
 - **Device Specs module** (2026-08-18) — four real-API pages over the aggregate `GET /employees/:id/detail`: Hardware Overview, Installed Software (Applications/Packages tabs + search), Peripherals, Permissions. This replaced the old `/users/[id]` single-page detail view (deleted)
 - Shared building blocks: `EmployeePage` shell (header + picker + loading/error/no-selection states, optional `fetchDetail`), `hooks/use-employee-detail.ts`, `lib/format.ts`, `EmployeeSelector`, `EmptyState`/`InventoryTable`/`FocusTime`/`DeviceClassIcon`
@@ -1031,6 +1035,7 @@ flowchart LR
 | **Monorepo tooling**    | No shared tooling (no Turborepo, Nx, etc.). Each service has its own build system.        |
 | **Build parity**        | `dotnet run` is NOT a release test — every change must be verified from an installed build; new assets/config/scripts must be bundled by the `publish/*` scripts (see below) |
 | **Web list pagination** | List/table pages ALWAYS use server-side **infinite scroll** (`useInfiniteQuery` + IntersectionObserver sentinel) — Next/Previous buttons are forbidden (see *Web Infinite-Scroll Rule* below) |
+| **Cross-table boolean flags** | Booleans that depend on a cross-table relationship (e.g. "does this employee have a login account?") MUST be projected by the server in the same query that returns the row — never built client-side from a separate fetch (see *Server-Projected Flags Rule* below) |
 | **Branding & version**  | Product name and version are written in exactly two files — `client/APP_IDENTIFIERS` and `client/VERSION`. No literal product name or version string anywhere else in C#, XAML, or the build scripts (see below) |
 
 ### Web Infinite-Scroll Rule (mandatory)
@@ -1046,6 +1051,30 @@ flowchart LR
 - Filter/search inputs change the query key (the infinite query restarts at page 1) — there is NO `page`
   state anywhere.
 - Reference implementations: `web/src/app/(app)/employees/page.tsx`, the Session Timeline journey page.
+
+### Server-Projected Flags Rule (mandatory since 2026-08-28)
+
+**A boolean flag that depends on a cross-table relationship (e.g. "does this employee have a login
+account?", "is this department in use?", "is this role assigned?") MUST be projected by the
+server in the same query that returns the row — never built client-side from a separate fetch.**
+
+- **Wrong:** a web `useQuery` that pulls up to N rows of a related table and builds a `Set<string>`
+  to answer a per-row question. It is O(N) on the client, O(perPage × flag-query-cost) on the
+  server, and **silently wrong** when `N < total related rows` — rows past the boundary are
+  misclassified. It also doubles round-trips and burns a second query per page load.
+- **Right:** add `EXISTS(SELECT 1 FROM other_table ot WHERE ot.fk = e.id AND ot.deleted_at IS NULL)`
+  (or a `COUNT(*) > 0` / `BOOL_OR` aggregate) to the list/return SELECTs. One indexed probe per
+  row against the existing FK index — it does **not** scan the related table. The cost is O(1)
+  per page row regardless of how big either table grows. The web consumes the field directly from
+  the existing DTO (`Employee.hasUserLogin` etc.) — no extra `useQuery`, no client-side map, no
+  cache key to invalidate when either table mutates.
+
+- The web API type carries the same field with a camelCase JSON key (e.g. `hasUserLogin: boolean`).
+- After a `POST`/`PUT`, prefer the **same response** carrying the projected flag
+  (e.g. `updated.hasUserLogin` from `UPDATE…RETURNING`) so the client guard needs no extra trip.
+- **First column-level use of this rule:** `Employee.hasUserLogin` (server/ARCHITECTURE.md §4).
+  Drop a one-line `> `Server-Projected Flags Rule` note in the relevant API table when a new
+  projection is added, mirroring the `hasUserLogin` entry.
 
 ### Installer-Parity Rule (mandatory)
 

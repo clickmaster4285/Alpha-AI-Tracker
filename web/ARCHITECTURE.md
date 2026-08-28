@@ -304,6 +304,24 @@ web/
 - Filters/search change the query key (a fresh infinite query starts at page 1) — never a `page` state.
 - Reference implementation: `src/app/(app)/employees/page.tsx` and the Session Timeline journey page.
 
+### Server-Projected Flags Rule (mandatory since 2026-08-28)
+
+**A boolean flag that depends on a cross-table relationship (e.g. "does this employee have a login
+account?") MUST be projected by the server in the same query that returns the row — never built
+client-side from a separate fetch.**
+
+- Wrong: a web `useQuery` that pulls up to N users and builds a `Set<string>` of employeeIds to
+  answer a per-row question. It is O(N) on the client, O(perPage × flag-query-cost) on the server,
+  and silently wrong when `N < total users` (rows are misclassified past the page boundary).
+- Right: add `EXISTS(SELECT 1 FROM other_table ot WHERE ot.fk = e.id AND ot.deleted_at IS NULL)`
+  to the list/return SELECTs. One indexed probe per row, O(1) per page, no extra round-trips.
+  The web consumes the field directly from the existing `Employee` (or analogous) DTO.
+
+The first column-level use of this rule is `Employee.hasUserLogin` (server/ARCHITECTURE.md §4).
+The web `Employee` type carries the same field as `hasUserLogin: boolean` (camelCase JSON key).
+Pattern reference: `web/src/app/(app)/employees/page.tsx` (dropdown visibility + reverse-sync guard
+in the `updateMutation`).
+
 ---
 
 ## 5. Pages/Routes Inventory & Data Dependencies
@@ -316,7 +334,7 @@ web/
 | `/login` | Login | Server (auth) | ✅ |
 | `/unauthorized` | Access denied (RouteGuard target) | — | ✅ |
 | `/dashboard` | Dashboard | Server (`GET /employees`, `/departments`, `/app-sessions?dateFrom=`, `/app-items?itemType=browser_tab&dateFrom=`) | ✅ |
-| `/employees` | Employee list | Server | ✅ |
+| `/employees` | Employee list (hides the "Login Credential" dropdown item when `emp.hasUserLogin` is true; `updateMutation` propagates name/email to the linked user via `usersApi.update` when the server's `UPDATE…RETURNING` reports `hasUserLogin`) | Server | ✅ |
 | `/employees/activity` | Activity status | Honest empty state (no endpoint) | ❌ |
 | `/employee-journey/timeline` | Session timeline | Server (`GET /app-sessions`, infinite scroll) | ✅ |
 | `/employee-journey/apps` | App usage | Server (aggregated `GET /app-sessions`) | ✅ |
@@ -360,7 +378,7 @@ web/
 | `/employee-portal` | Employee portal | Hardcoded demo data (scaffolding) | ❌ |
 | `/settings` | General settings | Static hub page | ❌ |
 | `/settings/tracking` | Tracking settings | In-memory session state only (explicit non-persistence notice) | ❌ |
-| `/settings/user-management` | User management (CRUD + role assignment, infinite scroll) | Server (`/users`, `/roles`) | ✅ |
+| `/settings/user-management` | User management (CRUD + role assignment, infinite scroll; create-from-employee form locks `name`/`email`/`employeeId` and excludes the `company_admin` role; new per-row **Edit** button opens the same dialog in edit mode via `?edit=1&userId=…`; password + confirm-password with eye toggles; on save, if the edited user has an `employeeId` the client also calls `employeesApi.update` to sync name/email to the attached employee) | Server (`/users`, `/roles`, `/employees`) | ✅ |
 | `/settings/notifications` | Notifications | Hardcoded demo data (scaffolding) | ❌ |
 | `/settings/billing` | Billing | Placeholder | ❌ |
 | `/settings/compliance` | Compliance | Placeholder | ❌ |

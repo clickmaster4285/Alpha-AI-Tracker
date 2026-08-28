@@ -231,13 +231,26 @@ All endpoints are under `/api/v1`. Full route inventory (~46 routes):
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/employees` | List employees (paginated, filterable, JOIN department) |
-| GET | `/employees/:id` | Get employee by ID |
+| GET | `/employees` | List employees (paginated, filterable, JOIN department; every row projects `hasUserLogin` — see below) |
+| GET | `/employees/:id` | Get employee by ID (with `hasUserLogin`) |
 | GET | `/employees/:id/detail` | Aggregate machine picture (hardware, storage, network, apps, packages, peripherals, permissions, stats) |
-| POST | `/employees` | Create employee |
-| PUT | `/employees/:id` | Update employee |
+| POST | `/employees` | Create employee (RETURNING includes `hasUserLogin`) |
+| PUT | `/employees/:id` | Update employee (RETURNING includes `hasUserLogin`) |
 | DELETE | `/employees/:id` | Soft-delete employee |
 | POST | `/employees/:id/generate-secret` | Generate one-time secret → Redis (5-min TTL) |
+
+> **`hasUserLogin` projection (2026-08-28).** Every employee SELECT path
+> (`List`, `GetByID`, `GetByEmployeeID`, `GetByEmail`, `ListAll`, `Create` and `Update`
+> `RETURNING`, and the `scanEmployeeRow` helper) adds
+> `EXISTS(SELECT 1 FROM users u WHERE u.employee_id = e.employee_id AND u.deleted_at IS NULL) AS has_user_login`
+> to the projection. The probe runs against the UNIQUE `users.employee_id` index
+> — it does **not** scan the `users` table. The cost is one indexed lookup per
+> page row (10/page by default), so it stays O(1) regardless of the total
+> employee or user count. The web employees page uses this flag to hide the
+> "Login Credential" dropdown item for employees who already have a login
+> account, and the employees `updateMutation` uses `updated.hasUserLogin` from
+> `PUT /employees/:id` to decide whether to propagate the name/email change to
+> the linked user — no extra round-trips, no client-side maps.
 
 ### Departments (Protected)
 
