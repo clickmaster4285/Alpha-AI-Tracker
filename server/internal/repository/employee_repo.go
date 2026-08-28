@@ -291,8 +291,8 @@ func (r *EmployeeRepo) ListAll(ctx context.Context) ([]models.Employee, error) {
 
 // ImportEmployeeItem is a single employee row to import (upsert by employee_id).
 // `Shift` is the human-readable name from the spreadsheet; the importer
-// resolves it to shift_id via the shifts catalog (best-effort; empty
-// means "Day Shift" fallback, no match means NULL).
+// resolves it to shift_id via the shifts catalog (best-effort; empty or
+// unknown → NULL — no hardcoded default).
 type ImportEmployeeItem struct {
 	EmployeeID string
 	Name       string
@@ -337,12 +337,16 @@ func (r *EmployeeRepo) Import(ctx context.Context, items []ImportEmployeeItem) (
 	}
 
 	// Resolve every referenced shift once (by name, case-insensitive).
-	// An empty string falls back to "Day Shift" (the seeded default).
+	// An empty cell or a name that doesn't match any non-deleted shift row
+	// leaves the assignment NULL. We deliberately do NOT fall back to any
+	// hardcoded shift name — the shifts catalog is the single source of
+	// truth (No-Hardcoded-Names Rule, AGENTS.md §6).
 	shiftIDs := make(map[string]int)
 	for _, it := range items {
 		name := strings.TrimSpace(it.Shift)
 		if name == "" {
-			name = "Day Shift"
+			// Empty cell → no assignment. Skip the catalog lookup.
+			continue
 		}
 		if _, ok := shiftIDs[name]; ok {
 			continue
@@ -383,15 +387,17 @@ func (r *EmployeeRepo) Import(ctx context.Context, items []ImportEmployeeItem) (
 			}
 		}
 
+		// An empty shift cell or an unknown shift name → no assignment
+		// (NULL). We never substitute a hardcoded fallback here — the
+		// shifts catalog is the single source of truth.
 		shiftName := strings.TrimSpace(it.Shift)
-		if shiftName == "" {
-			shiftName = "Day Shift"
-		}
 		var shiftID interface{}
-		if id, ok := shiftIDs[shiftName]; ok && id > 0 {
-			shiftID = id
-		} else {
-			shiftID = nil // unknown shift name → no assignment
+		if shiftName != "" {
+			if id, ok := shiftIDs[shiftName]; ok && id > 0 {
+				shiftID = id
+			}
+			// else: unknown name (already recorded with id=0 in the map)
+			// → shiftID stays nil.
 		}
 
 		// xmax=0 → freshly inserted; xmax≠0 → updated by ON CONFLICT.
