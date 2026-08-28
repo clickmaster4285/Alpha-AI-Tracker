@@ -73,14 +73,16 @@ func main() {
 	monitoringRepo := repository.NewMonitoringRepo(pool)
 	rbacRepo := repository.NewRBACRepo(pool)
 	refreshTokenRepo := repository.NewRefreshTokenRepo(pool)
+	shiftRepo := repository.NewShiftRepo(pool)
 
 	authService := services.NewAuthService(userRepo, rbacRepo, refreshTokenRepo, cfg.JWT, cfg.Admin)
 	userService := services.NewUserService(userRepo, rbacRepo, employeeRepo)
-	employeeService := services.NewEmployeeService(employeeRepo, redisClient)
+	employeeService := services.NewEmployeeService(employeeRepo, shiftRepo, redisClient)
 	departmentService := services.NewDepartmentService(departmentRepo, employeeRepo)
 	newSchemaService := services.NewNewSchemaService(newSchemaRepo, employeeRepo)
 	monitoringService := services.NewMonitoringService(monitoringRepo)
 	rbacService := services.NewRBACService(rbacRepo)
+	shiftService := services.NewShiftService(shiftRepo)
 
 	// Cast Redis client to interface
 	var redisInterface services.RedisClientInterface
@@ -95,6 +97,7 @@ func main() {
 	newSchemaHandler := handlers.NewNewSchemaHandler(newSchemaService, authService)
 	monitoringHandler := handlers.NewMonitoringHandler(monitoringService)
 	rbacHandler := handlers.NewRBACHandler(rbacService)
+	shiftHandler := handlers.NewShiftHandler(shiftService)
 
 	// ────────────────
 	// Seed RBAC catalog (modules, submodules, system role) — idempotent
@@ -130,7 +133,7 @@ func main() {
 	e.HideBanner = true
 	e.HidePort = true
 
-	router.Setup(e, cfg, authService, deviceRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler, rbacHandler)
+	router.Setup(e, cfg, authService, deviceRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler, rbacHandler, shiftHandler)
 
 	// ────────────────
 	// Graceful Shutdown

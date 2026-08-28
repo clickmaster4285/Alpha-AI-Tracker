@@ -3,6 +3,10 @@ package models
 import "time"
 
 // Employee represents a tracked employee in the system.
+//
+// Shift is the resolved shift name (denormalized at read time via LEFT JOIN
+// shifts; see migration 027_shifts.sql). ShiftID is the FK that is the sole
+// source of truth for the assignment — Shift is what the API surface carries.
 type Employee struct {
 	ID              string    `json:"id" db:"id"`
 	EmployeeID      string    `json:"employeeId" db:"employee_id"`
@@ -10,6 +14,7 @@ type Employee struct {
 	Email           string    `json:"email" db:"email"`
 	Department      string    `json:"department"`
 	DepartmentID    int       `json:"departmentId" db:"department_id"`
+	ShiftID         *int      `json:"shiftId" db:"shift_id"`
 	Shift           string    `json:"shift" db:"shift"`
 	TrackingEnabled bool      `json:"trackingEnabled" db:"tracking_enabled"`
 	TrackingStatus  string    `json:"trackingStatus" db:"tracking_status"`
@@ -33,6 +38,7 @@ type EmployeePublic struct {
 	Email           string    `json:"email"`
 	Department      string    `json:"department"`
 	DepartmentID    int       `json:"departmentId"`
+	ShiftID         *int      `json:"shiftId"`
 	Shift           string    `json:"shift"`
 	TrackingEnabled bool      `json:"trackingEnabled"`
 	TrackingStatus  string    `json:"trackingStatus"`
@@ -52,6 +58,7 @@ func (e *Employee) ToPublic() EmployeePublic {
 		Email:           e.Email,
 		Department:      e.Department,
 		DepartmentID:    e.DepartmentID,
+		ShiftID:         e.ShiftID,
 		Shift:           e.Shift,
 		TrackingEnabled: e.TrackingEnabled,
 		TrackingStatus:  e.TrackingStatus,
