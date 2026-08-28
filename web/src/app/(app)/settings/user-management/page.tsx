@@ -223,12 +223,13 @@ function UserManagementInner() {
             className="w-full border border-border rounded-lg pl-9 pr-3 py-2 text-sm bg-card text-foreground placeholder:text-muted-foreground"
           />
         </div>
-        <button
+        {/* user cann't create mannully, user create only through employee navigation */}
+        {/* <button
           onClick={() => setShowDialog(true)}
           className="gradient-primary text-primary-foreground px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 hover:opacity-90 self-start sm:self-auto"
         >
           <Plus className="w-4 h-4" /> Add User
-        </button>
+        </button> */}
       </div>
 
       <UsersTable search={search} />
