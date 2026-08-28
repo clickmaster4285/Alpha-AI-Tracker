@@ -298,7 +298,7 @@ export default function ProfilePage() {
   // catalog by the server). When the admin has no employee link, we fall back
   // to the admin user's own `shift` field (a separate `users.shift` column —
   // out of scope for this task).
-  const displayShift = emp?.shift || me.shift;
+  const displayShift = emp?.shift;
 
   const grantedModuleCount = perms.modules.filter(m => perms.isSystemAdmin || m.grantedCount > 0).length;
   const totalModuleCount = perms.modules.length;
