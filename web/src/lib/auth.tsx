@@ -4,6 +4,7 @@ import React, { createContext, useContext, useEffect, ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAppDispatch, useAppSelector } from './store/hooks';
 import { checkAuth, loginUser, logoutUser, clearError } from './store/redux';
+import { useQueryClient } from '@/components/providers';
 
 export type UserRole = 'super_admin' | 'org_admin' | 'hr_admin' | 'manager' | 'employee' | 'security_analyst' | 'it_admin' | 'auditor' | 'company_admin';
 
@@ -92,7 +93,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  const queryClient = useQueryClient();
+
   const logout = () => {
+    queryClient.clear();
     dispatch(logoutUser());
     router.replace('/login');
   };
