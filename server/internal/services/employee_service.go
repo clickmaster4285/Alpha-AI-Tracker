@@ -16,12 +16,15 @@ import (
 // EmployeeService handles business logic for employee operations.
 type EmployeeService struct {
 	repo        *repository.EmployeeRepo
+	shiftRepo   *repository.ShiftRepo
 	redisClient *goredis.Client
 }
 
-// NewEmployeeService creates a new EmployeeService.
-func NewEmployeeService(repo *repository.EmployeeRepo, redisClient *goredis.Client) *EmployeeService {
-	return &EmployeeService{repo: repo, redisClient: redisClient}
+// NewEmployeeService creates a new EmployeeService. The shiftRepo is used
+// only to look up the default "Day Shift" id when a create request omits
+// shiftId; nil is tolerated (the create path then stores shift_id NULL).
+func NewEmployeeService(repo *repository.EmployeeRepo, shiftRepo *repository.ShiftRepo, redisClient *goredis.Client) *EmployeeService {
+	return &EmployeeService{repo: repo, shiftRepo: shiftRepo, redisClient: redisClient}
 }
 
 // List returns a paginated list of employees.
@@ -76,10 +79,13 @@ func (s *EmployeeService) Create(ctx context.Context, req *dto.CreateEmployeeReq
 		return nil, fmt.Errorf("generate employee id: %w", err)
 	}
 
-	shift := req.Shift
-	if shift == "" {
-		shift = "Day"
+	// Resolve the shift assignment. nil → "no shift" (renders empty in UI).
+	// An explicit 0 (rare) is treated as nil.
+	var shiftID *int
+	if req.ShiftID != nil && *req.ShiftID > 0 {
+		shiftID = req.ShiftID
 	}
+
 	deptID := req.DepartmentID
 	if deptID == 0 {
 		deptID = 1 // Default to Engineering (ID 1)
@@ -93,7 +99,7 @@ func (s *EmployeeService) Create(ctx context.Context, req *dto.CreateEmployeeReq
 		Name:            req.Name,
 		Email:           req.Email,
 		DepartmentID:    deptID,
-		Shift:           shift,
+		ShiftID:         shiftID,
 		TrackingEnabled: true,
 		TrackingStatus:  "untracked",
 		IsOnline:        false,
@@ -129,8 +135,13 @@ func (s *EmployeeService) Update(ctx context.Context, id string, req *dto.Update
 	if req.DepartmentID != nil {
 		updates["department_id"] = *req.DepartmentID
 	}
-	if req.Shift != nil {
-		updates["shift"] = *req.Shift
+	if req.ShiftID != nil {
+		// Accept 0 / negative as "clear" (NULL); positive as the FK.
+		if *req.ShiftID > 0 {
+			updates["shift_id"] = *req.ShiftID
+		} else {
+			updates["shift_id"] = nil
+		}
 	}
 	if req.TrackingEnabled != nil {
 		updates["tracking_enabled"] = *req.TrackingEnabled
@@ -317,6 +328,7 @@ func employeeToResponse(e *models.Employee) dto.EmployeeResponse {
 		Email:           e.Email,
 		Department:      e.Department,
 		DepartmentID:    e.DepartmentID,
+		ShiftID:         e.ShiftID,
 		Shift:           e.Shift,
 		TrackingEnabled: e.TrackingEnabled,
 		TrackingStatus:  e.TrackingStatus,

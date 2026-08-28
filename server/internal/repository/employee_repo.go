@@ -91,7 +91,7 @@ func (r *EmployeeRepo) List(ctx context.Context, params EmployeeListParams) (*Em
 	query := fmt.Sprintf(`
 		SELECT e.id, e.employee_id, e.name, e.email,
 		       COALESCE(d.name, '') AS department,
-		       e.department_id, e.shift,
+		       e.department_id, e.shift_id, COALESCE(s.name, '') AS shift,
 		       e.tracking_enabled, e.tracking_status, e.is_online,
 		           COALESCE(e.avatar, '') AS avatar, COALESCE(e.avatar_color, '') AS avatar_color,
 		       e.created_at, e.updated_at, e.deleted_at,
@@ -100,6 +100,7 @@ func (r *EmployeeRepo) List(ctx context.Context, params EmployeeListParams) (*Em
 		                AND u.deleted_at IS NULL) AS has_user_login
 		FROM employees e
 		LEFT JOIN departments d ON e.department_id = d.id
+		LEFT JOIN shifts s ON s.id = e.shift_id AND s.deleted_at IS NULL
 		%s
 		ORDER BY e.created_at DESC, e.id DESC
 		LIMIT $%d OFFSET $%d
@@ -117,7 +118,7 @@ func (r *EmployeeRepo) List(ctx context.Context, params EmployeeListParams) (*Em
 		var e models.Employee
 		if err := rows.Scan(
 			&e.ID, &e.EmployeeID, &e.Name, &e.Email,
-			&e.Department, &e.DepartmentID, &e.Shift,
+			&e.Department, &e.DepartmentID, &e.ShiftID, &e.Shift,
 			&e.TrackingEnabled, &e.TrackingStatus, &e.IsOnline,
 			&e.Avatar, &e.AvatarColor,
 			&e.CreatedAt, &e.UpdatedAt, &e.DeletedAt,
@@ -150,7 +151,7 @@ func (r *EmployeeRepo) GetByID(ctx context.Context, id string) (*models.Employee
 	return r.getByID(ctx, `
 		SELECT e.id, e.employee_id, e.name, e.email,
 		       COALESCE(d.name, '') AS department,
-		       e.department_id, e.shift,
+		       e.department_id, e.shift_id, COALESCE(s.name, '') AS shift,
 		       e.tracking_enabled, e.tracking_status, e.is_online,
 		           COALESCE(e.avatar, '') AS avatar, COALESCE(e.avatar_color, '') AS avatar_color,
 		       e.created_at, e.updated_at, e.deleted_at,
@@ -159,6 +160,7 @@ func (r *EmployeeRepo) GetByID(ctx context.Context, id string) (*models.Employee
 		                AND u.deleted_at IS NULL) AS has_user_login
 		FROM employees e
 		LEFT JOIN departments d ON e.department_id = d.id
+		LEFT JOIN shifts s ON s.id = e.shift_id AND s.deleted_at IS NULL
 		WHERE e.id = $1 AND e.deleted_at IS NULL
 	`, id)
 }
@@ -168,7 +170,7 @@ func (r *EmployeeRepo) GetByEmployeeID(ctx context.Context, employeeID string) (
 	return r.getByID(ctx, `
 		SELECT e.id, e.employee_id, e.name, e.email,
 		       COALESCE(d.name, '') AS department,
-		       e.department_id, e.shift,
+		       e.department_id, e.shift_id, COALESCE(s.name, '') AS shift,
 		       e.tracking_enabled, e.tracking_status, e.is_online,
 		           COALESCE(e.avatar, '') AS avatar, COALESCE(e.avatar_color, '') AS avatar_color,
 		       e.created_at, e.updated_at, e.deleted_at,
@@ -177,6 +179,7 @@ func (r *EmployeeRepo) GetByEmployeeID(ctx context.Context, employeeID string) (
 		                AND u.deleted_at IS NULL) AS has_user_login
 		FROM employees e
 		LEFT JOIN departments d ON e.department_id = d.id
+		LEFT JOIN shifts s ON s.id = e.shift_id AND s.deleted_at IS NULL
 		WHERE e.employee_id = $1 AND e.deleted_at IS NULL
 	`, employeeID)
 }
@@ -186,7 +189,7 @@ func (r *EmployeeRepo) GetByEmail(ctx context.Context, email string) (*models.Em
 	return r.getByID(ctx, `
 		SELECT e.id, e.employee_id, e.name, e.email,
 		       COALESCE(d.name, '') AS department,
-		       e.department_id, e.shift,
+		       e.department_id, e.shift_id, COALESCE(s.name, '') AS shift,
 		       e.tracking_enabled, e.tracking_status, e.is_online,
 		           COALESCE(e.avatar, '') AS avatar, COALESCE(e.avatar_color, '') AS avatar_color,
 		       e.created_at, e.updated_at, e.deleted_at,
@@ -195,6 +198,7 @@ func (r *EmployeeRepo) GetByEmail(ctx context.Context, email string) (*models.Em
 		                AND u.deleted_at IS NULL) AS has_user_login
 		FROM employees e
 		LEFT JOIN departments d ON e.department_id = d.id
+		LEFT JOIN shifts s ON s.id = e.shift_id AND s.deleted_at IS NULL
 		WHERE e.email = $1 AND e.deleted_at IS NULL
 	`, email)
 }
@@ -209,12 +213,12 @@ func (r *EmployeeRepo) Create(ctx context.Context, e *models.Employee) (*models.
 	defer tx.Rollback(ctx)
 
 	query := `
-		INSERT INTO employees (employee_id, name, email, department_id, shift,
+		INSERT INTO employees (employee_id, name, email, department_id, shift_id,
 		                       tracking_enabled, tracking_status, is_online)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id, employee_id, name, email,
 		          COALESCE((SELECT name FROM departments WHERE id = $4), '') AS department,
-		          $4 AS department_id, shift,
+		          $4 AS department_id, shift_id, COALESCE((SELECT name FROM shifts WHERE id = employees.shift_id AND deleted_at IS NULL), '') AS shift,
 		          tracking_enabled, tracking_status, is_online,
 		          COALESCE(avatar, '') AS avatar, COALESCE(avatar_color, '') AS avatar_color,
 		          created_at, updated_at, deleted_at,
@@ -223,7 +227,7 @@ func (r *EmployeeRepo) Create(ctx context.Context, e *models.Employee) (*models.
 		                   AND u.deleted_at IS NULL) AS has_user_login
 	`
 	emp, err := execGetByID(ctx, tx, query,
-		e.EmployeeID, e.Name, e.Email, e.DepartmentID, e.Shift,
+		e.EmployeeID, e.Name, e.Email, e.DepartmentID, e.ShiftID,
 		e.TrackingEnabled, e.TrackingStatus, e.IsOnline,
 	)
 	if err != nil {
@@ -245,7 +249,7 @@ func (r *EmployeeRepo) ListAll(ctx context.Context) ([]models.Employee, error) {
 	query := `
 		SELECT e.id, e.employee_id, e.name, e.email,
 		       COALESCE(d.name, '') AS department,
-		       e.department_id, e.shift,
+		       e.department_id, e.shift_id, COALESCE(s.name, '') AS shift,
 		       e.tracking_enabled, e.tracking_status, e.is_online,
 		           COALESCE(e.avatar, '') AS avatar, COALESCE(e.avatar_color, '') AS avatar_color,
 		       e.created_at, e.updated_at, e.deleted_at,
@@ -254,6 +258,7 @@ func (r *EmployeeRepo) ListAll(ctx context.Context) ([]models.Employee, error) {
 		                AND u.deleted_at IS NULL) AS has_user_login
 		FROM employees e
 		LEFT JOIN departments d ON e.department_id = d.id
+		LEFT JOIN shifts s ON s.id = e.shift_id AND s.deleted_at IS NULL
 		WHERE e.deleted_at IS NULL
 		ORDER BY e.name ASC
 	`
@@ -268,7 +273,7 @@ func (r *EmployeeRepo) ListAll(ctx context.Context) ([]models.Employee, error) {
 		var e models.Employee
 		if err := rows.Scan(
 			&e.ID, &e.EmployeeID, &e.Name, &e.Email,
-			&e.Department, &e.DepartmentID, &e.Shift,
+			&e.Department, &e.DepartmentID, &e.ShiftID, &e.Shift,
 			&e.TrackingEnabled, &e.TrackingStatus, &e.IsOnline,
 			&e.Avatar, &e.AvatarColor,
 			&e.CreatedAt, &e.UpdatedAt, &e.DeletedAt,
@@ -285,6 +290,9 @@ func (r *EmployeeRepo) ListAll(ctx context.Context) ([]models.Employee, error) {
 }
 
 // ImportEmployeeItem is a single employee row to import (upsert by employee_id).
+// `Shift` is the human-readable name from the spreadsheet; the importer
+// resolves it to shift_id via the shifts catalog (best-effort; empty or
+// unknown → NULL — no hardcoded default).
 type ImportEmployeeItem struct {
 	EmployeeID string
 	Name       string
@@ -300,9 +308,10 @@ type ImportOutcome struct {
 }
 
 // Import upserts employees in ONE transaction: departments are get-or-created
-// (a missing name is created first, then attached via department_id) and every
-// row is upserted by its exact employee_id. Soft-deleted employees/departments
-// are revived so an Excel re-import is idempotent.
+// (a missing name is created first, then attached via department_id), shifts
+// are resolved by name (a missing name keeps the default), and every row is
+// upserted by its exact employee_id. Soft-deleted employees/departments are
+// revived so an Excel re-import is idempotent.
 func (r *EmployeeRepo) Import(ctx context.Context, items []ImportEmployeeItem) ([]ImportOutcome, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -327,6 +336,36 @@ func (r *EmployeeRepo) Import(ctx context.Context, items []ImportEmployeeItem) (
 		deptIDs[name] = id
 	}
 
+	// Resolve every referenced shift once (by name, case-insensitive).
+	// An empty cell or a name that doesn't match any non-deleted shift row
+	// leaves the assignment NULL. We deliberately do NOT fall back to any
+	// hardcoded shift name — the shifts catalog is the single source of
+	// truth (No-Hardcoded-Names Rule, AGENTS.md §6).
+	shiftIDs := make(map[string]int)
+	for _, it := range items {
+		name := strings.TrimSpace(it.Shift)
+		if name == "" {
+			// Empty cell → no assignment. Skip the catalog lookup.
+			continue
+		}
+		if _, ok := shiftIDs[name]; ok {
+			continue
+		}
+		var id int
+		err := tx.QueryRow(ctx,
+			"SELECT id FROM shifts WHERE LOWER(name) = LOWER($1) AND deleted_at IS NULL", name,
+		).Scan(&id)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				// Unknown shift name → leave the assignment NULL.
+				shiftIDs[name] = 0
+				continue
+			}
+			return nil, fmt.Errorf("resolve shift %q: %w", name, err)
+		}
+		shiftIDs[name] = id
+	}
+
 	outcomes := make([]ImportOutcome, len(items))
 	for i, it := range items {
 		deptName := strings.TrimSpace(it.Department)
@@ -348,26 +387,34 @@ func (r *EmployeeRepo) Import(ctx context.Context, items []ImportEmployeeItem) (
 			}
 		}
 
-		shift := it.Shift
-		if shift == "" {
-			shift = "Day"
+		// An empty shift cell or an unknown shift name → no assignment
+		// (NULL). We never substitute a hardcoded fallback here — the
+		// shifts catalog is the single source of truth.
+		shiftName := strings.TrimSpace(it.Shift)
+		var shiftID interface{}
+		if shiftName != "" {
+			if id, ok := shiftIDs[shiftName]; ok && id > 0 {
+				shiftID = id
+			}
+			// else: unknown name (already recorded with id=0 in the map)
+			// → shiftID stays nil.
 		}
 
 		// xmax=0 → freshly inserted; xmax≠0 → updated by ON CONFLICT.
 		var inserted bool
 		err = tx.QueryRow(ctx, `
-			INSERT INTO employees (employee_id, name, email, department_id, shift,
+			INSERT INTO employees (employee_id, name, email, department_id, shift_id,
 			                       tracking_enabled, tracking_status, is_online)
 			VALUES ($1, $2, $3, $4, $5, true, 'untracked', false)
 			ON CONFLICT (employee_id) DO UPDATE SET
 				name = EXCLUDED.name,
 				email = EXCLUDED.email,
 				department_id = EXCLUDED.department_id,
-				shift = EXCLUDED.shift,
+				shift_id = EXCLUDED.shift_id,
 				deleted_at = NULL,
 				updated_at = NOW()
 			RETURNING (xmax = 0) AS inserted
-		`, it.EmployeeID, it.Name, it.Email, deptIDs[deptName], shift).Scan(&inserted)
+		`, it.EmployeeID, it.Name, it.Email, deptIDs[deptName], shiftID).Scan(&inserted)
 		if err != nil {
 			if isDuplicateKeyError(err) {
 				outcomes[i] = ImportOutcome{Status: "skipped", Reason: "duplicate record"}
@@ -443,7 +490,8 @@ func (r *EmployeeRepo) Update(ctx context.Context, id string, updates map[string
 	allowedFields := map[string]string{
 		"name": "name", "email": "email",
 		"department_id": "department_id",
-		"shift": "shift", "tracking_enabled": "tracking_enabled",
+		"shift_id": "shift_id",
+		"tracking_enabled": "tracking_enabled",
 		"tracking_status": "tracking_status", "is_online": "is_online",
 	}
 
@@ -466,7 +514,7 @@ func (r *EmployeeRepo) Update(ctx context.Context, id string, updates map[string
 		WHERE id = $1 AND deleted_at IS NULL
 		RETURNING id, employee_id, name, email,
 		          COALESCE((SELECT name FROM departments WHERE id = employees.department_id), '') AS department,
-		          department_id, shift,
+		          department_id, shift_id, COALESCE((SELECT name FROM shifts WHERE id = employees.shift_id AND deleted_at IS NULL), '') AS shift,
 		          tracking_enabled, tracking_status, is_online,
 		          COALESCE(avatar, '') AS avatar, COALESCE(avatar_color, '') AS avatar_color,
 		          created_at, updated_at, deleted_at,
@@ -549,7 +597,7 @@ func scanEmployeeRow(rows pgx.Rows) (*models.Employee, error) {
 		var e models.Employee
 		err := row.Scan(
 			&e.ID, &e.EmployeeID, &e.Name, &e.Email,
-			&e.Department, &e.DepartmentID, &e.Shift,
+			&e.Department, &e.DepartmentID, &e.ShiftID, &e.Shift,
 			&e.TrackingEnabled, &e.TrackingStatus, &e.IsOnline,
 			&e.Avatar, &e.AvatarColor,
 			&e.CreatedAt, &e.UpdatedAt, &e.DeletedAt,

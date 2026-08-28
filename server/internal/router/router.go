@@ -23,6 +23,7 @@ func Setup(
 	newSchemaHandler *handlers.NewSchemaHandler,
 	monitoringHandler *handlers.MonitoringHandler,
 	rbacHandler *handlers.RBACHandler,
+	shiftHandler *handlers.ShiftHandler,
 ) {
 	// ─────────────────────────────
 	// Global Middleware
@@ -168,4 +169,13 @@ func Setup(
 	rolesGroup.POST("", rbacHandler.CreateRole)
 	rolesGroup.PUT("/:id", rbacHandler.UpdateRole)
 	rolesGroup.DELETE("/:id", rbacHandler.DeleteRole)
+
+	// Shifts: catalog CRUD + dropdown list (the /api/v1/shifts/all endpoint
+	// feeds the employee-form and self-service-profile dropdowns).
+	shifts := protected.Group("/shifts")
+	shifts.GET("", shiftHandler.ListShifts)
+	shifts.GET("/all", shiftHandler.ListAllShifts)
+	shifts.POST("", shiftHandler.CreateShift)
+	shifts.PUT("/:id", shiftHandler.UpdateShift)
+	shifts.DELETE("/:id", shiftHandler.DeleteShift)
 }

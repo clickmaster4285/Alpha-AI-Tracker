@@ -292,6 +292,14 @@ export default function ProfilePage() {
   const emp = profile.employee;
   const perms = profile.permissions;
 
+  // The /settings/profile page is the employee-self-service surface: when the
+  // logged-in admin user is linked to an employee record (`profile.employee`),
+  // the shift is the employee's resolved shift name (joined from the shifts
+  // catalog by the server). When the admin has no employee link, we fall back
+  // to the admin user's own `shift` field (a separate `users.shift` column —
+  // out of scope for this task).
+  const displayShift = emp?.shift;
+
   const grantedModuleCount = perms.modules.filter(m => perms.isSystemAdmin || m.grantedCount > 0).length;
   const totalModuleCount = perms.modules.length;
 
@@ -351,10 +359,10 @@ export default function ProfilePage() {
                   {emp.department}
                 </Badge>
               )}
-              {me.shift && (
+              {displayShift && (
                 <Badge variant="outline" className="font-normal">
                   <Briefcase className="w-3 h-3 mr-1.5" />
-                  Shift: {me.shift}
+                  Shift: {displayShift}
                 </Badge>
               )}
             </div>
@@ -407,7 +415,7 @@ export default function ProfilePage() {
             <InfoTile icon={Link2} label="Employee Link" value={me.employeeId} emptyText="Not linked" />
             <InfoTile icon={ShieldCheck} label="Role" value={role?.name ?? me.role} />
             <InfoTile icon={Building2} label="Department" value={emp?.department} emptyText="No department" />
-            <InfoTile icon={Briefcase} label="Shift" value={me.shift} emptyText="Unassigned" />
+            <InfoTile icon={Briefcase} label="Shift" value={displayShift} emptyText="Unassigned" />
           </div>
         </motion.section>
 

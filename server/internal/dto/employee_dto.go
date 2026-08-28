@@ -5,19 +5,23 @@ import "time"
 // ────────────────────────────────
 // Request DTOs
 // ────────────────────────────────// CreateEmployeeRequest is the payload for creating a new employee.
+// ShiftID is the FK to the shifts catalog (see migration 027_shifts.sql);
+// nil means "no shift assigned".
 type CreateEmployeeRequest struct {
 	Name         string `json:"name"`
 	Email        string `json:"email"`
 	DepartmentID int    `json:"departmentId"`
-	Shift        string `json:"shift,omitempty"`
+	ShiftID      *int   `json:"shiftId,omitempty"`
 }
 
 // UpdateEmployeeRequest is the payload for updating an employee.
+// A nil pointer means "leave the field as-is"; an explicit field with
+// null/absent values for ShiftID is handled by the partial-update map.
 type UpdateEmployeeRequest struct {
 	Name            *string `json:"name,omitempty"`
 	Email           *string `json:"email,omitempty"`
 	DepartmentID    *int    `json:"departmentId,omitempty"`
-	Shift           *string `json:"shift,omitempty"`
+	ShiftID         *int    `json:"shiftId,omitempty"`
 	TrackingEnabled *bool   `json:"trackingEnabled,omitempty"`
 	TrackingStatus  *string `json:"trackingStatus,omitempty"`
 	IsOnline        *bool   `json:"isOnline,omitempty"`
@@ -44,23 +48,26 @@ type GenerateSecretResponse struct {
 // ────────────────────────────────
 
 // EmployeeResponse is the public API response for an employee.
+// Shift is the resolved name (joined from shifts); ShiftID is the FK.
+// A NULL shift renders as an empty `shift` string and a null `shiftId`.
 type EmployeeResponse struct {
-	ID              string    `json:"id"`
-	EmployeeID      string    `json:"employeeId"`
-	Name            string    `json:"name"`
-	Email           string    `json:"email"`
-	Department      string    `json:"department"`
-	DepartmentID    int       `json:"departmentId"`
-	Shift           string    `json:"shift"`
-	TrackingEnabled bool      `json:"trackingEnabled"`
-	TrackingStatus  string    `json:"trackingStatus"`
-	IsOnline        bool      `json:"isOnline"`
-	Avatar          string    `json:"avatar"`
-	AvatarColor     string    `json:"avatarColor"`
-	HasUserLogin    bool      `json:"hasUserLogin"`
-	CreatedAt       time.Time    `json:"createdAt"`
-	UpdatedAt       time.Time    `json:"updatedAt"`
-	DeletedAt       *time.Time   `json:"deletedAt"`
+	ID              string      `json:"id"`
+	EmployeeID      string      `json:"employeeId"`
+	Name            string      `json:"name"`
+	Email           string      `json:"email"`
+	Department      string      `json:"department"`
+	DepartmentID    int         `json:"departmentId"`
+	ShiftID         *int        `json:"shiftId"`
+	Shift           string      `json:"shift"`
+	TrackingEnabled bool        `json:"trackingEnabled"`
+	TrackingStatus  string      `json:"trackingStatus"`
+	IsOnline        bool        `json:"isOnline"`
+	Avatar          string      `json:"avatar"`
+	AvatarColor     string      `json:"avatarColor"`
+	HasUserLogin    bool        `json:"hasUserLogin"`
+	CreatedAt       time.Time   `json:"createdAt"`
+	UpdatedAt       time.Time   `json:"updatedAt"`
+	DeletedAt       *time.Time  `json:"deletedAt"`
 }
 
 // EmployeeListResponse is a paginated list response.

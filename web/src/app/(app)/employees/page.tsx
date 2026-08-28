@@ -7,7 +7,7 @@ import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check, Eye, Monitor, Up
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import * as XLSX from 'xlsx';
-import { employeesApi, departmentsApi, usersApi, type Employee, type CreateEmployeePayload, type UpdateEmployeePayload, type ImportEmployeeRow, type ImportEmployeesResponse } from '@/lib/api';
+import { employeesApi, departmentsApi, usersApi, shiftsApi, type Employee, type CreateEmployeePayload, type UpdateEmployeePayload, type ImportEmployeeRow, type ImportEmployeesResponse, type Shift } from '@/lib/api';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import {
   DropdownMenu,
@@ -33,6 +33,8 @@ const HEADER_FIELD: Record<string, keyof ImportEmployeeRow> = {
   username: 'name',
   email: 'email',
   department: 'department',
+  shift: 'shift',
+  schedule: 'shift',
 };
 
 const normalizeHeader = (raw: string) =>
@@ -61,9 +63,11 @@ export default function UsersList() {
   const [newName, setNewName] = useState('');
   const [newEmail, setNewEmail] = useState('');
   const [newDeptId, setNewDeptId] = useState(1);
+  const [newShiftId, setNewShiftId] = useState<number | null>(null);
   const [editName, setEditName] = useState('');
   const [editEmail, setEditEmail] = useState('');
   const [editDeptId, setEditDeptId] = useState(1);
+  const [editShiftId, setEditShiftId] = useState<number | null>(null);
 
   // ── Queries ──
   // Server-side pagination with infinite scroll (same pattern as the Session
@@ -115,6 +119,16 @@ export default function UsersList() {
   });
 
   const departments = deptResponse?.departments || [];
+
+  // Shifts dropdown source — fetched once, used by both Add and Edit dialogs.
+  // Mirrors the departments query: listAll returns the full unpaged catalog.
+  const { data: shiftsResponse } = useQuery({
+    queryKey: ['shifts', 'all'],
+    queryFn: () => shiftsApi.listAll(),
+    staleTime: 60_000,
+  });
+
+  const shifts: Shift[] = shiftsResponse?.shifts || [];
 
   // hasUserLogin comes from the server (indexed EXISTS() per row) — no
   // client-side map or extra round-trips needed, and it scales with the
@@ -272,6 +286,7 @@ export default function UsersList() {
     setNewName('');
     setNewEmail('');
     setNewDeptId(1);
+    setNewShiftId(null);
   };
 
   const handleAdd = () => {
@@ -283,7 +298,7 @@ export default function UsersList() {
       name: newName,
       email: newEmail,
       departmentId: newDeptId,
-      shift: 'Day',
+      shiftId: newShiftId,
     });
   };
 
@@ -292,6 +307,7 @@ export default function UsersList() {
     setEditName(emp.name);
     setEditEmail(emp.email);
     setEditDeptId(emp.departmentId);
+    setEditShiftId(emp.shiftId);
   };
 
   const handleSaveEdit = (id: string) => {
@@ -301,6 +317,7 @@ export default function UsersList() {
         name: editName,
         email: editEmail,
         departmentId: editDeptId,
+        shiftId: editShiftId,
       },
     });
   };
@@ -448,7 +465,7 @@ export default function UsersList() {
         <table className="w-full min-w-[700px]">
           <thead>
             <tr className="border-b border-border">
-              {['Name', 'Employee ID', 'Email', 'Department', 'Status', 'Action'].map(h => (
+              {['Name', 'Employee ID', 'Email', 'Department', 'Shift', 'Status', 'Action'].map(h => (
                 <th key={h} className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground">{h}</th>
               ))}
             </tr>
@@ -456,7 +473,7 @@ export default function UsersList() {
           <tbody>
             {employees.length === 0 ? (
               <tr>
-                <td colSpan={6} className="text-center py-12 text-muted-foreground text-sm">
+                <td colSpan={7} className="text-center py-12 text-muted-foreground text-sm">
                   No employees found
                 </td>
               </tr>
@@ -487,6 +504,9 @@ export default function UsersList() {
                   <td className="px-4 py-3 text-sm font-mono font-medium text-foreground">{emp.employeeId}</td>
                   <td className="px-4 py-3 text-sm text-muted-foreground">{emp.email}</td>
                   <td className="px-4 py-3 text-sm text-foreground">{emp.department}</td>
+                  <td className="px-4 py-3 text-sm text-foreground">
+                    {emp.shift || <span className="text-muted-foreground/50 italic">Unassigned</span>}
+                  </td>
                   <td className="px-4 py-3">
                     <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${
                       emp.trackingStatus === 'tracked'
@@ -613,6 +633,18 @@ export default function UsersList() {
             >
               {departments.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
             </select>
+            <select
+              value={newShiftId ?? ''}
+              onChange={e => setNewShiftId(e.target.value === '' ? null : Number(e.target.value))}
+              className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
+            >
+              <option value="">No shift assigned</option>
+              {shifts.map(s => (
+                <option key={s.id} value={s.id}>
+                  {s.name} ({s.startTime}–{s.endTime})
+                </option>
+              ))}
+            </select>
             <button
               onClick={handleAdd}
               disabled={createMutation.isPending}
@@ -650,6 +682,18 @@ export default function UsersList() {
               className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
             >
               {departments.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+            </select>
+            <select
+              value={editShiftId ?? ''}
+              onChange={e => setEditShiftId(e.target.value === '' ? null : Number(e.target.value))}
+              className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
+            >
+              <option value="">No shift assigned</option>
+              {shifts.map(s => (
+                <option key={s.id} value={s.id}>
+                  {s.name} ({s.startTime}–{s.endTime})
+                </option>
+              ))}
             </select>
             <button
               onClick={() => showEdit && handleSaveEdit(showEdit)}
