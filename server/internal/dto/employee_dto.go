@@ -57,6 +57,7 @@ type EmployeeResponse struct {
 	IsOnline        bool      `json:"isOnline"`
 	Avatar          string    `json:"avatar"`
 	AvatarColor     string    `json:"avatarColor"`
+	HasUserLogin    bool      `json:"hasUserLogin"`
 	CreatedAt       time.Time    `json:"createdAt"`
 	UpdatedAt       time.Time    `json:"updatedAt"`
 	DeletedAt       *time.Time   `json:"deletedAt"`

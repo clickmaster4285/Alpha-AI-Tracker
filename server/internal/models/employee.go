@@ -19,6 +19,10 @@ type Employee struct {
 	CreatedAt       time.Time    `json:"createdAt" db:"created_at"`
 	UpdatedAt       time.Time    `json:"updatedAt" db:"updated_at"`
 	DeletedAt       *time.Time   `json:"deletedAt" db:"deleted_at"`
+	// HasUserLogin is true when a row in the `users` table exists for this
+	// employee's employee_id. Projected via EXISTS(…) so it costs one indexed
+	// probe per page row and scales to any number of employees.
+	HasUserLogin   bool      `json:"hasUserLogin" db:"has_user_login"`
 }
 
 // EmployeePublic is the public-facing employee info.

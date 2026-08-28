@@ -2,17 +2,23 @@
 
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { Plus, Loader2, Search, ShieldCheck } from 'lucide-react';
+import { Loader2, Search, ShieldCheck, Eye, EyeOff, Pencil } from 'lucide-react';
 import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { usersApi, rolesApi, type Role } from '@/lib/api';
+import { usersApi, rolesApi, employeesApi, type Role, type User, type UpdateUserPayload } from '@/lib/api';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 
 const PAGE_SIZE = 10;
 
 // ─── Users table (server-side infinite scroll) ───────────────────────────────
 
-function UsersTable({ search }: { search: string }) {
+function UsersTable({
+  search,
+  onEdit,
+}: {
+  search: string;
+  onEdit: (user: User) => void;
+}) {
   const sentinelRef = useRef<HTMLDivElement | null>(null);
 
   const query = useInfiniteQuery({
@@ -60,6 +66,7 @@ function UsersTable({ search }: { search: string }) {
                 <th className="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Role</th>
                 <th className="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Status</th>
                 <th className="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Created</th>
+                <th className="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground text-right">Action</th>
               </tr>
             </thead>
             <tbody>
@@ -100,11 +107,20 @@ function UsersTable({ search }: { search: string }) {
                     </span>
                   </td>
                   <td className="px-4 py-3 text-xs text-muted-foreground">{formatDate(u.createdAt)}</td>
+                  <td className="px-4 py-3 text-right">
+                    <button
+                      onClick={() => onEdit(u)}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium text-foreground hover:bg-muted transition-colors"
+                      aria-label={`Edit ${u.name}`}
+                    >
+                      <Pencil className="w-3.5 h-3.5" /> Edit
+                    </button>
+                  </td>
                 </tr>
               ))}
               {users.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="px-4 py-12 text-center text-sm text-muted-foreground">
+                  <td colSpan={7} className="px-4 py-12 text-center text-sm text-muted-foreground">
                     No users found{search ? ` for "${search}"` : ''}.
                   </td>
                 </tr>
@@ -160,11 +176,20 @@ function UserManagementInner() {
 
   const [search, setSearch] = useState('');
   const [showDialog, setShowDialog] = useState(false);
+  const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [employeeId, setEmployeeId] = useState('');
   const [roleId, setRoleId] = useState<string>('');
+  // When arriving from the employees page, fields are locked because they mirror
+  // the employee record; the same lock applies in edit mode (identity is fixed).
+  const [fieldsLocked, setFieldsLocked] = useState(false);
+  // Original user fetched in edit mode (for sync-on-save to the attached employee).
+  const [editingOriginalUser, setEditingOriginalUser] = useState<User | null>(null);
 
   const { data: rolesData } = useQuery({
     queryKey: ['roles'],
@@ -172,16 +197,74 @@ function UserManagementInner() {
   });
   const roles: Role[] = rolesData?.roles ?? [];
 
-  // Deep-link prefill: /settings/user-management?create=1&employeeId=&name=&email=
+  // Filter out the system "company_admin" role from the dropdown — it is a
+  // reserved role for the bootstrap admin and must not be assignable from this UI.
+  const assignableRoles = useMemo(
+    () => roles.filter(r => r.name !== 'company_admin'),
+    [roles],
+  );
+
+  // Deep-link prefill: two modes
+  //   ?create=1&employeeId=&name=&email=  → create user pre-filled from employee
+  //   ?edit=1&userId=                     → edit an existing user
   useEffect(() => {
     if (searchParams.get('create') === '1') {
       setName(searchParams.get('name') ?? '');
       setEmail(searchParams.get('email') ?? '');
       setEmployeeId(searchParams.get('employeeId') ?? '');
+      setPassword('');
+      setConfirmPassword('');
+      setShowPassword(false);
+      setShowConfirmPassword(false);
+      setRoleId('');
+      setEditingUserId(null);
+      setEditingOriginalUser(null);
+      setFieldsLocked(true); // name/email/employeeId are mirrors of the employee
       setShowDialog(true);
       router.replace('/settings/user-management');
+      return;
     }
+    if (searchParams.get('edit') === '1') {
+      const userId = searchParams.get('userId');
+      if (userId) {
+        openEditById(userId);
+        router.replace('/settings/user-management');
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams, router]);
+
+  // Fetch the user being edited so we have the original record to compare for sync.
+  const editTargetQuery = useQuery({
+    queryKey: ['user', editingUserId],
+    queryFn: () => usersApi.get(editingUserId!),
+    enabled: !!editingUserId,
+  });
+
+  useEffect(() => {
+    if (editingUserId && editTargetQuery.data) {
+      const u = editTargetQuery.data;
+      setName(u.name);
+      setEmail(u.email);
+      setEmployeeId(u.employeeId || '');
+      setRoleId(String(u.roleId));
+      setPassword('');
+      setConfirmPassword('');
+      setShowPassword(false);
+      setShowConfirmPassword(false);
+      setEditingOriginalUser(u);
+      setFieldsLocked(true); // identity is immutable on edit
+      setShowDialog(true);
+    }
+  }, [editingUserId, editTargetQuery.data]);
+
+  const openEditById = (userId: string) => {
+    setEditingUserId(userId);
+  };
+
+  const openEdit = (user: User) => {
+    openEditById(user.id);
+  };
 
   const createMutation = useMutation({
     mutationFn: () =>
@@ -194,6 +277,7 @@ function UserManagementInner() {
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['users'] });
+      queryClient.invalidateQueries({ queryKey: ['employees'] });
       toast.success('User created', { description: `${name} can now sign in to the dashboard.` });
       closeDialog();
     },
@@ -202,14 +286,107 @@ function UserManagementInner() {
     },
   });
 
+  const updateMutation = useMutation({
+    mutationFn: async (payload: { id: string; data: UpdateUserPayload }) => {
+      const updated = await usersApi.update(payload.id, payload.data);
+      // Sync identity changes to the attached employee record so the two
+      // surfaces never drift apart. EmployeeId is immutable (the lock prevents
+      // sending it), so we update by employeeId and only forward name/email.
+      if (editingOriginalUser?.employeeId && employeeId) {
+        const nameChanged = editingOriginalUser.name !== name;
+        const emailChanged = editingOriginalUser.email !== email;
+        if (nameChanged || emailChanged) {
+          try {
+            // Resolve the employee by their public employeeId (EMP-XXXXX) to
+            // get the UUID the employees API expects in the path.
+            const list = await employeesApi.list({ search: employeeId, perPage: 1 });
+            const emp = list.data.find(e => e.employeeId === employeeId);
+            if (emp) {
+              await employeesApi.update(emp.id, {
+                name: nameChanged ? name : undefined,
+                email: emailChanged ? email : undefined,
+              });
+            }
+          } catch (e) {
+            // Non-fatal: the user update succeeded; the employee sync failed.
+            toast.warning('Attached employee not synced', {
+              description: (e as Error).message,
+            });
+          }
+        }
+      }
+      return updated;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['users'] });
+      queryClient.invalidateQueries({ queryKey: ['employees'] });
+      toast.success('User updated', { description: 'Changes saved.' });
+      closeDialog();
+    },
+    onError: (err: Error) => {
+      toast.error('Failed to update user', { description: err.message });
+    },
+  });
+
   const closeDialog = () => {
     setShowDialog(false);
     setName('');
     setEmail('');
     setPassword('');
+    setConfirmPassword('');
+    setShowPassword(false);
+    setShowConfirmPassword(false);
     setEmployeeId('');
     setRoleId('');
+    setEditingUserId(null);
+    setEditingOriginalUser(null);
+    setFieldsLocked(false);
   };
+
+  const handleSave = () => {
+    if (!name.trim() || !email.trim()) {
+      toast.error('Validation error', { description: 'Name and email are required.' });
+      return;
+    }
+    if (!roleId) {
+      toast.error('Validation error', { description: 'Please select a role.' });
+      return;
+    }
+    if (editingUserId) {
+      // Edit mode: password is optional; confirm only if provided.
+      if (password || confirmPassword) {
+        if (password !== confirmPassword) {
+          toast.error('Validation error', { description: 'Passwords do not match.' });
+          return;
+        }
+        if (password.length < 6) {
+          toast.error('Validation error', { description: 'Password must be at least 6 characters.' });
+          return;
+        }
+      }
+      const data: UpdateUserPayload = { roleId: Number(roleId) };
+      if (password) data.password = password;
+      updateMutation.mutate({ id: editingUserId, data });
+    } else {
+      // Create mode: password is required (server allows default if empty, but
+      // we require a real password + confirm here for the employee-onboarding flow).
+      if (!password) {
+        toast.error('Validation error', { description: 'Password is required.' });
+        return;
+      }
+      if (password !== confirmPassword) {
+        toast.error('Validation error', { description: 'Passwords do not match.' });
+        return;
+      }
+      if (password.length < 6) {
+        toast.error('Validation error', { description: 'Password must be at least 6 characters.' });
+        return;
+      }
+      createMutation.mutate();
+    }
+  };
+
+  const dialogTitle = editingUserId ? 'Edit User' : 'Add User';
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -232,14 +409,23 @@ function UserManagementInner() {
         </button> */}
       </div>
 
-      <UsersTable search={search} />
+      <UsersTable search={search} onEdit={openEdit} />
 
-      {/* Create user dialog */}
+      {/* Create / Edit user dialog */}
       <Dialog open={showDialog} onOpenChange={open => { if (!open) closeDialog(); }}>
         <DialogContent className="bg-card max-w-lg">
           <DialogHeader>
-            <DialogTitle className="font-display">Add User</DialogTitle>
+            <DialogTitle className="font-display">{dialogTitle}</DialogTitle>
           </DialogHeader>
+
+          {fieldsLocked && (
+            <div className="mt-1 flex items-start gap-2 bg-muted/50 border border-border rounded-lg px-3 py-2 text-xs text-muted-foreground">
+              <ShieldCheck className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+              <span>
+                Name, email and employee ID are linked to the employee record and cannot be changed here.
+              </span>
+            </div>
+          )}
 
           <div className="space-y-3 mt-1">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -247,36 +433,75 @@ function UserManagementInner() {
                 value={name}
                 onChange={e => setName(e.target.value)}
                 placeholder="Full Name"
-                className="border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
+                readOnly={fieldsLocked}
+                disabled={fieldsLocked}
+                className="border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground read-only:bg-muted read-only:text-muted-foreground read-only:cursor-not-allowed disabled:opacity-70"
               />
               <input
                 value={email}
                 onChange={e => setEmail(e.target.value)}
                 type="email"
                 placeholder="Email"
-                className="border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
+                readOnly={fieldsLocked}
+                disabled={fieldsLocked}
+                className="border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground read-only:bg-muted read-only:text-muted-foreground read-only:cursor-not-allowed disabled:opacity-70"
               />
             </div>
-            <input
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              type="password"
-              placeholder="Password (leave empty for default)"
-              className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
-            />
+
+            <div className="relative">
+              <input
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                type={showPassword ? 'text' : 'password'}
+                placeholder={editingUserId ? 'New password (leave empty to keep current)' : 'Password'}
+                className="w-full border border-border rounded-lg pl-3 pr-10 py-2 text-sm bg-background text-foreground"
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword(s => !s)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-muted-foreground hover:text-foreground rounded transition-colors"
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
+                tabIndex={-1}
+              >
+                {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+
+            <div className="relative">
+              <input
+                value={confirmPassword}
+                onChange={e => setConfirmPassword(e.target.value)}
+                type={showConfirmPassword ? 'text' : 'password'}
+                placeholder="Confirm password"
+                className="w-full border border-border rounded-lg pl-3 pr-10 py-2 text-sm bg-background text-foreground"
+              />
+              <button
+                type="button"
+                onClick={() => setShowConfirmPassword(s => !s)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-muted-foreground hover:text-foreground rounded transition-colors"
+                aria-label={showConfirmPassword ? 'Hide confirm password' : 'Show confirm password'}
+                tabIndex={-1}
+              >
+                {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+
             <input
               value={employeeId}
               onChange={e => setEmployeeId(e.target.value)}
-              placeholder="Employee ID link (optional, e.g. EMP-00001)"
-              className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
+              placeholder="Employee ID link (e.g. EMP-00001)"
+              readOnly={fieldsLocked}
+              disabled={fieldsLocked}
+              className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground font-mono read-only:bg-muted read-only:text-muted-foreground read-only:cursor-not-allowed disabled:opacity-70"
             />
+
             <select
               value={roleId}
               onChange={e => setRoleId(e.target.value)}
               className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
             >
               <option value="">Select role...</option>
-              {roles.map(r => (
+              {assignableRoles.map(r => (
                 <option key={r.id} value={r.id}>
                   {roleLabel(r.name)}
                   {r.isSystem ? ' (full access)' : ''}
@@ -285,21 +510,17 @@ function UserManagementInner() {
             </select>
 
             <button
-              onClick={() => {
-                if (!name.trim() || !email.trim()) {
-                  toast.error('Validation error', { description: 'Name and email are required.' });
-                  return;
-                }
-                if (!roleId) {
-                  toast.error('Validation error', { description: 'Please select a role.' });
-                  return;
-                }
-                createMutation.mutate();
-              }}
-              disabled={createMutation.isPending}
+              onClick={handleSave}
+              disabled={createMutation.isPending || updateMutation.isPending}
               className="w-full gradient-primary text-primary-foreground py-2.5 rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-50"
             >
-              {createMutation.isPending ? 'Creating...' : 'Create User'}
+              {createMutation.isPending || updateMutation.isPending
+                ? editingUserId
+                  ? 'Saving...'
+                  : 'Creating...'
+                : editingUserId
+                ? 'Save Changes'
+                : 'Create User'}
             </button>
           </div>
         </DialogContent>
