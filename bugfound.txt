@@ -304,5 +304,52 @@ reliable enough that the .desktop file alone (created in Step 1) handles
 auto-start without needing the systemd service.
 
 ================================================================================
+  BUG #5 — Shift Management: Soft-Deleted Shift Names Block Re-Creation
+  Date Found: 2026-08-29
+  Environment: Web Dashboard (Shift Management page)
+================================================================================
+
+SEVERITY: MEDIUM
+AFFECTS: Web dashboard shift management CRUD
+
+DESCRIPTION:
+  When creating a shift, deleting it, then recreating a shift with the same
+  name, the server either rejects it or silently renames it — even though
+  the old shift is soft-deleted (deleted_at IS NOT NULL).
+
+  Steps to reproduce:
+    1. Create a shift named "morning" — succeeds
+    2. Delete the "morning" shift — soft-deleted (deleted_at set)
+    3. Create a new shift named "morning" — should succeed (old one is deleted)
+       BUT it either fails with a uniqueness error or the name is changed
+
+ROOT CAUSE:
+  The server-side UNIQUE constraint on the shift name column does NOT
+  exclude soft-deleted rows. The constraint is something like:
+
+    UNIQUE (name)  -- or  UNIQUE (name, deleted_at)
+
+  This means a soft-deleted row with name="morning" still occupies the
+  uniqueness slot, so a new INSERT with name="morning" violates the
+  constraint.
+
+  The correct behavior: only enforce uniqueness among NON-deleted rows.
+  This can be implemented as either:
+    a) A partial unique index:  CREATE UNIQUE INDEX ... WHERE deleted_at IS NULL
+    b) A unique constraint on (name, deleted_at) — but only if deleted_at
+       is always NULL for active rows (fragile, not recommended)
+
+EXPECTED BEHAVIOR:
+  After soft-deleting a shift, the name should be freed so a new shift
+  with the same name can be created without conflict.
+
+AFFECTED FILES:
+  - server/migrations/ (shift table UNIQUE constraint)
+  - server/internal/repository/new_schema_repo.go (shift CRUD)
+  - server/internal/handler/ (shift handler)
+  - web/src/app/(app)/settings/shift-management/page.tsx (UI)
+
+
+================================================================================
   END OF BUG REPORT
 ================================================================================
