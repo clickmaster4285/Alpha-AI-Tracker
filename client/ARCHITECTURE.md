@@ -848,3 +848,85 @@ into the UI thread.
 ⚠️ **Installers are not code-signed / checksum-verified** — the download is trusted over GitHub's TLS.
 Signing is a future hardening step (the Inno `.iss`, `build-deb.sh` and `build-dmg.sh` have no signing
 hooks yet).
+
+## 19. Time & Attendance (Phase 1 — client foundation)
+
+> Added 2026-08-28. Builds the client half of the **Time & Attendance** sidebar module. The web
+> dashboard (Phase 2) renders this data via new server endpoints. This section is the client
+> foundation only; it is fully transport-independent and ships behind `ALPHA_TA_ENABLED`.
+> See the repo-root `finalplan.txt` (§0–§15) for the authoritative build-order + rule audit.
+
+### Vocabulary (single source of truth, `Core/Models/SessionEvent.cs`)
+
+The `SessionEventTypes` static class is the ONE place every session_events `event_type` string
+lives on the client (finalplan R5). The Go server mirror is `server/internal/models/session_event.go`
+and the web mirror is `web/src/lib/eventTypes.ts`; a CI contract test asserts the three sets match.
+
+| Constant | event_type | Emitter |
+|---|---|---|
+| `PowerOn` | `power_on` | `LogCollectorService.StartTracking` + `SystemEventWatcher` boot |
+| `PowerOff` | `power_off` | `ShutdownSentinel` (SIGTERM / Ctrl+C / Avalonia exit / dispose) |
+| `Resume` | `resume` | `SystemEventWatcher` (UPower, SystemEvents resume) |
+| `OsLogin` | `os_login` | `SystemEventWatcher` (Windows SessionSwitch) |
+| `OsLogout` | `os_logout` | `SystemEventWatcher` (Windows SessionSwitch) |
+| `ScreenLock` | `screen_lock` | `SystemEventWatcher` (login1 / GNOME ScreenSaver / SessionSwitch) |
+| `ScreenUnlock` | `screen_unlock` | `SystemEventWatcher` (login1 / ScreenSaver / SessionSwitch) |
+| `TrackerLogin` | `tracker_login` | `LogCollectorService.StartTracking` |
+| `UiHidden` | `ui_hidden` | `App.axaml.cs` window.Closing (hide-to-tray) |
+| `IdleStart` | `idle_start` | `IdleDetector` (threshold crossing) |
+| `IdleEnd` | `idle_end` | `IdleDetector` (threshold crossing) |
+
+`Login` is kept as an `[Obsolete]` alias of `TrackerLogin` for back-compat with pre-2026-08-28 rows.
+
+### Services
+
+| Service | Type | Cadence | Purpose |
+|---|---|---|---|
+| `SessionEventRecorder` | `IEventRecorder` singleton | — | Single funnel for ALL session_events writes; 5 s dedup window (burst collapse) + hard 2 s write timeout |
+| `ShutdownSentinel` | hosted (FIRST in DI) | — | Writes `power_off` before the host stops; `ManualResetEventSlim` so `Program.cs` waits ≤3 s before disposing the store (R7) |
+| `SystemEventWatcher` | hosted | event-driven | Linux D-Bus (UPower / login1 / GNOME ScreenSaver), Windows `SystemEvents`, macOS stub; touches `ta_last_known_os_event_at` watermark |
+| `IdleDetector` | hosted | 30 s poll | OS idle source (Mutter.IdleMonitor / X11 / GetLastInputInfo); emits `idle_start`/`idle_end` crossings |
+| `ScheduleCacheService` | hosted | login + every 6 h | Mirrors `GET /api/v1/schedules/me` into local tables; graceful no-op on 404 until Phase 2 |
+| `LocalTimeSkewService` | hosted | 15 min | Measures client↔server clock skew from the HTTP Date header; stores per server URL; skips post-resume passes |
+| `AttendanceAggregator` | hosted | 5 min | Rolls up today's session-idle activity into `daily_attendance_cache` (arrival/departure/active/idle + status) |
+
+DI order (finalplan §3): `ShutdownSentinel` is registered FIRST so .NET stops it LAST — guaranteeing
+`power_off` is written while the SQLite singleton is still alive.
+
+### SQLite additions (made idempotent in `DatabaseSchema.CreateTableSql`)
+
+- `employee_schedule` (PK employee_id) — mirrored shift (timezone, weekly_pattern JSON, grace_minutes, validity).
+- `company_holidays` (PK holiday_date) — mirrored holiday calendar.
+- `daily_attendance_cache` (PK employee_id, work_date) — DERIVED, client-owned, NEVER sent to server.
+- `local_time_skew` (PK server_url) — per-server clock-skew measurement.
+- Indexes: `(event_type, event_at)` on session_events, `(employee_id, work_date)` on
+  `daily_attendance_cache` (finalplan S5).
+
+### Concurrency (finalplan R8 / BUG-9)
+
+With 6 hosted services hitting SQLite, the original single-connection `SemaphoreSlim(1,1)` would
+serialize everything and risk deadlock. `SqliteLogStore.InitializeAsync` now:
+1. enables `PRAGMA journal_mode=WAL;` + `synchronous=NORMAL` FIRST, then
+2. opens a second **ReadOnly** connection (`WithReadConnectionAsync`) for pure readers
+   (`AttendanceAggregator`, schedule/holiday/skew reads).
+
+Writers (collector, sync) still use the gated write connection; readers use the read connection, so
+collection never blocks aggregation and vice versa.
+
+### Feature flag & config
+
+| Key | Default | Meaning |
+|---|---|---|
+| `ALPHA_TA_ENABLED` | true | master switch; false parks SystemEventWatcher, IdleDetector, ScheduleCacheService, LocalTimeSkewService, AttendanceAggregator |
+| `ALPHA_IDLE_THRESHOLD_SEC` | 120 | seconds of no input before `idle_start` |
+| `ALPHA_IDLE_AWAY_THRESHOLD_SEC` | 600 | reserved for A.8 away classification |
+| `ALPHA_IDLE_POLL_SEC` | 30 | idle-source poll cadence |
+| `ALPHA_TA_LOCK_HYSTERESIS_SEC` | 30 | suppress re-locks within this window |
+
+### Phase 1 → Phase 2 handoff
+
+- **Server (Phase 2):** `GET /api/v1/schedules/me` (SVR-1), `GET /api/v1/server-time` (SVR-3),
+  `GET /api/v1/attendance/today|range` (SVR-4/5), and an extension to the `session-events/sync`
+  handler to accept the 5-min aggregate `{count, first_at, last_at}` payload (SVR-2, A.9/A.10).
+- **Web (Phase 2):** the `timesheets` / `attendance` / `hours-insights` pages (already declared in
+  the sidebar). `gps-location` stays **hidden** — no `module` permission key registered server-side.

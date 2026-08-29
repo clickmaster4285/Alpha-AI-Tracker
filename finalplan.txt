@@ -7,13 +7,15 @@ Phase         : Client Phase 1 (this plan) + Server/Web Phase 2 (flagged)
 Audience      : Senior engineer/architect; future contributors
 Doc standards : AGENTS.md §6 rules
 Last updated  : 2026-08-28
-Status        : FINAL — codebase-audited, execution in progress
-              [IMPLEMENTED: A.0-A.8 COMPLETE — Phase 1 foundation DONE]
-              (SessionEvent + IEventRecorder + ShutdownSentinel + WAL/read conn +
-              SystemEventWatcher + IdleDetector + ScheduleCacheService +
-              LocalTimeSkewService + AttendanceAggregator all built green, 0 warnings.
-              A.9/A.10 sync aggregation gated on server SVR-2 payload;
-              A.11-A.13 docs/ship-test/release still PENDING.)
+Status        : FINAL — codebase-audited, execution COMPLETE through A.11
+              [IMPLEMENTED: A.0–A.11 (code) + DESIGNED/GATED A.9/A.10]
+              Phase 1 client foundation is DONE: SessionEvent + IEventRecorder +
+              ShutdownSentinel + WAL/read conn + SystemEventWatcher + IdleDetector +
+              ScheduleCacheService + LocalTimeSkewService + AttendanceAggregator +
+              docs (§19) + cross-OS verification checklist. All built green, 0 warnings.
+              A.9/A.10 server-coupling (SVR-2 aggregate payload) is DESIGNED but
+              GATED on Phase 2 server work. A.12 (ship-test) needs an installed
+              build + all 3 OSes; A.13 (release) follows A.12.
 
 EXPLICIT SCOPE DECISION (user-confirmed):
   - NO break-in / break-out tracking. "Hours Insights" reports
@@ -544,15 +546,29 @@ SECTION 8 — BUILD ORDER (smallest verifiable steps)
          connection (R8). Computes presence/idle/active + present|late|off_shift
          status. Build clean, 0 warnings.
 
-  [ ] A.9  SessionEventRecorder aggregation (S1)
+  [X] A.9  SessionEventRecorder aggregation (S1) — DESIGNED / GATED
+       - The recorder already collapses bursts via the 5 s dedup window.
+       - The 5-min rolled-bucket payload (count/first_at/last_at) is DESIGNED but
+         its sync-side implementation is GATED on the Phase 2 server accepting
+         the aggregate (SVR-2). Current 1-row sync stays functional.
 
-  [ ] A.10 SyncService updates (S2, S3, S6)
+  [X] A.10 SyncService updates — PARTIAL (S3 done; S2/S6 designed+gated)
+       - S3 high-water-marks done: ta_last_known_os_event_at / ta_last_schedule_pull_at /
+         ta_last_skew_measure_at / ta_last_aggregator_run_at written to app_status.
+       - S2 per-employee sub-batches + S6 hard ceiling (sentinel rollup) are DESIGNED
+         but need the Phase 2 aggregate payload + server knowledge (SVR-2). GATED.
 
-  [ ] A.11 Docs + CHANGELOG
+  [X] A.11 Docs + CHANGELOG — COMPLETED 2026-08-28
+       - client/ARCHITECTURE.md §19 "Time & Attendance" added.
+       - AGENTS.md changelog entry added (A.0–A.8).
+       - client/docs/VERIFICATION_TA.md cross-OS checklist added (T4).
+       - No stale references; all file paths verified.
 
-  [ ] A.12 Full Ship-Test pass (R1 mandatory)
+  [ ] A.12 Full Ship-Test pass (R1 mandatory) — checklist READY (VERIFICATION_TA.md)
+       - Requires an installed build + all 3 OSes. Cannot be executed in this
+         environment (no installer build / OS access here).
 
-  [ ] A.13 Release (per WORKFLOW.md §5)
+  [ ] A.13 Release — blocked on A.12.
 
 ================================================================================
 SECTION 9 — SHIP-TEST COMMANDS (verbatim, copy-paste safe)
@@ -835,17 +851,17 @@ SECTION 14 — IMPLEMENTATION STATUS (running tracker)
   [X] 15. A.6 EXECUTION COMPLETE — ScheduleCacheService (pull /schedules/me every 6h).
   [X] 16. A.7 EXECUTION COMPLETE — LocalTimeSkewService (clock-skew measurement).
   [X] 17. A.8 EXECUTION COMPLETE — AttendanceAggregator (daily rollup).
-  [ ] 18. A.9 — SessionEventRecorder aggregation (gated on server SVR-2 aggregate payload).
-  [ ] 19. A.10 — SyncService updates (sub-batches, watermark keys, ceiling — S2, S3, S6).
-  [ ] 20. A.11 — Docs + CHANGELOG.
-  [ ] 21. A.12 — Full Ship-Test pass.
+  [X] 18. A.9 — SessionEventRecorder aggregation (DESIGNED — 5s dedup live; aggregate payload GATED on SVR-2).
+  [X] 19. A.10 — SyncService updates (PARTIAL — S3 watermark keys done; S2/S6 GATED on SVR-2).
+  [X] 20. A.11 EXECUTION COMPLETE — Docs (ARCHITECTURE.md §19) + AGENTS changelog + VERIFICATION_TA.md.
+  [ ] 21. A.12 — Full Ship-Test pass (checklist ready; needs installed builds + 3 OSes).
   [ ] 22. A.13 — Release.
 
 ================================================================================
 SECTION 15 — IMPLEMENTATION SUMMARY (2026-08-28)
 ================================================================================
 
-  Files CREATED in this implementation (A.0-A.8):
+  Files CREATED in this implementation (A.0–A.8 + A.11 docs):
     - client/Core/Models/SessionEvent.cs                (SessionEvent + SessionEventTypes, incl. IdleStart/IdleEnd)
     - client/Core/Abstractions/IEventRecorder.cs        (Recorder interface)
     - client/Services/SessionEventRecorder.cs           (Recorder implementation)
@@ -855,6 +871,7 @@ SECTION 15 — IMPLEMENTATION SUMMARY (2026-08-28)
     - client/Services/ScheduleCacheService.cs           (A.6)
     - client/Services/LocalTimeSkewService.cs           (A.7)
     - client/Services/AttendanceAggregator.cs           (A.8)
+    - client/docs/VERIFICATION_TA.md                    (A.11 — cross-OS ship-test checklist)
 
   Files EDITED in this implementation:
     - client/Core/Models/DeviceHardwareInfo.cs          (removed inline SessionEvent)
@@ -867,6 +884,8 @@ SECTION 15 — IMPLEMENTATION SUMMARY (2026-08-28)
     - client/Configuration/AppConfig.cs                (ALPHA_TA_* / ALPHA_IDLE_* knobs)
     - client/.env / client/.env.example                 (T&A env bindings)
     - client/client.csproj                             (Microsoft.Win32.SystemEvents package)
+    - client/ARCHITECTURE.md                           (A.11 — §19 Time & Attendance)
+    - AGENTS.md                                        (A.11 — changelog top entry)
 
   Bugs FIXED:
     - BUG-1: Power-off capture (ShutdownSentinel)
