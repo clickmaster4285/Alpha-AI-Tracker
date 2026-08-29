@@ -13,16 +13,32 @@ public class SqliteLogStore : ILogStore, IDisposable
     private SqliteConnection? _connection;
 
     /// <summary>
-    /// Concurrency gate protecting the single shared SqliteConnection.
-    /// SemaphoreSlim(1,1) = exclusive access. NOT reentrant — see private
+    /// Read-only connection (Time and Attendance, Phase 1, finalplan R8 + section 2.8).
+    /// Background readers (AttendanceAggregator, future read-heavy services) use this
+    /// connection so they never serialize with the gated write connection that
+    /// LogCollectorService and SyncService hold during the collection cycle. WAL mode
+    /// (enabled in InitializeAsync below) is the prerequisite - readers and writers can
+    /// proceed concurrently only when the journal mode is WAL.
+    /// </summary>
+    private SqliteConnection? _readConnection;
+    private readonly SemaphoreSlim _readConnectionGate = new(1, 1);
+
+    /// <summary>
+    /// Concurrency gate protecting the single shared WRITE SqliteConnection.
+    /// SemaphoreSlim(1,1) = exclusive access. NOT reentrant - see private
     /// ungated helpers (SetStatusCoreAsync, GetEmployeeInfoCoreAsync) that
     /// composite methods call instead of the public gated versions.
+    /// The READ connection above is NOT gated by this; it has its own gate which
+    /// is essentially a no-op (a single reader at a time) but reserves the
+    /// connection so two readers don't share its commands concurrently.
     /// </summary>
     private readonly SemaphoreSlim _connectionGate = new(1, 1);
 
     public SqliteLogStore(string dbPath, string? encryptionKey = null)
     {
         _dbPath = dbPath;
+        // Cache=Shared is the WAL-friendly connection string: the same .db file
+        // can be opened by the read connection without re-opening the file.
         var cs = $"Data Source={dbPath};Mode=ReadWriteCreate;Cache=Shared";
         _connectionString = cs;
     }
@@ -47,6 +63,29 @@ public class SqliteLogStore : ILogStore, IDisposable
             busyCmd.CommandText = "PRAGMA busy_timeout = 5000;";
             await busyCmd.ExecuteNonQueryAsync(ct);
 
+            // ── WAL mode (Time and Attendance, finalplan R8 + section 2.8) ──
+            // MUST be set BEFORE opening the read-only connection. The read
+            // connection inherits the journal mode of the database file, so if WAL
+            // were enabled AFTER the read connection opened, that connection would
+            // see a legacy rollback journal and readers would still block writers.
+            // PRAGMA journal_mode = WAL is idempotent and persistent across
+            // connections - setting it on every boot is the safe pattern.
+            using (var walCmd = _connection.CreateCommand())
+            {
+                walCmd.CommandText = "PRAGMA journal_mode = WAL;";
+                await walCmd.ExecuteNonQueryAsync(ct);
+            }
+            // synchronous=NORMAL pairs with WAL: durability is bounded by the
+            // checkpoint interval, not every write. Faster than the default FULL
+            // while still surviving a power loss without DB corruption (only the
+            // most recent uncheckpointed transaction can be lost, acceptable for
+            // telemetry).
+            using (var syncCmd = _connection.CreateCommand())
+            {
+                syncCmd.CommandText = "PRAGMA synchronous = NORMAL;";
+                await syncCmd.ExecuteNonQueryAsync(ct);
+            }
+
             var cmd = _connection.CreateCommand();
             cmd.CommandText = DatabaseSchema.CreateTableSql;
             await cmd.ExecuteNonQueryAsync(ct);
@@ -56,6 +95,46 @@ public class SqliteLogStore : ILogStore, IDisposable
         finally
         {
             _connectionGate.Release();
+        }
+
+        // Open the read-only connection AFTER WAL is enabled (see comment above).
+        // Mode=ReadOnly ensures this connection physically CANNOT write; any
+        // accidental write call throws, eliminating an entire class of bugs where
+        // a reader silently mutates the DB.
+        await _readConnectionGate.WaitAsync(ct);
+        try
+        {
+            _readConnection = new SqliteConnection($"Data Source={_dbPath};Mode=ReadOnly;Cache=Shared");
+            await _readConnection.OpenAsync(ct);
+            using var rBusy = _readConnection.CreateCommand();
+            rBusy.CommandText = "PRAGMA busy_timeout = 5000;";
+            await rBusy.ExecuteNonQueryAsync(ct);
+        }
+        finally
+        {
+            _readConnectionGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Time and Attendance (finalplan R8, section 2.8): acquire the read connection
+    /// for callers that are read-only (AttendanceAggregator, future analytics, tests).
+    /// The callback receives a live SqliteConnection in ReadOnly mode; it is the
+    /// callback's responsibility to create + execute + dispose commands quickly. The
+    /// connection gate ensures only one reader runs at a time so two concurrent
+    /// SELECTs never share an in-flight DataReader.
+    /// </summary>
+    internal async Task<T> WithReadConnectionAsync<T>(Func<SqliteConnection, Task<T>> action, CancellationToken ct)
+    {
+        if (_readConnection == null) throw new InvalidOperationException("SqliteLogStore not initialized");
+        await _readConnectionGate.WaitAsync(ct);
+        try
+        {
+            return await action(_readConnection);
+        }
+        finally
+        {
+            _readConnectionGate.Release();
         }
     }
 
@@ -1307,6 +1386,256 @@ public class SqliteLogStore : ILogStore, IDisposable
         {
             _connectionGate.Release();
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Time and Attendance CRUD (Phase 1, finalplan section 2.2)
+    // Schedule + holidays are PURE MIRROR data from the server (ScheduleCacheService
+    // pulls them every 6h in A.6). daily_attendance_cache + local_time_skew are
+    // CLIENT-OWNED: written by AttendanceAggregator (A.8) and LocalTimeSkewService
+    // (A.7) respectively. None of these are sent to the server in Phase 1.
+    // ════════════════════════════════════════════════════════════════════════
+
+    public async Task UpsertEmployeeScheduleAsync(
+        string employeeId, string timezone, string weeklyPatternJson,
+        int graceMinutes, string? validFrom, string? validTo, string? serverId,
+        CancellationToken ct)
+    {
+        if (_connection == null) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+                INSERT INTO employee_schedule
+                    (employee_id, timezone, weekly_pattern, grace_minutes,
+                     valid_from, valid_to, server_id, is_synced, synced_at, updated_at)
+                VALUES
+                    ($eid, $tz, $pattern, $grace, $vfrom, $vto, $sid, 1,
+                     strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'),
+                     strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+                ON CONFLICT(employee_id) DO UPDATE SET
+                    timezone = excluded.timezone,
+                    weekly_pattern = excluded.weekly_pattern,
+                    grace_minutes = excluded.grace_minutes,
+                    valid_from = excluded.valid_from,
+                    valid_to = excluded.valid_to,
+                    server_id = excluded.server_id,
+                    is_synced = 1,
+                    synced_at = excluded.synced_at,
+                    updated_at = excluded.updated_at
+            ";
+            cmd.Parameters.AddWithValue("$eid", employeeId);
+            cmd.Parameters.AddWithValue("$tz", timezone);
+            cmd.Parameters.AddWithValue("$pattern", weeklyPatternJson);
+            cmd.Parameters.AddWithValue("$grace", graceMinutes);
+            cmd.Parameters.AddWithValue("$vfrom", (object?)validFrom ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$vto", (object?)validTo ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$sid", (object?)serverId ?? DBNull.Value);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task<IReadOnlyList<(string EmployeeId, string Timezone, string WeeklyPattern, int GraceMinutes)>>
+        ListEmployeeSchedulesAsync(CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<(string, string, string, int)>();
+        // Use the READ connection - this is a pure read, doesn't need to serialize
+        // with writers. The reader callback owns its own DataReader lifetime.
+        return await WithReadConnectionAsync(async conn =>
+        {
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT employee_id, timezone, weekly_pattern, grace_minutes FROM employee_schedule";
+            var results = new List<(string, string, string, int)>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                results.Add((
+                    reader.GetString(0),
+                    reader.GetString(1),
+                    reader.GetString(2),
+                    reader.GetInt32(3)));
+            }
+            return (IReadOnlyList<(string, string, string, int)>)results;
+        }, ct);
+    }
+
+    public async Task UpsertCompanyHolidayAsync(string date, string label, string? serverId, CancellationToken ct)
+    {
+        if (_connection == null) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+                INSERT INTO company_holidays
+                    (holiday_date, label, server_id, is_synced, synced_at)
+                VALUES
+                    ($date, $label, $sid, 1, strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+                ON CONFLICT(holiday_date) DO UPDATE SET
+                    label = excluded.label,
+                    server_id = excluded.server_id,
+                    is_synced = 1,
+                    synced_at = excluded.synced_at
+            ";
+            cmd.Parameters.AddWithValue("$date", date);
+            cmd.Parameters.AddWithValue("$label", label);
+            cmd.Parameters.AddWithValue("$sid", (object?)serverId ?? DBNull.Value);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task<IReadOnlyList<(string Date, string Label)>> ListCompanyHolidaysAsync(CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<(string, string)>();
+        return await WithReadConnectionAsync(async conn =>
+        {
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT holiday_date, label FROM company_holidays";
+            var results = new List<(string, string)>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                results.Add((reader.GetString(0), reader.GetString(1)));
+            }
+            return (IReadOnlyList<(string, string)>)results;
+        }, ct);
+    }
+
+    public async Task UpsertDailyAttendanceAsync(
+        string employeeId, string workDate, DateTime? firstActiveAt, DateTime? lastActiveAt,
+        int activeSeconds, int idleSeconds, int offShiftSeconds, string status, int lateMinutes,
+        CancellationToken ct)
+    {
+        if (_connection == null) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+                INSERT INTO daily_attendance_cache
+                    (employee_id, work_date, first_active_at, last_active_at,
+                     active_seconds, idle_seconds, off_shift_seconds, status, late_minutes, updated_at)
+                VALUES
+                    ($eid, $date, $fa, $la, $a, $i, $o, $st, $lm,
+                     strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+                ON CONFLICT(employee_id, work_date) DO UPDATE SET
+                    first_active_at = COALESCE(NULLIF(excluded.first_active_at, ''), daily_attendance_cache.first_active_at),
+                    last_active_at = excluded.last_active_at,
+                    active_seconds = excluded.active_seconds,
+                    idle_seconds = excluded.idle_seconds,
+                    off_shift_seconds = excluded.off_shift_seconds,
+                    status = excluded.status,
+                    late_minutes = excluded.late_minutes,
+                    updated_at = excluded.updated_at
+            ";
+            cmd.Parameters.AddWithValue("$eid", employeeId);
+            cmd.Parameters.AddWithValue("$date", workDate);
+            cmd.Parameters.AddWithValue("$fa", firstActiveAt?.ToString("O") ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("$la", lastActiveAt?.ToString("O") ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("$a", activeSeconds);
+            cmd.Parameters.AddWithValue("$i", idleSeconds);
+            cmd.Parameters.AddWithValue("$o", offShiftSeconds);
+            cmd.Parameters.AddWithValue("$st", status);
+            cmd.Parameters.AddWithValue("$lm", lateMinutes);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task<(int ActiveSeconds, int IdleSeconds, int OffShiftSeconds, DateTime? FirstActiveAt)?>
+        GetDailyAttendanceAsync(string employeeId, string workDate, CancellationToken ct)
+    {
+        if (_connection == null) return null;
+        return await WithReadConnectionAsync(async conn =>
+        {
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = @"SELECT active_seconds, idle_seconds, off_shift_seconds, first_active_at
+                                FROM daily_attendance_cache
+                                WHERE employee_id = $eid AND work_date = $date";
+            cmd.Parameters.AddWithValue("$eid", employeeId);
+            cmd.Parameters.AddWithValue("$date", workDate);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct)) return null;
+            DateTime? fa = reader.IsDBNull(3) ? null : reader.GetDateTime(3);
+            return ((int, int, int, DateTime?)?)(
+                reader.GetInt32(0), reader.GetInt32(1), reader.GetInt32(2), fa);
+        }, ct);
+    }
+
+    public async Task UpsertTimeSkewAsync(string serverUrl, DateTime measuredAt, double skewSeconds, CancellationToken ct)
+    {
+        if (_connection == null) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+                INSERT INTO local_time_skew (server_url, last_measured_at, skew_seconds)
+                VALUES ($url, $at, $skew)
+                ON CONFLICT(server_url) DO UPDATE SET
+                    last_measured_at = excluded.last_measured_at,
+                    skew_seconds = excluded.skew_seconds
+            ";
+            cmd.Parameters.AddWithValue("$url", serverUrl);
+            cmd.Parameters.AddWithValue("$at", measuredAt.ToString("O"));
+            cmd.Parameters.AddWithValue("$skew", skewSeconds);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task<(DateTime MeasuredAt, double SkewSeconds)?> GetLatestTimeSkewAsync(string serverUrl, CancellationToken ct)
+    {
+        if (_connection == null) return null;
+        return await WithReadConnectionAsync(async conn =>
+        {
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT last_measured_at, skew_seconds FROM local_time_skew WHERE server_url = $url";
+            cmd.Parameters.AddWithValue("$url", serverUrl);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct)) return null;
+            var at = DateTime.Parse(reader.GetString(0), null, System.Globalization.DateTimeStyles.RoundtripKind);
+            return ((DateTime, double)?)(at, reader.GetDouble(1));
+        }, ct);
+    }
+
+    /// <summary>
+    /// Time and Attendance (finalplan section 2.5 + section 5 S1): read session_events
+    /// in a [from, to) window. Used by AttendanceAggregator (A.8) for the daily
+    /// window read. Uses the read-only connection - non-blocking with writers.
+    /// </summary>
+    public async Task<IReadOnlyList<SessionEvent>> GetSessionEventsInRangeAsync(
+        DateTime fromUtc, DateTime toUtc, CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<SessionEvent>();
+        return await WithReadConnectionAsync(async conn =>
+        {
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = @"SELECT * FROM session_events
+                                WHERE event_at >= $from AND event_at < $to
+                                ORDER BY event_at ASC";
+            cmd.Parameters.AddWithValue("$from", fromUtc.ToString("O"));
+            cmd.Parameters.AddWithValue("$to", toUtc.ToString("O"));
+            var results = new List<SessionEvent>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct)) results.Add(MapSessionEventReader(reader));
+            return (IReadOnlyList<SessionEvent>)results;
+        }, ct);
     }
 
     // ────────────────────────────────────────

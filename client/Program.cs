@@ -147,6 +147,18 @@ builder.Services.AddSingleton<ILogStore>(sp =>
     return new SqliteLogStore(ResolveDbPath(config.DbPath), config.DbEncryptionKey);
 });
 
+// ────────────────────────────────────────────────────────────────────────────
+// Time & Attendance (Phase 1, finalplan section 3 / R7): the ShutdownSentinel
+// is registered FIRST so it is StartAsync'd first and StopAsync'd last by the
+// .NET host. That ordering guarantees the sentinel's ApplicationStopping hook
+// fires before any other hosted service is torn down (including the SQLite
+// store). The IEventRecorder that the sentinel writes through is registered
+// immediately after so the dependency is satisfied.
+// ────────────────────────────────────────────────────────────────────────────
+builder.Services.AddSingleton<client.Services.Watchers.ShutdownSentinel>();
+builder.Services.AddSingleton<IEventRecorder, SessionEventRecorder>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.Watchers.ShutdownSentinel>());
+
 // HTTP Client
 builder.Services.AddSingleton<HttpClient>(sp =>
 {
@@ -262,9 +274,22 @@ builder.Services.AddTransient<MainViewModel>();
 
 var host = builder.Build();
 
+// ────────────────────────────────────────────────────────────────────────────
+// Time & Attendance (Phase 1, finalplan section 2.6 / R7): wire the sentinel to
+// the IHostApplicationLifetime AFTER the host is built (the lifetime is
+// created during host.StartAsync, so we have to reach into Services now).
+// The Console.CancelKeyPress hook is also installed here so a Ctrl+C in a
+// terminal emits the power_off event before the host's normal stop path.
+// ────────────────────────────────────────────────────────────────────────────
+var shutdownSentinel = host.Services.GetRequiredService<client.Services.Watchers.ShutdownSentinel>();
+shutdownSentinel.HookConsoleCancelKeyPress();
+
 try
 {
     await host.StartAsync(CancellationToken.None);
+
+    // The lifetime is now available - wire the ApplicationStopping hook.
+    shutdownSentinel.HookLifetime(host.Services.GetRequiredService<IHostApplicationLifetime>());
 
     // Set service provider for App to resolve ViewModels from DI
     App.ServiceProvider = host.Services;
@@ -327,6 +352,18 @@ try
     }
 
     await host.StopAsync(CancellationToken.None);
+
+    // ────────────────────────────────────────────────────────────────────────────
+    // Time & Attendance (Phase 1, R7): the ShutdownSentinel writes the power_off
+    // event inside its ApplicationStopping handler. host.StopAsync() returns
+    // AFTER the sentinel's StopAsync runs (reverse DI order), but the SQL write
+    // inside the sentinel is async; the SQLite store's Dispose() may run on
+    // a parallel path. Wait on the sentinel's MRE with a hard 3-second ceiling
+    // (slightly above the recorder's 2s internal timeout) to guarantee the
+    // write finishes before we move into the finally block that disposes the
+    // single-instance service and the mutex.
+    // ────────────────────────────────────────────────────────────────────────────
+    shutdownSentinel.PowerOffWritten.Wait(TimeSpan.FromSeconds(3));
     host.Dispose();
 }
 finally

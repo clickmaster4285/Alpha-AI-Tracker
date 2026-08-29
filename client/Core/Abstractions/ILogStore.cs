@@ -221,4 +221,53 @@ public interface ILogStore
     Task SaveEmployeeInfoAsync(EmployeeInfo employee, CancellationToken ct);
     Task<EmployeeInfo?> GetEmployeeInfoAsync(CancellationToken ct);
     Task ClearEmployeeInfoAsync(CancellationToken ct);
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Time and Attendance (Phase 1, finalplan section 2.2)
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// <summary>Range query over session_events in a [from, to) UTC window.
+    /// Used by AttendanceAggregator for the daily window read. Uses the read-only
+    /// connection (no writer serialization).</summary>
+    Task<IReadOnlyList<SessionEvent>> GetSessionEventsInRangeAsync(
+        DateTime fromUtc, DateTime toUtc, CancellationToken ct);
+
+    /// <summary>Mirror-write the employee's schedule from GET /api/v1/schedules/me.
+    /// Idempotent: ON CONFLICT(employee_id) updates in place.</summary>
+    Task UpsertEmployeeScheduleAsync(
+        string employeeId, string timezone, string weeklyPatternJson,
+        int graceMinutes, string? validFrom, string? validTo, string? serverId,
+        CancellationToken ct);
+
+    /// <summary>Read all mirrored schedules. Used by AttendanceAggregator (A.8) to
+    /// compute the local "arrival" status without re-fetching the server.</summary>
+    Task<IReadOnlyList<(string EmployeeId, string Timezone, string WeeklyPattern, int GraceMinutes)>>
+        ListEmployeeSchedulesAsync(CancellationToken ct);
+
+    /// <summary>Mirror-write a single company holiday. Idempotent on holiday_date.</summary>
+    Task UpsertCompanyHolidayAsync(string date, string label, string? serverId, CancellationToken ct);
+
+    /// <summary>Read all mirrored holidays. Read-only connection.</summary>
+    Task<IReadOnlyList<(string Date, string Label)>> ListCompanyHolidaysAsync(CancellationToken ct);
+
+    /// <summary>Upsert the daily attendance rollup for one (employee, date). Idempotent
+    /// on the composite primary key. first_active_at is preserved across updates (the
+    /// "arrival" timestamp is set once and never overwritten for the same day).</summary>
+    Task UpsertDailyAttendanceAsync(
+        string employeeId, string workDate, DateTime? firstActiveAt, DateTime? lastActiveAt,
+        int activeSeconds, int idleSeconds, int offShiftSeconds, string status, int lateMinutes,
+        CancellationToken ct);
+
+    /// <summary>Read the daily attendance rollup for one (employee, date). Returns null
+    /// when no aggregator pass has ever run for that day. Read-only connection.</summary>
+    Task<(int ActiveSeconds, int IdleSeconds, int OffShiftSeconds, DateTime? FirstActiveAt)?>
+        GetDailyAttendanceAsync(string employeeId, string workDate, CancellationToken ct);
+
+    /// <summary>Upsert the most recent clock-skew measurement for a server URL. One row
+    /// per server (so lab/staging/prod measurements don't overwrite each other).</summary>
+    Task UpsertTimeSkewAsync(string serverUrl, DateTime measuredAt, double skewSeconds, CancellationToken ct);
+
+    /// <summary>Read the most recent clock-skew measurement for a server URL. Read-only
+    /// connection. Returns null when never measured (first-run case).</summary>
+    Task<(DateTime MeasuredAt, double SkewSeconds)?> GetLatestTimeSkewAsync(string serverUrl, CancellationToken ct);
 }

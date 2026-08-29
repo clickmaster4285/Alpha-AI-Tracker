@@ -125,14 +125,3 @@ public class InstalledPackage
     public string CreatedAt { get; set; } = string.Empty;
 }
 
-public class SessionEvent
-{
-    public string Id { get; set; } = Guid.NewGuid().ToString("N");
-    /// <summary>"login" | "logout" | "lock" | "unlock"</summary>
-    public string EventType { get; set; } = string.Empty;
-    public string OsUsername { get; set; } = string.Empty;
-    public DateTime EventAt { get; set; } = DateTime.UtcNow;
-    public bool IsSynced { get; set; }
-    public string? SyncedAt { get; set; }
-    public string CreatedAt { get; set; } = string.Empty;
-}

@@ -159,6 +159,14 @@ internal static class DatabaseSchema
         CREATE INDEX IF NOT EXISTS idx_session_events_unsent
             ON session_events(is_synced, event_at);
 
+        -- Time & Attendance (Phase 1, finalplan §5 S5): the AttendanceAggregator's
+        -- daily-window read uses (event_type, event_at) and the per-employee daily
+        -- rollup uses (event_type, event_at) for a window scan. Both are O(log n)
+        -- reads on this index. The unsent-drain index above is preserved because
+        -- the /session-events/sync pull still uses (is_synced, event_at).
+        CREATE INDEX IF NOT EXISTS idx_session_events_type_at
+            ON session_events(event_type, event_at);
+
         -- APPLICATION LOGS
 
         CREATE TABLE IF NOT EXISTS app_sessions (
@@ -283,6 +291,74 @@ internal static class DatabaseSchema
         );
 
         -- shell_commands table intentionally removed — no longer collected
+
+        -- ════════════════════════════════════════════════════════════════════════
+        -- v12 / v13 — Time & Attendance (Phase 1, finalplan §2.2)
+        -- All four tables are pure client mirror / derived data; the server
+        -- (Phase 2) NEVER receives the daily_attendance_cache rows. The
+        -- schedule/holiday tables are populated by the NEW ScheduleCacheService
+        -- (A.6) which PULLs GET /api/v1/schedules/me every 6h.
+        -- ════════════════════════════════════════════════════════════════════════
+
+        -- Per-employee shift assignment, mirrored from the server's shifts catalog.
+        -- weekly_pattern is a JSON string of {mon:HH:MM-HH:MM, tue:..., ...} so the
+        -- client never has to know about the server's normalized shift schema.
+        -- is_synced is the initial-pull ack: 1 = server has confirmed this row.
+        CREATE TABLE IF NOT EXISTS employee_schedule (
+            employee_id        TEXT PRIMARY KEY,
+            timezone           TEXT NOT NULL DEFAULT 'UTC',
+            weekly_pattern     TEXT NOT NULL DEFAULT '{}',
+            grace_minutes      INTEGER NOT NULL DEFAULT 10,
+            valid_from         TEXT,
+            valid_to           TEXT,
+            server_id          TEXT,
+            is_synced          INTEGER NOT NULL DEFAULT 0,
+            synced_at          TEXT,
+            updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+        );
+
+        -- Company-wide holiday calendar. The client uses it to bucket the daily
+        -- attendance status (present/late/absent/half_day) — a day on this list
+        -- is automatically off-shift.
+        CREATE TABLE IF NOT EXISTS company_holidays (
+            holiday_date       TEXT PRIMARY KEY,    -- ISO date 'YYYY-MM-DD'
+            label              TEXT NOT NULL DEFAULT '',
+            server_id          TEXT,
+            is_synced          INTEGER NOT NULL DEFAULT 0,
+            synced_at          TEXT
+        );
+
+        -- Derived per-day attendance roll-up (Phase 1: client-owned; server has
+        -- its own aggregator for the public T&A view in Phase 2). Never sent to
+        -- the server; never deleted client-side. Refreshed every 5 minutes by
+        -- AttendanceAggregator (A.8).
+        CREATE TABLE IF NOT EXISTS daily_attendance_cache (
+            employee_id        TEXT NOT NULL,
+            work_date          TEXT NOT NULL,        -- ISO date 'YYYY-MM-DD' in the employee's tz
+            first_active_at    TEXT,
+            last_active_at     TEXT,
+            active_seconds     INTEGER NOT NULL DEFAULT 0,
+            idle_seconds       INTEGER NOT NULL DEFAULT 0,
+            off_shift_seconds  INTEGER NOT NULL DEFAULT 0,
+            status             TEXT NOT NULL DEFAULT 'unknown',  -- present|late|absent|half_day|unknown
+            late_minutes       INTEGER NOT NULL DEFAULT 0,
+            updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')),
+            PRIMARY KEY (employee_id, work_date)
+        );
+
+        -- (employee_id, work_date) — the AttendanceAggregator's daily-window read
+        CREATE INDEX IF NOT EXISTS idx_daily_attendance_cache_employee_date
+            ON daily_attendance_cache(employee_id, work_date);
+
+        -- Local clock skew measurement. One row per server URL so a machine that
+        -- ever points at multiple server hosts (lab/staging/prod) keeps separate
+        -- measurements. Written by LocalTimeSkewService (A.7) on every successful
+        -- /auth/check call.
+        CREATE TABLE IF NOT EXISTS local_time_skew (
+            server_url         TEXT PRIMARY KEY,
+            last_measured_at   TEXT NOT NULL,
+            skew_seconds       REAL NOT NULL
+        );
     ";
 
     internal const string MigrateSql = @"

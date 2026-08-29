@@ -44,6 +44,13 @@ public class LogCollectorService : BackgroundService
     private readonly IInstalledAppDetector _appDetector;
     private readonly IPackageDetector _packageDetector;
     private readonly IBrowserRegistry _browserRegistry;
+    /// <summary>
+    /// Time and Attendance (Phase 1, finalplan section 2.5): all session_events writes
+    /// go through this recorder. It owns dedup + idempotency + hard 2s shutdown timeout.
+    /// The previous direct call to <c>RecordSessionEventAsync("login", ...)</c> is replaced
+    /// with <c>_eventRecorder.RecordAsync(SessionEventTypes.TrackerLogin)</c>.
+    /// </summary>
+    private readonly IEventRecorder _eventRecorder;
     private int _cycleCount;
     private string? _currentEmployeeId;
     private string? _currentEmployeeName;
@@ -156,7 +163,8 @@ public class LogCollectorService : BackgroundService
         HttpClient httpClient,
         IInstalledAppDetector appDetector,
         IPackageDetector packageDetector,
-        IBrowserRegistry browserRegistry)
+        IBrowserRegistry browserRegistry,
+        IEventRecorder eventRecorder)
     {
         _config = config;
         _collector = collector;
@@ -166,6 +174,7 @@ public class LogCollectorService : BackgroundService
         _appDetector = appDetector;
         _packageDetector = packageDetector;
         _browserRegistry = browserRegistry;
+        _eventRecorder = eventRecorder;
     }
 
     public void StartTracking()
@@ -180,7 +189,18 @@ public class LogCollectorService : BackgroundService
         // Record login session event — only if the last persisted event isn't already an open login.
         // StartTracking() is called both at session restore AND on every explicit login, so without
         // this guard a relaunch writes a duplicate "login" row while the previous one is never closed.
-        _ = RecordSessionEventAsync("login", stoppingToken: default);
+        //
+        // Time and Attendance Phase 1 (finalplan section 2.1 / BUG-2 fix): the literal "login"
+        // is replaced with the SessionEventTypes.TrackerLogin constant so the vocabulary
+        // lives in ONE place (R5). The IEventRecorder handles dedup + idempotency; we don't
+        // need the old "skip if last event has the same type" check here.
+        _ = _eventRecorder.RecordAsync(SessionEventTypes.TrackerLogin);
+
+        // Power-on (finalplan section 2.1): capture the boot explicitly instead of inferring
+        // it on the next launch via ReconcileStaleSessionsOnBootAsync. The crash-recovery
+        // path stays as a defense-in-depth fallback for machines that were powered off
+        // abruptly (no graceful shutdown -> no power_off row).
+        _ = _eventRecorder.RecordAsync(SessionEventTypes.PowerOn);
 
         if (OperatingSystem.IsWindows())
         {
