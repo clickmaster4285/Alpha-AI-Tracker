@@ -1,0 +1,308 @@
+================================================================================
+  BUG REPORT: Auto-Start Not Working on Linux Mint 22.2 (Cinnamon)
+  Date Found: 2026-08-29
+  Environment: Linux Mint 22.2, Kernel 7.0.0.28, Intel i7-4600U
+  Works On: Ubuntu (GNOME), Windows
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+  1. Bug #1 — Systemd Service File Never Created (Infinite Permission Wizard Loop)
+  2. Bug #2 — EnableAutoStartForced() Tries to Enable Non-Existent Service
+  3. Bug #3 — Stale Mutex Blocks Background Launch After Crash/Reboot
+  4. Bug #4 — Cinnamon Autostart Reliability Gap
+  5. How Each Fix Should Be Applied (No Code Changes Yet)
+  6. Diagnostic Commands for Linux Mint 22.2
+
+
+================================================================================
+  BUG #1 — Systemd Service File Never Created (Infinite Permission Wizard Loop)
+================================================================================
+
+SEVERITY: HIGH
+AFFECTS: All fresh Linux installs (Ubuntu AND Mint)
+MASKED ON: Ubuntu (GNOME's XDG autostart is reliable enough without systemd)
+
+DESCRIPTION:
+  On a fresh install, the permission wizard's "Background Running" step (Step 2)
+  can NEVER be completed. The user is stuck in an infinite loop where Step 2
+  always re-appears, even after clicking "Grant".
+
+ROOT CAUSE:
+  The flow is:
+
+  1. User clicks "Grant" on Step 2 (BackgroundRunning)
+  2. MainViewModel.GrantBackgroundRunningAsync() is called
+     (MainViewModel.cs:863-868)
+  3. It calls _autoStart.EnableAutoStartForced()
+     (AutoStartService.cs:58-112)
+  4. EnableAutoStartForced() does TWO things:
+     a) Creates the .desktop autostart file  <-- this works
+     b) Runs: systemctl --user enable alpha-ai-tracker.service
+  5. BUT the .service FILE does not exist yet!
+     The ONLY place that creates it is:
+       BackgroundGuardService.InstallSystemdServiceAsync()
+       (BackgroundGuardService.cs:169-261)
+     And it is GUARDED by:
+       if (_systemdWasInstalled && _systemdServiceName != null)
+       (BackgroundGuardService.cs:100)
+     On a fresh install, _systemdWasInstalled = false
+     (set at line 53 via DetectSystemdService() which checks file existence)
+     So InstallSystemdServiceAsync() is NEVER called.
+  6. systemctl --user enable fails silently (exit code ignored, caught at line 106)
+  7. GetNextPermissionStep() re-evaluates:
+     - IsAutoStartEnabled() = YES (.desktop file exists) -> passes
+     - IsBackgroundGuardConfigured() = NO (.service file doesn't exist) -> FAILS
+     - Returns PermissionStep.BackgroundRunning -> STEP 2 AGAIN -> INFINITE LOOP
+
+  The .service file is only created by BackgroundGuardService, but the guard
+  only runs AFTER the host starts (line 208 in Program.cs). And even then, it
+  only creates the file if it WAS previously installed and got deleted.
+
+AFFECTED FILES:
+  - client/ViewModels/MainViewModel.cs:863-868 (GrantBackgroundRunningAsync)
+  - client/Services/AutoStartService.cs:58-112 (EnableAutoStartForced)
+  - client/Services/BackgroundGuardService.cs:100-110 (watchdog guard)
+  - client/Services/BackgroundGuardService.cs:169-261 (InstallSystemdServiceAsync)
+
+
+================================================================================
+  BUG #2 — EnableAutoStartForced() Tries to Enable Non-Existent Service
+================================================================================
+
+SEVERITY: MEDIUM
+AFFECTS: All fresh Linux installs
+
+DESCRIPTION:
+  AutoStartService.EnableAutoStartForced() (line 85-99) runs
+  "systemctl --user enable alpha-ai-tracker.service" without first ensuring the
+  unit file exists at ~/.config/systemd/user/alpha-ai-tracker.service.
+
+  The systemctl command fails with:
+    Failed to enable unit: Unit file alpha-ai-tracker.service does not exist.
+
+  This error is caught by the generic try-catch at line 106 and logged as a
+  warning, but the exit code is never checked. The method returns true (from
+  EnableAutoStart()) even though the systemd service was NOT enabled.
+
+AFFECTED FILES:
+  - client/Services/AutoStartService.cs:85-99
+
+
+================================================================================
+  BUG #3 — Stale Mutex Blocks Background Launch After Crash/Reboot
+================================================================================
+
+SEVERITY: HIGH
+AFFECTS: Linux Mint 22.2 (and potentially all platforms)
+
+DESCRIPTION:
+  The global named mutex "AlphaAITracker" (Program.cs:73) is used for
+  single-instance enforcement. When the app starts with --background, it
+  checks if the mutex is already held:
+
+    if (!mutexCreated)
+    {
+        if (isUserLaunch)
+            SingleInstanceService.SignalExistingInstance();
+        return;  // <-- EXITS SILENTLY (line 105)
+    }
+
+  Problem: If the previous instance crashed, was force-killed, or the system
+  was rebooted without clean shutdown, the mutex MAY still appear held (OS-
+  dependent behavior). The new --background launch sees the mutex as taken,
+  determines it's NOT a user launch, and exits immediately without starting
+  any tracking services.
+
+  On Ubuntu/GNOME, session cleanup is more reliable and this rarely happens.
+  On Linux Mint/Cinnamon, force-closing via the task manager or rebooting
+  during heavy load can leave the mutex orphaned.
+
+  The --restart flag (line 81-91) has a WaitOne(8s) timeout, but that's only
+  for the explicit restart flow, not for normal --background auto-start.
+
+AFFECTED FILES:
+  - client/Program.cs:73-106 (mutex handling)
+
+
+================================================================================
+  BUG #4 — Cinnamon Autostart Reliability Gap
+================================================================================
+
+SEVERITY: LOW-MEDIUM
+AFFECTS: Linux Mint 22.2 (Cinnamon desktop)
+
+DESCRIPTION:
+  The .desktop autostart file at ~/.config/autostart/alpha-ai-tracker.desktop
+  uses X-GNOME-Autostart-enabled=true. While Cinnamon IS XDG-compliant and
+  should honor this, there are known reliability differences:
+
+  1. Cinnamon's startup applications manager may not immediately recognize
+     manually-created .desktop files (vs files added through its GUI).
+
+  2. Cinnamon session (cinnamon-session) may start autostart entries BEFORE
+     the user's D-Bus session is fully ready, causing the app to fail to
+     connect to its named pipe or log store.
+
+  3. If Linux Mint 22.2 defaults to Wayland (not X11), the autostart timing
+     may differ from X11 sessions.
+
+  4. The .desktop file format is correct per XDG spec, but Cinnamon may
+     have subtle parsing differences from GNOME's gnome-session.
+
+AFFECTED FILES:
+  - client/Services/AutoStartService.cs:258-281 (EnableLinuxAutoStart)
+
+
+================================================================================
+  HOW EACH FIX SHOULD BE APPLIED
+================================================================================
+
+NOTE: No code changes made yet. This is the plan only.
+
+FIX #1 — Create systemd service file before enabling it
+-------------------------------------------------------
+  WHERE: client/ViewModels/MainViewModel.cs:863-868
+
+  WHAT: GrantBackgroundRunningAsync() should call a new method that:
+    1. Creates the .service file at ~/.config/systemd/user/alpha-ai-tracker.service
+       (same content as BackgroundGuardService.InstallSystemdServiceAsync, line 174-190)
+    2. Runs "systemctl --user daemon-reload"
+    3. Runs "systemctl --user enable alpha-ai-tracker.service"
+    4. Runs "systemctl --user start alpha-ai-tracker.service"
+
+  WHY: Currently, GrantBackgroundRunningAsync() delegates to
+  EnableAutoStartForced() which tries "systemctl --user enable" without the
+  file existing. The service file must be created FIRST.
+
+  ALSO: Update the BackgroundGuardService.ExecuteAsync() initial detection
+  (line 53) so that on a fresh install, if the .desktop autostart file exists
+  but the .service file doesn't, the guard proactively creates it. This makes
+  the guard work as both a watchdog AND a first-time installer.
+
+
+FIX #2 — Fix EnableAutoStartForced() to check systemctl exit code
+-----------------------------------------------------------------
+  WHERE: client/Services/AutoStartService.cs:89-97
+
+  WHAT: After the process exits, check proc.ExitCode. If non-zero, log the
+  error and return false (or at minimum, read StandardError for the message).
+
+  WHY: Currently the exit code is completely ignored, masking the fact that
+  the service file doesn't exist.
+
+
+FIX #3 — Add mutex stale-detection for --background launches
+------------------------------------------------------------
+  WHERE: client/Program.cs:73-106
+
+  WHAT: When the mutex is held and the launch is --background (NOT a user
+  launch), instead of exiting silently, check if the existing process is
+  actually alive:
+
+    1. Use Process.GetProcessesByName("client") to find running instances
+    2. If no other process is found, the mutex is stale (orphaned)
+    3. Release the stale mutex and re-acquire it
+    4. Proceed with normal startup
+
+  Alternatively, use a more robust single-instance mechanism:
+    - Check /proc/<pid>/status for the owning PID
+    - Use a lockfile with PID written inside (can detect stale locks)
+    - Add a mutex lease timeout (auto-release after N seconds of inactivity)
+
+  WHY: On Linux Mint/Cinnamon, force-kills and reboots can leave the mutex
+  orphaned. The --background auto-start then fails silently every boot until
+  the user manually kills the orphaned process or reboots cleanly.
+
+
+FIX #4 — Add systemd service as primary auto-start on Cinnamon
+--------------------------------------------------------------
+  WHERE: client/Services/AutoStartService.cs:258-281
+
+  WHAT: On Linux, after creating the .desktop file, ALSO ensure the systemd
+  user service is installed and enabled. This makes the systemd service the
+  PRIMARY auto-start mechanism (in addition to the .desktop file as a backup).
+
+  The systemd user service is independent of the desktop environment and works
+  identically on GNOME, Cinnamon, KDE, XFCE, etc. It also survives desktop
+  session restarts (if lingering is enabled).
+
+  Add "loginctl enable-linger $USER" if not already enabled (one-time setup).
+  This ensures the systemd user instance persists beyond login sessions.
+
+  WHY: Relying solely on XDG autostart is fragile across different desktop
+  environments. The systemd service provides a consistent, DE-agnostic
+  auto-start mechanism.
+
+
+================================================================================
+  DIAGNOSTIC COMMANDS FOR LINUX MINT 22.2
+================================================================================
+
+Run these on the Linux Mint machine to confirm the bugs:
+
+  # 1. Check if the .desktop autostart file exists
+  cat ~/.config/autostart/alpha-ai-tracker.desktop
+
+  # 2. Check if the systemd service file exists (Bug #1: it probably doesn't)
+  ls -la ~/.config/systemd/user/alpha-ai-tracker.service
+
+  # 3. Check the app log for crash/error messages (Bug #3)
+  cat ~/.local/share/alpha-ai-tracker/dotnetrunlog.txt | tail -50
+
+  # 4. Check for stuck/orphaned instances (Bug #3)
+  pgrep -a client
+  pgrep -a alpha
+  ps aux | grep -i "alpha\|client" | grep -v grep
+
+  # 5. Check session type (Bug #4: Wayland vs X11)
+  echo $XDG_SESSION_TYPE
+
+  # 6. Check all autostart files registered for this user
+  ls -la ~/.config/autostart/
+
+  # 7. Check systemd user instance status
+  systemctl --user status
+
+  # 8. Check if lingering is enabled (needed for systemd user services)
+  loginctl show-user $USER | grep Linger
+
+  # 9. Try to manually start the systemd service (will fail if file doesn't exist)
+  systemctl --user start alpha-ai-tracker.service 2>&1
+
+  # 10. Check Cinnamon's startup applications
+  ls -la /etc/xdg/autostart/ | grep -i alpha
+  dbus-send --session --dest=org.Cinnamon --print-reply \
+    /org/Cinnamon/StartupApps org.Cinnamon.StartupApps.GetApps 2>&1
+
+Expected results that confirm the bugs:
+  - Step 2 returns "No such file or directory" -> confirms Bug #1
+  - Step 4 shows no running processes -> confirms the app never started -> Bug #3
+  - Step 9 returns "Unit file alpha-ai-tracker.service does not exist" -> confirms Bug #2
+  - Step 5 returns "wayland" -> confirms Bug #4 is relevant
+
+
+================================================================================
+  SUMMARY
+================================================================================
+
+Bug #1 (Infinite Wizard Loop) is the PRIMARY reason auto-start doesn't work
+on Linux Mint 22.2. The user gets stuck on Step 2 and may abandon the setup
+process. Even though the .desktop file IS created in Step 1, the user may not
+realize it.
+
+Bug #3 (Stale Mutex) is the SECONDARY reason. Even if the .desktop file exists
+and Cinnamon tries to launch the app at login, the background instance may
+exit silently due to an orphaned mutex from a previous session.
+
+Bug #4 (Cinnamon Reliability) is a CONTRIBUTING factor. Cinnamon's autostart
+is less battle-tested than GNOME's, so even a correctly configured .desktop
+file may not launch reliably.
+
+On Ubuntu, Bug #1 exists but is masked because GNOME's XDG autostart is
+reliable enough that the .desktop file alone (created in Step 1) handles
+auto-start without needing the systemd service.
+
+================================================================================
+  END OF BUG REPORT
+================================================================================
