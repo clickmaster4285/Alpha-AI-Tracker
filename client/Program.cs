@@ -159,6 +159,47 @@ builder.Services.AddSingleton<client.Services.Watchers.ShutdownSentinel>();
 builder.Services.AddSingleton<IEventRecorder, SessionEventRecorder>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.Watchers.ShutdownSentinel>());
 
+// ────────────────────────────────────────────────────────────────────────────
+// Time & Attendance (Phase 1, A.3): SystemEventWatcher subscribes to OS power /
+// lock / sleep / login signals and writes them through the IEventRecorder. It
+// runs as a hosted service so the host's lifecycle (StartAsync/StopAsync) governs
+// its D-Bus / SystemEvents subscriptions.
+// ────────────────────────────────────────────────────────────────────────────
+builder.Services.AddSingleton<client.Services.Watchers.SystemEventWatcher>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.Watchers.SystemEventWatcher>());
+
+// ────────────────────────────────────────────────────────────────────────────
+// Time & Attendance (Phase 1, A.4): IdleDetector polls the OS idle source
+// (Mutter.IdleMonitor / XScreenSaver / GetLastInputInfo) and emits idle_start /
+// idle_end threshold crossings through the IEventRecorder.
+// ────────────────────────────────────────────────────────────────────────────
+builder.Services.AddSingleton<client.Services.IdleDetector>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.IdleDetector>());
+
+// ────────────────────────────────────────────────────────────────────────────
+// Time & Attendance (Phase 1, A.7): LocalTimeSkewService measures the client
+// clock's skew against the server's HTTP Date header every 15 min and stores
+// it per server URL (BUG-7 + BUG-12 fix). No-op when ALPHA_TA_ENABLED=false.
+// ────────────────────────────────────────────────────────────────────────────
+builder.Services.AddSingleton<client.Services.LocalTimeSkewService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.LocalTimeSkewService>());
+
+// ────────────────────────────────────────────────────────────────────────────
+// Time & Attendance (Phase 1, A.6): ScheduleCacheService mirrors the employee's
+// shift + holidays from GET /api/v1/schedules/me every 6h (BUG-6 fix). No-op
+// when ALPHA_TA_ENABLED=false or the Phase 2 endpoint is absent (404).
+// ────────────────────────────────────────────────────────────────────────────
+builder.Services.AddSingleton<client.Services.ScheduleCacheService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.ScheduleCacheService>());
+
+// ────────────────────────────────────────────────────────────────────────────
+// Time & Attendance (Phase 1, A.8): AttendanceAggregator rolls up today's
+// session-idle activity into daily_attendance_cache every 5 min. Reads use the
+// read-only connection (R8). No-op when ALPHA_TA_ENABLED=false.
+// ────────────────────────────────────────────────────────────────────────────
+builder.Services.AddSingleton<client.Services.AttendanceAggregator>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.AttendanceAggregator>());
+
 // HTTP Client
 builder.Services.AddSingleton<HttpClient>(sp =>
 {

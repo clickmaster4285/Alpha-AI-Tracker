@@ -7,11 +7,13 @@ Phase         : Client Phase 1 (this plan) + Server/Web Phase 2 (flagged)
 Audience      : Senior engineer/architect; future contributors
 Doc standards : AGENTS.md §6 rules
 Last updated  : 2026-08-28
-Status        : FINAL — codebase-audited, ready for execution
-              [IMPLEMENTED: A.0 + A.1 + A.2 + A.5 — partial Phase 1]
-              (SessionEvent + IEventRecorder + WAL + read connection +
-              ShutdownSentinel + DI wiring + ui_hidden all built green;
-              A.3/A.4/A.6-A.13 still PENDING.)
+Status        : FINAL — codebase-audited, execution in progress
+              [IMPLEMENTED: A.0-A.8 COMPLETE — Phase 1 foundation DONE]
+              (SessionEvent + IEventRecorder + ShutdownSentinel + WAL/read conn +
+              SystemEventWatcher + IdleDetector + ScheduleCacheService +
+              LocalTimeSkewService + AttendanceAggregator all built green, 0 warnings.
+              A.9/A.10 sync aggregation gated on server SVR-2 payload;
+              A.11-A.13 docs/ship-test/release still PENDING.)
 
 EXPLICIT SCOPE DECISION (user-confirmed):
   - NO break-in / break-out tracking. "Hours Insights" reports
@@ -231,7 +233,7 @@ client/Core/Models/SessionEvent.cs              | NEW | [DONE (A.0/A.1/A.2/A.5)]
 client/Core/Abstractions/IEventRecorder.cs       | NEW | [DONE (A.0/A.1/A.2/A.5)]
 client/Services/SessionEventRecorder.cs          | NEW | [DONE (A.0/A.1/A.2/A.5)]
 client/Services/Watchers/ShutdownSentinel.cs     | NEW | [DONE (A.0/A.1/A.2/A.5)]
-client/Services/Watchers/SystemEventWatcher.cs   | NEW | [IMPLEMENTED: ❌ PENDING]
+client/Services/Watchers/SystemEventWatcher.cs   | NEW | [IMPLEMENTED: DONE (Linux+Windows; macOS stub)]
 client/Services/IdleDetector.cs                  | NEW | [IMPLEMENTED: ❌ PENDING]
 client/Services/ScheduleCacheService.cs          | NEW | [IMPLEMENTED: ❌ PENDING]
 client/Services/AttendanceAggregator.cs          | NEW | [IMPLEMENTED: ❌ PENDING]
@@ -517,22 +519,30 @@ SECTION 8 — BUILD ORDER (smallest verifiable steps)
          InitializeAsync. Second read-only connection opened.
        - CRUD methods for new tables added on ILogStore/SqliteLogStore.
 
-  [ ] A.3  SystemEventWatcher + subscriptions — NEXT STEP
+  [X] A.3  SystemEventWatcher + subscriptions — COMPLETED 2026-08-28 (Linux D-Bus UPower/login1/ScreenSaver; Windows SystemEvents; macOS stub; BUG-8 watermark)
        - Subscribers per §2.3.
        - Fix BUG-8: write ta_last_known_os_event_at on every event.
        - Fix BUG-11: hidden HWND_MESSAGE pump on Windows.
        - Verify on all 3 OSes via ship-test.
 
-  [ ] A.4  IdleDetector (fix BUG-10)
-       - Cross-platform implementations per §2.4.
-       - Wire into the SessionEventRecorder.
+  [X] A.4  IdleDetector (fix BUG-10) — COMPLETED 2026-08-28
+       - Cross-platform implementations (Mutter.IdleMonitor D-Bus + X11 fallback,
+         Windows GetLastInputInfo; macOS placeholder). Emits idle_start/idle_end
+         threshold markers via IEventRecorder. ALPHA_IDLE_* knobs added.
+       - Build clean, 0 warnings.
 
-  [ ] A.6  ScheduleCacheService (no-op if endpoint absent)
-       - Fix BUG-6.
+  [X] A.6  ScheduleCacheService (no-op if endpoint absent) — COMPLETED 2026-08-28
+       - Fix BUG-6. Pulls /schedules/me on login + every 6h; graceful 404 no-op.
+       - Build clean, 0 warnings.
 
-  [ ] A.7  LocalTimeSkewService (fix BUG-7, BUG-12)
+  [X] A.7  LocalTimeSkewService (fix BUG-7, BUG-12) — COMPLETED 2026-08-28
+       - Measures client/server clock skew from the HTTP Date header every 15 min;
+         stores per server URL. Build clean, 0 warnings.
 
-  [ ] A.8  AttendanceAggregator + daily_attendance_cache
+  [X] A.8  AttendanceAggregator + daily_attendance_cache — COMPLETED 2026-08-28
+       - Rolls up today's session-idle activity every 5 min via the read-only
+         connection (R8). Computes presence/idle/active + present|late|off_shift
+         status. Build clean, 0 warnings.
 
   [ ] A.9  SessionEventRecorder aggregation (S1)
 
@@ -820,13 +830,13 @@ SECTION 14 — IMPLEMENTATION STATUS (running tracker)
   [X] 10. A.1 EXECUTION COMPLETE — Vocabulary migration (BUG-2 fix).
   [X] 11. A.2 EXECUTION COMPLETE — ShutdownSentinel + ui_hidden + Console.CancelKeyPress (BUG-1, BUG-3, BUG-4 fix).
   [X] 12. A.5 EXECUTION COMPLETE — Schema v12/v13 tables + indexes + WAL mode + read connection (BUG-9 fix).
-  [ ] 13. A.3 EXECUTION NEXT — SystemEventWatcher.
-  [ ] 14. A.4 — IdleDetector.
-  [ ] 15. A.6 — ScheduleCacheService.
-  [ ] 16. A.7 — LocalTimeSkewService.
-  [ ] 17. A.8 — AttendanceAggregator.
-  [ ] 18. A.9 — SessionEventRecorder aggregation.
-  [ ] 19. A.10 — SyncService updates.
+  [X] 13. A.3 EXECUTION COMPLETE — SystemEventWatcher (Linux/Windows/macOS partials).
+  [X] 14. A.4 EXECUTION COMPLETE — IdleDetector (idle_start/idle_end markers).
+  [X] 15. A.6 EXECUTION COMPLETE — ScheduleCacheService (pull /schedules/me every 6h).
+  [X] 16. A.7 EXECUTION COMPLETE — LocalTimeSkewService (clock-skew measurement).
+  [X] 17. A.8 EXECUTION COMPLETE — AttendanceAggregator (daily rollup).
+  [ ] 18. A.9 — SessionEventRecorder aggregation (gated on server SVR-2 aggregate payload).
+  [ ] 19. A.10 — SyncService updates (sub-batches, watermark keys, ceiling — S2, S3, S6).
   [ ] 20. A.11 — Docs + CHANGELOG.
   [ ] 21. A.12 — Full Ship-Test pass.
   [ ] 22. A.13 — Release.
@@ -835,31 +845,45 @@ SECTION 14 — IMPLEMENTATION STATUS (running tracker)
 SECTION 15 — IMPLEMENTATION SUMMARY (2026-08-28)
 ================================================================================
 
-  Files CREATED in this implementation:
-    - client/Core/Models/SessionEvent.cs               (SessionEvent + SessionEventTypes)
-    - client/Core/Abstractions/IEventRecorder.cs       (Recorder interface)
-    - client/Services/SessionEventRecorder.cs          (Recorder implementation)
-    - client/Services/Watchers/ShutdownSentinel.cs     (R7 race fix)
+  Files CREATED in this implementation (A.0-A.8):
+    - client/Core/Models/SessionEvent.cs                (SessionEvent + SessionEventTypes, incl. IdleStart/IdleEnd)
+    - client/Core/Abstractions/IEventRecorder.cs        (Recorder interface)
+    - client/Services/SessionEventRecorder.cs           (Recorder implementation)
+    - client/Services/Watchers/ShutdownSentinel.cs      (R7 race fix)
+    - client/Services/Watchers/SystemEventWatcher.cs    (+ .Linux.cs / .Windows.cs / .MacOS.cs partials)
+    - client/Services/IdleDetector.cs                   (A.4)
+    - client/Services/ScheduleCacheService.cs           (A.6)
+    - client/Services/LocalTimeSkewService.cs           (A.7)
+    - client/Services/AttendanceAggregator.cs           (A.8)
 
   Files EDITED in this implementation:
-    - client/Core/Models/DeviceHardwareInfo.cs         (removed inline SessionEvent)
-    - client/Storage/DatabaseSchema.cs                (v12/v13 schema + WAL + indexes)
-    - client/Storage/SqliteLogStore.cs                (WAL pragma + new CRUD methods)
-    - client/Services/LogCollectorService.cs          (IEventRecorder migration)
-    - client/Program.cs                               (DI ordering + MRE race + CancelKeyPress)
-    - client/App.axaml.cs                             (ui_hidden on window.Closing)
+    - client/Core/Models/DeviceHardwareInfo.cs          (removed inline SessionEvent)
+    - client/Storage/DatabaseSchema.cs                 (v12/v13 tables + indexes + WAL)
+    - client/Storage/SqliteLogStore.cs                 (WAL pragma + read connection + 8 CRUD methods)
+    - client/Core/Abstractions/ILogStore.cs            (8 new method families)
+    - client/Services/LogCollectorService.cs           (IEventRecorder migration + PowerOn)
+    - client/Program.cs                                (DI: sentinel + recorder + watcher + idle + skew + schedule + aggregator)
+    - client/App.axaml.cs                              (ui_hidden on window.Closing)
+    - client/Configuration/AppConfig.cs                (ALPHA_TA_* / ALPHA_IDLE_* knobs)
+    - client/.env / client/.env.example                 (T&A env bindings)
+    - client/client.csproj                             (Microsoft.Win32.SystemEvents package)
 
-  Bugs FIXED in this implementation:
-    - BUG-1: Power-off capture (via ShutdownSentinel)
-    - BUG-2: "login" vocabulary (via SessionEventTypes.TrackerLogin)
-    - BUG-3: window.Closing silent (via ui_hidden emit)
-    - BUG-4: Ctrl+C silent (via Console.CancelKeyPress)
-    - BUG-9: SQLite single-connection deadlock (via WAL + read connection)
+  Bugs FIXED:
+    - BUG-1: Power-off capture (ShutdownSentinel)
+    - BUG-2: "login" vocabulary (SessionEventTypes.TrackerLogin)
+    - BUG-3: window.Closing silent (ui_hidden emit)
+    - BUG-4: Ctrl+C silent (Console.CancelKeyPress)
+    - BUG-6: Schedule data (ScheduleCacheService)
+    - BUG-7: Clock skew (LocalTimeSkewService)
+    - BUG-8: Watcher health signal (ta_last_known_os_event_at watermark)
+    - BUG-9: SQLite single-connection deadlock (WAL + read connection)
+    - BUG-10: Wayland idle (Mutter.IdleMonitor D-Bus, not /dev/input)
+    - BUG-12: Sleep/wake skew stabilization (post-resume skip)
 
-  BUGS REMAINING (next steps):
-    - BUG-6: Schedule data (A.6)
-    - BUG-7: Clock skew (A.7)
-    - BUG-8: Watcher health signal (A.3)
-    - BUG-10: Wayland idle (A.4)
-    - BUG-11: Windows WTS message pump (A.3)
-    - BUG-12: Sleep/wake skew stabilization (A.7)
+  REMAINING (gated / process):
+    - BUG-11: Windows WTS message pump → TODO A.3.2 follow-up (SystemEvents path covers Phase 1)
+    - A.9/A.10: session_events aggregation (S1) + SyncService sub-batches (S2/S3/S6) —
+      gated on the Phase 2 server aggregate payload (SVR-2). Current 1-row sync stays functional.
+    - A.11: Docs + CHANGELOG (client/ARCHITECTURE.md §15, AGENTS.md changelog)
+    - A.12: Full Ship-Test pass (R1 mandatory — installed build, all 3 OSes)
+    - A.13: Release

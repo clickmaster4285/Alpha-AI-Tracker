@@ -54,6 +54,15 @@ public class AppConfig
     public bool SyncCompression { get; init; } = true;       // gzip request bodies (server: middleware.Decompress)
     public int SyncRetentionHours { get; init; } = 24;       // retention: synced app_items/app_sessions older than this are deleted client-side
 
+    // ─── Time & Attendance (Phase 1, finalplan §3) ───
+    // Idle thresholds (A.4): when does "idle" start, and how often to poll the OS
+    // idle source. The away threshold is reserved for A.8's status computation.
+    public bool TaEnabled { get; init; } = true;
+    public int IdleThresholdSeconds { get; init; } = 120;   // when does "idle" start
+    public int IdleAwayThresholdSeconds { get; init; } = 600; // when does "away" start (A.8)
+    public int IdlePollSeconds { get; init; } = 30;         // poll cadence
+    public int LockHysteresisSeconds { get; init; } = 30;   // screen_lock dedup window
+
     // ─── Self-update (GitHub Releases) ───
     // The client checks https://github.com/{UpdateRepo}/releases/latest for an
     // installer newer than the running VERSION, downloads it into the user data dir
@@ -97,6 +106,11 @@ public class AppConfig
             UpdateEnabled = GetEnv("ALPHA_UPDATE_ENABLED") is not ("0" or "false" or "False"),
             UpdateAutoCheckHours = Math.Max(1, int.TryParse(GetEnv("ALPHA_UPDATE_AUTO_CHECK_HOURS"), out var updHours) ? updHours : 24),
             UpdateAutoInstall = GetEnv("ALPHA_UPDATE_AUTO_INSTALL") is not ("0" or "false" or "False"),
+            TaEnabled = GetEnv("ALPHA_TA_ENABLED") is not ("0" or "false" or "False"),
+            IdleThresholdSeconds = Math.Max(10, int.TryParse(GetEnv("ALPHA_IDLE_THRESHOLD_SEC"), out var idleTh) ? idleTh : 120),
+            IdleAwayThresholdSeconds = Math.Max(30, int.TryParse(GetEnv("ALPHA_IDLE_AWAY_THRESHOLD_SEC"), out var idleAway) ? idleAway : 600),
+            IdlePollSeconds = Math.Max(5, int.TryParse(GetEnv("ALPHA_IDLE_POLL_SEC"), out var idlePoll) ? idlePoll : 30),
+            LockHysteresisSeconds = Math.Max(5, int.TryParse(GetEnv("ALPHA_TA_LOCK_HYSTERESIS_SEC"), out var lockHys) ? lockHys : 30),
         };
     }
 

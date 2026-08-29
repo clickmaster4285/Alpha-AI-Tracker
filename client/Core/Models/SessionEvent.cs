@@ -53,6 +53,12 @@ public static class SessionEventTypes
     // ── UI visibility (App.axaml.cs window.Closing, A.2) ──
     public const string UiHidden     = "ui_hidden";
 
+    // ── Idle / AFK (IdleDetector, A.4) ──
+    // Threshold-crossing markers only: idle start and idle end. The
+    // AttendanceAggregator (A.8) accumulates idle_seconds from these.
+    public const string IdleStart    = "idle_start";
+    public const string IdleEnd      = "idle_end";
+
     // Back-compat alias for rows written before the rename. Reading code
     // (server-side filters, web dashboard) still sees "login" in legacy
     // databases — keep this constant so a server-side JOIN/filter can use it.
