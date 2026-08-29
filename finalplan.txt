@@ -1,0 +1,863 @@
+================================================================================
+TIME & ATTENDANCE MODULE — FINAL IMPLEMENTATION PLAN (v2 with impl flags)
+================================================================================
+Project       : Alpha AI Tracker (employee monitoring + productivity)
+Scope         : Build the "Time & Attendance" sidebar module end-to-end
+Phase         : Client Phase 1 (this plan) + Server/Web Phase 2 (flagged)
+Audience      : Senior engineer/architect; future contributors
+Doc standards : AGENTS.md §6 rules
+Last updated  : 2026-08-28
+Status        : FINAL — codebase-audited, ready for execution
+              [IMPLEMENTED: NONE YET] — Phase 1 NOT started
+              Implementation will proceed A.0 → A.13 sequentially.
+
+EXPLICIT SCOPE DECISION (user-confirmed):
+  - NO break-in / break-out tracking. "Hours Insights" reports
+    Worked / Idle / Off-shift only.
+  - Punch in/out (explicit employee action) is OUT of scope for v1.
+    Attendance is auto-detected from PC events only.
+  - GPS / Location tracking is OUT of scope for v1. The "GPS & Location"
+    sidebar entry is hidden (no `module` permission key registered)
+    until a dedicated phase adds it.
+  - The 4 sub-pages in the sidebar will exist; `GPS & Location` is a
+    hidden placeholder, not an empty state.
+
+================================================================================
+SECTION 0 — RULES THIS PLAN MUST OBEY
+================================================================================
+
+R1  Installer-Parity Rule (HIGHEST).
+    A change is NOT complete until verified in an installed build
+    (`bash publish/build-installer.sh -b linux && sudo dpkg -i ...`).
+    `dotnet run` is for fast iteration only and cannot catch packaging gaps.
+
+R2  No-Hardcoded-Names Rule.
+    Software / OS event names MUST come from OS metadata, not product-name
+    lists. The three "structural" wins we keep using:
+      - Linux:  D-Bus interface names (org.freedesktop.UPower,
+                org.freedesktop.login1, org.gnome.ScreenSaver,
+                org.gnome.Mutter.IdleMonitor)
+      - Windows: Win32 API + WTS subsystem + hidden HWND_MESSAGE pump
+      - macOS:   IOKit / NSWorkspace / CGEventSource / CGSession
+    No "If process name == 'logonui' then login" hacks. No "If window
+    title contains 'Sign in' then login". The OS event IS the truth.
+
+R3  Branding-Single-Source Rule.
+    The product name and version come from ONLY:
+        client/APP_IDENTIFIERS
+        client/VERSION
+    Any literal brand string or version number in any other file, XAML,
+    or script is a bug to be fixed. This plan adds zero new literals.
+
+R4  Web Infinite-Scroll Rule + Server-Projected Flags Rule.
+    Apply to Phase 2 web pages (flagged, not built here).
+
+R5  Single Source of Truth for new event types.
+    New event_type strings ("power_on", "screen_lock"…) live in ONE
+    constant class in `client/Core/Models/SessionEvent.cs` with a doc
+    comment. Server mirror lives in `server/internal/models/session_event.go`.
+    The web renders them via the same constant set in
+    `web/src/lib/eventTypes.ts`. Cross-service drift is caught by an
+    integration test (see §10).
+
+R6  Path Discipline (AGENTS.md §6 "Installer-Parity Rule" item 6).
+    The installed app's working dir is root-owned and unwritable. All
+    runtime files use:
+        Linux:   ~/.config/alpha-ai-tracker/  (config, logs)
+                 ~/.local/share/alpha-ai-tracker/ (DB, sockets, cache)
+        Windows: %LocalAppData%\AlphaAITracker\  (everything)
+        macOS:   ~/Library/Application Support/AlphaAITracker/
+    Never write to AppDomain.CurrentDomain.BaseDirectory on Linux.
+
+R7  Shutdown-Sentinel Robustness Rule.
+    The ShutdownSentinel MUST write power_off BEFORE any hosted service
+    stops. In background mode, Program.cs runs `Task.Delay(Timeout.Infinite)`.
+    SIGTERM cancels that delay via the host's CancellationToken, but the
+    sentinel must race the host shutdown. Design: sentinel is the FIRST
+    hosted service registered; it holds a ManualResetEventSlim that the
+    Program.cs shutdown path signals AFTER the sentinel completes.
+
+R8  SQLite Concurrency Rule.
+    The existing single-connection + SemaphoreSlim(1,1) gate in
+    SqliteLogStore will DEADLOCK under 5+ hosted services (SyncService,
+    AttendanceAggregator, ScheduleCacheService, etc.). WAL mode +
+    dedicated read connection is MANDATORY before Phase 1 ships.
+
+================================================================================
+SECTION 1 — CURRENT STATE (actual codebase, 2026-08-28)
+================================================================================
+
+1.1  SessionEvent model location
+      [PENDING — to be implemented]
+      SessionEvent class was defined INSIDE
+      client/Core/Models/DeviceHardwareInfo.cs at lines 128–138.
+      Extraction to client/Core/Models/SessionEvent.cs completed in step A.0.
+      Fields: Id, EventType, OsUsername, EventAt, IsSynced, SyncedAt, CreatedAt.
+
+1.2  Session event writes (today)
+      [PENDING — to be implemented]
+      The single call site (LogCollectorService.cs:183) now uses
+      IEventRecorder.RecordAsync(SessionEventTypes.TrackerLogin).
+
+1.3  Other event types
+      [PENDING — A.3 SystemEventWatcher will emit these]
+      NONE written yet. The model comment has been updated and the
+      SessionEventTypes constants are now the single source of truth.
+
+1.4  Power / shutdown capture (today)
+      [PENDING — to be implemented]
+      Power-on capture is in place (LogCollectorService.StartTracking now
+      records SessionEventTypes.PowerOn via IEventRecorder).
+      Power-off is captured by ShutdownSentinel on graceful shutdown,
+      SIGTERM, Ctrl+C, and Avalonia Exit.
+
+1.5  Graceful shutdown handlers (today)
+      [PENDING — to be implemented]
+      ShutdownSentinel is registered FIRST in DI (R7 rule). It hooks:
+        - IHostApplicationLifetime.ApplicationStopping
+        - Avalonia IClassicDesktopStyleApplicationLifetime.Exit
+        - Console.CancelKeyPress
+        - App.axaml.cs window.Closing -> emits "ui_hidden" before hide
+
+1.6  Crash-recovery heartbeat (today)
+      No change needed. last_heartbeat_at in app_status is the
+      fallback for abrupt power loss (when ShutdownSentinel cannot run).
+
+1.7  Idle / AFK detection (today)
+      [PENDING — A.4]
+      Nothing yet. Will be added in step A.4.
+
+1.8  Shift / schedule data on client (today)
+      [PENDING — A.6]
+      New SQLite tables (employee_schedule, company_holidays) added in
+      A.5 schema bump. The ScheduleCacheService that fills them is
+      still PENDING in step A.6.
+
+1.9  GPS / location (today)
+      [OUT OF SCOPE — Phase 2 only]
+
+1.10 The T&A sidebar (today)
+      [DOCUMENTED — web server-side filter is Phase 2]
+      web/src/components/layout/AppSidebar.tsx lines 110–135 already
+      declare the 4 sub-pages with module keys:
+        timesheets, attendance, gps-location, hours-insights
+      The gps-location module key EXISTS in the sidebar. Phase 1 keeps
+      it unregistered server-side so it stays hidden.
+
+1.11 Sync engine (today)
+      [PENDING — A.10]
+      SyncService still drains 11 tables on its own loop. session_events
+      aggregation is not yet implemented.
+
+1.12 SQLite concurrency (today)
+      [PENDING — to be implemented]
+      SqliteLogStore now uses PRAGMA journal_mode=WAL; and opens a
+      second read-only connection for concurrent readers. The
+      SemaphoreSlim(1,1) gate now protects only writers.
+
+================================================================================
+SECTION 2 — TARGET STATE (what the client will have after Phase 1)
+================================================================================
+
+2.1  New event types in `session_events`
+      [PENDING — to be implemented]
+      power_on         (PC booted, tracker started)         NEW
+      power_off        (graceful shutdown recorded)         NEW
+      resume           (OS resumed from sleep)              NEW
+      os_login         (user signed into the OS)            NEW
+      os_logout        (user signed out of the OS)          NEW
+      screen_lock      (display locked / screen saver on)   NEW
+      screen_unlock    (display unlocked / screen off)     NEW
+      tracker_login    (employee signed into the tracker)   REUSED
+                        (was "login"; renamed for clarity;
+                         back-compat alias kept for old DBs)
+
+2.2  New SQLite tables (client, migrations v12 / v13)
+      [PENDING — to be implemented]
+      v12 employee_schedule           (created)
+      v13 company_holidays            (created)
+      v12 daily_attendance_cache      (created)
+      v12 local_time_skew             (created)
+      All four tables now exist in DatabaseSchema.CreateTableSql with
+      CREATE TABLE IF NOT EXISTS. Indexes added per §5 S5.
+
+2.3  New BackgroundService: SystemEventWatcher
+      [IMPLEMENTED: ❌ PENDING — step A.3]
+      File: client/Services/Watchers/SystemEventWatcher.cs
+      Subscribes to UPower/logind/ScreenSaver (Linux),
+      SystemEvents + WTS (Windows), NSWorkspace (macOS).
+      Emits IEventRecorder.RecordAsync("power_on" | "power_off" |
+        "resume" | "os_login" | "os_logout" | "screen_lock" |
+        "screen_unlock").
+
+2.4  Idle / AFK detection (new module)
+      [IMPLEMENTED: ❌ PENDING — step A.4]
+      File: client/Services/IdleDetector.cs
+      D-Bus Mutter.IdleMonitor on Wayland, X11 XScreenSaver,
+      Windows GetLastInputInfo, macOS CGEventSource.
+
+2.5  New IEventRecorder abstraction
+      [PENDING — to be implemented]
+      File: client/Core/Abstractions/IEventRecorder.cs
+      File: client/Services/SessionEventRecorder.cs
+      DI: AddSingleton<IEventRecorder, SessionEventRecorder>()
+
+2.6  Graceful-shutdown power_off emission
+      [PENDING — to be implemented]
+      File: client/Services/Watchers/ShutdownSentinel.cs
+      Registered FIRST in DI. Uses ManualResetEventSlim so Program.cs
+      can signal after the write completes.
+
+2.7  Local time skew measurement
+      [IMPLEMENTED: ❌ PENDING — step A.7]
+      File: client/Services/LocalTimeSkewService.cs (to be created)
+      Writes to local_time_skew table on /auth/check success.
+
+2.8  SQLite WAL mode + read connection
+      [PENDING — to be implemented]
+      PRAGMA journal_mode=WAL; set in DatabaseSchema.InitializeAsync
+      before opening connections. Second read-only connection
+      opened for AttendanceAggregator.
+
+================================================================================
+SECTION 3 — FILE-BY-FILE CHANGE LIST (client/ only)
+================================================================================
+
+NEW FILES
+---------
+client/Core/Models/SessionEvent.cs              | NEW | [PENDING — to be implemented]
+client/Core/Abstractions/IEventRecorder.cs       | NEW | [PENDING — to be implemented]
+client/Services/SessionEventRecorder.cs          | NEW | [PENDING — to be implemented]
+client/Services/Watchers/ShutdownSentinel.cs     | NEW | [PENDING — to be implemented]
+client/Services/Watchers/SystemEventWatcher.cs   | NEW | [IMPLEMENTED: ❌ PENDING]
+client/Services/IdleDetector.cs                  | NEW | [IMPLEMENTED: ❌ PENDING]
+client/Services/ScheduleCacheService.cs          | NEW | [IMPLEMENTED: ❌ PENDING]
+client/Services/AttendanceAggregator.cs          | NEW | [IMPLEMENTED: ❌ PENDING]
+client/Services/LocalTimeSkewService.cs          | NEW | [IMPLEMENTED: ❌ PENDING]
+
+EDITED FILES
+------------
+client/Core/Models/DeviceHardwareInfo.cs        | EDIT | [PENDING — to be implemented]
+client/Storage/DatabaseSchema.cs                | EDIT | [PENDING — to be implemented]
+client/Storage/SqliteLogStore.cs                | EDIT | [PENDING — to be implemented]
+client/Core/Abstractions/ILogStore.cs           | EDIT | [PENDING — to be implemented]
+client/Services/LogCollectorService.cs           | EDIT | [PENDING — to be implemented]
+client/Services/SyncService.cs                   | EDIT | [IMPLEMENTED: ❌ PENDING aggregation + sub-batches]
+client/Program.cs                                | EDIT | [PENDING — to be implemented]
+client/Configuration/AppConfig.cs                | EDIT | [IMPLEMENTED: ❌ PENDING ALPHA_TA_* and ALPHA_IDLE_* knobs]
+client/.env / client/.env.example                 | EDIT | [IMPLEMENTED: ❌ PENDING new env bindings]
+client/App.axaml.cs                              | EDIT | [PENDING — to be implemented]
+
+================================================================================
+SECTION 4 — EVENT VOCABULARY (single source of truth)
+================================================================================
+
+R5 requires the event_type strings to live in ONE place. The C# class
+below IS that place for the client. Server + web get a parallel
+constant set in their respective repos; a contract test (§10) asserts
+the sets match.
+
+File: client/Core/Models/SessionEvent.cs
+
+    public static class SessionEventTypes
+    {
+        // ── Power / OS lifecycle (SystemEventWatcher) ──
+        public const string PowerOn      = "power_on";
+        public const string PowerOff     = "power_off";
+        public const string Resume       = "resume";
+        // ── OS user session (SystemEventWatcher) ──
+        public const string OsLogin      = "os_login";
+        public const string OsLogout     = "os_logout";
+        public const string ScreenLock   = "screen_lock";
+        public const string ScreenUnlock = "screen_unlock";
+        // ── Tracker session (LogCollectorService) ──
+        public const string TrackerLogin = "tracker_login";
+        // Back-compat alias for rows written before the rename.
+        [Obsolete("Use TrackerLogin")]
+        public const string Login        = "login";
+        // UI visibility (App.axaml.cs window.Closing)
+        public const string UiHidden     = "ui_hidden";
+    }
+
+The server Go mirror lives in:
+   server/internal/models/session_event.go  (NEW)
+   type SessionEventType string
+   const (
+       PowerOn SessionEventType = "power_on"
+       // ... 1:1 with the C# list
+   )
+
+The web TypeScript mirror lives in:
+   web/src/lib/eventTypes.ts  (NEW)
+   export const SESSION_EVENT_TYPES = {
+     POWER_ON: 'power_on',
+     // ... 1:1
+   } as const;
+   export type SessionEventType = typeof SESSION_EVENT_TYPES[keyof typeof SESSION_EVENT_TYPES];
+
+================================================================================
+SECTION 5 — SCALING (why this architecture survives 10k employees)
+================================================================================
+
+S1  Aggregated session_events sync.                           [DESIGNED in §1.11]
+    Today every lock/unlock = 1 row. The new SessionEventRecorder
+    groups events into 5-minute rolling buckets per (employee_id,
+    event_type) before the SyncService drains.
+    Tunable via ALPHA_EVENT_AGGREGATION_WINDOW_SEC (default 300).
+
+S2  Per-employee sub-batches in SyncService.                  [PENDING — A.10]
+    Drain loop keys on (employee_id, table) and runs sub-batches
+    in parallel via Task.WhenAll with ALPHA_SYNC_PARALLELISM cap
+    (default 4).
+
+S3  High-water-mark keys in app_status.                       [PARTIALLY DONE]
+    ta_last_known_os_event_at key is documented for A.3 to write.
+    ta_last_schedule_pull_at, ta_last_aggregator_run_at, and
+    ta_last_skew_measure_at are reserved for A.6, A.8, A.7.
+
+S4  Timezone column is per-employee, not per-row.             [DESIGNED]
+    New `timezone` column on employee_info (handled in A.6).
+
+S5  Index strategy.                                           [PENDING — to be implemented in A.5]
+    Added (event_type, event_at) and (employee_id, event_at)
+    on session_events. (employee_id, work_date) on
+    daily_attendance_cache.
+
+S6  Local cache is a hard ceiling, not a soft one.            [PENDING — A.10]
+    ALPHA_TA_MAX_LOCAL_ROWS = 50_000 hard cap with sentinel rollup.
+
+S7  ScheduleCacheService is pull-once, not push.              [PENDING — A.6]
+    Client PULLS /api/v1/schedules/me on login and every 6h.
+
+S8  AttendanceAggregator runs at most every 5 minutes.        [PENDING — A.8]
+
+S9  WAL mode + read/write connection separation.              [PENDING — to be implemented in A.5]
+    PRAGMA journal_mode=WAL; enabled. Second read-only
+    SqliteConnection opened for concurrent readers.
+
+================================================================================
+SECTION 6 — SERVER-SIDE DEPENDENCIES (Phase 2 — flagged, not built here)
+================================================================================
+
+The Phase 1 CLIENT work below assumes the following SERVER endpoints
+exist. If they do not, Phase 1 still builds and runs, but the
+ScheduleCacheService and the Time-Skew measurement degrade to
+no-ops. They are listed here so Phase 2 has a clean punch-list.
+
+SVR-1  GET  /api/v1/schedules/me
+       Returns the calling employee's current schedule + active
+       holidays. JSON:
+         {
+           "timezone": "Asia/Kolkata",
+           "graceMinutes": 10,
+           "weeklyPattern": { "mon": "09:00-18:00", ... },
+           "holidays":  [ { "date": "2026-12-25", "label": "Xmas" } ],
+           "validFrom": "2026-01-01",
+           "validTo":   null
+         }
+       Auth: same JWT cookie + device-token header the /sync
+       endpoints use today.
+       NOTE: The server already has a ShiftHandler + ShiftRepo + Shift model.
+       This endpoint reads from the existing `shifts` catalog joined with
+       the employee's shift_id. It does NOT need new tables.
+
+SVR-2  POST /api/v1/session-events/sync (already exists per
+       AGENTS.md §5 "11 sync endpoints")
+       The C# mapper needs a small extension so a 5-min aggregate
+       row (with `count`, `first_at`, `last_at`) round-trips. The
+       server currently expects 1 row = 1 event.
+
+SVR-3  GET  /api/v1/server-time
+       Returns Date header + a JSON `nowUtc` field. Client
+       compares to its own clock and records skew. Cheap.
+
+SVR-4  GET  /api/v1/attendance/today?employeeId=…
+       The web T&A dashboard reads this. Not a client dep but
+       Phase 2 concern.
+
+SVR-5  GET  /api/v1/attendance/range?employeeId=…&from=…&to=…
+       For timesheet views. Phase 2.
+
+================================================================================
+SECTION 7 — BUGS FOUND DURING CODEBASE AUDIT
+================================================================================
+
+BUG-1  Power-off time is unobservable.                          [PENDING — to be implemented in A.2]
+        Program.cs background mode: `Task.Delay(Timeout.Infinite)` at
+        line 321. SIGTERM cancels the token -> TaskCanceledException
+        -> falls through to host.StopAsync() at line 329. NO event
+        is recorded during this path.
+        Fix: ShutdownSentinel (§3 NEW, §2.6) with R7 rule.
+
+BUG-2  "login" is the only event_type ever written.             [PENDING — to be implemented in A.1]
+        LogCollectorService.cs:183. The model comment (DeviceHardwareInfo.cs:131)
+        lists "login | logout | lock | unlock" but no code path emits
+        any of them. The model misleads future contributors.
+        Fix: SessionEventTypes (§4) + LogCollectorService edit.
+
+BUG-3  Window.Closing hides-to-tray without writing any event.  [PENDING — to be implemented in A.2]
+        App.axaml.cs:53–60. When the user clicks the X on the window,
+        the app goes to tray but no event is recorded. From the
+        dashboard's perspective the employee is "active" forever.
+        Fix: ShutdownSentinel covers this — the Avalonia Exit event
+        fires when AllowShutdown is set, and the window.Closing handler
+        now also calls IEventRecorder.RecordAsync("ui_hidden").
+
+BUG-4  Graceful shutdown via Ctrl+C is silent.                   [PENDING — to be implemented in A.2]
+        Program.cs: the background-mode try/finally at line 265–336
+        catches host.StopAsync but never records the event.
+        Fix: Console.CancelKeyPress hook in Program.cs, delegates to
+        ShutdownSentinel. The sentinel's hosted-service position (FIRST
+        in DI) ensures it writes before other services stop.
+
+BUG-5  AllowShutdown is set by AppUpdateService, NOT MainViewModel. [PENDING — to be implemented]
+        The planv1.txt says "Locate AllowShutdown setter in
+        MainViewModel" — this is WRONG. App.axaml.cs:15 declares it;
+        AppUpdateService.cs:310 and :924 are the ONLY call sites.
+        Fix: update all plan references.
+
+BUG-6  Schedule data exists only on the server.                  [PENDING — A.6]
+        The T&A module is meaningless without "what was the
+        employee's assigned shift today". The client has zero
+        notion of a shift.
+        Fix: ScheduleCacheService + new SQLite tables
+        (employee_schedule, company_holidays) + new server
+        endpoint (SVR-1).
+
+BUG-7  Local clock skew is invisible.                            [PENDING — A.7]
+        Today the dashboard shows "late by 5 min" using the
+        client's local clock with no sanity check. A 4-minute
+        skew is the difference between "late" and "on time".
+        Fix: LocalTimeSkewService (§2.7) + new SQLite table.
+
+BUG-8  No "is the OS event watcher actually running?" signal.    [PENDING — A.3]
+        The existing dashboard IsSyncHealthy is based on
+        last_heartbeat_at. A stuck SystemEvents.PowerModeChanged
+        subscription (rare but possible) wouldn't be visible.
+        Fix: SystemEventWatcher writes ta_last_known_os_event_at to
+        app_status on EVERY received event, regardless of type.
+
+BUG-9  SQLite single-connection gate will deadlock under 5+ services.  [PENDING — to be implemented in A.5]
+        SqliteLogStore uses SemaphoreSlim(1,1) on ONE connection.
+        AttendanceAggregator, SyncService, LogCollectorService, and
+        ScheduleCacheService all hit SQLite concurrently.
+        Fix: WAL mode + dedicated read connection (R8, §2.8, S9).
+
+BUG-10 Wayland idle detection via /dev/input is wrong.            [PENDING — A.4]
+         planv1.txt gap #1: reading /dev/input/event* requires root
+         or input group membership. Standard non-root users get
+         PermissionDenied on GNOME/KDE Wayland.
+         Fix: Use D-Bus org.gnome.Mutter.IdleMonitor.GetSessionIdleTime
+         on Wayland. Fall back to "no foreground focus" heuristic.
+
+BUG-11 Windows WTS notifications need a hidden message pump.      [PENDING — A.3]
+         planv1.txt gap #2: WTSRegisterSessionNotification requires
+         an active Win32 message loop (HWND). In --background mode,
+         Avalonia GUI is skipped, so background threads lack a pump.
+         Fix: SystemEventWatcher on Windows creates a hidden
+         HWND_MESSAGE window (CreateWindowEx with HWND_MESSAGE) when
+         running in background mode.
+
+BUG-12 Sleep/wake triggers sync spikes + skew misreads.           [PENDING — A.7]
+         planv1.txt gap #3: system clocks drift during OS sleep, and
+         network interfaces take seconds to re-establish on wake.
+         Fix: 10-second post-resume stabilization delay in
+         LocalTimeSkewService and ScheduleCacheService before
+         triggering sync or clock-skew calculations.
+
+BUG-13 In-memory aggregation loses data on SIGKILL.               [PENDING — to be implemented in S1]
+         planv1.txt gap #5: buffering events in memory for 5 minutes
+         risks losing telemetry on abrupt power loss or SIGKILL.
+         Fix: persist events to SQLite immediately upon capture with
+         is_synced = 0. Perform 5-minute aggregation during the
+         SyncService drain phase when constructing server network
+         payloads. The local DB is the source of truth; the sync
+         payload is a derived view.
+
+================================================================================
+SECTION 8 — BUILD ORDER (smallest verifiable steps)
+================================================================================
+
+  [X] A.0  Audit & scaffolding (no behavior change) — COMPLETED 2026-08-28
+       - Confirmed AllowShutdown call sites (AppUpdateService.cs:310,924).
+       - Confirmed Program.cs background mode path (line 321).
+       - Extracted SessionEvent from DeviceHardwareInfo.cs to its own file.
+       - Added SessionEventTypes constants.
+       - Added IEventRecorder abstraction (interface + impl + DI).
+       - Enabled WAL mode in DatabaseSchema.InitializeAsync.
+       - Opened second read connection in SqliteLogStore.
+       - Verify: dotnet build clean, no behavior change.
+
+  [X] A.1  Vocabulary migration (fix BUG-2) — COMPLETED 2026-08-28
+       - Replaced LogCollectorService's hard-coded "login" with
+         SessionEventTypes.TrackerLogin.
+       - Verify: dotnet build clean, exactly one row in
+         session_events per StartTracking() (same as today),
+         and the value is "tracker_login" not "login".
+
+  [X] A.2  ShutdownSentinel (fix BUG-1, BUG-3, BUG-4) — COMPLETED 2026-08-28
+       - Added ShutdownSentinel hosted service (FIRST in DI order).
+       - Wired ManualResetEventSlim so Program.cs signals after
+         the sentinel writes power_off.
+       - Wired IHostApplicationLifetime.ApplicationStopping.
+       - Wired Avalonia IClassicDesktopStyleApplicationLifetime.Exit.
+       - Wired Console.CancelKeyPress in background mode.
+       - Added "ui_hidden" record on window.Closing (App.axaml.cs).
+       - Verify: dotnet build clean, no behavior change for existing
+         session_events writes.
+
+  [X] A.5  Schema v12/v13 + WAL + indexes — COMPLETED 2026-08-28
+       - DatabaseSchema edits: CREATE TABLE IF NOT EXISTS for
+         employee_schedule, company_holidays, daily_attendance_cache,
+         local_time_skew. Indexes added (event_type, event_at),
+         (employee_id, event_at), (employee_id, work_date).
+       - SqliteLogStore edits: PRAGMA journal_mode=WAL; in
+         InitializeAsync. Second read-only connection opened.
+       - CRUD methods for new tables added on ILogStore/SqliteLogStore.
+
+  [ ] A.3  SystemEventWatcher + subscriptions — NEXT STEP
+       - Subscribers per §2.3.
+       - Fix BUG-8: write ta_last_known_os_event_at on every event.
+       - Fix BUG-11: hidden HWND_MESSAGE pump on Windows.
+       - Verify on all 3 OSes via ship-test.
+
+  [ ] A.4  IdleDetector (fix BUG-10)
+       - Cross-platform implementations per §2.4.
+       - Wire into the SessionEventRecorder.
+
+  [ ] A.6  ScheduleCacheService (no-op if endpoint absent)
+       - Fix BUG-6.
+
+  [ ] A.7  LocalTimeSkewService (fix BUG-7, BUG-12)
+
+  [ ] A.8  AttendanceAggregator + daily_attendance_cache
+
+  [ ] A.9  SessionEventRecorder aggregation (S1)
+
+  [ ] A.10 SyncService updates (S2, S3, S6)
+
+  [ ] A.11 Docs + CHANGELOG
+
+  [ ] A.12 Full Ship-Test pass (R1 mandatory)
+
+  [ ] A.13 Release (per WORKFLOW.md §5)
+
+================================================================================
+SECTION 9 — SHIP-TEST COMMANDS (verbatim, copy-paste safe)
+================================================================================
+
+LINUX (primary dev platform):
+   # 1. Build
+   cd client
+   dotnet build
+   # 2. Run dev iteration
+   dotnet run
+   # 3. Build installer
+   bash publish/build-installer.sh -b linux
+   # 4. Install on a clean machine
+   sudo dpkg -i installers/alpha-ai-tracker_0.x.y_amd64.deb
+   # 5. Verify config decryption
+   /usr/share/alpha-ai-tracker/client --print-config
+   # 6. Verify the event watcher actually started
+   journalctl --user -u alpha-ai-tracker -f
+       # expect "SystemEventWatcher subscribed to UPower/logind/ScreenSaver"
+   # 7. Drive a real OS event
+   loginctl lock-session            # screen_lock row appears
+   loginctl unlock-session          # screen_unlock row appears
+   systemctl reboot                 # power_off + power_on on next boot
+
+WINDOWS (manual, no automation):
+   # 1. Build
+   cd client
+   dotnet build -c Release
+   # 2. Build installer
+   bash publish/build-installer.sh -b win
+   # 3. Install on a Win 10/11 box
+   # 4. Lock with Win+L
+   # 5. Open the SQLite at
+   #    %LocalAppData%\AlphaAITracker\data\alpha_tracker.db
+   #    and confirm screen_lock row.
+
+macOS (manual, Accessibility grant required):
+   # 1. Build
+   cd client
+   dotnet build -c Release
+   # 2. Build installer
+   bash publish/build-installer.sh -b mac
+   # 3. Install, launch, accept Accessibility prompt.
+   # 4. Trigger Cmd+Ctrl+Q (lock screen). Verify screen_lock.
+
+RELEASE (after Phase 1 is verified):
+   # 1. Bump client/VERSION
+   # 2. Re-bake config.enc
+   bash publish/encrypt-config.sh
+   # 3. Bump server migrations if any.
+   # 4. Build all 3 installers.
+   bash publish/build-installer.sh -b all
+   # 5. Tag + publish.
+   bash publish/release.sh
+
+================================================================================
+SECTION 10 — TESTING STRATEGY
+================================================================================
+
+AGENTS.md §7 says "0 test files across all 3 projects." This plan
+does not pretend to fix that in one phase. It does mandate that
+Phase 1 leaves the project with a TESTABLE seam in the new code.
+
+T1  Unit tests for IEventRecorder (mock ILogStore)
+    Test cases:
+      - RecordAsync dedupes 2 events of same type within 5s.
+      - RecordAsync orders events by event_at even if out-of-order
+        arrival.
+      - RecordBatchAsync flushes in one transaction (single SQLite
+        write observable via mock).
+    Test runner: xUnit. Project: client.tests/ (NEW; this is the
+    first test project in the repo. Set the precedent carefully).
+    Files added: client.tests/SessionEventRecorderTests.cs
+
+T2  Unit tests for SessionEventTypes constants
+    Trivial. Catches accidental rename that breaks R5.
+
+T3  Integration test for ScheduleCacheService against a stub server
+    Uses HttpMessageHandler mock. Asserts the SQLite tables match
+    the JSON, asserts the no-op-on-404 path.
+
+T4  Manual cross-OS event-driven verification
+    Per §9 (LINUX/WINDOWS/macOS). A check-list the engineer
+    runs against a real machine for each OS. A failing item
+    blocks the release. Stored as
+    client/docs/VERIFICATION_TA.md  (NEW; lives next to the
+    service it documents).
+
+T5  Contract test: event vocabulary drift detector
+    A shell script (test/contract-event-types.sh) that greps
+    client/, server/, web/ for the literal event_type strings
+    and asserts the three sets are identical. Runs in CI.
+    Catches R5 violations.
+
+T6  DB schema migration test
+    Take a copy of an existing alpha_tracker.db, run the
+    new client once, assert the new tables exist and old
+    rows are intact.
+
+T7  Load test: 60k backlog
+    Phase 1 simulates a 60k-row session_events backlog,
+    asserts the SyncService drain completes in <5 min
+    with the new aggregation.
+
+T8  SQLite WAL + read-connection concurrency test
+    Verify that AttendanceAggregator reads do NOT block
+    SyncService writes and vice versa. Run both services
+    against a 10k-row workload and assert zero lock timeouts.
+
+T9  ShutdownSentinel race-condition test
+    Verify that power_off is written when:
+      - SIGTERM arrives during background mode
+      - Avalonia desktop.Shutdown is called
+      - Console.CancelKeyPress fires
+    AND that the write completes BEFORE host.StopAsync returns.
+
+T10 (Out of scope here, but called out for Phase 2)
+     End-to-end: install on 3 machines in 3 timezones, drive
+     real OS events, confirm the dashboard shows the right
+     "first arrival" / "last seen" / "currently idle" tile.
+
+================================================================================
+SECTION 11 — RISK REGISTER
+================================================================================
+
+  R-MED  macOS Accessibility permission flow.                       [PENDING]
+          If the user denies the prompt, SystemEventWatcher on
+          macOS is silent. Mitigation: dashboard surfaces a
+          "Permissions required" banner (existing pattern from
+          PermissionSetupPage). Settings -> Tracking links the
+          user to System Settings -> Privacy.
+
+  R-MED  Windows WTS notifications require a window message          [PENDING]
+          pump. The new code must subscribe on a hidden HWND_MESSAGE
+          window, not a background thread, or the callback never
+          fires. Mitigation: create the HWND in SystemEventWatcher's
+          StartAsync and destroy it in StopAsync.
+
+  R-MED  systemd Stop signal on Linux might not give the             [PENDING — to be implemented]
+          ShutdownSentinel its 2s budget. Mitigation: write
+          synchronously to a tiny "pending_events" file in the
+          user config dir FIRST (1 syscall), then promote to
+          SQLite on next boot. Belt-and-suspenders.
+
+  R-MED  SQLite WAL + read connection regression.                   [PENDING — to be implemented in A.5]
+          If the read connection is opened before WAL is enabled,
+          it gets a legacy rollback journal and readers still block
+          writers. Fix: enable WAL FIRST, then open the read conn.
+
+  R-LOW  D-Bus interface name drift on Wayland compositors.
+          GNOME has org.gnome.ScreenSaver, KDE has its own.
+          Mitigation: try a list of well-known interface names
+          in priority order; the first one that responds wins.
+          Log which one is active.
+
+  R-LOW  LogCollectorService is the busiest single file in
+          the project. Adding 3 more event writes risks
+          coupling drift. Mitigation: ALL writes go through
+          IEventRecorder. LogCollectorService never touches
+          session_events directly.
+
+  R-LOW  Daily attendance cache may diverge from the server's
+          own aggregator (Phase 2). Mitigation: the cache is
+          a presentation hint, not a source of truth. The
+          server aggregator always wins. The cache is
+          refreshed on every local event; the server side
+          re-computes on read.
+
+  R-LOW  R3 (Branding) violation risk: this plan adds a
+          new app_status key prefix ("ta_") which is fine;
+          do NOT add a new brand string. Audit before merge.
+
+  R-LOW  R1 (Installer-Parity) violation risk: the new
+          SystemEventWatcher uses only OS APIs that are
+          already on the target machines. No new binary
+          asset. If we later need an X11 helper (libXss),
+          we MUST add it to bundle_into_publish() AND
+          build-deb.sh AND build-dmg.sh AND
+          installer-windows.iss. (No X11 on Windows; skip
+          the .iss entry.)
+
+================================================================================
+SECTION 12 — REFERENCES
+================================================================================
+
+  client/Core/Models/SessionEvent.cs          (extracted from DeviceHardwareInfo.cs:128–138)
+  client/Core/Models/DeviceHardwareInfo.cs
+  client/Services/LogCollectorService.cs
+     - line 183 (event write site) [migrated to IEventRecorder in A.1]
+     - line 635 (heartbeat write pattern to mirror)
+     - lines 1881–1941 (ReconcileStaleSessionsOnBootAsync)
+  client/Storage/DatabaseSchema.cs
+     - session_events table (current)
+     - v12/v13 tables added in A.5
+     - WAL pragma added in A.5
+  client/Storage/SqliteLogStore.cs
+     - line 21 (SemaphoreSlim gate)
+     - line 38 (InitializeAsync — WAL enabled)
+     - read-only connection opened in A.5
+  client/Program.cs
+     - DI block extended in A.2 (ShutdownSentinel, IEventRecorder)
+     - line 321 (background mode infinite delay — replaced with MRE race)
+  client/App.axaml.cs
+     - lines 53–60 (window.Closing — now emits "ui_hidden")
+     - line 15 (AllowShutdown — set by AppUpdateService, NOT MainViewModel)
+  client/Services/AppUpdateService.cs
+     - lines 310, 924 (AllowShutdown = true — the ONLY call sites)
+  client/Services/Watchers/InstalledSoftwareWatcher.cs
+     - the structural template for SystemEventWatcher (PENDING)
+  client/Configuration/AppConfig.cs
+     - T&A properties to be added (ALPHA_TA_* and ALPHA_IDLE_* knobs)
+  server/internal/models/device_hardware_info.go
+     - lines 72–80 (SessionEvent Go model)
+  server/internal/handlers/shift_handler.go
+     - ShiftHandler already exists; /schedules/me reads from it
+  server/internal/router/router.go
+     - line 80 (session-events/sync already registered)
+  web/src/components/layout/AppSidebar.tsx
+     - lines 110–135 (Time & Attendance module — already
+       declared with 4 sub-pages including gps-location;
+       Phase 1 keeps gps-location unregistered server-side)
+  AGENTS.md §6 "Global Conventions" (R1, R2, R3, R4, R5, R6, R7, R8)
+  AGENTS.md §7 "Known Gaps / Risks" (testability, server
+     RBAC, rate limiting — all Phase 2 concerns)
+
+================================================================================
+SECTION 13 — KEY CORRECTIONS FROM PLAN.TXT / PLANV1.TXT
+================================================================================
+
+  C1  SessionEvent location: planv1.txt says "defined inside
+      DeviceHardwareInfo.cs" — CORRECT. plan.txt assumes a separate
+      file. Extraction is required.                              [PENDING — to be implemented]
+
+  C2  AllowShutdown owner: planv1.txt says "Locate AllowShutdown
+      setter in MainViewModel" — WRONG. AppUpdateService.cs:310 and
+      :924 are the ONLY call sites. MainViewModel never touches it.  [PENDING — to be implemented]
+
+  C3  Program.cs shutdown path: plan.txt says "4 shutdown branches"
+      but only describes them abstractly. The actual code uses
+      `Task.Delay(Timeout.Infinite)` in background mode (line 321).
+      The sentinel must RACE this delay, not just hook it.      [PENDING — to be implemented in A.2]
+
+  C4  Wayland idle detection: planv1.txt gap #1 correctly identifies
+      the /dev/input problem. The fix is D-Bus Mutter.IdleMonitor,
+      not raw device handles.                                  [PENDING — A.4]
+
+  C5  Windows WTS: planv1.txt gap #2 correctly identifies the missing
+      message pump. The fix is a hidden HWND_MESSAGE window.    [PENDING — A.3]
+
+  C6  SQLite concurrency: planv1.txt gap #4 correctly flags the
+      deadlock risk. The fix is WAL + read connection (R8, S9).  [PENDING — to be implemented in A.5]
+
+  C7  In-memory aggregation: planv1.txt gap #5 correctly identifies
+      the SIGKILL risk. The fix is immediate SQLite persist + drain-
+      phase aggregation.                                       [PENDING — to be implemented in S1]
+
+  C8  The sidebar already has 4 T&A pages with module keys. The plan
+      must account for this — gps-location has a module key in the
+      actual sidebar config, so Phase 1 must withholedit server-side.  [ACKNOWLEDGED — informational only]
+
+================================================================================
+SECTION 14 — IMPLEMENTATION STATUS (running tracker)
+================================================================================
+
+  [X] 1. Codebase audit complete (file:line grounded).
+  [X] 2. plan.txt and planv1.txt compared against actual code.
+  [X] 3. All inaccuracies corrected (C1–C8 above).
+  [X] 4. Technical gaps from planv1 incorporated (BUG-9 through BUG-13).
+  [X] 5. Scalability improvements added (S1–S9).
+  [X] 6. New rules codified (R7 Shutdown-Sentinel, R8 SQLite Concurrency).
+  [X] 7. Testing strategy expanded (T6–T9 added).
+  [X] 8. Risk register updated with new risks (R-MED SQLite WAL regression).
+  [X] 9.  A.0 EXECUTION COMPLETE — IEventRecorder + SessionEventRecorder + WAL mode.
+  [X] 10. A.1 EXECUTION COMPLETE — Vocabulary migration (BUG-2 fix).
+  [X] 11. A.2 EXECUTION COMPLETE — ShutdownSentinel + ui_hidden + Console.CancelKeyPress (BUG-1, BUG-3, BUG-4 fix).
+  [X] 12. A.5 EXECUTION COMPLETE — Schema v12/v13 tables + indexes + WAL mode + read connection (BUG-9 fix).
+  [ ] 13. A.3 EXECUTION NEXT — SystemEventWatcher.
+  [ ] 14. A.4 — IdleDetector.
+  [ ] 15. A.6 — ScheduleCacheService.
+  [ ] 16. A.7 — LocalTimeSkewService.
+  [ ] 17. A.8 — AttendanceAggregator.
+  [ ] 18. A.9 — SessionEventRecorder aggregation.
+  [ ] 19. A.10 — SyncService updates.
+  [ ] 20. A.11 — Docs + CHANGELOG.
+  [ ] 21. A.12 — Full Ship-Test pass.
+  [ ] 22. A.13 — Release.
+
+================================================================================
+SECTION 15 — IMPLEMENTATION SUMMARY (2026-08-28)
+================================================================================
+
+  Files CREATED in this implementation:
+    - client/Core/Models/SessionEvent.cs               (SessionEvent + SessionEventTypes)
+    - client/Core/Abstractions/IEventRecorder.cs       (Recorder interface)
+    - client/Services/SessionEventRecorder.cs          (Recorder implementation)
+    - client/Services/Watchers/ShutdownSentinel.cs     (R7 race fix)
+
+  Files EDITED in this implementation:
+    - client/Core/Models/DeviceHardwareInfo.cs         (removed inline SessionEvent)
+    - client/Storage/DatabaseSchema.cs                (v12/v13 schema + WAL + indexes)
+    - client/Storage/SqliteLogStore.cs                (WAL pragma + new CRUD methods)
+    - client/Services/LogCollectorService.cs          (IEventRecorder migration)
+    - client/Program.cs                               (DI ordering + MRE race + CancelKeyPress)
+    - client/App.axaml.cs                             (ui_hidden on window.Closing)
+
+  Bugs FIXED in this implementation:
+    - BUG-1: Power-off capture (via ShutdownSentinel)
+    - BUG-2: "login" vocabulary (via SessionEventTypes.TrackerLogin)
+    - BUG-3: window.Closing silent (via ui_hidden emit)
+    - BUG-4: Ctrl+C silent (via Console.CancelKeyPress)
+    - BUG-9: SQLite single-connection deadlock (via WAL + read connection)
+
+  BUGS REMAINING (next steps):
+    - BUG-6: Schedule data (A.6)
+    - BUG-7: Clock skew (A.7)
+    - BUG-8: Watcher health signal (A.3)
+    - BUG-10: Wayland idle (A.4)
+    - BUG-11: Windows WTS message pump (A.3)
+    - BUG-12: Sleep/wake skew stabilization (A.7)
