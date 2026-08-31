@@ -909,6 +909,89 @@ export const usersApi = {
 };
 
 // ──────────────────────────
+// Time & Attendance API
+// ──────────────────────────
+
+export type AttendanceStatus =
+  | 'present'
+  | 'late'
+  | 'absent'
+  | 'half_day'
+  | 'off_shift'
+  | 'unknown';
+
+export interface AttendanceRecord {
+  employeeId: string;
+  workDate: string;
+  firstActiveAt?: string | null;
+  lastActiveAt?: string | null;
+  activeSeconds: number;
+  idleSeconds: number;
+  offShiftSeconds: number;
+  status: AttendanceStatus;
+  lateMinutes: number;
+}
+
+export interface AttendanceRangeResponse {
+  data: AttendanceRecord[];
+  total: number;
+  page: number;
+  perPage: number;
+  totalPages: number;
+}
+
+export interface Holiday {
+  id: number;
+  date: string;
+  label: string;
+}
+
+export interface HolidayListResponse {
+  data: Holiday[];
+  total: number;
+}
+
+export interface HolidayInput {
+  date: string;
+  label: string;
+}
+
+export const attendanceApi = {
+  today: (employeeId: string) =>
+    request<AttendanceRecord>('/attendance/today', { params: { employeeId } }),
+
+  range: (params: {
+    employeeId: string;
+    from: string;
+    to: string;
+    page?: number;
+    perPage?: number;
+  }) =>
+    request<AttendanceRangeResponse>('/attendance/range', {
+      params: params as Record<string, string | number | undefined>,
+    }),
+
+  /** Convenience wrapper: one employee, one calendar day. */
+  day: (employeeId: string, date: string) =>
+    request<AttendanceRangeResponse>('/attendance/range', {
+      params: { employeeId, from: date, to: date, page: 1, perPage: 1 },
+    }).then(r => r.data[0] ?? null),
+};
+
+export const holidaysApi = {
+  list: () => request<HolidayListResponse>('/holidays'),
+
+  create: (data: HolidayInput) =>
+    request<Holiday>('/holidays', { method: 'POST', body: data }),
+
+  update: (id: number, data: HolidayInput) =>
+    request<Holiday>(`/holidays/${id}`, { method: 'PUT', body: data }),
+
+  delete: (id: number) =>
+    request<{ message: string }>(`/holidays/${id}`, { method: 'DELETE' }),
+};
+
+// ──────────────────────────
 // Health API
 // ──────────────────────────
 
