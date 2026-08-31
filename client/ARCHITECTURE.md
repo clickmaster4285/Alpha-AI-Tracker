@@ -89,9 +89,10 @@
 > - 2026-08-07: **Quiet terminal** — per-event browser-journey logs demoted to Debug (visible with
 >   `ALPHA_LOG_LEVEL=debug`); startup banner stays at Information.
 > - 2026-08-07: **Headless `--background` service mode** — `Program.cs` no longer initializes the
->   Avalonia/X11 UI in background mode (the installed systemd unit had hardcoded a stale
->   `XAUTHORITY=~/.Xauthority`; the real Xwayland auth is `/run/user/<uid>/.mutter-Xwaylandauth.*`), so
->   the installed service stays active instead of dying at startup.
+>   Avalonia/X11 UI at boot. Manual launches signal that process to create the UI lazily. Linux user
+>   units inherit the graphical environment from the systemd user manager instead of hardcoding
+>   `DISPLAY` / `XAUTHORITY`; `BackgroundGuardService` removes legacy `~/.Xauthority` overrides and
+>   performs one systemd-only restart so GNOME Wayland's rotating Mutter cookie takes effect.
 > - 2026-08-06: **Hybrid URL fallback — browser profile History reader** (`BrowserHistoryReader.cs`).
 >   Reads Chromium `History` / Firefox `places.sqlite` while the browser runs (safe copy + `-wal`/`-shm`/
 >   `-journal` sidecars, read-only, signature-throttled); resolution is STRICTLY title-match; generic
@@ -859,8 +860,9 @@ hooks yet).
 ### Vocabulary (single source of truth, `Core/Models/SessionEvent.cs`)
 
 The `SessionEventTypes` static class is the ONE place every session_events `event_type` string
-lives on the client (finalplan R5). The Go server mirror is `server/internal/models/session_event.go`
-and the web mirror is `web/src/lib/eventTypes.ts`; a CI contract test asserts the three sets match.
+lives on the client (finalplan R5). The planned Go mirror
+(`server/internal/models/session_event.go`), web mirror (`web/src/lib/eventTypes.ts`), and CI
+contract test are Phase 2 work and do not exist yet.
 
 | Constant | event_type | Emitter |
 |---|---|---|
@@ -883,12 +885,12 @@ and the web mirror is `web/src/lib/eventTypes.ts`; a CI contract test asserts th
 | Service | Type | Cadence | Purpose |
 |---|---|---|---|
 | `SessionEventRecorder` | `IEventRecorder` singleton | — | Single funnel for ALL session_events writes; 5 s dedup window (burst collapse) + hard 2 s write timeout |
-| `ShutdownSentinel` | hosted (FIRST in DI) | — | Writes `power_off` before the host stops; `ManualResetEventSlim` so `Program.cs` waits ≤3 s before disposing the store (R7) |
-| `SystemEventWatcher` | hosted | event-driven | Linux D-Bus (UPower / login1 / GNOME ScreenSaver), Windows `SystemEvents`, macOS stub; touches `ta_last_known_os_event_at` watermark |
+| `ShutdownSentinel` | hosted (FIRST in DI) | — | Writes `power_off` before the host stops; background mode uses `WaitForShutdownAsync` so SIGTERM reaches hosted-service shutdown, then `ManualResetEventSlim` bounds the final write wait |
+| `SystemEventWatcher` | hosted | event-driven | Linux D-Bus (UPower / login1 shutdown+lock / GNOME ScreenSaver), Windows `SystemEvents`, macOS stub; login1 `PrepareForShutdown(true)` persists before Xwayland teardown; touches `ta_last_known_os_event_at` watermark |
 | `IdleDetector` | hosted | 30 s poll | OS idle source (Mutter.IdleMonitor / X11 / GetLastInputInfo); emits `idle_start`/`idle_end` crossings |
-| `ScheduleCacheService` | hosted | login + every 6 h | Mirrors `GET /api/v1/schedules/me` into local tables; graceful no-op on 404 until Phase 2 |
-| `LocalTimeSkewService` | hosted | 15 min | Measures client↔server clock skew from the HTTP Date header; stores per server URL; skips post-resume passes |
-| `AttendanceAggregator` | hosted | 5 min | Rolls up today's session-idle activity into `daily_attendance_cache` (arrival/departure/active/idle + status) |
+| `ScheduleCacheService` | hosted | login/resume + every 6 h | Mirrors `GET /api/v1/schedules/me` into local tables; login wakes it immediately, resume waits 10 s for network stabilization, and 404 remains a graceful no-op until Phase 2 |
+| `LocalTimeSkewService` | hosted | startup/resume + every 15 min | Measures client↔server clock skew from the HTTP Date header; resume waits 10 s before measuring |
+| `AttendanceAggregator` | hosted | login + every 5 min | Rolls up arrival/last-seen, the union of idle+screen-lock time, active time, schedule overlap, holidays, lateness, absence, half-day, and off-shift time; legacy offset timestamps are normalized to UTC at the store boundary |
 
 DI order (finalplan §3): `ShutdownSentinel` is registered FIRST so .NET stops it LAST — guaranteeing
 `power_off` is written while the SQLite singleton is still alive.
@@ -905,7 +907,9 @@ DI order (finalplan §3): `ShutdownSentinel` is registered FIRST so .NET stops i
 ### Concurrency (finalplan R8 / BUG-9)
 
 With 6 hosted services hitting SQLite, the original single-connection `SemaphoreSlim(1,1)` would
-serialize everything and risk deadlock. `SqliteLogStore.InitializeAsync` now:
+serialize everything and risk deadlock. `Program.cs` initializes the store before starting hosted
+services (so the first boot event cannot race SQLite); `SqliteLogStore.InitializeAsync` is
+serialized/idempotent and:
 1. enables `PRAGMA journal_mode=WAL;` + `synchronous=NORMAL` FIRST, then
 2. opens a second **ReadOnly** connection (`WithReadConnectionAsync`) for pure readers
    (`AttendanceAggregator`, schedule/holiday/skew reads).
@@ -928,5 +932,6 @@ collection never blocks aggregation and vice versa.
 - **Server (Phase 2):** `GET /api/v1/schedules/me` (SVR-1), `GET /api/v1/server-time` (SVR-3),
   `GET /api/v1/attendance/today|range` (SVR-4/5), and an extension to the `session-events/sync`
   handler to accept the 5-min aggregate `{count, first_at, last_at}` payload (SVR-2, A.9/A.10).
-- **Web (Phase 2):** the `timesheets` / `attendance` / `hours-insights` pages (already declared in
-  the sidebar). `gps-location` stays **hidden** — no `module` permission key registered server-side.
+- **Web (Phase 2):** replace the current static `timesheets` / `attendance` pages and
+  `hours-insights` placeholder with live APIs and server-side infinite scroll. `gps-location` is
+  out of scope but is currently registered in the RBAC catalog; remove that grant before release.
