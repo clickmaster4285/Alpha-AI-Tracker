@@ -98,11 +98,21 @@ public sealed partial class SystemEventWatcher : BackgroundService
             _logger.LogError(ex, "SystemEventWatcher: subscription failed (continuing with whatever succeeded)");
         }
 
-        // Park the background task. All events flow through callbacks registered
-        // above; ExecuteAsync just needs to stay alive until shutdown.
+        // Park the background task. On Linux, a polling loop runs every 30s to
+        // check ScreenSaver.GetActive() as a fallback for missed ActiveChanged
+        // signals (GNOME 46+ sometimes skips the signal for Super+L).
         try
         {
-            await Task.Delay(Timeout.Infinite, stoppingToken);
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
+
+                if (OperatingSystem.IsLinux())
+                {
+                    try { await PollScreenSaverActiveAsync(); }
+                    catch (Exception ex) { _logger.LogDebug(ex, "ScreenSaver poll cycle failed"); }
+                }
+            }
         }
         catch (OperationCanceledException)
         {
