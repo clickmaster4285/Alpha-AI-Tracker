@@ -386,6 +386,8 @@ export interface Shift {
   endTime: string;
   /** Comma-separated weekday short names (e.g. "Mon,Tue,Wed,Thu,Fri"). */
   workingDays: string;
+  /** IANA timezone used to interpret shift hours (e.g. "Asia/Karachi"). */
+  timezone: string;
   graceMinutes: number;
   overtimeHours: number;
   description: string;
@@ -412,6 +414,7 @@ export interface CreateShiftPayload {
   startTime: string;
   endTime: string;
   workingDays: string;
+  timezone: string;
   graceMinutes: number;
   overtimeHours: number;
   description?: string;

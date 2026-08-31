@@ -17,6 +17,7 @@ const DEFAULT_FORM: CreateShiftPayload = {
   startTime: '09:00',
   endTime: '17:00',
   workingDays: 'Mon,Tue,Wed,Thu,Fri',
+  timezone: 'UTC',
   graceMinutes: 5,
   overtimeHours: 8,
   description: '',
@@ -140,6 +141,7 @@ export default function ShiftManagement() {
       startTime: s.startTime,
       endTime: s.endTime,
       workingDays: s.workingDays,
+      timezone: s.timezone || 'UTC',
       graceMinutes: s.graceMinutes,
       overtimeHours: s.overtimeHours,
       description: s.description,
@@ -163,6 +165,7 @@ export default function ShiftManagement() {
   const validate = (): string | null => {
     if (!form.name.trim()) return 'Shift name is required';
     if (!form.startTime || !form.endTime) return 'Start and end time are required';
+    if (!form.timezone.trim()) return 'IANA timezone is required';
     if (form.graceMinutes < 0 || form.graceMinutes > 120) return 'Grace minutes must be 0–120';
     if (form.overtimeHours < 0 || form.overtimeHours > 24) return 'Overtime hours must be 0–24';
     return null;
@@ -297,6 +300,10 @@ export default function ShiftManagement() {
                   <span className="text-foreground">{shift.graceMinutes} min</span>
                 </div>
                 <div className="flex justify-between">
+                  <span className="text-muted-foreground">Timezone</span>
+                  <span className="text-foreground">{shift.timezone || 'UTC'}</span>
+                </div>
+                <div className="flex justify-between">
                   <span className="text-muted-foreground">Overtime After</span>
                   <span className="text-foreground">{shift.overtimeHours}h</span>
                 </div>
@@ -423,6 +430,14 @@ export default function ShiftManagement() {
                   onChange={e => setForm({ ...form, overtimeHours: Number(e.target.value) })}
                 />
               </div>
+            </div>
+            <div>
+              <label className="text-sm font-semibold text-foreground mb-1 block">IANA Timezone</label>
+              <Input
+                value={form.timezone}
+                onChange={e => setForm({ ...form, timezone: e.target.value })}
+                placeholder="e.g. Asia/Karachi"
+              />
             </div>
             <div>
               <label className="text-sm font-semibold text-foreground mb-1 block">Description</label>
