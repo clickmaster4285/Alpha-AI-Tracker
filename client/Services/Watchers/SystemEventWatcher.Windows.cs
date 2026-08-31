@@ -1,9 +1,10 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Win32;
 using client.Core.Models;
-using System.Runtime.Versioning;
 
 namespace client.Services.Watchers;
+
+#pragma warning disable CA1416 // Every entry point below returns unless OperatingSystem.IsWindows().
 
 /// <summary>
 /// Windows half of <see cref="SystemEventWatcher"/>. Uses the .NET
@@ -22,15 +23,14 @@ namespace client.Services.Watchers;
 /// </summary>
 public sealed partial class SystemEventWatcher
 {
-    [SupportedOSPlatform("windows")]
     private PowerModeChangedEventHandler? _winPowerModeChanged;
 
-    [SupportedOSPlatform("windows")]
     private SessionSwitchEventHandler? _winSessionSwitch;
 
-    [SupportedOSPlatform("windows")]
     private void SubscribeWindows()
     {
+        if (!OperatingSystem.IsWindows()) return;
+
         _logger.LogInformation("SystemEventWatcher: subscribing to SystemEvents (PowerModeChanged, SessionSwitch)");
 
         _winPowerModeChanged = (sender, e) =>
@@ -93,9 +93,10 @@ public sealed partial class SystemEventWatcher
     /// the base class's StopAsync. Implementation here (rather than the
     /// base) because the delegate fields are private to this partial.
     /// </summary>
-    [SupportedOSPlatform("windows")]
     internal void UnsubscribeWindows()
     {
+        if (!OperatingSystem.IsWindows()) return;
+
         try
         {
             if (_winPowerModeChanged != null)
@@ -109,3 +110,5 @@ public sealed partial class SystemEventWatcher
         }
     }
 }
+
+#pragma warning restore CA1416

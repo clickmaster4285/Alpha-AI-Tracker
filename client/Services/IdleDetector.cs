@@ -1,7 +1,6 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using System.Runtime.InteropServices;
-using System.Runtime.Versioning;
 using client.Configuration;
 using client.Core.Abstractions;
 using client.Core.Models;
@@ -177,9 +176,10 @@ public static class IdleDetectorPlatform
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
 
-    [SupportedOSPlatform("windows")]
     public static double? GetIdleSecondsWindows()
     {
+        if (!OperatingSystem.IsWindows()) return null;
+
         var info = new LASTINPUTINFO();
         info.cbSize = (uint)Marshal.SizeOf(info);
         if (!GetLastInputInfo(ref info)) return null;
