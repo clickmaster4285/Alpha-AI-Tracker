@@ -70,7 +70,7 @@ var isMinimized = args.Contains("--minimized");
 // Restart=always racing) must exit quietly so they never disturb the user.
 var isUserLaunch = !isBackground && !isMinimized;
 
-var appMutex = new Mutex(true, "AlphaAITracker", out var mutexCreated);
+var appMutex = new Mutex(true, SingleInstanceService.MutexName, out var mutexCreated);
 if (!mutexCreated)
 {
     // ── --restart (post-update relaunch) ──
