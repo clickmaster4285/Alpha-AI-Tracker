@@ -888,8 +888,8 @@ contract test are Phase 2 work and do not exist yet.
 | `ShutdownSentinel` | hosted (FIRST in DI) | — | Writes `power_off` before the host stops; background mode uses `WaitForShutdownAsync` so SIGTERM reaches hosted-service shutdown, then `ManualResetEventSlim` bounds the final write wait |
 | `SystemEventWatcher` | hosted | event-driven | Linux D-Bus (UPower / login1 shutdown+lock / GNOME ScreenSaver), Windows `SystemEvents`, macOS stub; login1 `PrepareForShutdown(true)` persists before Xwayland teardown; touches `ta_last_known_os_event_at` watermark |
 | `IdleDetector` | hosted | 30 s poll | OS idle source (Mutter.IdleMonitor / X11 / GetLastInputInfo); emits `idle_start`/`idle_end` crossings |
-| `ScheduleCacheService` | hosted | login/resume + every 6 h | Mirrors `GET /api/v1/schedules/me` into local tables; login wakes it immediately, resume waits 10 s for network stabilization, and 404 remains a graceful no-op until Phase 2 |
-| `LocalTimeSkewService` | hosted | startup/resume + every 15 min | Measures client↔server clock skew from the HTTP Date header; resume waits 10 s before measuring |
+| `ScheduleCacheService` | hosted | login/resume + every 6 h | Mirrors the Phase 2 `GET /api/v1/schedules/me` response into local tables; login wakes it immediately and resume waits 10 s for network stabilization |
+| `LocalTimeSkewService` | hosted | startup/resume + every 15 min | Measures client↔server clock skew from `GET /api/v1/server-time`'s Date header; resume waits 10 s before measuring |
 | `AttendanceAggregator` | hosted | login + every 5 min | Rolls up arrival/last-seen, the union of idle+screen-lock time, active time, schedule overlap, holidays, lateness, absence, half-day, and off-shift time; legacy offset timestamps are normalized to UTC at the store boundary |
 
 DI order (finalplan §3): `ShutdownSentinel` is registered FIRST so .NET stops it LAST — guaranteeing
@@ -929,9 +929,11 @@ collection never blocks aggregation and vice versa.
 
 ### Phase 1 → Phase 2 handoff
 
-- **Server (Phase 2):** `GET /api/v1/schedules/me` (SVR-1), `GET /api/v1/server-time` (SVR-3),
-  `GET /api/v1/attendance/today|range` (SVR-4/5), and an extension to the `session-events/sync`
-  handler to accept the 5-min aggregate `{count, first_at, last_at}` payload (SVR-2, A.9/A.10).
+- **Server (Phase 2, implemented 2026-08-31):** `GET /api/v1/schedules/me` (SVR-1),
+  `GET /api/v1/server-time` (SVR-3), `GET /api/v1/attendance/today|range` (SVR-4/5), holiday
+  CRUD, and aggregate-compatible `session-events/sync` fields `{count, firstAt, lastAt}` (SVR-2).
+- **Client follow-up:** A.9/A.10 may now aggregate queued session events before sync; raw
+  one-event rows remain fully backward compatible with the server contract.
 - **Web (Phase 2):** replace the current static `timesheets` / `attendance` pages and
   `hours-insights` placeholder with live APIs and server-side infinite scroll. `gps-location` is
   out of scope but is currently registered in the RBAC catalog; remove that grant before release.

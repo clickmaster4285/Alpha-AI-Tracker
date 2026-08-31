@@ -1,7 +1,16 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-08-18 (date-range filters on app-sessions + app-items)
+> **Last audited:** 2026-08-31 (Time & Attendance Phase 2)
 > **Changelog:**
+> - 2026-08-31: **Time & Attendance Phase 2 server contract.** Migration 028 adds an IANA
+>   timezone to shifts, the company-holiday calendar, and aggregate-compatible
+>   `session_events` fields (`event_count`, `first_at`, `last_at`). Device-authenticated
+>   clients can read `GET /api/v1/schedules/me`; `GET /api/v1/server-time` is public;
+>   JWT-protected admins can manage `/holidays` and read `/attendance/today` or
+>   `/attendance/range`. Attendance is computed on read from session events, the latest
+>   heartbeat, the assigned shift, and holidays; idle and lock intervals are unioned.
+>   The range response is paginated for web infinite scrolling. Unit tests cover the
+>   lowercase weekly-pattern contract and overlapping inactive intervals.
 > - 2026-08-18: **Server-side date-range filtering on app-sessions + app-items list endpoints.**
 >   `GET /app-sessions` and `GET /app-items` now accept `dateFrom` and `dateTo` query parameters (RFC3339
 >   or date-only like `2026-08-18`). Sessions filter on `started_at`, items on `opened_at`. Combined with
@@ -85,7 +94,7 @@ server/
 ├── go.mod / go.sum              # Go module: github.com/alpha-ai-tracker/server
 ├── .env.example                 # Environment variable template
 │
-├── migrations/                  # SQL migration files, run in sorted order on startup (001–025 = 24 files; 003 deleted)
+├── migrations/                  # SQL migration files, run in sorted order on startup (latest: 028)
 │   ├── 001_init.sql             # users, departments, employee_id_seq, triggers, seed departments
 │   ├── 002_employees.sql        # Separate employees table, migrate non-admin users out of users
 │   ├── 004_employee_department_id.sql  # FK employees.department_id → departments.id
@@ -108,7 +117,10 @@ server/
 │   ├── 022_sequence_retention_indexes.sql # retention-purge support indexes
 │   ├── 023_monitoring_config.sql    # monitoring_types, monitoring_categories + classification columns + monitoring_sites
 │   ├── 024_catalog_merge.sql        # cross-OS catalog dedup by normalized name
-│   └── 025_rbac_roles_modules.sql   # roles/modules/submodules/role_submodule_permissions; users.role_id sole source of truth
+│   ├── 025_rbac_roles_modules.sql   # roles/modules/submodules/role_submodule_permissions; users.role_id sole source of truth
+│   ├── 026_refresh_tokens.sql        # rotating web refresh-token persistence
+│   ├── 027_shifts.sql               # relational shift catalog + employee assignment
+│   └── 028_time_attendance_phase2.sql # timezone, holidays, aggregate event fields
 │
 └── internal/
     ├── config/config.go         # Loads env vars, builds Config struct (incl. LINK_STALE_DAYS)
@@ -312,7 +324,8 @@ Employee token is carried in the request body (`{employeeId, token, entries: [..
 | POST | `/installed-apps/sync` | `installed_applications` + `employee_installed_applications` | Upsert catalog-then-link in ONE tx |
 | POST | `/installed-packages/sync` | `installed_packages` + `employee_installed_packages` | Upsert catalog-then-link in ONE tx |
 | POST | `/network-info/sync` | `network_info` | Bulk upsert |
-| POST | `/session-events/sync` | `session_events` | Bulk upsert |
+| POST | `/session-events/sync` | `session_events` | Bulk upsert; accepts optional count/firstAt/lastAt aggregates |
+| GET | `/schedules/me` | `shifts`, `company_holidays` | Device-auth schedule mirror |
 | POST | `/app-sessions/sync` | `app_sessions` | Bulk upsert |
 | POST | `/app-items/sync` | `app_items` | Bulk upsert |
 | POST | `/app-status/sync` | `app_status` | Upsert by (employee_id, key) |
@@ -500,10 +513,10 @@ id TEXT PK · employee_id FK · public_ip · private_ip · mac_address
 network_interface_name · collected_at / synced_at / created_at / deleted_at
 ```
 
-**`session_events`** — Login/logout/lock/unlock events (migration 006). The client now emits only `login` (via `StartTracking`); `logout` stopped being emitted when the employee-disconnect flow was removed 2026-08-10.
+**`session_events`** — Power/login/lock/idle telemetry (migrations 006, 028).
 ```
 id TEXT PK · employee_id FK · event_type · os_username
-event_at / synced_at / created_at / deleted_at
+event_at · event_count · first_at · last_at / synced_at / created_at / deleted_at
 ```
 
 **`app_sessions`** — Relational app sessions (migrations 006, 010, 013)
@@ -591,7 +604,7 @@ applied_at      TIMESTAMPTZ DEFAULT NOW()
 
 ### Migration Tool
 
-**Custom runner** in `database/postgres.go`. Reads `.sql` files from `migrations/` directory (currently 25 files: 001, 002, 004–026), tracks applied migrations in `schema_migrations` table, runs in transaction order. Each file runs in its own transaction.
+**Custom runner** in `database/postgres.go`. Reads all `.sql` files from `migrations/` in filename order (latest: 028), tracks applied migrations in `schema_migrations`, and runs each file in its own transaction.
 
 ---
 
