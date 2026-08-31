@@ -11,8 +11,10 @@ TABLE OF CONTENTS
   2. Bug #2 — EnableAutoStartForced() Tries to Enable Non-Existent Service
   3. Bug #3 — Stale Mutex Blocks Background Launch After Crash/Reboot
   4. Bug #4 — Cinnamon Autostart Reliability Gap
-  5. How Each Fix Should Be Applied (No Code Changes Yet)
-  6. Diagnostic Commands for Linux Mint 22.2
+  5. Bug #5 — Shift Management: Soft-Deleted Shift Names Block Re-Creation
+  6. Bug #6 — installed_applications: version and publisher always empty on Linux
+  7. How Each Fix Should Be Applied (No Code Changes Yet)
+  8. Diagnostic Commands for Linux Mint 22.2
 
 
 ================================================================================
@@ -348,6 +350,194 @@ AFFECTED FILES:
   - server/internal/repository/new_schema_repo.go (shift CRUD)
   - server/internal/handler/ (shift handler)
   - web/src/app/(app)/settings/shift-management/page.tsx (UI)
+
+
+================================================================================
+  BUG #6 — installed_applications: version and publisher always empty on Linux
+  Date Found: 2026-08-31
+  Environment: Linux (Ubuntu, Mint, all distros)
+  Works On: Windows (registry populates version/publisher correctly)
+================================================================================
+
+SEVERITY: MEDIUM
+AFFECTS: All Linux installed builds — every application row in the SQLite
+         installed_applications table has empty app_version and publisher
+
+DESCRIPTION:
+  Every installed application on Linux has empty app_version and publisher
+  fields in the installed_applications SQLite table. This data IS available
+  from the OS (dpkg-query, flatpak, snap) but is never written into the
+  installed_applications table on Linux.
+
+  Evidence from the live DB at /home/devteam/.local/share/alpha-ai-tracker/data/alpha_tracker.db:
+
+    sqlite> SELECT COUNT(*) FROM installed_applications WHERE is_installed=1;
+    101
+
+    sqlite> SELECT COUNT(*) FROM installed_applications
+            WHERE is_installed=1
+              AND (app_version = '' OR app_version IS NULL);
+    101
+
+    sqlite> SELECT COUNT(*) FROM installed_applications
+            WHERE is_installed=1
+              AND (publisher = '' OR publisher IS NULL);
+    101
+
+  100% of rows have empty version and publisher. The sync payload
+  (SyncService.cs:276-277) DOES include appVersion and publisher fields,
+  but they are always empty strings, so the server stores empty values too.
+
+ROOT CAUSE:
+  On Linux, InstalledAppDetector.ScanDesktopFiles() (InstalledAppDetector.cs:379-391)
+  creates InstalledApplication entries from .desktop files with hardcoded empty
+  strings:
+
+    _installedApps.Add(new InstalledApplication
+    {
+        AppName = name,
+        BinaryName = binaryName ?? "",
+        DesktopId = Path.GetFileNameWithoutExtension(filePath),
+        Categories = categories ?? "",
+        InstallPath = exec ?? filePath,
+        Publisher = "",          // <-- HARDCODED EMPTY
+        AppVersion = "",         // <-- HARDCODED EMPTY
+        ChangeType = "seen",
+        IsBrowser = isBrowser,
+        DetectedAt = DateTime.UtcNow,
+    });
+
+  This is correct behavior for .desktop files — they do NOT contain version
+  or publisher metadata. However, the data IS available from other OS sources:
+
+  Source 1 — dpkg-query (PackageDetector.ScanDpkg, PackageDetector.cs:260-317):
+    dpkg-query -W -f='${Package}\t${Version}\t${Maintainer}\n'
+    Returns 2697 packages with version + maintainer (publisher).
+    BUT this data goes into installed_packages table, NOT installed_applications.
+
+  Source 2 — flatpak (PackageDetector.ScanFlatpak):
+    flatpak list --columns=name,application,version
+    Returns version for Flatpak apps (Floorp, Warpinator, etc.).
+    BUT this data also goes into installed_packages only.
+
+  Source 3 — snap (PackageDetector.ScanSnap):
+    snap list — returns version + publisher.
+    BUT again, installed_packages only.
+
+  The SoftwareClassifier (SoftwareClassifier.cs:158-173) has MergeAppMetadata()
+  that copies version/publisher between InstalledApplication rows, but it only
+  merges between app-to-app sources (e.g., registry metadata into shortcut rows
+  on Windows). There is NO code path that merges installed_packages data into
+  installed_applications on Linux.
+
+  The two tables are SEPARATE:
+    installed_applications  — populated by InstalledAppDetector (from .desktop files)
+    installed_packages      — populated by PackageDetector (from dpkg/npm/pip/...)
+
+  On Windows, version/publisher come from the registry (InstalledAppDetector
+  reads them directly), so the fields are populated. On Linux, .desktop files
+  are the ONLY source for installed_applications, and they lack this metadata.
+
+  THE GAP: No cross-reference exists to look up a binary_name or package name
+  in the dpkg database and copy its version/publisher into the matching
+  installed_applications row.
+
+
+AFFECTED FILES:
+  - client/Core/InstalledAppDetector.cs:379-391 (ScanDesktopFiles — hardcodes empty)
+  - client/Core/PackageDetector.cs:260-317 (ScanDpkg — has the data but writes to wrong table)
+  - client/Core/SoftwareClassifier.cs:158-173 (MergeAppMetadata — only merges app-to-app)
+  - client/Storage/SqliteLogStore.cs:467-468,1021-1042 (INSERT/UPDATE — stores empty strings)
+
+
+================================================================================
+  RESOLUTION PLAN FOR BUG #6
+================================================================================
+
+NOTE: No code changes made yet. This is the plan only.
+
+FIX #6 — Cross-reference dpkg/flatpak/snap data into installed_applications
+---------------------------------------------------------------------------
+
+  OPTION A (Recommended) — Post-scan enrichment pass in InstalledAppDetector:
+
+    WHERE: client/Core/InstalledAppDetector.cs, new method after
+           ScanDesktopFiles() completes
+
+    WHAT: After all .desktop files are scanned and _installedApps is populated,
+    run a enrichment pass that:
+
+    1. Build a lookup dictionary from dpkg-query:
+       dictionary<string, (string version, string publisher)> dpkgLookup
+       Key = package name (e.g., "google-chrome-stable", "vlc", "vim")
+
+    2. For each InstalledApplication in _installedApps:
+       a. Try exact match on binary_name against dpkg package name
+       b. Try exact match on app_name against dpkg package name
+       c. Try fuzzy match: dpkg package name contains binary_name or vice versa
+       d. If matched AND app.AppVersion is still empty:
+          - Set app.AppVersion = dpkgLookup[match].version
+          - Set app.Publisher = dpkgLookup[match].publisher
+
+    3. Same logic for flatpak apps:
+       - flatpak app IDs are already the DesktopId (e.g., "org.x.Warpinator")
+       - Match on DesktopId against flatpak application ID
+       - Copy flatpak version into AppVersion
+
+    4. Same logic for snap apps:
+       - Match on binary_name or app_name against snap package name
+       - Copy snap version and publisher
+
+    WHY: This is the least invasive fix — it adds a post-scan enrichment step
+    that only fills in EMPTY fields. It does not change the scan logic, the
+    table schema, or the sync payload. Existing populated fields are never
+    overwritten (the COALESCE NULLIF pattern in SqliteLogStore already protects
+    updates).
+
+    The dpkg data is already collected by PackageDetector.ScanDpkg() at the
+    same startup phase. Either:
+      a) InstalledAppDetector calls dpkg-query directly (duplicate but isolated)
+      b) Share the dpkg data from PackageDetector via a static cache or DI
+
+    Option (a) is simpler and avoids cross-component coupling. The dpkg-query
+    call takes <50ms and runs once at startup.
+
+
+  OPTION B — Merge at Store layer (SqliteLogStore):
+
+    WHERE: client/Storage/SqliteLogStore.cs, StoreInstalledApplicationsAsync
+
+    WHAT: When inserting/updating an installed_applications row, if app_version
+    or publisher is empty, query the installed_packages table for a matching
+    package and copy its version/publisher.
+
+    WHY: This ensures ANY future code path that writes an InstalledApplication
+    with empty version/publisher automatically gets enriched. The merge happens
+    at the persistence layer, not the detection layer.
+
+    DRAWBACK: Couples the two tables at the store level; makes the store aware
+    of detection semantics.
+
+
+  RECOMMENDED: Option A — it's cleaner, keeps the enrichment in the detection
+  layer, and the dpkg-query call is cheap (<50ms on this machine with 2697
+  packages).
+
+
+DIAGNOSTIC COMMANDS:
+  # Verify the bug — all rows should show empty version/publisher
+  sqlite3 ~/.local/share/alpha-ai-tracker/data/alpha_tracker.db \
+    "SELECT app_name, '[' || app_version || ']', '[' || publisher || ']'
+     FROM installed_applications WHERE is_installed=1 LIMIT 20;"
+
+  # Verify dpkg data IS available for these apps
+  dpkg-query -W -f='${Package}\t${Version}\t${Maintainer}\n' \
+    google-chrome-stable vim vlc copyq code 2>/dev/null
+
+  # Verify flatpak data IS available
+  flatpak list --columns=application,version 2>/dev/null | grep -i "warpinator\|floorp"
+
+  # Expected: dpkg/flatpak return version+publisher, but the DB shows empty
 
 
 ================================================================================
