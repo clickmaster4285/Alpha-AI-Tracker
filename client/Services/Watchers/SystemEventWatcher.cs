@@ -37,9 +37,12 @@ public sealed partial class SystemEventWatcher : BackgroundService
     // Lock-hysteresis: a flaky screensaver / GDM switcher can fire screen_lock +
     // screen_unlock every few seconds. Finalplan section 2.3 says "30s hysteresis"
     // so we only re-emit a screen_lock after 30s of no screen_unlock.
+    // Initial state is "never seen" (null), NOT DateTime.MinValue — using MinValue
+    // would put (now - MinValue) ≈ 2,000,000,000 seconds into the hysteresis
+    // window and the very first screen_lock after a fresh boot would be suppressed.
     private static readonly TimeSpan LockHysteresis = TimeSpan.FromSeconds(30);
-    private DateTime _lastScreenLockAt = DateTime.MinValue;
-    private DateTime _lastScreenUnlockAt = DateTime.MinValue;
+    private DateTime? _lastScreenLockAt;
+    private DateTime? _lastScreenUnlockAt;
     private readonly object _hysteresisGate = new();
 
     // macOS-only: track the last known screen-locked state for the CGSession
@@ -145,8 +148,8 @@ public sealed partial class SystemEventWatcher : BackgroundService
             {
                 var now = DateTime.UtcNow;
                 if (eventType == SessionEventTypes.ScreenLock &&
-                    (now - _lastScreenLockAt) < LockHysteresis &&
-                    (now - _lastScreenUnlockAt) < LockHysteresis)
+                    _lastScreenLockAt.HasValue && (now - _lastScreenLockAt.Value) < LockHysteresis &&
+                    _lastScreenUnlockAt.HasValue && (now - _lastScreenUnlockAt.Value) < LockHysteresis)
                 {
                     _logger.LogDebug("SystemEventWatcher: screen_lock suppressed by hysteresis (source={Source})", source);
                     return;
