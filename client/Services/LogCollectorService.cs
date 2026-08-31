@@ -51,6 +51,8 @@ public class LogCollectorService : BackgroundService
     /// with <c>_eventRecorder.RecordAsync(SessionEventTypes.TrackerLogin)</c>.
     /// </summary>
     private readonly IEventRecorder _eventRecorder;
+    private readonly ScheduleCacheService _scheduleCache;
+    private readonly AttendanceAggregator _attendanceAggregator;
     private int _cycleCount;
     private string? _currentEmployeeId;
     private string? _currentEmployeeName;
@@ -164,7 +166,9 @@ public class LogCollectorService : BackgroundService
         IInstalledAppDetector appDetector,
         IPackageDetector packageDetector,
         IBrowserRegistry browserRegistry,
-        IEventRecorder eventRecorder)
+        IEventRecorder eventRecorder,
+        ScheduleCacheService scheduleCache,
+        AttendanceAggregator attendanceAggregator)
     {
         _config = config;
         _collector = collector;
@@ -175,6 +179,8 @@ public class LogCollectorService : BackgroundService
         _packageDetector = packageDetector;
         _browserRegistry = browserRegistry;
         _eventRecorder = eventRecorder;
+        _scheduleCache = scheduleCache;
+        _attendanceAggregator = attendanceAggregator;
     }
 
     public void StartTracking()
@@ -201,6 +207,8 @@ public class LogCollectorService : BackgroundService
         // path stays as a defense-in-depth fallback for machines that were powered off
         // abruptly (no graceful shutdown -> no power_off row).
         _ = _eventRecorder.RecordAsync(SessionEventTypes.PowerOn);
+        _scheduleCache.RequestImmediatePull();
+        _attendanceAggregator.RequestImmediateAggregation();
 
         if (OperatingSystem.IsWindows())
         {

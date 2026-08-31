@@ -2,7 +2,6 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using client.Configuration;
 using client.Core.Abstractions;
-using client.Core.Models;
 
 namespace client.Services;
 
@@ -35,27 +34,39 @@ public sealed class LocalTimeSkewService : BackgroundService
     private const double StoreSkewToleranceSeconds = 2.0;
     private static readonly TimeSpan ResampleInterval = TimeSpan.FromHours(1);
 
-    private readonly IEventRecorder _eventRecorder;
     private readonly ILogStore _store;
     private readonly AppConfig _config;
     private readonly HttpClient _httpClient;
     private readonly ILogger<LocalTimeSkewService> _logger;
+    private readonly SemaphoreSlim _measureSignal = new(0, 1);
+    private long _notBeforeUtcTicks;
 
     private DateTime _lastStoredAt = DateTime.MinValue;
     private double? _lastStoredSkewSeconds;
 
     public LocalTimeSkewService(
-        IEventRecorder eventRecorder,
         ILogStore store,
         AppConfig config,
         HttpClient httpClient,
         ILogger<LocalTimeSkewService> logger)
     {
-        _eventRecorder = eventRecorder;
         _store = store;
         _config = config;
         _httpClient = httpClient;
         _logger = logger;
+    }
+
+    /// <summary>Request a fresh measurement after resume stabilization.</summary>
+    public void RequestPostResumeMeasurement()
+    {
+        Interlocked.Exchange(
+            ref _notBeforeUtcTicks,
+            DateTime.UtcNow.Add(PostResumeStabilization).Ticks);
+        try
+        {
+            if (_measureSignal.CurrentCount == 0) _measureSignal.Release();
+        }
+        catch (SemaphoreFullException) { }
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -72,6 +83,14 @@ public sealed class LocalTimeSkewService : BackgroundService
         {
             try
             {
+                var notBeforeTicks = Interlocked.Exchange(ref _notBeforeUtcTicks, 0);
+                if (notBeforeTicks > 0)
+                {
+                    var stabilizationDelay = new DateTime(notBeforeTicks, DateTimeKind.Utc) - DateTime.UtcNow;
+                    if (stabilizationDelay > TimeSpan.Zero)
+                        await Task.Delay(stabilizationDelay, stoppingToken);
+                }
+
                 await MeasureAndStoreAsync(stoppingToken);
             }
             catch (OperationCanceledException) { throw; }
@@ -82,7 +101,7 @@ public sealed class LocalTimeSkewService : BackgroundService
 
             try
             {
-                await Task.Delay(MeasureInterval, stoppingToken);
+                await _measureSignal.WaitAsync(MeasureInterval, stoppingToken);
             }
             catch (OperationCanceledException) { }
         }

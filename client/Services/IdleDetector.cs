@@ -44,6 +44,12 @@ public sealed class IdleDetector : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (!_config.TaEnabled)
+        {
+            _logger.LogInformation("IdleDetector: ALPHA_TA_ENABLED=false - parked");
+            return;
+        }
+
         _logger.LogInformation(
             "IdleDetector starting (threshold={IdleSec}s, poll={PollSec}s)",
             _config.IdleThresholdSeconds, _config.IdlePollSeconds);

@@ -21,19 +21,23 @@ namespace client.Services;
 /// logs at Debug and retries on the next 6h tick - Phase 1 client work never
 /// blocks on Phase 2 server work.
 ///
-/// Auth: a GET cannot carry a body, so the employee token rides in the
-/// Authorization header. We send BOTH header styles (Bearer + Device) so the
-/// endpoint works whichever middleware protects it in Phase 2.
+/// Auth: a GET cannot carry a body, so the device token rides in the
+/// Authorization header. Bearer is used only as a compatibility fallback when
+/// a legacy employee record has no device token.
 /// </summary>
 public sealed class ScheduleCacheService : BackgroundService
 {
     private static readonly TimeSpan PullInterval = TimeSpan.FromHours(6);
     private static readonly TimeSpan FirstPullDelay = TimeSpan.FromSeconds(45);
+    private static readonly TimeSpan PostResumeStabilization = TimeSpan.FromSeconds(10);
 
     private readonly ILogStore _store;
     private readonly AppConfig _config;
     private readonly HttpClient _httpClient;
     private readonly ILogger<ScheduleCacheService> _logger;
+    private readonly SemaphoreSlim _pullSignal = new(0, 1);
+    private readonly object _signalGate = new();
+    private DateTime _notBeforeUtc = DateTime.MinValue;
 
     private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
 
@@ -49,6 +53,26 @@ public sealed class ScheduleCacheService : BackgroundService
         _logger = logger;
     }
 
+    /// <summary>
+    /// Wake the schedule loop after login or resume. Resume requests wait for the
+    /// network stack to settle before pulling; repeated requests coalesce.
+    /// </summary>
+    public void RequestImmediatePull(bool afterResume = false)
+    {
+        var notBefore = afterResume
+            ? DateTime.UtcNow.Add(PostResumeStabilization)
+            : DateTime.UtcNow;
+        lock (_signalGate)
+        {
+            if (notBefore > _notBeforeUtc) _notBeforeUtc = notBefore;
+        }
+        try
+        {
+            if (_pullSignal.CurrentCount == 0) _pullSignal.Release();
+        }
+        catch (SemaphoreFullException) { }
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (!_config.TaEnabled)
@@ -57,14 +81,24 @@ public sealed class ScheduleCacheService : BackgroundService
             return;
         }
 
-        // Give the login flow time to persist the employee token before the first pull.
-        try { await Task.Delay(FirstPullDelay, stoppingToken); }
+        // Pull after a short startup grace unless login wakes us sooner.
+        try { await _pullSignal.WaitAsync(FirstPullDelay, stoppingToken); }
         catch (OperationCanceledException) { return; }
 
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
+                DateTime notBefore;
+                lock (_signalGate)
+                {
+                    notBefore = _notBeforeUtc;
+                    _notBeforeUtc = DateTime.MinValue;
+                }
+                var stabilizationDelay = notBefore - DateTime.UtcNow;
+                if (stabilizationDelay > TimeSpan.Zero)
+                    await Task.Delay(stabilizationDelay, stoppingToken);
+
                 await PullAsync(stoppingToken);
             }
             catch (OperationCanceledException) { throw; }
@@ -75,7 +109,7 @@ public sealed class ScheduleCacheService : BackgroundService
 
             try
             {
-                await Task.Delay(PullInterval, stoppingToken);
+                await _pullSignal.WaitAsync(PullInterval, stoppingToken);
             }
             catch (OperationCanceledException) { }
         }
@@ -95,11 +129,15 @@ public sealed class ScheduleCacheService : BackgroundService
         var request = new System.Net.Http.HttpRequestMessage(
             System.Net.Http.HttpMethod.Get,
             $"{_config.ServerUrl.TrimEnd('/')}/api/v1/schedules/me");
-        // Both auth header styles: the endpoint's middleware is a Phase 2 decision.
-        request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", employee.Token);
         if (!string.IsNullOrWhiteSpace(employee.DeviceToken))
         {
-            request.Headers.TryAddWithoutValidation("Authorization", $"Device {employee.DeviceToken}");
+            request.Headers.Authorization =
+                new System.Net.Http.Headers.AuthenticationHeaderValue("Device", employee.DeviceToken);
+        }
+        else
+        {
+            request.Headers.Authorization =
+                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", employee.Token);
         }
 
         using var response = await _httpClient.SendAsync(request, ct);

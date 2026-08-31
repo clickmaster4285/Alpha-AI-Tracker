@@ -16,13 +16,10 @@ namespace client.Services.Watchers;
 ///   - window.Closing (handled in App.axaml.cs - emits <c>ui_hidden</c> instead)
 ///   - Singleton disposal (defense-in-depth)
 ///
-/// R7 design rationale: in --background mode, Program.cs runs
-/// <c>await Task.Delay(Timeout.Infinite, CancellationToken.None)</c>. On SIGTERM,
-/// the delay throws TaskCanceledException and the host falls through to
-/// <c>host.StopAsync()</c>. A naive ApplicationStopping hook races the host and
-/// typically LOSES. This sentinel uses a ManualResetEventSlim to coordinate
-/// with Program.cs: the host stop waits for the sentinel to finish writing
-/// the event before continuing.
+/// R7 design rationale: in --background mode, Program.cs waits through
+/// <c>WaitForShutdownAsync</c>, which is tied to the host lifetime. On SIGTERM,
+/// ApplicationStopping fires and this sentinel synchronously completes its
+/// bounded write before hosted-service shutdown continues.
 ///
 /// Hard 2-second timeout: the IEventRecorder already enforces a 2s write
 /// timeout internally, so the sentinel can never block shutdown longer than
@@ -79,11 +76,9 @@ public sealed class ShutdownSentinel : IHostedService, IDisposable
     }
 
     /// <summary>
-    /// Late-wire the IHostApplicationLifetime hooks. Program.cs calls this after
-    /// the host is built but before host.StartAsync (because StartAsync is what
-    /// creates the IHostApplicationLifetime). This split keeps the sentinel
-    /// DI-safe (no constructor dependency on the lifetime) AND lets us register
-    /// the ApplicationStopping token at the right time.
+    /// Late-wire the IHostApplicationLifetime hooks after host.StartAsync.
+    /// This split keeps the sentinel DI-safe while registering the stopping
+    /// callback before Program.cs begins waiting for shutdown.
     /// </summary>
     public void HookLifetime(IHostApplicationLifetime lifetime)
     {

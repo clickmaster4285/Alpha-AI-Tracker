@@ -56,6 +56,11 @@ if (args.Contains("--print-config"))
     Console.WriteLine($"SyncMaxBytes={cfg.SyncMaxBytes}");
     Console.WriteLine($"SyncCompression={cfg.SyncCompression}");
     Console.WriteLine($"SyncRetentionHours={cfg.SyncRetentionHours}");
+    Console.WriteLine($"TaEnabled={cfg.TaEnabled}");
+    Console.WriteLine($"IdleThresholdSeconds={cfg.IdleThresholdSeconds}");
+    Console.WriteLine($"IdleAwayThresholdSeconds={cfg.IdleAwayThresholdSeconds}");
+    Console.WriteLine($"IdlePollSeconds={cfg.IdlePollSeconds}");
+    Console.WriteLine($"LockHysteresisSeconds={cfg.LockHysteresisSeconds}");
     return;
 }
 
@@ -327,6 +332,13 @@ shutdownSentinel.HookConsoleCancelKeyPress();
 
 try
 {
+    // Initialize SQLite before any hosted service starts. SystemEventWatcher is
+    // intentionally first in DI and emits power_on immediately; starting the
+    // host before the store was ready made that write a silent no-op, while its
+    // dedup bucket then suppressed LogCollectorService's valid retry.
+    await host.Services.GetRequiredService<ILogStore>()
+        .InitializeAsync(CancellationToken.None);
+
     await host.StartAsync(CancellationToken.None);
 
     // The lifetime is now available - wire the ApplicationStopping hook.
@@ -363,6 +375,7 @@ try
                     try
                     {
                         // The user asked for the GUI — show the window immediately.
+                        RefreshLinuxDesktopEnvironment();
                         App.LaunchedHidden = false;
                         BuildAvaloniaApp().StartWithClassicDesktopLifetime(
                             args.Where(a => !a.Equals("--background", StringComparison.OrdinalIgnoreCase)).ToArray());
@@ -384,15 +397,18 @@ try
                 Console.Error.WriteLine($"[client] Failed to start GUI thread: {ex.Message}");
             }
         };
-        await Task.Delay(Timeout.Infinite, CancellationToken.None);
+        // WaitForShutdownAsync is tied to IHostApplicationLifetime. The previous
+        // uncancellable Task.Delay kept the process alive after SIGTERM even though
+        // ConsoleLifetime had fired ApplicationStopping; systemd eventually had to
+        // SIGKILL it and the code below never ran.
+        await host.WaitForShutdownAsync();
     }
     else
     {
         App.LaunchedHidden = isMinimized;
         BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+        await host.StopAsync(CancellationToken.None);
     }
-
-    await host.StopAsync(CancellationToken.None);
 
     // ────────────────────────────────────────────────────────────────────────────
     // Time & Attendance (Phase 1, R7): the ShutdownSentinel writes the power_off
@@ -418,6 +434,59 @@ static AppBuilder BuildAvaloniaApp()
         .UsePlatformDetect()
         .WithInterFont()
         .LogToTrace();
+
+// A systemd user service keeps the environment captured by its manager, while
+// this long-lived process may have inherited stale values from an old unit.
+// Read the manager's current graphical-session values immediately before lazy
+// Avalonia startup (especially GNOME Wayland's rotating XAUTHORITY path).
+static void RefreshLinuxDesktopEnvironment()
+{
+    if (!OperatingSystem.IsLinux()) return;
+
+    try
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "systemctl",
+            Arguments = "--user show-environment",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        using var proc = System.Diagnostics.Process.Start(psi);
+        if (proc == null) return;
+
+        var outputTask = proc.StandardOutput.ReadToEndAsync();
+        if (!proc.WaitForExit(2000))
+        {
+            try { proc.Kill(entireProcessTree: true); } catch { }
+            return;
+        }
+
+        var allowed = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "XAUTHORITY",
+            "XDG_RUNTIME_DIR",
+            "DBUS_SESSION_BUS_ADDRESS",
+        };
+        foreach (var line in outputTask.GetAwaiter().GetResult().Split('\n'))
+        {
+            var separator = line.IndexOf('=');
+            if (separator <= 0) continue;
+            var name = line[..separator];
+            if (!allowed.Contains(name)) continue;
+            Environment.SetEnvironmentVariable(name, line[(separator + 1)..].TrimEnd('\r'));
+        }
+    }
+    catch
+    {
+        // The existing environment may already be valid; Avalonia will report
+        // the actionable display error if it is not.
+    }
+}
 
 // ─── Log path resolution ───
 static string ResolveDbPath(string dbPath)

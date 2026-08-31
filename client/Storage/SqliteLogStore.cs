@@ -33,6 +33,8 @@ public class SqliteLogStore : ILogStore, IDisposable
     /// connection so two readers don't share its commands concurrently.
     /// </summary>
     private readonly SemaphoreSlim _connectionGate = new(1, 1);
+    private readonly SemaphoreSlim _initializationGate = new(1, 1);
+    private bool _initialized;
 
     public SqliteLogStore(string dbPath, string? encryptionKey = null)
     {
@@ -45,6 +47,11 @@ public class SqliteLogStore : ILogStore, IDisposable
 
     public async Task InitializeAsync(CancellationToken ct)
     {
+        await _initializationGate.WaitAsync(ct);
+        try
+        {
+        if (_initialized) return;
+
         var dir = Path.GetDirectoryName(_dbPath);
         if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
         {
@@ -113,6 +120,12 @@ public class SqliteLogStore : ILogStore, IDisposable
         finally
         {
             _readConnectionGate.Release();
+        }
+        _initialized = true;
+        }
+        finally
+        {
+            _initializationGate.Release();
         }
     }
 
@@ -2905,7 +2918,15 @@ public class SqliteLogStore : ILogStore, IDisposable
             Id = r.GetString(r.GetOrdinal("id")),
             EventType = r.GetString(r.GetOrdinal("event_type")),
             OsUsername = r.GetString(r.GetOrdinal("os_username")),
-            EventAt = DateTime.Parse(r.GetString(r.GetOrdinal("event_at"))),
+            // Legacy rows may carry a local offset while current writers use Z.
+            // Normalize at the storage boundary so arithmetic never subtracts
+            // wall-clock ticks from UTC ticks and silently shifts durations.
+            EventAt = DateTimeOffset
+                .Parse(
+                    r.GetString(r.GetOrdinal("event_at")),
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.RoundtripKind)
+                .UtcDateTime,
             IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
             SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
             CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),

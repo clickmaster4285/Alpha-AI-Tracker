@@ -14,16 +14,17 @@ namespace client.Services.Watchers;
 ///
 ///   SYSTEM BUS:
 ///     1. org.freedesktop.UPower / PrepareForSleep(bool)       — power/sleep.
-///     2. org.freedesktop.login1.Session / Lock + Unlock       — lock/unlock
+///     2. org.freedesktop.login1.Manager / PrepareForShutdown  — reboot/shutdown.
+///     3. org.freedesktop.login1.Session / Lock + Unlock       — lock/unlock
 ///        (works when the screen locker calls Lock(); GNOME Shell 46+ uses
 ///        SetLockedHint instead, so this only fires on some desktops).
 ///
 ///   SESSION BUS:
-///     3. org.gnome.ScreenSaver / ActiveChanged(bool)          — GNOME lock.
+///     4. org.gnome.ScreenSaver / ActiveChanged(bool)          — GNOME lock.
 ///        Primary source for GNOME screen lock/unlock detection.
 ///
 ///   SESSION BUS (polling fallback):
-///     4. org.gnome.ScreenSaver.GetActive() polled every 30 s. Catches lock
+///     5. org.gnome.ScreenSaver.GetActive() polled every 30 s. Catches lock
 ///        state changes that ActiveChanged misses (GNOME 46 sometimes skips
 ///        the signal for Super+L but always reflects the state in GetActive).
 ///
@@ -85,6 +86,49 @@ public sealed partial class SystemEventWatcher
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "UPower subscription failed");
+        }
+
+        // ── login1 Manager: shutdown/reboot before the display server dies ──
+        // GNOME tears Xwayland down before the user service receives its normal
+        // stop job. A process hosting a lazy Avalonia GUI can therefore exit on
+        // XOpenDisplay's fatal disconnect before ApplicationStopping runs.
+        // PrepareForShutdown(true) is emitted earlier and is the authoritative
+        // opportunity to persist power_off.
+        try
+        {
+            var shutdownSub = await conn.WatchSignalAsync<bool>(
+                sender: "org.freedesktop.login1",
+                path: "/org/freedesktop/login1",
+                @interface: "org.freedesktop.login1.Manager",
+                signal: "PrepareForShutdown",
+                reader: (Message m, object? s) => m.GetBodyReader().ReadBool(),
+                handler: (Notification<bool> n) =>
+                {
+                    if (n.IsCompletion || !n.Value) return;
+                    try
+                    {
+                        // The bus and process can disappear immediately after
+                        // this callback, so complete the recorder's bounded
+                        // SQLite write synchronously.
+                        SafeRecordAsync(
+                            SessionEventTypes.PowerOff,
+                            "login1_prepare_shutdown",
+                            default).GetAwaiter().GetResult();
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "login1 PrepareForShutdown handler failed");
+                    }
+                },
+                null,
+                ObserverFlags.None,
+                state: null);
+            _dbusSubscriptions.Add(shutdownSub);
+            _logger.LogDebug("SystemEventWatcher: login1 PrepareForShutdown OK");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "login1 PrepareForShutdown subscription failed");
         }
 
         // ── login1: Lock / Unlock (no body → non-generic watcher) ──

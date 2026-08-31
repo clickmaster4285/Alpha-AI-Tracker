@@ -7,18 +7,14 @@ namespace client.Services;
 /// <summary>
 /// Default <see cref="IEventRecorder"/> implementation. Wraps <see cref="ILogStore"/>
 /// with:
-///   - A 5-second dedup window keyed on (eventType, top-of-minute bucket) so two
+///   - A true sliding 5-second dedup window keyed by eventType so two
 ///     near-simultaneous sources (UPower + ScreenSaver) collapse to one row.
-///   - An in-memory ordered queue for callers that fire before the SQLite gate is
-///     available (rare — only at process boot before LogCollectorService.StartAsync
-///     finishes). The flush is amortised into the first successful gate acquisition.
 ///   - Hard 2-second timeouts on every SQLite call so a locked DB during shutdown
 ///     (R7 in the finalplan) can never delay process exit.
 ///
-/// The dedup rule is deliberately simple: events with the same EventType arriving
-/// within the same 5-second bucket are coalesced. The bucket ID is a single int
-/// (<c>(int)(at.Ticks / TimeSpan.FromSeconds(5).Ticks)</c>) so a comparison is
-/// O(1) and the cache never grows beyond a few entries per event type.
+/// The dedup rule is deliberately simple: events with the same EventType less
+/// than five seconds apart are coalesced. This is a sliding interval, not fixed
+/// clock buckets (events at 14.9s and 15.1s must still deduplicate).
 /// </summary>
 public sealed class SessionEventRecorder : IEventRecorder
 {
@@ -29,9 +25,9 @@ public sealed class SessionEventRecorder : IEventRecorder
     private readonly ILogStore _store;
     private readonly ILogger<SessionEventRecorder> _logger;
 
-    // Per-type last-seen bucket id. Dictionary because there are <10 event types in
+    // Per-type last-seen timestamp. Dictionary because there are <10 event types in
     // production; the lookup is O(1) and the memory cost is negligible.
-    private readonly Dictionary<string, long> _lastBucket = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DateTime> _lastEventAt = new(StringComparer.Ordinal);
     private readonly object _gate = new();
 
     public SessionEventRecorder(ILogStore store, ILogger<SessionEventRecorder> logger)
@@ -54,18 +50,18 @@ public sealed class SessionEventRecorder : IEventRecorder
         }
 
         var ts = at ?? DateTime.UtcNow;
-        var bucket = ts.Ticks / DedupWindow.Ticks;
 
         // Fast-path dedup. The lock is held only for the dictionary lookup, never
         // across the SQLite call — the ILogStore owns its own gate.
         lock (_gate)
         {
-            if (_lastBucket.TryGetValue(eventType, out var prev) && prev == bucket)
+            if (_lastEventAt.TryGetValue(eventType, out var prev) &&
+                (ts - prev).Duration() < DedupWindow)
             {
-                _logger.LogDebug("Dedup'd {EventType} in bucket {Bucket}", eventType, bucket);
+                _logger.LogDebug("Dedup'd {EventType} within sliding window", eventType);
                 return;
             }
-            _lastBucket[eventType] = bucket;
+            _lastEventAt[eventType] = ts;
         }
 
         var evt = new SessionEvent

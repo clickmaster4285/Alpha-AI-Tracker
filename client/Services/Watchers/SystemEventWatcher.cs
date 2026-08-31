@@ -32,6 +32,8 @@ public sealed partial class SystemEventWatcher : BackgroundService
     private readonly IEventRecorder _eventRecorder;
     private readonly ILogStore _store;
     private readonly AppConfig _config;
+    private readonly ScheduleCacheService _scheduleCache;
+    private readonly LocalTimeSkewService _timeSkew;
     private readonly ILogger<SystemEventWatcher> _logger;
 
     // Lock-hysteresis: a flaky screensaver / GDM switcher can fire screen_lock +
@@ -40,7 +42,6 @@ public sealed partial class SystemEventWatcher : BackgroundService
     // Initial state is "never seen" (null), NOT DateTime.MinValue — using MinValue
     // would put (now - MinValue) ≈ 2,000,000,000 seconds into the hysteresis
     // window and the very first screen_lock after a fresh boot would be suppressed.
-    private static readonly TimeSpan LockHysteresis = TimeSpan.FromSeconds(30);
     private DateTime? _lastScreenLockAt;
     private DateTime? _lastScreenUnlockAt;
     private readonly object _hysteresisGate = new();
@@ -53,16 +54,26 @@ public sealed partial class SystemEventWatcher : BackgroundService
         IEventRecorder eventRecorder,
         ILogStore store,
         AppConfig config,
+        ScheduleCacheService scheduleCache,
+        LocalTimeSkewService timeSkew,
         ILogger<SystemEventWatcher> logger)
     {
         _eventRecorder = eventRecorder;
         _store = store;
         _config = config;
+        _scheduleCache = scheduleCache;
+        _timeSkew = timeSkew;
         _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (!_config.TaEnabled)
+        {
+            _logger.LogInformation("SystemEventWatcher: ALPHA_TA_ENABLED=false - parked");
+            return;
+        }
+
         _logger.LogInformation("SystemEventWatcher starting (osDescription={Os})", System.Runtime.InteropServices.RuntimeInformation.OSDescription);
 
         // First-line guard: also record power_on here. LogCollectorService also
@@ -149,6 +160,12 @@ public sealed partial class SystemEventWatcher : BackgroundService
 
     private async Task SafeRecordAsync(string eventType, string source, CancellationToken ct)
     {
+        if (eventType == SessionEventTypes.Resume)
+        {
+            _scheduleCache.RequestImmediatePull(afterResume: true);
+            _timeSkew.RequestPostResumeMeasurement();
+        }
+
         // Hysteresis for screen_lock / screen_unlock (finalplan section 2.3).
         // We allow unlock at any time (a stuck lock would be visible immediately),
         // but we suppress re-locks within 30s of the previous lock or unlock.
@@ -157,9 +174,10 @@ public sealed partial class SystemEventWatcher : BackgroundService
             lock (_hysteresisGate)
             {
                 var now = DateTime.UtcNow;
+                var lockHysteresis = TimeSpan.FromSeconds(_config.LockHysteresisSeconds);
                 if (eventType == SessionEventTypes.ScreenLock &&
-                    _lastScreenLockAt.HasValue && (now - _lastScreenLockAt.Value) < LockHysteresis &&
-                    _lastScreenUnlockAt.HasValue && (now - _lastScreenUnlockAt.Value) < LockHysteresis)
+                    ((_lastScreenLockAt.HasValue && (now - _lastScreenLockAt.Value) < lockHysteresis) ||
+                     (_lastScreenUnlockAt.HasValue && (now - _lastScreenUnlockAt.Value) < lockHysteresis)))
                 {
                     _logger.LogDebug("SystemEventWatcher: screen_lock suppressed by hysteresis (source={Source})", source);
                     return;
