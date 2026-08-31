@@ -8,6 +8,7 @@ Core Directives:
 2.  The No-Hardcoded-Names Rule is the second most important rule. Software detection must NEVER use hardcoded product/software names. Classification must come from genuine OS metadata (PE Subsystem, filesystem structure, registry flags, etc.). Name lists are forbidden.
 3.  The Branding-Single-Source Rule is a structural guarantee. The product name and version are written in exactly two files: `client/APP_IDENTIFIERS` and `client/VERSION`. Any task that results in a literal brand string or version number in any other file, XAML, or script is considered a bug that must be fixed.
 4.  "If you cannot find it in the docs, it does not exist." You are strictly limited to the provided context to avoid hallucinating interfaces, paths, or workflows that are not defined in the project. If a piece of information is not in the .md files, ask the user where to find it or clearly state the assumption you are making. The project is a monorepo, and you must always specify which service (`client/`, `server/`, `web/`) a given task applies to.
+5.  The Cross-Platform Analyzer Safety Rule is mandatory. A build hang or multi-GB compiler process is a critical development/CI blocker. In the single-TFM client, put `OperatingSystem.IsWindows/Linux/MacOS()` guards inside platform-specific methods; do not propagate `[SupportedOSPlatform]` through cross-platform partial classes or async background-service call graphs. Never globally disable analyzers to hide the problem.
 
 Background & Project Context:
 Alpha AI Tracker is an employee monitoring and productivity analytics system consisting of three services:
@@ -73,6 +74,7 @@ Troubleshooting a Client Build Issue:
     - The working directory is not being assumed to be writable.
     - The correct `config.enc` is being loaded (use `--print-config`).
     - All new assets were added to the installer scripts (see above).
+4.  If `dotnet build` exceeds twice its normal duration or compiler memory approaches 1 GB, capture the compiler stack and check `PlatformCompatibilityAnalyzer`. Replace propagated platform attributes with guarded platform-method bodies, then verify using a non-incremental build.
 
 ---
 Chat Instructions

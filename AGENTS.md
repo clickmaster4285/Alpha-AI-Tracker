@@ -1044,6 +1044,7 @@ flowchart LR
 | **Web list pagination** | List/table pages ALWAYS use server-side **infinite scroll** (`useInfiniteQuery` + IntersectionObserver sentinel) — Next/Previous buttons are forbidden (see *Web Infinite-Scroll Rule* below) |
 | **Cross-table boolean flags** | Booleans that depend on a cross-table relationship (e.g. "does this employee have a login account?") MUST be projected by the server in the same query that returns the row — never built client-side from a separate fetch (see *Server-Projected Flags Rule* below) |
 | **Branding & version**  | Product name and version are written in exactly two files — `client/APP_IDENTIFIERS` and `client/VERSION`. No literal product name or version string anywhere else in C#, XAML, or the build scripts (see below) |
+| **Cross-platform OS guards** | Guard platform-specific method bodies with `OperatingSystem.IsWindows/Linux/MacOS()`; do not propagate `[SupportedOSPlatform]` through cross-platform partial/background-service call graphs (see below) |
 
 ### Web Infinite-Scroll Rule (mandatory)
 
@@ -1114,6 +1115,22 @@ server in the same query that returns the row — never built client-side from a
 5. **Package managers are the source of truth** — winget/npm/pip/choco/scoop/apt/snap/flatpak/brew report what they installed; dedup is by identity/fingerprint, not by filtering names.
 
 **Allowed exceptions (OS-shell constructs, NOT user software):** Linux GNOME/session daemon prefixes in `NonAppProcesses`/`NonAppProcessPrefixes` (gnome-*, gsd-*, gvfsd-*, ibus-*, evolution-*), Windows shell display names (`DisplayNameOverrides`: explorer→File Explorer, svchost→Windows Services…), and the Windows Update `KB`-prefix naming convention. These are OS-provided labels for OS processes; user-installed software detection must stay 100% metadata-driven. When a fix is tempting as a name list, it must be implemented as metadata first (probe the OS), and the resulting rule documented here.
+
+### Cross-Platform Analyzer Safety Rule (mandatory)
+
+**A client build that hangs or consumes multiple GB is a critical development/CI blocker.** In this
+single-TFM cross-platform project, do not place `[SupportedOSPlatform]` on fields or methods whose
+platform state must propagate through a cross-platform partial class or async `BackgroundService`
+call graph. .NET 10's `PlatformCompatibilityAnalyzer` can enter exponential global-flow analysis.
+
+- Put an explicit `OperatingSystem.IsWindows/Linux/MacOS()` early-return guard **inside** each
+  platform-specific method.
+- If platform-only APIs inside event-handler lambdas still produce CA1416, a narrowly scoped
+  `#pragma warning disable CA1416` is allowed only in that platform file and only when every entry
+  point has the explicit runtime guard.
+- Never fix this by globally disabling .NET analyzers.
+- After changing platform code, run a non-incremental `dotnet build`; investigate builds taking
+  more than twice the normal baseline or approaching 1 GB compiler memory.
 
 ### Branding-Single-Source Rule (mandatory)
 
