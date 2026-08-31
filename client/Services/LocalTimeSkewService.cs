@@ -124,12 +124,13 @@ public sealed class LocalTimeSkewService : BackgroundService
             return;
         }
 
-        // HEAD on the server root: cheapest request that carries a Date header
-        // (net/http's default response always emits Date).
+        // Dedicated Phase 2 endpoint carries an explicit UTC Date header.
         var beforeUtc = DateTime.UtcNow;
-        using var request = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Head, _config.ServerUrl);
+        var endpoint = $"{_config.ServerUrl.TrimEnd('/')}/api/v1/server-time";
+        using var request = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Get, endpoint);
         using var response = await _httpClient.SendAsync(request, ct);
         var afterUtc = DateTime.UtcNow;
+        response.EnsureSuccessStatusCode();
 
         var dateHeader = response.Headers.Date;
         if (!dateHeader.HasValue)
