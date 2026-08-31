@@ -166,10 +166,13 @@ type NetworkInfoResponse struct {
 // ────────────────────────────────
 
 type SessionEventEntry struct {
-	ID         string `json:"id"`
-	EventType  string `json:"eventType"`
-	OsUsername string `json:"osUsername"`
-	EventAt    string `json:"eventAt"`
+	ID         string  `json:"id"`
+	EventType  string  `json:"eventType"`
+	OsUsername string  `json:"osUsername"`
+	EventAt    string  `json:"eventAt"`
+	Count      *int    `json:"count,omitempty"`
+	FirstAt    *string `json:"firstAt,omitempty"`
+	LastAt     *string `json:"lastAt,omitempty"`
 }
 
 type SyncSessionEventsRequest struct {
@@ -184,6 +187,9 @@ type SessionEventResponse struct {
 	EventType  string     `json:"eventType"`
 	OsUsername string     `json:"osUsername"`
 	EventAt    time.Time  `json:"eventAt"`
+	Count      int        `json:"count"`
+	FirstAt    time.Time  `json:"firstAt"`
+	LastAt     time.Time  `json:"lastAt"`
 	SyncedAt   *time.Time `json:"syncedAt,omitempty"`
 }
 

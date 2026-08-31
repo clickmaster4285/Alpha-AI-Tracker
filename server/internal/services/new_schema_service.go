@@ -291,13 +291,42 @@ func (s *NewSchemaService) SyncSessionEvents(ctx context.Context, req *dto.SyncS
 	now := time.Now()
 	entries := make([]models.SessionEvent, 0, len(req.Entries))
 	for _, e := range req.Entries {
-		ts, _ := time.Parse(time.RFC3339, e.EventAt)
+		ts, err := time.Parse(time.RFC3339, e.EventAt)
+		if err != nil {
+			return nil, fmt.Errorf("invalid eventAt for event %q: %w", e.ID, err)
+		}
+		count := 1
+		if e.Count != nil {
+			count = *e.Count
+		}
+		if count < 1 {
+			return nil, fmt.Errorf("event count must be greater than zero")
+		}
+		firstAt, lastAt := ts, ts
+		if e.FirstAt != nil {
+			firstAt, err = time.Parse(time.RFC3339, *e.FirstAt)
+			if err != nil {
+				return nil, fmt.Errorf("invalid firstAt for event %q: %w", e.ID, err)
+			}
+		}
+		if e.LastAt != nil {
+			lastAt, err = time.Parse(time.RFC3339, *e.LastAt)
+			if err != nil {
+				return nil, fmt.Errorf("invalid lastAt for event %q: %w", e.ID, err)
+			}
+		}
+		if lastAt.Before(firstAt) {
+			return nil, fmt.Errorf("lastAt must not be before firstAt")
+		}
 		entries = append(entries, models.SessionEvent{
 			ID:         e.ID,
 			EmployeeID: req.EmployeeID,
 			EventType:  e.EventType,
 			OsUsername: e.OsUsername,
 			EventAt:    ts,
+			EventCount: count,
+			FirstAt:    firstAt,
+			LastAt:     lastAt,
 			SyncedAt:   &now,
 		})
 	}

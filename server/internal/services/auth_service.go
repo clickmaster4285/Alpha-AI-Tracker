@@ -13,11 +13,11 @@ import (
 	"log"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/alpha-ai-tracker/server/internal/config"
 	"github.com/alpha-ai-tracker/server/internal/dto"
 	"github.com/alpha-ai-tracker/server/internal/models"
 	"github.com/alpha-ai-tracker/server/internal/repository"
+	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -344,13 +344,16 @@ func (s *AuthService) GetUserResponseByID(ctx context.Context, id string) (*dto.
 func (s *AuthService) GenerateEmployeeToken(emp *models.Employee) (string, error) {
 	now := time.Now()
 	claims := &Claims{
-		UserID: emp.ID,
+		// DeviceAuth consumers query telemetry by the public EMP-XXXXX key.
+		// Using the employees UUID here made the legacy Bearer fallback
+		// authenticate successfully but return no employee/schedule data.
+		UserID: emp.EmployeeID,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(now.Add(s.jwtConfig.EmployeeAccessExpiry)),
 			IssuedAt:  jwt.NewNumericDate(now),
 			NotBefore: jwt.NewNumericDate(now),
 			Issuer:    "alpha-ai-tracker-employee",
-			Subject:   emp.ID,
+			Subject:   emp.EmployeeID,
 		},
 	}
 

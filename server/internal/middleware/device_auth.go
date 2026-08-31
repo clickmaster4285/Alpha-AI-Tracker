@@ -59,7 +59,8 @@ func DeviceAuth(deviceRepo *repository.DeviceRepo, authService *services.AuthSer
 			// 2. Fallback to JWT validation for backward compatibility
 			if authService != nil {
 				claims, err := authService.ValidateToken(token)
-				if err == nil && claims != nil && claims.UserID != "" {
+				if err == nil && claims != nil && claims.UserID != "" &&
+					claims.Issuer == "alpha-ai-tracker-employee" {
 					c.Set("employee_id", claims.UserID)
 					return next(c)
 				}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/alpha-ai-tracker/server/internal/models"
 	"github.com/alpha-ai-tracker/server/internal/repository"
@@ -49,6 +50,7 @@ func (s *ShiftService) Create(ctx context.Context, req *ShiftInput) (*models.Shi
 		StartTime:     req.StartTime,
 		EndTime:       req.EndTime,
 		WorkingDays:   strings.TrimSpace(req.WorkingDays),
+		Timezone:      normalizedTimezone(req.Timezone, "UTC"),
 		GraceMinutes:  req.GraceMinutes,
 		OvertimeHours: req.OvertimeHours,
 		Description:   req.Description,
@@ -77,6 +79,7 @@ func (s *ShiftService) Update(ctx context.Context, id int, req *ShiftInput) (*mo
 		StartTime:     req.StartTime,
 		EndTime:       req.EndTime,
 		WorkingDays:   strings.TrimSpace(req.WorkingDays),
+		Timezone:      normalizedTimezone(req.Timezone, existing.Timezone),
 		GraceMinutes:  req.GraceMinutes,
 		OvertimeHours: req.OvertimeHours,
 		Description:   req.Description,
@@ -128,7 +131,22 @@ func validateShiftInput(req *ShiftInput) error {
 	if req.OvertimeHours < 0 || req.OvertimeHours > 24 {
 		return fmt.Errorf("overtime hours must be between 0 and 24")
 	}
+	timezone := normalizedTimezone(req.Timezone, "UTC")
+	if _, err := time.LoadLocation(timezone); err != nil {
+		return fmt.Errorf("timezone must be a valid IANA timezone")
+	}
 	return nil
+}
+
+func normalizedTimezone(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value != "" {
+		return value
+	}
+	if strings.TrimSpace(fallback) != "" {
+		return fallback
+	}
+	return "UTC"
 }
 
 // ShiftInput is the writable shape of a shift (used for create + update).
@@ -138,6 +156,7 @@ type ShiftInput struct {
 	StartTime     string `json:"startTime"`
 	EndTime       string `json:"endTime"`
 	WorkingDays   string `json:"workingDays"`
+	Timezone      string `json:"timezone"`
 	GraceMinutes  int    `json:"graceMinutes"`
 	OvertimeHours int    `json:"overtimeHours"`
 	Description   string `json:"description"`

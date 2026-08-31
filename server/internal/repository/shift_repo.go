@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/alpha-ai-tracker/server/internal/models"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/alpha-ai-tracker/server/internal/models"
 )
 
 // ShiftRepo handles database operations for the shift catalog (see migration
@@ -26,8 +26,8 @@ func NewShiftRepo(pool *pgxpool.Pool) *ShiftRepo {
 
 // ShiftListParams filters the shift list.
 type ShiftListParams struct {
-	Search string
-	Page   int
+	Search  string
+	Page    int
 	PerPage int
 }
 
@@ -76,6 +76,7 @@ func (r *ShiftRepo) List(ctx context.Context, params ShiftListParams) (*ShiftLis
 		SELECT s.id, s.name,
 		       s.start_time::TEXT, s.end_time::TEXT,
 		       COALESCE(s.working_days, '') AS working_days,
+		       COALESCE(s.timezone, 'UTC') AS timezone,
 		       COALESCE(s.grace_minutes, 0) AS grace_minutes,
 		       COALESCE(s.overtime_hours, 0) AS overtime_hours,
 		       COALESCE(s.description, ''),
@@ -106,7 +107,7 @@ func (r *ShiftRepo) List(ctx context.Context, params ShiftListParams) (*ShiftLis
 		if err := rows.Scan(
 			&s.ID, &s.Name,
 			&s.StartTime, &s.EndTime,
-			&s.WorkingDays, &s.GraceMinutes, &s.OvertimeHours,
+			&s.WorkingDays, &s.Timezone, &s.GraceMinutes, &s.OvertimeHours,
 			&s.Description, &s.EmployeeCount,
 			&s.CreatedAt, &s.UpdatedAt, &s.DeletedAt,
 		); err != nil {
@@ -131,6 +132,7 @@ func (r *ShiftRepo) ListAll(ctx context.Context) ([]models.Shift, error) {
 		SELECT s.id, s.name,
 		       s.start_time::TEXT, s.end_time::TEXT,
 		       COALESCE(s.working_days, '') AS working_days,
+		       COALESCE(s.timezone, 'UTC') AS timezone,
 		       COALESCE(s.grace_minutes, 0) AS grace_minutes,
 		       COALESCE(s.overtime_hours, 0) AS overtime_hours,
 		       COALESCE(s.description, ''),
@@ -151,7 +153,7 @@ func (r *ShiftRepo) ListAll(ctx context.Context) ([]models.Shift, error) {
 		if err := rows.Scan(
 			&s.ID, &s.Name,
 			&s.StartTime, &s.EndTime,
-			&s.WorkingDays, &s.GraceMinutes, &s.OvertimeHours,
+			&s.WorkingDays, &s.Timezone, &s.GraceMinutes, &s.OvertimeHours,
 			&s.Description, &s.EmployeeCount,
 			&s.CreatedAt, &s.UpdatedAt, &s.DeletedAt,
 		); err != nil {
@@ -169,6 +171,7 @@ func (r *ShiftRepo) GetByID(ctx context.Context, id int) (*models.Shift, error) 
 		SELECT id, name,
 		       start_time::TEXT, end_time::TEXT,
 		       COALESCE(working_days, '') AS working_days,
+		       COALESCE(timezone, 'UTC') AS timezone,
 		       COALESCE(grace_minutes, 0) AS grace_minutes,
 		       COALESCE(overtime_hours, 0) AS overtime_hours,
 		       COALESCE(description, ''),
@@ -179,7 +182,7 @@ func (r *ShiftRepo) GetByID(ctx context.Context, id int) (*models.Shift, error) 
 	`, id).Scan(
 		&s.ID, &s.Name,
 		&s.StartTime, &s.EndTime,
-		&s.WorkingDays, &s.GraceMinutes, &s.OvertimeHours,
+		&s.WorkingDays, &s.Timezone, &s.GraceMinutes, &s.OvertimeHours,
 		&s.Description, &s.EmployeeCount,
 		&s.CreatedAt, &s.UpdatedAt, &s.DeletedAt,
 	)
@@ -196,21 +199,22 @@ func (r *ShiftRepo) GetByID(ctx context.Context, id int) (*models.Shift, error) 
 func (r *ShiftRepo) Create(ctx context.Context, s *models.Shift) (*models.Shift, error) {
 	var created models.Shift
 	err := r.pool.QueryRow(ctx, `
-		INSERT INTO shifts (name, start_time, end_time, working_days, grace_minutes, overtime_hours, description)
-		VALUES ($1, $2::TIME, $3::TIME, $4, $5, $6, $7)
+		INSERT INTO shifts (name, start_time, end_time, working_days, timezone, grace_minutes, overtime_hours, description)
+		VALUES ($1, $2::TIME, $3::TIME, $4, $5, $6, $7, $8)
 		RETURNING id, name,
 		          start_time::TEXT, end_time::TEXT,
 		          COALESCE(working_days, '') AS working_days,
+		          COALESCE(timezone, 'UTC') AS timezone,
 		          COALESCE(grace_minutes, 0) AS grace_minutes,
 		          COALESCE(overtime_hours, 0) AS overtime_hours,
 		          COALESCE(description, ''),
 		          0 AS employee_count,
 		          created_at, updated_at, NULL::TIMESTAMPTZ AS deleted_at
-	`, s.Name, s.StartTime, s.EndTime, s.WorkingDays, s.GraceMinutes, s.OvertimeHours, s.Description,
+	`, s.Name, s.StartTime, s.EndTime, s.WorkingDays, s.Timezone, s.GraceMinutes, s.OvertimeHours, s.Description,
 	).Scan(
 		&created.ID, &created.Name,
 		&created.StartTime, &created.EndTime,
-		&created.WorkingDays, &created.GraceMinutes, &created.OvertimeHours,
+		&created.WorkingDays, &created.Timezone, &created.GraceMinutes, &created.OvertimeHours,
 		&created.Description, &created.EmployeeCount,
 		&created.CreatedAt, &created.UpdatedAt, &created.DeletedAt,
 	)
@@ -229,23 +233,25 @@ func (r *ShiftRepo) Update(ctx context.Context, id int, s *models.Shift) (*model
 			start_time = $2::TIME,
 			end_time = $3::TIME,
 			working_days = $4,
-			grace_minutes = $5,
-			overtime_hours = $6,
-			description = $7
-		WHERE id = $8 AND deleted_at IS NULL
+			timezone = $5,
+			grace_minutes = $6,
+			overtime_hours = $7,
+			description = $8
+		WHERE id = $9 AND deleted_at IS NULL
 		RETURNING id, name,
 		          start_time::TEXT, end_time::TEXT,
 		          COALESCE(working_days, '') AS working_days,
+		          COALESCE(timezone, 'UTC') AS timezone,
 		          COALESCE(grace_minutes, 0) AS grace_minutes,
 		          COALESCE(overtime_hours, 0) AS overtime_hours,
 		          COALESCE(description, ''),
 		          0 AS employee_count,
 		          created_at, updated_at, NULL::TIMESTAMPTZ AS deleted_at
-	`, s.Name, s.StartTime, s.EndTime, s.WorkingDays, s.GraceMinutes, s.OvertimeHours, s.Description, id,
+	`, s.Name, s.StartTime, s.EndTime, s.WorkingDays, s.Timezone, s.GraceMinutes, s.OvertimeHours, s.Description, id,
 	).Scan(
 		&updated.ID, &updated.Name,
 		&updated.StartTime, &updated.EndTime,
-		&updated.WorkingDays, &updated.GraceMinutes, &updated.OvertimeHours,
+		&updated.WorkingDays, &updated.Timezone, &updated.GraceMinutes, &updated.OvertimeHours,
 		&updated.Description, &updated.EmployeeCount,
 		&updated.CreatedAt, &updated.UpdatedAt, &updated.DeletedAt,
 	)

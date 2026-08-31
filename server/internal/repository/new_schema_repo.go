@@ -247,25 +247,36 @@ func (r *NewSchemaRepo) BulkInsertSessionEvents(ctx context.Context, entries []m
 		}
 		batch := entries[i:end]
 		valueStrings := make([]string, 0, len(batch))
-		args := make([]interface{}, 0, len(batch)*5)
+		args := make([]interface{}, 0, len(batch)*9)
 		argIdx := 1
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d)",
-				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4, argIdx+5,
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
+				argIdx+5, argIdx+6, argIdx+7, argIdx+8,
 			))
 			args = append(args,
-				e.ID, e.EmployeeID, e.EventType, e.OsUsername, e.EventAt, time.Now(),
+				e.ID, e.EmployeeID, e.EventType, e.OsUsername, e.EventAt,
+				e.EventCount, e.FirstAt, e.LastAt, time.Now(),
 			)
-			argIdx += 6
+			argIdx += 9
 		}
 
 		query := fmt.Sprintf(`
 			INSERT INTO session_events
-				(id, employee_id, event_type, os_username, event_at, synced_at)
+				(id, employee_id, event_type, os_username, event_at,
+				 event_count, first_at, last_at, synced_at)
 			VALUES %s
-			ON CONFLICT (id) DO NOTHING
+			ON CONFLICT (id) DO UPDATE SET
+				event_type = EXCLUDED.event_type,
+				os_username = EXCLUDED.os_username,
+				event_at = EXCLUDED.event_at,
+				event_count = EXCLUDED.event_count,
+				first_at = EXCLUDED.first_at,
+				last_at = EXCLUDED.last_at,
+				synced_at = EXCLUDED.synced_at
+			WHERE session_events.employee_id = EXCLUDED.employee_id
 		`, strings.Join(valueStrings, ", "))
 
 		tag, err := r.pool.Exec(ctx, query, args...)

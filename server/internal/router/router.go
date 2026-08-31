@@ -24,6 +24,7 @@ func Setup(
 	monitoringHandler *handlers.MonitoringHandler,
 	rbacHandler *handlers.RBACHandler,
 	shiftHandler *handlers.ShiftHandler,
+	timeAttendanceHandler *handlers.TimeAttendanceHandler,
 ) {
 	// ─────────────────────────────
 	// Global Middleware
@@ -55,6 +56,7 @@ func Setup(
 			"timestamp": c.RealIP(),
 		})
 	})
+	e.GET("/api/v1/server-time", timeAttendanceHandler.ServerTime)
 
 	// ─────────────────────────────
 	// Public Routes (no auth required)
@@ -88,6 +90,7 @@ func Setup(
 	syncGroup.POST("/hardware-devices/sync", newSchemaHandler.SyncHardwareDevices)
 	syncGroup.POST("/permission-status/sync", newSchemaHandler.SyncPermissionStatus)
 	syncGroup.POST("/storage-devices/sync", newSchemaHandler.SyncStorageDevices)
+	syncGroup.GET("/schedules/me", timeAttendanceHandler.GetMySchedule)
 
 	// ─────────────────────────────
 	// Semi-Protected Routes (optional auth)
@@ -178,4 +181,13 @@ func Setup(
 	shifts.POST("", shiftHandler.CreateShift)
 	shifts.PUT("/:id", shiftHandler.UpdateShift)
 	shifts.DELETE("/:id", shiftHandler.DeleteShift)
+
+	holidays := protected.Group("/holidays")
+	holidays.GET("", timeAttendanceHandler.ListHolidays)
+	holidays.POST("", timeAttendanceHandler.CreateHoliday)
+	holidays.PUT("/:id", timeAttendanceHandler.UpdateHoliday)
+	holidays.DELETE("/:id", timeAttendanceHandler.DeleteHoliday)
+
+	protected.GET("/attendance/today", timeAttendanceHandler.GetToday)
+	protected.GET("/attendance/range", timeAttendanceHandler.GetRange)
 }
