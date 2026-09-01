@@ -252,6 +252,24 @@ public class SyncService : BackgroundService
             e => e.Id,
             sw, budget, ct));
 
+        tasks.Add((sw, budget, ct) => DrainTableAsync<LocationSample>(
+            "/api/v1/location-samples/sync",
+            (limit, token) => _store.GetUnsentLocationSamplesAsync(limit, token),
+            e => new
+            {
+                id = e.Id,
+                latitude = e.Latitude,
+                longitude = e.Longitude,
+                accuracyM = e.AccuracyM,
+                altitudeM = e.AltitudeM,
+                source = e.Source,
+                address = e.Address,
+                capturedAt = e.CapturedAt.ToString("O"),
+            },
+            (ids, token) => _store.MarkLocationSamplesSentAsync(ids, token),
+            e => e.Id,
+            sw, budget, ct));
+
         tasks.Add((sw, budget, ct) => DrainSessionEventsAsync(sw, budget, ct));
 
         tasks.Add((sw, budget, ct) => DrainTableAsync<InstalledApplication>(

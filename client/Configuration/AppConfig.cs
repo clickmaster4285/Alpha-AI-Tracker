@@ -65,6 +65,11 @@ public class AppConfig
     public int EventAggregationWindowSec { get; init; } = 300; // 5-min sync buckets (S1)
     public int TaMaxLocalRows { get; init; } = 50_000;       // unsynced row ceiling (S6)
 
+    // ─── GPS & Location (Phase 3, finalplan §16) ───
+    // Default OFF — requires OS location permission + employee consent.
+    public bool LocationEnabled { get; init; } = false;
+    public int LocationPollSec { get; init; } = 300;         // 5 min — not continuous GPS
+
     // ─── Self-update (GitHub Releases) ───
     // The client checks https://github.com/{UpdateRepo}/releases/latest for an
     // installer newer than the running VERSION, downloads it into the user data dir
@@ -115,6 +120,8 @@ public class AppConfig
             LockHysteresisSeconds = Math.Max(5, int.TryParse(GetEnv("ALPHA_TA_LOCK_HYSTERESIS_SEC"), out var lockHys) ? lockHys : 30),
             EventAggregationWindowSec = Math.Max(60, int.TryParse(GetEnv("ALPHA_EVENT_AGGREGATION_WINDOW_SEC"), out var aggWin) ? aggWin : 300),
             TaMaxLocalRows = Math.Max(1000, int.TryParse(GetEnv("ALPHA_TA_MAX_LOCAL_ROWS"), out var taMax) ? taMax : 50_000),
+            LocationEnabled = GetEnv("ALPHA_LOCATION_ENABLED") is ("1" or "true" or "True"),
+            LocationPollSec = Math.Max(60, int.TryParse(GetEnv("ALPHA_LOCATION_POLL_SEC"), out var locPoll) ? locPoll : 300),
         };
     }
 

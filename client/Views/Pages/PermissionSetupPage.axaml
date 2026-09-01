@@ -148,6 +148,32 @@
                         </StackPanel>
                     </Border>
 
+                    <!-- ── Step: Location (when ALPHA_LOCATION_ENABLED) ── -->
+                    <Border Classes="card fade-in" Margin="0,28,0,0"
+                            Padding="32,30" IsVisible="{Binding IsLocationStep}">
+                        <StackPanel Spacing="14">
+                            <Border Width="50" Height="50" CornerRadius="{StaticResource RadiusLg}"
+                                    Background="{StaticResource SuccessBrush}" HorizontalAlignment="Left"
+                                    BoxShadow="{StaticResource CardShadow}">
+                                <TextBlock Text="{Binding CurrentPermissionStepNumber}"
+                                           FontSize="21" FontWeight="Bold"
+                                           Foreground="{StaticResource SuccessFgBrush}"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <TextBlock Text="{Binding StepTitle}" Classes="h1" FontSize="21"/>
+                            <TextBlock Text="{Binding StepDescription}" Classes="label"
+                                       FontSize="13.5" TextWrapping="Wrap" LineHeight="21"/>
+                            <Button Classes="primary" HorizontalAlignment="Left" MinWidth="210"
+                                    Margin="0,6,0,0"
+                                    Command="{Binding GrantCurrentStepPermissionCommand}"
+                                    IsEnabled="{Binding IsStepWorking, Converter={StaticResource BoolInvert}}"
+                                    Content="{Binding StepButtonText}"/>
+                            <TextBlock Text="{Binding StepStatusText}" FontSize="12"
+                                       Classes="label" TextWrapping="Wrap"
+                                       IsVisible="{Binding StepStatusText, Converter={StaticResource StringNotEmpty}}"/>
+                        </StackPanel>
+                    </Border>
+
                     <!-- ── Final step: platform permissions ── -->
                     <Border Classes="card fade-in" Margin="0,28,0,0"
                             Padding="32,30" IsVisible="{Binding IsPermissionStep}">

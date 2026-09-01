@@ -2239,19 +2239,34 @@ public class LogCollectorService : BackgroundService
             if (OperatingSystem.IsLinux())
             {
                 sessionType = Environment.GetEnvironmentVariable("XDG_SESSION_TYPE") ?? "unknown";
-                var perms = client.Platform.Linux.ProcessCollector.GetPermissionStatus();
+                var perms = new Dictionary<string, bool>(client.Platform.Linux.ProcessCollector.GetPermissionStatus());
+                if (_config.LocationEnabled)
+                {
+                    foreach (var kv in LocationPermission.GetPermissionStatus(_httpClient))
+                        perms[kv.Key] = kv.Value;
+                }
                 await _store.SetPermissionStatusAsync(perms, sessionType, ct);
             }
             else if (OperatingSystem.IsWindows())
             {
                 sessionType = "windows";
-                var perms = client.Platform.Windows.ProcessCollector.GetPermissionStatus();
+                var perms = new Dictionary<string, bool>(client.Platform.Windows.ProcessCollector.GetPermissionStatus());
+                if (_config.LocationEnabled)
+                {
+                    foreach (var kv in LocationPermission.GetPermissionStatus(_httpClient))
+                        perms[kv.Key] = kv.Value;
+                }
                 await _store.SetPermissionStatusAsync(perms, sessionType, ct);
             }
             else if (OperatingSystem.IsMacOS())
             {
                 sessionType = "macos";
-                var perms = client.Platform.MacOS.ProcessCollector.GetPermissionStatus();
+                var perms = new Dictionary<string, bool>(client.Platform.MacOS.ProcessCollector.GetPermissionStatus());
+                if (_config.LocationEnabled)
+                {
+                    foreach (var kv in LocationPermission.GetPermissionStatus(_httpClient))
+                        perms[kv.Key] = kv.Value;
+                }
                 await _store.SetPermissionStatusAsync(perms, sessionType, ct);
             }
         }

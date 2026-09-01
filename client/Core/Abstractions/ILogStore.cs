@@ -81,6 +81,11 @@ public interface ILogStore
     Task<IReadOnlyList<HardwareDevice>> GetUnsentHardwareDevicesAsync(int limit, CancellationToken ct);
     Task MarkHardwareDevicesSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
 
+    // ── Location samples (Phase 3 GPS) ──
+    Task StoreLocationSamplesAsync(IReadOnlyList<LocationSample> entries, CancellationToken ct);
+    Task<IReadOnlyList<LocationSample>> GetUnsentLocationSamplesAsync(int limit, CancellationToken ct);
+    Task MarkLocationSamplesSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
+
     // ── Sync (2026-08-11): app_status + permission_status are sent to the server; never
     //    deleted client-side. app_status rows re-sync on change (is_synced reset by upsert).
     Task<IReadOnlyList<AppStatus>> GetUnsentAppStatusAsync(int limit, CancellationToken ct);

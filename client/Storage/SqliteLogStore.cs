@@ -2547,6 +2547,78 @@ public class SqliteLogStore : ILogStore, IDisposable
     }
 
     // ────────────────────────────────────────
+    // Location samples (Phase 3 GPS — synced; never deleted client-side)
+    // ────────────────────────────────────────
+
+    public async Task StoreLocationSamplesAsync(IReadOnlyList<LocationSample> entries, CancellationToken ct)
+    {
+        if (_connection == null || entries.Count == 0) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = DatabaseSchema.InsertLocationSampleSql;
+            var pId = cmd.Parameters.Add("$id", SqliteType.Text);
+            var pLat = cmd.Parameters.Add("$latitude", SqliteType.Real);
+            var pLon = cmd.Parameters.Add("$longitude", SqliteType.Real);
+            var pAcc = cmd.Parameters.Add("$accuracy_m", SqliteType.Real);
+            var pAlt = cmd.Parameters.Add("$altitude_m", SqliteType.Real);
+            var pSrc = cmd.Parameters.Add("$source", SqliteType.Text);
+            var pAddr = cmd.Parameters.Add("$address", SqliteType.Text);
+            var pCap = cmd.Parameters.Add("$captured_at", SqliteType.Text);
+
+            foreach (var e in entries)
+            {
+                pId.Value = e.Id;
+                pLat.Value = e.Latitude;
+                pLon.Value = e.Longitude;
+                pAcc.Value = e.AccuracyM.HasValue ? e.AccuracyM.Value : DBNull.Value;
+                pAlt.Value = e.AltitudeM.HasValue ? e.AltitudeM.Value : DBNull.Value;
+                pSrc.Value = e.Source;
+                pAddr.Value = string.IsNullOrWhiteSpace(e.Address) ? DBNull.Value : e.Address;
+                pCap.Value = e.CapturedAt.ToString("O");
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task<IReadOnlyList<LocationSample>> GetUnsentLocationSamplesAsync(int limit, CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<LocationSample>();
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+                SELECT id, latitude, longitude, accuracy_m, altitude_m, source, address,
+                       captured_at, is_synced, synced_at, created_at
+                FROM location_samples
+                WHERE is_synced = 0
+                ORDER BY captured_at ASC
+                LIMIT $limit";
+            cmd.Parameters.AddWithValue("$limit", limit);
+            var results = new List<LocationSample>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+                results.Add(MapLocationSampleReader(reader));
+            return results;
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task MarkLocationSamplesSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        await MarkSentCoreAsync("location_samples", "id", ids, ct);
+    }
+
+    // ────────────────────────────────────────
     // Sync: app_status + permission_status (sent to server; never deleted client-side)
     // ────────────────────────────────────────
 
@@ -3027,6 +3099,24 @@ public class SqliteLogStore : ILogStore, IDisposable
             DeviceNode = r.GetString(r.GetOrdinal("device_node")),
             PluggedAt = DateTime.Parse(r.GetString(r.GetOrdinal("plugged_at"))),
             UnpluggedAt = r.IsDBNull(r.GetOrdinal("unplugged_at")) ? null : DateTime.Parse(r.GetString(r.GetOrdinal("unplugged_at"))),
+            IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
+            SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
+            CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),
+        };
+    }
+
+    private static LocationSample MapLocationSampleReader(SqliteDataReader r)
+    {
+        return new LocationSample
+        {
+            Id = r.GetString(r.GetOrdinal("id")),
+            Latitude = r.GetDouble(r.GetOrdinal("latitude")),
+            Longitude = r.GetDouble(r.GetOrdinal("longitude")),
+            AccuracyM = r.IsDBNull(r.GetOrdinal("accuracy_m")) ? null : r.GetDouble(r.GetOrdinal("accuracy_m")),
+            AltitudeM = r.IsDBNull(r.GetOrdinal("altitude_m")) ? null : r.GetDouble(r.GetOrdinal("altitude_m")),
+            Source = r.GetString(r.GetOrdinal("source")),
+            Address = r.IsDBNull(r.GetOrdinal("address")) ? null : r.GetString(r.GetOrdinal("address")),
+            CapturedAt = DateTime.Parse(r.GetString(r.GetOrdinal("captured_at"))),
             IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
             SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
             CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),

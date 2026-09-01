@@ -362,6 +362,27 @@ internal static class DatabaseSchema
             last_measured_at   TEXT NOT NULL,
             skew_seconds       REAL NOT NULL
         );
+
+        -- GPS / location samples (Phase 3, finalplan §16). Synced to server; retained locally.
+        CREATE TABLE IF NOT EXISTS location_samples (
+            id               TEXT PRIMARY KEY,
+            latitude         REAL NOT NULL,
+            longitude        REAL NOT NULL,
+            accuracy_m       REAL,
+            altitude_m       REAL,
+            source           TEXT NOT NULL DEFAULT 'ip',
+            address          TEXT,
+            captured_at      TEXT NOT NULL,
+            is_synced        INTEGER NOT NULL DEFAULT 0,
+            synced_at        TEXT,
+            created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_location_samples_unsent
+            ON location_samples(is_synced, captured_at);
+
+        CREATE INDEX IF NOT EXISTS idx_location_samples_captured
+            ON location_samples(captured_at DESC);
     ";
 
     internal const string MigrateSql = @"
@@ -434,6 +455,23 @@ internal static class DatabaseSchema
         ALTER TABLE session_events ADD COLUMN event_count INTEGER;
         ALTER TABLE session_events ADD COLUMN first_at TEXT;
         ALTER TABLE session_events ADD COLUMN last_at TEXT;
+        CREATE TABLE IF NOT EXISTS location_samples (
+            id               TEXT PRIMARY KEY,
+            latitude         REAL NOT NULL,
+            longitude        REAL NOT NULL,
+            accuracy_m       REAL,
+            altitude_m       REAL,
+            source           TEXT NOT NULL DEFAULT 'ip',
+            address          TEXT,
+            captured_at      TEXT NOT NULL,
+            is_synced        INTEGER NOT NULL DEFAULT 0,
+            synced_at        TEXT,
+            created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_location_samples_unsent
+            ON location_samples(is_synced, captured_at);
+        CREATE INDEX IF NOT EXISTS idx_location_samples_captured
+            ON location_samples(captured_at DESC);
     ";
 
     // PHASE 1: INSERT STATEMENTS
@@ -532,6 +570,19 @@ internal static class DatabaseSchema
 
     internal const string MarkSessionEventsSentSql = @"
         UPDATE session_events
+        SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')
+        WHERE id IN ({0})
+    ";
+
+    internal const string InsertLocationSampleSql = @"
+        INSERT INTO location_samples
+            (id, latitude, longitude, accuracy_m, altitude_m, source, address, captured_at)
+        VALUES
+            ($id, $latitude, $longitude, $accuracy_m, $altitude_m, $source, $address, $captured_at)
+    ";
+
+    internal const string MarkLocationSamplesSentSql = @"
+        UPDATE location_samples
         SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')
         WHERE id IN ({0})
     ";

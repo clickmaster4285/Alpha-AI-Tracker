@@ -63,6 +63,8 @@ if (args.Contains("--print-config"))
     Console.WriteLine($"LockHysteresisSeconds={cfg.LockHysteresisSeconds}");
     Console.WriteLine($"EventAggregationWindowSec={cfg.EventAggregationWindowSec}");
     Console.WriteLine($"TaMaxLocalRows={cfg.TaMaxLocalRows}");
+    Console.WriteLine($"LocationEnabled={cfg.LocationEnabled}");
+    Console.WriteLine($"LocationPollSec={cfg.LocationPollSec}");
     return;
 }
 
@@ -206,6 +208,13 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.Sc
 // ────────────────────────────────────────────────────────────────────────────
 builder.Services.AddSingleton<client.Services.AttendanceAggregator>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.AttendanceAggregator>());
+
+// ────────────────────────────────────────────────────────────────────────────
+// Phase 3 GPS (finalplan §16 B.1): LocationSamplerService polls OS location /
+// IP geolocation on ALPHA_LOCATION_POLL_SEC. Default OFF (ALPHA_LOCATION_ENABLED).
+// ────────────────────────────────────────────────────────────────────────────
+builder.Services.AddSingleton<client.Services.LocationSamplerService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.LocationSamplerService>());
 
 // HTTP Client
 builder.Services.AddSingleton<HttpClient>(sp =>
