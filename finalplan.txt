@@ -15,7 +15,8 @@ Status        : FINAL — T&A Phase 1 + Phase 2 server/web DONE in code
               systemctl stop → power_off, loginctl lock/unlock, idle rollup, watermark.
               Still open: full OS reboot power_on/off proof, Windows + macOS manual pass.
               A.13 release can proceed after reboot proof or with documented waiver.
-              Phase 3 GPS & Location (lat/lon coordinates) — PLANNED in §16, not built.
+              Phase 3 GPS & Location — IN PROGRESS (2026-09-01): B.0–B.3,
+              B.6–B.7, B.9–B.10 done in code; B.4/B.5/B.8 complete 2026-09-01.
 
 EXPLICIT SCOPE DECISION (user-confirmed):
   - NO break-in / break-out tracking. "Hours Insights" reports
@@ -913,7 +914,7 @@ SECTION 15 — IMPLEMENTATION SUMMARY (2026-08-28)
     - BUG-11: Windows WTS message pump → TODO A.3.2 follow-up (SystemEvents path covers Phase 1)
     - A.12: Linux mostly done (2026-09-01); reboot + Win/mac pending
     - A.13: Release (after reboot proof or waiver)
-    - Phase 3 GPS (§16): lat/lon coordinates — planned, not started
+    - Phase 3 GPS (§16): B.0–B.8, B.9–B.10 implemented (B.4 permission wizard, B.5 postinst, B.8 geofence).
 
 ================================================================================
 SECTION 16 — PHASE 3: GPS & LOCATION (coordinates) — PLANNED, NOT BUILT
@@ -962,30 +963,25 @@ SECTION 16 — PHASE 3: GPS & LOCATION (coordinates) — PLANNED, NOT BUILT
 
 16.2  CLIENT (build order B.0–B.5)
 
-      [ ] B.0  Feature flag ALPHA_LOCATION_ENABLED (default false) +
-               ALPHA_LOCATION_POLL_SEC (default 300 = 5 min, not continuous).
-      [ ] B.1  LocationSamplerService (BackgroundService):
-               - Windows: Geolocator.GetGeopositionAsync
-               - macOS: CLLocationManager wrapper (net10.0-maccatalyst or shell)
-               - Linux: GeoClue2 Simple client over D-Bus
-               - Fallback: reuse public IP geo only when OS API unavailable
-                 (store source=ip, low accuracy — never pretend it is GPS).
-      [ ] B.2  SQLite location_samples + is_synced; retention like session_events.
-      [ ] B.3  POST /api/v1/location-samples/sync (DeviceAuth, gzip batch).
-      [ ] B.4  Permission wizard step: Location (reuse permission_status sync).
-      [ ] B.5  Installer-Parity: polkit/GeoClue note in Linux postinst docs.
+      [X] B.0  Feature flag ALPHA_LOCATION_ENABLED (default false) +
+               ALPHA_LOCATION_POLL_SEC (default 300) — AppConfig + .env.example.
+      [X] B.1  LocationSamplerService — Windows PS Geolocator, Linux GeoClue2
+               busctl, IP fallback (ip-api.com, source=ip). macOS → IP only.
+      [X] B.2  SQLite location_samples + is_synced (never deleted client-side).
+      [X] B.3  POST /api/v1/location-samples/sync via SyncService.
+      [X] B.4  Permission wizard step: Location (reuse permission_status sync).
+      [X] B.5  Installer-Parity: polkit/GeoClue note in Linux postinst docs.
 
 16.3  SERVER (build order B.6–B.8)
 
-      [ ] B.6  Migration 029_location_samples.sql + geofence tables (optional).
-      [ ] B.7  GET /api/v1/location-samples?employeeId=&from=&to= (paginated).
-      [ ] B.8  Geofence CRUD + server-side inside/outside evaluation on ingest.
+      [X] B.6  Migration 029_location_samples.sql (geofence tables deferred).
+      [X] B.7  GET /api/v1/location-samples?employeeId=&dateFrom=&dateTo=.
+      [X] B.8  Geofence CRUD + server-side inside/outside evaluation on ingest.
 
 16.4  WEB (build order B.9–B.10)
 
-      [ ] B.9  Replace mock locationData in web/src/app/(app)/gps-location/page.tsx
-               with live API + infinite scroll (Web Infinite-Scroll Rule).
-      [ ] B.10 Wire /employee-journey/location map/trail from same API.
+      [X] B.9  /gps-location live API + infinite scroll.
+      [X] B.10 /employee-journey/location trail table from same API.
 
 16.5  RELATION TO T&A (A.0–A.13)
 
