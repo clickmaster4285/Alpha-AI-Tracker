@@ -54,7 +54,8 @@ export default function TimesheetsPage() {
 
   return (
     <div className="space-y-4 animate-fade-in">
-        <div className="flex flex-col lg:flex-row lg:items-end gap-4 justify-between">
+      <div className="flex lg:flex-row flex-col justify-between">
+        <div className="flex flex-col gap-4 ">
           <div>
             <h3 className="font-display font-bold text-lg text-foreground">Timesheets</h3>
             <p className="text-xs text-muted-foreground mt-0.5">
@@ -63,7 +64,7 @@ export default function TimesheetsPage() {
           </div>
         </div>
 
-        <div className="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-end">
+        <div className="flex flex-col sm:flex-row gap-3 ">
           <EmployeeSelector
             value={employee?.id ?? ''}
             onChange={setEmployee}
@@ -85,7 +86,7 @@ export default function TimesheetsPage() {
             className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground w-full sm:w-auto"
           />
         </div>
-
+      </div>
       {!employee ? (
         <EmptyState icon={Clock} text="Select an employee to view their timesheet history." />
       ) : (
