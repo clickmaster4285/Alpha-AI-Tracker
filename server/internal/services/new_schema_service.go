@@ -14,12 +14,13 @@ import (
 
 // NewSchemaService handles business logic for Phase 1 & Phase 2 tables.
 type NewSchemaService struct {
-	repo         *repository.NewSchemaRepo
-	employeeRepo *repository.EmployeeRepo
+	repo            *repository.NewSchemaRepo
+	employeeRepo    *repository.EmployeeRepo
+	geofenceService *GeofenceService
 }
 
-func NewNewSchemaService(repo *repository.NewSchemaRepo, employeeRepo *repository.EmployeeRepo) *NewSchemaService {
-	return &NewSchemaService{repo: repo, employeeRepo: employeeRepo}
+func NewNewSchemaService(repo *repository.NewSchemaRepo, employeeRepo *repository.EmployeeRepo, geofenceService *GeofenceService) *NewSchemaService {
+	return &NewSchemaService{repo: repo, employeeRepo: employeeRepo, geofenceService: geofenceService}
 }
 
 // ── device_hardware_info ──
@@ -722,6 +723,102 @@ func (s *NewSchemaService) SyncStorageDevices(ctx context.Context, req *dto.Sync
 		return nil, fmt.Errorf("bulk upsert storage_devices: %w", err)
 	}
 	return &dto.SyncBatchResponse{Synced: inserted, Message: fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries))}, nil
+}
+
+// ── location_samples (Phase 3 GPS) ──
+
+func (s *NewSchemaService) SyncLocationSamples(ctx context.Context, req *dto.SyncLocationSamplesRequest) (*dto.SyncBatchResponse, error) {
+	emp, err := s.employeeRepo.GetByEmployeeID(ctx, req.EmployeeID)
+	if err != nil {
+		return nil, fmt.Errorf("verify employee: %w", err)
+	}
+	if emp == nil {
+		return nil, fmt.Errorf("employee not found")
+	}
+	if len(req.Entries) == 0 {
+		return &dto.SyncBatchResponse{Synced: 0, Message: "No entries to sync"}, nil
+	}
+
+	entries := make([]models.LocationSample, 0, len(req.Entries))
+	for _, e := range req.Entries {
+		capturedAt, err := time.Parse(time.RFC3339, e.CapturedAt)
+		if err != nil {
+			continue
+		}
+		if e.Latitude < -90 || e.Latitude > 90 || e.Longitude < -180 || e.Longitude > 180 {
+			continue
+		}
+		source := e.Source
+		if source == "" {
+			source = "ip"
+		}
+		entries = append(entries, models.LocationSample{
+			ID:         e.ID,
+			EmployeeID: req.EmployeeID,
+			Latitude:   e.Latitude,
+			Longitude:  e.Longitude,
+			AccuracyM:  e.AccuracyM,
+			AltitudeM:  e.AltitudeM,
+			Source:     source,
+			Address:    e.Address,
+			CapturedAt: capturedAt,
+		})
+	}
+
+	inserted, err := s.repo.BulkUpsertLocationSamples(ctx, entries)
+	if err != nil {
+		return nil, fmt.Errorf("bulk upsert location_samples: %w", err)
+	}
+	if s.geofenceService != nil && len(entries) > 0 {
+		if err := s.geofenceService.EvaluateSamplesOnIngest(ctx, req.EmployeeID, entries); err != nil {
+			return nil, fmt.Errorf("geofence evaluation: %w", err)
+		}
+	}
+	return &dto.SyncBatchResponse{Synced: inserted, Message: fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries))}, nil
+}
+
+func (s *NewSchemaService) ListLocationSamples(ctx context.Context, params repository.LocationSampleListParams) (*dto.LocationSampleListResponse, error) {
+	result, err := s.repo.ListLocationSamples(ctx, params)
+	if err != nil {
+		return nil, fmt.Errorf("list location_samples: %w", err)
+	}
+
+	items := make([]dto.LocationSampleResponse, len(result.Items))
+	for i, item := range result.Items {
+		var syncedAt *time.Time
+		if item.SyncedAt != nil {
+			t := *item.SyncedAt
+			syncedAt = &t
+		}
+		geofenceStatus := "Outside"
+		if s.geofenceService != nil {
+			if label, err := s.geofenceService.GeofenceLabel(ctx, item.Latitude, item.Longitude); err == nil && label != "" {
+				geofenceStatus = label
+			}
+		}
+		items[i] = dto.LocationSampleResponse{
+			ID:             item.ID,
+			EmployeeID:     item.EmployeeID,
+			EmployeeName:   item.EmployeeName,
+			Latitude:       item.Latitude,
+			Longitude:      item.Longitude,
+			AccuracyM:      item.AccuracyM,
+			AltitudeM:      item.AltitudeM,
+			Source:         item.Source,
+			Address:        item.Address,
+			CapturedAt:     item.CapturedAt,
+			SyncedAt:       syncedAt,
+			GeofenceStatus: geofenceStatus,
+		}
+	}
+
+	return &dto.LocationSampleListResponse{
+		Data:       items,
+		Total:      result.Total,
+		Page:       result.Page,
+		PerPage:    result.PerPage,
+		TotalPages: result.TotalPages,
+	}, nil
 }
 
 // ────────────────────────────────

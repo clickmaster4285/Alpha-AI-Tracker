@@ -80,7 +80,9 @@ func main() {
 	userService := services.NewUserService(userRepo, rbacRepo, employeeRepo)
 	employeeService := services.NewEmployeeService(employeeRepo, shiftRepo, redisClient)
 	departmentService := services.NewDepartmentService(departmentRepo, employeeRepo)
-	newSchemaService := services.NewNewSchemaService(newSchemaRepo, employeeRepo)
+	geofenceRepo := repository.NewGeofenceRepo(pool)
+	geofenceService := services.NewGeofenceService(geofenceRepo)
+	newSchemaService := services.NewNewSchemaService(newSchemaRepo, employeeRepo, geofenceService)
 	monitoringService := services.NewMonitoringService(monitoringRepo)
 	rbacService := services.NewRBACService(rbacRepo)
 	shiftService := services.NewShiftService(shiftRepo)
@@ -101,6 +103,7 @@ func main() {
 	rbacHandler := handlers.NewRBACHandler(rbacService)
 	shiftHandler := handlers.NewShiftHandler(shiftService)
 	timeAttendanceHandler := handlers.NewTimeAttendanceHandler(timeAttendanceService)
+	geofenceHandler := handlers.NewGeofenceHandler(geofenceService)
 
 	// ────────────────
 	// Seed RBAC catalog (modules, submodules, system role) — idempotent
@@ -136,7 +139,7 @@ func main() {
 	e.HideBanner = true
 	e.HidePort = true
 
-	router.Setup(e, cfg, authService, deviceRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler, rbacHandler, shiftHandler, timeAttendanceHandler)
+	router.Setup(e, cfg, authService, deviceRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler, rbacHandler, shiftHandler, timeAttendanceHandler, geofenceHandler)
 
 	// ────────────────
 	// Graceful Shutdown

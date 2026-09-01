@@ -1279,3 +1279,164 @@ func (r *NewSchemaRepo) GetBrowserNameByProcessName(ctx context.Context, process
 	}
 	return name, nil
 }
+
+// ────────────────────────────────
+// Location Samples (Phase 3 GPS)
+// ────────────────────────────────
+
+func (r *NewSchemaRepo) BulkUpsertLocationSamples(ctx context.Context, entries []models.LocationSample) (int, error) {
+	if len(entries) == 0 {
+		return 0, nil
+	}
+	batchSize := 500
+	inserted := 0
+	for i := 0; i < len(entries); i += batchSize {
+		end := i + batchSize
+		if end > len(entries) {
+			end = len(entries)
+		}
+		batch := entries[i:end]
+		valueStrings := make([]string, 0, len(batch))
+		args := make([]interface{}, 0, len(batch)*9)
+		argIdx := 1
+
+		for _, e := range batch {
+			valueStrings = append(valueStrings, fmt.Sprintf(
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4, argIdx+5, argIdx+6, argIdx+7, argIdx+8,
+			))
+			args = append(args,
+				e.ID, e.EmployeeID, e.Latitude, e.Longitude, e.AccuracyM, e.AltitudeM,
+				e.Source, e.Address, e.CapturedAt,
+			)
+			argIdx += 9
+		}
+
+		query := fmt.Sprintf(`
+			INSERT INTO location_samples
+				(id, employee_id, latitude, longitude, accuracy_m, altitude_m, source, address, captured_at)
+			VALUES %s
+			ON CONFLICT (id) DO UPDATE SET
+				latitude = EXCLUDED.latitude,
+				longitude = EXCLUDED.longitude,
+				accuracy_m = EXCLUDED.accuracy_m,
+				altitude_m = EXCLUDED.altitude_m,
+				source = EXCLUDED.source,
+				address = EXCLUDED.address,
+				captured_at = EXCLUDED.captured_at,
+				synced_at = NOW()
+		`, strings.Join(valueStrings, ", "))
+
+		tag, err := r.pool.Exec(ctx, query, args...)
+		if err != nil {
+			return inserted, fmt.Errorf("bulk upsert location_samples: %w", err)
+		}
+		inserted += int(tag.RowsAffected())
+	}
+	return inserted, nil
+}
+
+type LocationSampleListParams struct {
+	EmployeeID string
+	DateFrom   time.Time
+	DateTo     time.Time
+	Page       int
+	PerPage    int
+}
+
+type LocationSampleListResult struct {
+	Items      []models.LocationSample
+	Total      int
+	Page       int
+	PerPage    int
+	TotalPages int
+}
+
+func (r *NewSchemaRepo) ListLocationSamples(ctx context.Context, params LocationSampleListParams) (*LocationSampleListResult, error) {
+	if params.Page < 1 {
+		params.Page = 1
+	}
+	if params.PerPage < 1 || params.PerPage > 100 {
+		params.PerPage = 30
+	}
+
+	var conditions []string
+	var args []interface{}
+	argIdx := 1
+
+	conditions = append(conditions, "ls.deleted_at IS NULL")
+
+	if params.EmployeeID != "" {
+		conditions = append(conditions, fmt.Sprintf("ls.employee_id = $%d", argIdx))
+		args = append(args, params.EmployeeID)
+		argIdx++
+	}
+	if !params.DateFrom.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("ls.captured_at >= $%d", argIdx))
+		args = append(args, params.DateFrom)
+		argIdx++
+	}
+	if !params.DateTo.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("ls.captured_at <= $%d", argIdx))
+		args = append(args, params.DateTo)
+		argIdx++
+	}
+
+	whereClause := "WHERE " + strings.Join(conditions, " AND ")
+
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM location_samples ls %s", whereClause)
+	var total int
+	if err := r.pool.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, fmt.Errorf("count location_samples: %w", err)
+	}
+
+	offset := (params.Page - 1) * params.PerPage
+	listArgs := append(append([]interface{}{}, args...), params.PerPage, offset)
+	limitIdx := argIdx
+	offsetIdx := argIdx + 1
+
+	query := fmt.Sprintf(`
+		SELECT ls.id, ls.employee_id, COALESCE(e.name, '') AS employee_name,
+		       ls.latitude, ls.longitude, ls.accuracy_m, ls.altitude_m,
+		       ls.source, ls.address, ls.captured_at, ls.synced_at, ls.created_at
+		FROM location_samples ls
+		LEFT JOIN employees e ON e.employee_id = ls.employee_id AND e.deleted_at IS NULL
+		%s
+		ORDER BY ls.captured_at DESC
+		LIMIT $%d OFFSET $%d
+	`, whereClause, limitIdx, offsetIdx)
+
+	rows, err := r.pool.Query(ctx, query, listArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("list location_samples: %w", err)
+	}
+	defer rows.Close()
+
+	var items []models.LocationSample
+	for rows.Next() {
+		var s models.LocationSample
+		if err := rows.Scan(
+			&s.ID, &s.EmployeeID, &s.EmployeeName, &s.Latitude, &s.Longitude, &s.AccuracyM, &s.AltitudeM,
+			&s.Source, &s.Address, &s.CapturedAt, &s.SyncedAt, &s.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan location_sample row: %w", err)
+		}
+		items = append(items, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	totalPages := total / params.PerPage
+	if total%params.PerPage != 0 {
+		totalPages++
+	}
+
+	return &LocationSampleListResult{
+		Items:      items,
+		Total:      total,
+		Page:       params.Page,
+		PerPage:    params.PerPage,
+		TotalPages: totalPages,
+	}, nil
+}

@@ -389,3 +389,47 @@ type SyncStorageDevicesRequest struct {
 	Token      string               `json:"token"`
 	Entries    []StorageDeviceEntry `json:"entries"`
 }
+
+// ────────────────────────────────
+// location_samples (Phase 3 GPS, 2026-09-01)
+// ────────────────────────────────
+
+type LocationSampleEntry struct {
+	ID         string   `json:"id"`
+	Latitude   float64  `json:"latitude"`
+	Longitude  float64  `json:"longitude"`
+	AccuracyM  *float64 `json:"accuracyM,omitempty"`
+	AltitudeM  *float64 `json:"altitudeM,omitempty"`
+	Source     string   `json:"source"`
+	Address    *string  `json:"address,omitempty"`
+	CapturedAt string   `json:"capturedAt"`
+}
+
+type SyncLocationSamplesRequest struct {
+	EmployeeID string                `json:"employeeId"`
+	Token      string                `json:"token"`
+	Entries    []LocationSampleEntry `json:"entries"`
+}
+
+type LocationSampleResponse struct {
+	ID             string     `json:"id"`
+	EmployeeID     string     `json:"employeeId"`
+	EmployeeName   string     `json:"employeeName,omitempty"`
+	Latitude       float64    `json:"latitude"`
+	Longitude      float64    `json:"longitude"`
+	AccuracyM      *float64   `json:"accuracyM,omitempty"`
+	AltitudeM      *float64   `json:"altitudeM,omitempty"`
+	Source         string     `json:"source"`
+	Address        *string    `json:"address,omitempty"`
+	CapturedAt     time.Time  `json:"capturedAt"`
+	SyncedAt       *time.Time `json:"syncedAt,omitempty"`
+	GeofenceStatus string     `json:"geofenceStatus,omitempty"`
+}
+
+type LocationSampleListResponse struct {
+	Data       []LocationSampleResponse `json:"data"`
+	Total      int                      `json:"total"`
+	Page       int                      `json:"page"`
+	PerPage    int                      `json:"perPage"`
+	TotalPages int                      `json:"totalPages"`
+}

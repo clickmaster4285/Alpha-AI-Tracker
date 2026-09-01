@@ -358,6 +358,52 @@ func (h *NewSchemaHandler) SyncStorageDevices(c echo.Context) error {
 }
 
 // ────────────────────────────────
+// Phase 3: Location Samples (GPS)
+// ────────────────────────────────
+
+func (h *NewSchemaHandler) SyncLocationSamples(c echo.Context) error {
+	var req dto.SyncLocationSamplesRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "Invalid request body"})
+	}
+	empID, errResp := getAuthenticatedEmployeeID(c)
+	if errResp != nil {
+		return errResp
+	}
+	req.EmployeeID = empID
+
+	resp, err := h.service.SyncLocationSamples(c.Request().Context(), &req)
+	if err != nil {
+		log.Printf("[new_schema] SyncLocationSamples error: %v", err)
+		return c.JSON(http.StatusInternalServerError, dto.APIError{Code: http.StatusInternalServerError, Message: "Failed to sync", Detail: err.Error()})
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+func (h *NewSchemaHandler) ListLocationSamples(c echo.Context) error {
+	page, _ := strconv.Atoi(c.QueryParam("page"))
+	perPage, _ := strconv.Atoi(c.QueryParam("perPage"))
+
+	params := repository.LocationSampleListParams{
+		EmployeeID: c.QueryParam("employeeId"),
+		DateFrom:   parseTimeParam(c.QueryParam("dateFrom")),
+		DateTo:     parseTimeParam(c.QueryParam("dateTo")),
+		Page:       page,
+		PerPage:    perPage,
+	}
+
+	result, err := h.service.ListLocationSamples(c.Request().Context(), params)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, dto.APIError{
+			Code:    http.StatusInternalServerError,
+			Message: "Failed to list location samples",
+			Detail:  err.Error(),
+		})
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+// ────────────────────────────────
 // Employee Detail (web dashboard — GET /employees/:id/detail)
 // ────────────────────────────────
 

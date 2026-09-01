@@ -25,6 +25,7 @@ func Setup(
 	rbacHandler *handlers.RBACHandler,
 	shiftHandler *handlers.ShiftHandler,
 	timeAttendanceHandler *handlers.TimeAttendanceHandler,
+	geofenceHandler *handlers.GeofenceHandler,
 ) {
 	// ─────────────────────────────
 	// Global Middleware
@@ -90,6 +91,7 @@ func Setup(
 	syncGroup.POST("/hardware-devices/sync", newSchemaHandler.SyncHardwareDevices)
 	syncGroup.POST("/permission-status/sync", newSchemaHandler.SyncPermissionStatus)
 	syncGroup.POST("/storage-devices/sync", newSchemaHandler.SyncStorageDevices)
+	syncGroup.POST("/location-samples/sync", newSchemaHandler.SyncLocationSamples)
 	syncGroup.GET("/schedules/me", timeAttendanceHandler.GetMySchedule)
 
 	// ─────────────────────────────
@@ -140,6 +142,16 @@ func Setup(
 
 	// App Items listing (protected — web admin access)
 	protected.GET("/app-items", newSchemaHandler.ListAppItems)
+
+	// Location samples (Phase 3 GPS — web admin access)
+	protected.GET("/location-samples", newSchemaHandler.ListLocationSamples)
+
+	// Geofence zones (Phase 3 GPS B.8)
+	geofence := protected.Group("/geofence-zones")
+	geofence.GET("", geofenceHandler.ListZones)
+	geofence.POST("", geofenceHandler.CreateZone)
+	geofence.PUT("/:id", geofenceHandler.UpdateZone)
+	geofence.DELETE("/:id", geofenceHandler.DeleteZone)
 
 	// Departments
 	depts := protected.Group("/departments")
