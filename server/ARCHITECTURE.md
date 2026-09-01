@@ -1,14 +1,26 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-08-31 (Time & Attendance Phase 2)
+> **Last audited:** 2026-09-01 (shift timezone + attendance display alignment)
 > **Changelog:**
+> - 2026-09-01: **Attendance late/present uses shift IANA timezone; legacy UTC rows auto-migrated.**
+>   Shifts created before admins set a timezone stayed on migration 028's `UTC` default while
+>   `session_events` carried local offsets — status math disagreed with the web table (e.g. 09:08
+>   PKT displayed as on-time when compared to 09:00 UTC). New `DEFAULT_SHIFT_TIMEZONE` in
+>   `config.Load()`; `ShiftRepo.ApplyDefaultTimezone` runs at boot via `ShiftService` when set;
+>   `AttendanceResponse.timezone` echoes the shift zone used for `present`/`late`/`half_day`;
+>   `ShiftService.Create` falls back to `DEFAULT_SHIFT_TIMEZONE` when the payload omits timezone.
+>   Operators must set this to the company's wall-clock zone (e.g. `Asia/Karachi`) or edit each
+>   shift's timezone on `/shifts`.
 > - 2026-08-31: **Time & Attendance Phase 2 server contract.** Migration 028 adds an IANA
 >   timezone to shifts, the company-holiday calendar, and aggregate-compatible
 >   `session_events` fields (`event_count`, `first_at`, `last_at`). Device-authenticated
 >   clients can read `GET /api/v1/schedules/me`; `GET /api/v1/server-time` is public;
 >   JWT-protected admins can manage `/holidays` and read `/attendance/today` or
 >   `/attendance/range`. Attendance is computed on read from session events, the latest
->   heartbeat, the assigned shift, and holidays; idle and lock intervals are unioned.
+>   heartbeat, the assigned shift (**in `shifts.timezone` — not the admin's browser zone**), and
+>   holidays; idle and lock intervals are unioned. `late` = earliest active-marker `first_at` is
+>   strictly after `shift_start + grace_minutes` in that IANA zone. Response includes `timezone`
+>   for web display parity.
 >   The range response is paginated for web infinite scrolling. Unit tests cover the
 >   lowercase weekly-pattern contract and overlapping inactive intervals.
 > - 2026-08-18: **Server-side date-range filtering on app-sessions + app-items list endpoints.**
@@ -123,7 +135,7 @@ server/
 │   └── 028_time_attendance_phase2.sql # timezone, holidays, aggregate event fields
 │
 └── internal/
-    ├── config/config.go         # Loads env vars, builds Config struct (incl. LINK_STALE_DAYS)
+    ├── config/config.go         # Loads env vars, builds Config struct (incl. LINK_STALE_DAYS, DEFAULT_SHIFT_TIMEZONE)
     ├── database/postgres.go     # pgxpool creation, migration runner
     ├── redis/redis.go           # Redis client wrapper (StoreSecret, ValidateSecret, DeleteSecret)
     ├── jobs/staleness_sweep.go  # Hourly background job deactivating stale employee↔catalog links
@@ -345,6 +357,20 @@ Employee token is carried in the request body (`{employeeId, token, entries: [..
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/employees/:id/detail` | **Aggregate machine picture** for one employee: employee record, latest `device_hardware_info`, `storage_devices`, latest `network_info`, currently-installed apps/packages (active junction links), `hardware_devices` peripherals, `permission_status`, `app_status` map and activity stats. Consumed by the web `/users/[id]` page. |
+
+### Time & Attendance (Protected — web admin reads)
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/attendance/today?employeeId=` | Today's row: `timezone`, `firstActiveAt`, `lastActiveAt`, `status`, `lateMinutes`, active/idle/off-shift seconds |
+| GET | `/attendance/range?employeeId=&from=&to=&page=&perPage=` | Paginated daily rows (timesheets; infinite scroll on web) |
+| GET/POST/PUT/DELETE | `/holidays` | Company holiday calendar CRUD |
+| GET/POST/PUT/DELETE | `/shifts` | Shift catalog CRUD — each shift carries an IANA `timezone` |
+
+> **Shift timezone rule (2026-09-01).** Late/present math runs in `shifts.timezone`, not the admin
+> browser's local zone. Legacy rows still on `UTC` are rewritten at boot when
+> `DEFAULT_SHIFT_TIMEZONE` is set in `.env`. The web shift form defaults new shifts to the admin
+> browser's IANA zone.
 
 ### Missing Endpoints (sync-only tables with no standalone listing API)
 
@@ -781,10 +807,18 @@ The server is **mostly stateless**:
 
 ### Background Jobs
 
-**One job exists:**
-- `jobs/staleness_sweep.go` — hourly goroutine (started in `main.go`) that sets `is_active = false` on `employee_installed_applications` / `employee_installed_packages` rows whose `last_seen_at` is older than `LINK_STALE_DAYS` (default 7). This is link-lifecycle management, NOT data pruning.
+**Jobs started in `main.go`:**
+- `jobs/staleness_sweep.go` — hourly goroutine that sets `is_active = false` on `employee_installed_applications` / `employee_installed_packages` rows whose `last_seen_at` is older than `LINK_STALE_DAYS` (default 7). Link-lifecycle only, NOT data pruning.
+- `ShiftService.ApplyDefaultTimezone` — runs once at boot when `DEFAULT_SHIFT_TIMEZONE` is set; updates all non-deleted shifts whose `timezone` is still `UTC` to that IANA value (idempotent).
 
-**Still missing:**
+**Environment (attendance-related):**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LINK_STALE_DAYS` | `7` | Catalog junction staleness window |
+| `DEFAULT_SHIFT_TIMEZONE` | *(empty)* | Company IANA zone applied to legacy `UTC` shifts at boot; create-shift fallback when timezone omitted |
+
+**Still missing (data jobs):**
 - No data-pruning job — app_sessions/app_items/device_hardware/etc. grow unbounded
 - No data aggregation/pre-computation
 

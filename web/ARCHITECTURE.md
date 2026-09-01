@@ -1,8 +1,15 @@
 # Web Architecture — Alpha AI Tracker Dashboard
 
-> **Last audited:** 2026-08-22
+> **Last audited:** 2026-09-01
 > **Changelog:**
-> 2026-08-22: **Sidebar parent menus stay open when navigating to child pages.**
+> - 2026-09-01: **Attendance/timesheets display aligned with server shift timezone.**
+>   `/attendance` and `/timesheets` format `firstActiveAt`/`lastActiveAt` with
+>   `formatDateTimeInZone(iso, record.timezone)` so the table matches late/present math (not
+>   browser-local `toLocaleString` alone). `AttendanceRecord` carries optional `timezone` from
+>   the API. `/shifts` new-shift dialog defaults timezone to
+>   `Intl.DateTimeFormat().resolvedOptions().timeZone` instead of hardcoded `UTC`. Server must
+>   set `DEFAULT_SHIFT_TIMEZONE` or per-shift IANA zones — see `server/ARCHITECTURE.md`.
+> - 2026-08-22: **Sidebar parent menus stay open when navigating to child pages.**
 >   `AppSidebar` now auto-expands any parent section whose `children` array contains the current
 >   `pathname`, so the menu stays open when the user opens a child page.
 > 2026-08-22: **Configuration pages UI/UX redesign + manual website creation.**
@@ -220,9 +227,9 @@ web/
             ├── emails/             # Emails & Alerts (mock data)
             ├── kpis/               # KPIs & KRAs (mock data)
             ├── roles/              # Roles (mock data)
-            ├── shifts/             # Shift management (mock data)
-            ├── timesheets/         # Timesheets (mock data)
-            ├── attendance/         # Attendance log (mock data)
+            ├── shifts/             # Shift management (live API)
+            ├── timesheets/         # Per-employee attendance range (live API)
+            ├── attendance/         # Daily attendance log (live API)
             ├── gps-location/       # Coming Soon shell (live UI: GpsLocationLive.tsx; see locationUi.ts)
             ├── hours-insights/     # Hours insights (mock data)
             ├── productivity-scoring/  # Score card (mock data)
@@ -358,9 +365,9 @@ in the `updateMutation`).
 | `/screenshots` | Screenshots | Honest empty state (no endpoint) | ❌ |
 | `/live-stream` | Live stream | Honest empty state (no endpoint) | ❌ |
 | `/kpis` | KPIs & KRAs | Hardcoded demo data (scaffolding) | ❌ |
-| `/shifts` | Shift management | Hardcoded demo data (scaffolding) | ❌ |
-| `/timesheets` | Timesheets | Hardcoded demo data (scaffolding) | ❌ |
-| `/attendance` | Attendance | Hardcoded demo data (scaffolding) | ❌ |
+| `/shifts` | Shift management | Server (`/shifts` CRUD; IANA timezone field; new-shift defaults to browser zone) | ✅ |
+| `/timesheets` | Timesheets | Server (`/attendance/range`; times formatted in `record.timezone`) | ✅ |
+| `/attendance` | Attendance log | Server (`/attendance/range` per employee/day; status + late minutes from server) | ✅ |
 | `/gps-location` | GPS & Location | Coming Soon (`LOCATION_UI_ENABLED=false`; live code in `GpsLocationLive.tsx`) | ⏸ |
 | `/hours-insights` | Hours insights | Honest empty state (no endpoint) | ❌ |
 | `/productivity-scoring` | Score card | Hardcoded demo data (scaffolding) | ❌ |

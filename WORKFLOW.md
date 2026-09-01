@@ -4,7 +4,7 @@ How work actually moves through this repo — the loops you run daily, and the g
 
 Rules live in [AGENTS.md](./AGENTS.md) §6; this file is the *procedure* for obeying them. File locations: [FILE_HIERARCHY.md](./FILE_HIERARCHY.md).
 
-*Last audited: 2026-08-10 — commands verified against `client/publish/*.sh`, `server/Makefile`, `web/package.json`.*
+*Last audited: 2026-09-01 — commands verified against `client/publish/*.sh`, `server/Makefile`, `web/package.json`.*
 
 ---
 
@@ -37,6 +37,10 @@ make test           # go test ./... -v -count=1
 ```
 
 Schema changes are **append-only**: add `017_<name>.sql` to `server/migrations/`, never edit an applied file.
+
+Set `DEFAULT_SHIFT_TIMEZONE` in `server/.env` to your company's IANA zone (e.g. `Asia/Karachi`) so
+legacy shifts on migration 028's `UTC` default are corrected at boot and attendance late/present
+matches local wall-clock. Per-shift overrides live on `/shifts`.
 
 ### Web
 

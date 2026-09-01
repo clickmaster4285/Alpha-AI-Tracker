@@ -952,6 +952,7 @@ the grouping; `DrainSessionEventsAsync` marks every source row `is_synced` after
   `test/contract-event-types.sh` (T5).
 - **Client follow-up:** backward compatible — servers without aggregate columns still accept
   count=1 rows; Phase 2 server expects `{count, firstAt, lastAt}`.
-- **Web (Phase 2):** replace the current static `timesheets` / `attendance` pages and
-  `hours-insights` placeholder with live APIs and server-side infinite scroll. `gps-location` is
-  out of scope but is currently registered in the RBAC catalog; remove that grant before release.
+- **Web (Phase 2, live):** `/attendance`, `/timesheets`, `/holidays` call the attendance/holiday
+  APIs with infinite scroll. First/last active times use `record.timezone` from the server (shift
+  IANA zone) — operators must set `DEFAULT_SHIFT_TIMEZONE` or per-shift timezone on the server so
+  late/present matches wall-clock. `gps-location` UI is gated Coming Soon (`LOCATION_UI_ENABLED`).

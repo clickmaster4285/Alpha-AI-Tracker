@@ -353,6 +353,10 @@ Phase 2 is BUILT. Migration 028, attendance APIs, holiday CRUD, shift timezone,
 and web pages (/attendance, /timesheets, /holidays) are live. Client A.9/A.10
 aggregate sync pairs with SVR-2.
 
+2026-09-01 timezone fix: set server DEFAULT_SHIFT_TIMEZONE (IANA, e.g. Asia/Karachi)
+so shifts still on UTC are migrated at boot; attendance late/present uses shifts.timezone;
+AttendanceResponse includes timezone; web formats first/last active in that zone.
+
 SVR-1  GET  /api/v1/schedules/me                                    [DONE]
        Returns the calling employee's current schedule + active
        holidays. JSON:
@@ -382,10 +386,11 @@ SVR-3  GET  /api/v1/server-time
 
 SVR-4  GET  /api/v1/attendance/today?employeeId=…
        The web T&A dashboard reads this. Not a client dep but
-       Phase 2 concern.
+       Phase 2 concern. Response includes timezone (shift IANA zone
+       used for late/present) plus firstActiveAt, status, lateMinutes.
 
 SVR-5  GET  /api/v1/attendance/range?employeeId=…&from=…&to=…
-       For timesheet views. Phase 2.
+       For timesheet views. Phase 2. Same payload shape as SVR-4 per day.
 
 ================================================================================
 SECTION 7 — BUGS FOUND DURING CODEBASE AUDIT
