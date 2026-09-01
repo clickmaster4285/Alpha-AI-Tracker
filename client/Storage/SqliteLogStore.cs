@@ -157,7 +157,7 @@ public class SqliteLogStore : ILogStore, IDisposable
 
         foreach (var statement in DatabaseSchema.MigrateSql.Split(';', StringSplitOptions.RemoveEmptyEntries))
         {
-            var sql = statement.Trim();
+            var sql = StripSqlLineComments(statement).Trim();
             if (string.IsNullOrEmpty(sql)) continue;
             try
             {
@@ -190,6 +190,23 @@ public class SqliteLogStore : ILogStore, IDisposable
             CREATE INDEX IF NOT EXISTS idx_app_items_unsent ON app_items(is_synced, opened_at);
         ";
         await indexCmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// Removes -- line comments before executing a migration fragment. MigrateSql is split on
+    /// ';' and a semicolon inside a comment would otherwise produce a bogus statement
+    /// (e.g. "normal OS events..." after "sentinel rows; normal...").
+    /// </summary>
+    private static string StripSqlLineComments(string sql)
+    {
+        var kept = new List<string>();
+        foreach (var line in sql.Split('\n'))
+        {
+            var trimmed = line.TrimStart();
+            if (trimmed.StartsWith("--", StringComparison.Ordinal)) continue;
+            kept.Add(line);
+        }
+        return string.Join('\n', kept);
     }
 
     /// <summary>

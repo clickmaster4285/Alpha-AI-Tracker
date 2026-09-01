@@ -34,7 +34,7 @@ public class SessionEvent
 ///   3. The dashboard never sees a literal "logon" or "screensaver_on" written
 ///      by one path and "screen_lock" written by another.
 ///
-/// New event types are added in 3 places: here, server/internal/models/session_event.go
+/// New event types are added in 3 places: here, server/internal/models/session_event_types.go
 /// (Go mirror), and web/src/lib/eventTypes.ts (web mirror). The contract test greps
 /// all three for the literal strings and fails CI if any set is missing an entry.
 /// </summary>

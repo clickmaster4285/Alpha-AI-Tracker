@@ -8,7 +8,7 @@ Audience      : Senior engineer/architect; future contributors
 Doc standards : AGENTS.md §6 rules
 Last updated  : 2026-08-28
 Status        : FINAL — codebase-audited, execution COMPLETE through A.11
-              [IMPLEMENTED: A.0–A.11 (code) + DESIGNED/GATED A.9/A.10]
+              [IMPLEMENTED: A.0–A.11 + A.9/A.10 (2026-09-01)]
               Phase 1 client foundation is DONE: SessionEvent + IEventRecorder +
               ShutdownSentinel + WAL/read conn + SystemEventWatcher + IdleDetector +
               ScheduleCacheService + LocalTimeSkewService + AttendanceAggregator +
@@ -151,9 +151,9 @@ SECTION 1 — CURRENT STATE (actual codebase, 2026-08-28)
       it unregistered server-side so it stays hidden.
 
 1.11 Sync engine (today)
-      [PENDING — A.10 (SyncService aggregation)]
-      SyncService still drains 11 tables on its own loop. session_events
-      aggregation is not yet implemented.
+      [DONE — A.9/A.10 (2026-09-01)]
+      SyncService drains session_events with 5-min bucket aggregation
+      (count/firstAt/lastAt) and S6 row-ceiling rollup.
 
 1.12 SQLite concurrency (today)
       [DONE (A.0/A.1/A.2/A.5)]
@@ -305,13 +305,13 @@ The web TypeScript mirror lives in:
 SECTION 5 — SCALING (why this architecture survives 10k employees)
 ================================================================================
 
-S1  Aggregated session_events sync.                           [DESIGNED in §1.11]
+S1  Aggregated session_events sync.                           [DONE — A.9 (2026-09-01)]
     Today every lock/unlock = 1 row. The new SessionEventRecorder
     groups events into 5-minute rolling buckets per (employee_id,
     event_type) before the SyncService drains.
     Tunable via ALPHA_EVENT_AGGREGATION_WINDOW_SEC (default 300).
 
-S2  Per-employee sub-batches in SyncService.                  [PENDING — A.10 (SyncService aggregation)]
+S2  Per-employee sub-batches in SyncService.                  [N/A — single employee per desktop client]
     Drain loop keys on (employee_id, table) and runs sub-batches
     in parallel via Task.WhenAll with ALPHA_SYNC_PARALLELISM cap
     (default 4).
@@ -329,7 +329,7 @@ S5  Index strategy.                                           [DONE (A.0/A.1/A.2
     on session_events. (employee_id, work_date) on
     daily_attendance_cache.
 
-S6  Local cache is a hard ceiling, not a soft one.            [PENDING — A.10 (SyncService aggregation)]
+S6  Local cache is a hard ceiling, not a soft one.            [DONE — A.10 (2026-09-01)]
     ALPHA_TA_MAX_LOCAL_ROWS = 50_000 hard cap with sentinel rollup.
 
 S7  ScheduleCacheService is pull-once, not push.              [PENDING — A.6 (ScheduleCacheService fills the tables created in A.5)]
@@ -546,17 +546,15 @@ SECTION 8 — BUILD ORDER (smallest verifiable steps)
          connection (R8). Computes presence/idle/active + present|late|off_shift
          status. Build clean, 0 warnings.
 
-  [X] A.9  SessionEventRecorder aggregation (S1) — DESIGNED / GATED
-       - The recorder already collapses bursts via the 5 s dedup window.
-       - The 5-min rolled-bucket payload (count/first_at/last_at) is DESIGNED but
-         its sync-side implementation is GATED on the Phase 2 server accepting
-         the aggregate (SVR-2). Current 1-row sync stays functional.
+  [X] A.9  SessionEventRecorder aggregation (S1) — COMPLETED 2026-09-01
+       - Raw events persist one-per-row locally (BUG-13).
+       - SyncService aggregates into 5-min buckets via SessionEventSyncAggregator;
+         payload carries count/firstAt/lastAt (SVR-2 server accepts aggregates).
 
-  [X] A.10 SyncService updates — PARTIAL (S3 done; S2/S6 designed+gated)
-       - S3 high-water-marks done: ta_last_known_os_event_at / ta_last_schedule_pull_at /
-         ta_last_skew_measure_at / ta_last_aggregator_run_at written to app_status.
-       - S2 per-employee sub-batches + S6 hard ceiling (sentinel rollup) are DESIGNED
-         but need the Phase 2 aggregate payload + server knowledge (SVR-2). GATED.
+  [X] A.10 SyncService updates — COMPLETED 2026-09-01
+       - S3 high-water-marks done (prior).
+       - S6 hard ceiling: ALPHA_TA_MAX_LOCAL_ROWS + old_data_dropped sentinel.
+       - S2 per-employee sub-batches: N/A on desktop (single employee per client).
 
   [X] A.11 Docs + CHANGELOG — COMPLETED 2026-08-28
        - client/ARCHITECTURE.md §19 "Time & Attendance" added.
@@ -899,10 +897,7 @@ SECTION 15 — IMPLEMENTATION SUMMARY (2026-08-28)
     - BUG-10: Wayland idle (Mutter.IdleMonitor D-Bus, not /dev/input)
     - BUG-12: Sleep/wake skew stabilization (post-resume skip)
 
-  REMAINING (gated / process):
+  REMAINING (process):
     - BUG-11: Windows WTS message pump → TODO A.3.2 follow-up (SystemEvents path covers Phase 1)
-    - A.9/A.10: session_events aggregation (S1) + SyncService sub-batches (S2/S3/S6) —
-      gated on the Phase 2 server aggregate payload (SVR-2). Current 1-row sync stays functional.
-    - A.11: Docs + CHANGELOG (client/ARCHITECTURE.md §15, AGENTS.md changelog)
     - A.12: Full Ship-Test pass (R1 mandatory — installed build, all 3 OSes)
     - A.13: Release

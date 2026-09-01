@@ -61,3 +61,12 @@
 ## Watcher health watermark (BUG-8)
 
 - [ ] `app_status` has a `ta_last_known_os_event_at` value that updates after real OS events.
+
+## Session-event sync aggregation (A.9 / A.10)
+
+- [ ] `--print-config` shows `EventAggregationWindowSec=300` and `TaMaxLocalRows=50000`.
+- [ ] Drive 3+ `screen_lock` events in the same 5-min window → local SQLite has 3 rows
+      (`is_synced=0`), but Postgres receives **one** row with `event_count=3` after the bucket closes.
+- [ ] `bash test/contract-event-types.sh` passes (13 event types across client/server/web).
+- [ ] Optional S6 stress: set `ALPHA_TA_MAX_LOCAL_ROWS=100`, backlog >100 unsynced rows →
+      an `old_data_dropped` sentinel appears locally and syncs with `count` = dropped rows.

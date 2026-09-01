@@ -430,7 +430,7 @@ internal static class DatabaseSchema
         -- rows-per-cycle lifecycle model deliberately allows multiple rows per package
         -- (one per install cycle) and a UNIQUE constraint would break reinstall history.
         -- T&A aggregate metadata on session_events (A.9/A.10): used by old_data_dropped
-        -- sentinel rows; normal OS events leave these NULL and aggregation happens at sync.
+        -- sentinel rows. Normal OS events leave these NULL (aggregation happens at sync).
         ALTER TABLE session_events ADD COLUMN event_count INTEGER;
         ALTER TABLE session_events ADD COLUMN first_at TEXT;
         ALTER TABLE session_events ADD COLUMN last_at TEXT;

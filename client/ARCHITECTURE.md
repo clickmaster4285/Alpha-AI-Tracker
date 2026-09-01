@@ -860,9 +860,8 @@ hooks yet).
 ### Vocabulary (single source of truth, `Core/Models/SessionEvent.cs`)
 
 The `SessionEventTypes` static class is the ONE place every session_events `event_type` string
-lives on the client (finalplan R5). The planned Go mirror
-(`server/internal/models/session_event.go`), web mirror (`web/src/lib/eventTypes.ts`), and CI
-contract test are Phase 2 work and do not exist yet.
+lives on the client (finalplan R5). Go and web mirrors exist; run `test/contract-event-types.sh`
+to catch drift.
 
 | Constant | event_type | Emitter |
 |---|---|---|
@@ -877,8 +876,12 @@ contract test are Phase 2 work and do not exist yet.
 | `UiHidden` | `ui_hidden` | `App.axaml.cs` window.Closing (hide-to-tray) |
 | `IdleStart` | `idle_start` | `IdleDetector` (threshold crossing) |
 | `IdleEnd` | `idle_end` | `IdleDetector` (threshold crossing) |
+| `OldDataDropped` | `old_data_dropped` | `SyncService` S6 row-ceiling rollup |
 
 `Login` is kept as an `[Obsolete]` alias of `TrackerLogin` for back-compat with pre-2026-08-28 rows.
+
+Cross-service mirrors: `server/internal/models/session_event_types.go`, `web/src/lib/eventTypes.ts`.
+Contract test: `test/contract-event-types.sh` (T5).
 
 ### Services
 
@@ -926,14 +929,29 @@ collection never blocks aggregation and vice versa.
 | `ALPHA_IDLE_AWAY_THRESHOLD_SEC` | 600 | reserved for A.8 away classification |
 | `ALPHA_IDLE_POLL_SEC` | 30 | idle-source poll cadence |
 | `ALPHA_TA_LOCK_HYSTERESIS_SEC` | 30 | suppress re-locks within this window |
+| `ALPHA_EVENT_AGGREGATION_WINDOW_SEC` | 300 | sync-time bucket size for session_events aggregates (S1) |
+| `ALPHA_TA_MAX_LOCAL_ROWS` | 50000 | unsynced row ceiling; excess rolls into `old_data_dropped` (S6) |
+
+### Session-event sync aggregation (A.9 / A.10)
+
+Raw OS events are written one-per-row to SQLite immediately (BUG-13). `SyncService` groups
+unsynced rows into rolling buckets per `(event_type, window)` when the bucket window has fully
+elapsed, then POSTs `{ count, firstAt, lastAt }` to `/api/v1/session-events/sync`. Closed buckets
+only — the current open window stays local until it closes. `SessionEventSyncAggregator` performs
+the grouping; `DrainSessionEventsAsync` marks every source row `is_synced` after a successful send.
 
 ### Phase 1 → Phase 2 handoff
 
 - **Server (Phase 2, implemented 2026-08-31):** `GET /api/v1/schedules/me` (SVR-1),
   `GET /api/v1/server-time` (SVR-3), `GET /api/v1/attendance/today|range` (SVR-4/5), holiday
   CRUD, and aggregate-compatible `session-events/sync` fields `{count, firstAt, lastAt}` (SVR-2).
-- **Client follow-up:** A.9/A.10 may now aggregate queued session events before sync; raw
-  one-event rows remain fully backward compatible with the server contract.
+- **Client (A.9/A.10, implemented 2026-09-01):** `SessionEventSyncAggregator` + `DrainSessionEventsAsync`
+  aggregate unsynced rows at sync time (`ALPHA_EVENT_AGGREGATION_WINDOW_SEC`, default 300 s).
+  S6 ceiling via `ALPHA_TA_MAX_LOCAL_ROWS` + `old_data_dropped` sentinel. Mirrors:
+  `server/internal/models/session_event_types.go`, `web/src/lib/eventTypes.ts`;
+  `test/contract-event-types.sh` (T5).
+- **Client follow-up:** backward compatible — servers without aggregate columns still accept
+  count=1 rows; Phase 2 server expects `{count, firstAt, lastAt}`.
 - **Web (Phase 2):** replace the current static `timesheets` / `attendance` pages and
   `hours-insights` placeholder with live APIs and server-side infinite scroll. `gps-location` is
   out of scope but is currently registered in the RBAC catalog; remove that grant before release.
