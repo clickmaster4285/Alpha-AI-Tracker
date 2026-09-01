@@ -1,13 +1,15 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { Clock, Loader2 } from 'lucide-react';
-import { useInfiniteQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import EmployeeSelector from '@/components/EmployeeSelector';
 import EmptyState from '@/components/employees/EmptyState';
 import {
   attendanceApi,
+  employeesApi,
   type AttendanceRecord,
   type AttendanceStatus,
   type Employee,
@@ -48,9 +50,25 @@ function daysAgo(n: number): string {
 }
 
 export default function TimesheetsPage() {
+  const searchParams = useSearchParams();
+  const deepLinkEmployeeId = searchParams.get('employeeId');
+  const deepLinkFrom = searchParams.get('from');
+  const deepLinkTo = searchParams.get('to');
+
   const [employee, setEmployee] = useState<Employee | null>(null);
-  const [from, setFrom] = useState(daysAgo(13));
-  const [to, setTo] = useState(localToday());
+  const [from, setFrom] = useState(deepLinkFrom ?? daysAgo(13));
+  const [to, setTo] = useState(deepLinkTo ?? localToday());
+
+  const { data: employeesData } = useQuery({
+    queryKey: ['employees', 'selector'],
+    queryFn: () => employeesApi.list({ page: 1, perPage: 100 }),
+  });
+
+  useEffect(() => {
+    if (!deepLinkEmployeeId || !employeesData) return;
+    const match = employeesData.data.find(e => e.id === deepLinkEmployeeId);
+    if (match) setEmployee(match);
+  }, [deepLinkEmployeeId, employeesData]);
 
   return (
     <div className="space-y-4 animate-fade-in">

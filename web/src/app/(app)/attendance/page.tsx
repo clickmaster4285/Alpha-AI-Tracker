@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import Link from 'next/link';
 import { motion } from 'framer-motion';
 import { CalendarDays, Loader2 } from 'lucide-react';
 import { useQueries, useQuery } from '@tanstack/react-query';
@@ -204,7 +205,9 @@ export default function AttendancePage() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((a, i) => (
+              {filtered.map((a, i) => {
+                const empUuid = employees.find(e => e.employeeId === a.employeeId)?.id ?? a.employeeId;
+                return (
                 <motion.tr
                   key={a.employeeId}
                   initial={{ opacity: 0 }}
@@ -213,8 +216,13 @@ export default function AttendancePage() {
                   className="border-b border-border last:border-0 hover:bg-muted/30"
                 >
                   <td className="px-4 py-3 text-sm font-medium text-foreground">
-                    {a.employeeName}
-                    <span className="block text-xs text-muted-foreground font-mono">{a.employeeId}</span>
+                    <Link
+                      href={{ pathname: '/timesheets', query: { employeeId: empUuid, from: date, to: date } }}
+                      className="hover:text-primary hover:underline"
+                    >
+                      {a.employeeName}
+                      <span className="block text-xs text-muted-foreground font-mono">{a.employeeId}</span>
+                    </Link>
                   </td>
                   <td className="px-4 py-3 text-sm text-muted-foreground">{a.workDate}</td>
                   <td className="px-4 py-3">
@@ -230,7 +238,8 @@ export default function AttendancePage() {
                     {a.lateMinutes > 0 ? `${a.lateMinutes} min` : '—'}
                   </td>
                 </motion.tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
