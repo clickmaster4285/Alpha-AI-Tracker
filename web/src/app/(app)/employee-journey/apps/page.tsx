@@ -1,11 +1,12 @@
 'use client';
 
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, Suspense, useEffect, useMemo, useState } from 'react';
 import { AppWindow, Timer, Layers, Activity, Loader2, ChevronRight, ChevronDown } from 'lucide-react';
 import { keepPreviousData, useQueries } from '@tanstack/react-query';
 import EmployeePage from '@/components/employees/EmployeePage';
 import EmptyState from '@/components/employees/EmptyState';
-import ActivityFilters, { createDefaultFilter, type ActivityFilter } from '@/components/journey/ActivityFilters';
+import ActivityFilters, { type ActivityFilter } from '@/components/journey/ActivityFilters';
+import { useUrlActivityFilter } from '@/hooks/use-url-activity-filter';
 import { appSessionsApi, type AppSession } from '@/lib/api';
 import { formatDateTime, formatSeconds } from '@/lib/format';
 
@@ -31,19 +32,23 @@ const PER_PAGE = 100;
 
 export default function EmployeeJourneyApps() {
   return (
-    <EmployeePage
-      title="App Usage"
-      subtitle="Time spent per application across the employee's most recent sessions."
-      icon={AppWindow}
-    >
-      {({ employee }) => <AppUsageBody employeeId={employee.employeeId} />}
-    </EmployeePage>
+    <Suspense fallback={<div className="flex items-center justify-center min-h-[400px]"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>}>
+      <EmployeePage
+        title="App Usage"
+        subtitle="Time spent per application across the employee's most recent sessions."
+        icon={AppWindow}
+      >
+        {({ employee }) => <AppUsageBody employeeId={employee.employeeId} />}
+      </EmployeePage>
+    </Suspense>
   );
 }
 
 function AppUsageBody({ employeeId }: { employeeId: string }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [filter, setFilter] = useState<ActivityFilter>(createDefaultFilter);
+  // URL-synced filter (preset / search / custom date range). The default
+  // is "today" so the URL is empty on first load — see useUrlActivityFilter.
+  const [filter, setFilter] = useUrlActivityFilter();
   const [isFiltering, setIsFiltering] = useState(false);
 
   const toggle = (key: string) => {

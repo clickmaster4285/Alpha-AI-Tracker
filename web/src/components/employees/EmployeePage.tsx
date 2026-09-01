@@ -1,11 +1,10 @@
 'use client';
 
-import { useState } from 'react';
-import { useSearchParams } from 'next/navigation';
 import { Loader2, UserX } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import EmployeeSelector from '@/components/EmployeeSelector';
 import { useEmployeeDetail } from '@/hooks/use-employee-detail';
+import { useUrlQueryState } from '@/hooks/use-url-query-state';
 import { employeesApi, type Employee, type EmployeeDetail } from '@/lib/api';
 
 export interface EmployeePageContext {
@@ -30,6 +29,14 @@ interface EmployeePageProps {
  * page header, employee picker (deep-linkable via ?employeeId=), and
  * loading/error/no-selection states. The body is rendered by the caller
  * once an employee (and optionally the detail payload) is available.
+ *
+ * URL state
+ * ---------
+ * The selected employee is mirrored to `?employeeId=<uuid>`. Any sibling
+ * page (the employees table action menu, an external link) can deep-link
+ * to a specific journey or device-specs subpage by adding that param; a
+ * manual address-bar edit propagates back into the picker on the next
+ * render. See the Web URL-State Rule in AGENTS.md §6.
  */
 export default function EmployeePage({
   title,
@@ -38,8 +45,11 @@ export default function EmployeePage({
   fetchDetail = false,
   children,
 }: EmployeePageProps) {
-  const searchParams = useSearchParams();
-  const [employeeId, setEmployeeId] = useState(searchParams.get('employeeId') || '');
+  const [filters, setFilters] = useUrlQueryState(
+    { employeeId: {} },
+    { employeeId: '' },
+  );
+  const employeeId = filters.employeeId;
 
   // Same query key as EmployeeSelector — one shared cache entry.
   const { data: employeesData } = useQuery({
@@ -52,7 +62,7 @@ export default function EmployeePage({
   const detailQuery = useEmployeeDetail(fetchDetail ? employeeId : '');
 
   const handleChange = (emp: Employee | null) => {
-    setEmployeeId(emp?.id ?? '');
+    setFilters({ employeeId: emp?.id ?? '' });
   };
 
   return (

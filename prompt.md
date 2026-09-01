@@ -84,6 +84,12 @@ Follow the full definitions in `AGENTS.md`. In particular:
 - **Web infinite scrolling:** list/table pages use server-side infinite scrolling, never Previous/Next.
 - **Server-projected relationship flags:** cross-table booleans are calculated in the server query, not
   reconstructed by extra client requests.
+- **URL-synced filters:** every filterable web page keeps its filter state in the browser URL query
+  string. Applying a filter writes `?key=value` first, the React Query call re-keys from the URL, and a
+  manual URL edit re-fires the same query. Use `useUrlQueryState` for ad-hoc shapes and
+  `useUrlActivityFilter` for `ActivityFilter`. Search inputs keep a local debounced mirror (~400 ms);
+  date modals and search inputs have no Clear button — the only way to clear is select a default
+  preset or empty the input. `useSearchParams` requires a `<Suspense>` boundary.
 - **Cross-platform analyzer safety:** guard platform method bodies with
   `OperatingSystem.IsWindows/Linux/MacOS()`. Do not propagate `[SupportedOSPlatform]` through
   cross-platform partial/background-service graphs, and never globally disable analyzers.

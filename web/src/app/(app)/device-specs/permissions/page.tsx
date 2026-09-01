@@ -1,14 +1,16 @@
 'use client';
 
-import { ShieldCheck, ShieldX } from 'lucide-react';
+import { Suspense } from 'react';
+import { ShieldCheck, ShieldX, Loader2 } from 'lucide-react';
 import EmployeePage from '@/components/employees/EmployeePage';
 import InventoryTable from '@/components/employees/InventoryTable';
 import { formatDateTime } from '@/lib/format';
 
 export default function DeviceSpecsPermissions() {
   return (
-    <EmployeePage
-      title="Permissions"
+    <Suspense fallback={<div className="flex items-center justify-center min-h-[400px]"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>}>
+      <EmployeePage
+        title="Permissions"
       subtitle="OS permission checks the desktop client ran on the employee's machine."
       icon={ShieldCheck}
       fetchDetail
@@ -46,5 +48,6 @@ export default function DeviceSpecsPermissions() {
         );
       }}
     </EmployeePage>
+    </Suspense>
   );
 }

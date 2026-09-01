@@ -1,16 +1,44 @@
 'use client'
 
-import { useState, useMemo } from 'react';
+import { Suspense, useState, useMemo, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Search, ChevronDown, ChevronUp, Loader2, Monitor, Globe, FolderOpen, ExternalLink } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { appSessionsApi, appItemsApi, employeesApi, type AppSession, type AppItem } from '@/lib/api';
+import { useUrlQueryState } from '@/hooks/use-url-query-state';
 
 export default function ComprehensiveLogs() {
-  const [selectedEmployee, setSelectedEmployee] = useState('');
-  const [searchQuery, setSearchQuery] = useState('');
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center min-h-[400px]"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>}>
+      <ComprehensiveLogsBody />
+    </Suspense>
+  );
+}
+
+function ComprehensiveLogsBody() {
+  // URL-synced filters (employee / search / page). All three round-trip so a
+  // deep link like `?employee=EMP-10005&q=chrome&page=2` lands on the same
+  // list the user was viewing.
+  const [urlFilters, setUrlFilters] = useUrlQueryState(
+    { employee: {}, q: {}, page: {} },
+    { employee: '', q: '', page: '1' },
+  );
+  const selectedEmployee = urlFilters.employee;
+  const setSelectedEmployee = (next: string) => setUrlFilters({ employee: next, page: '1' });
+  const searchQuery = urlFilters.q;
+  // Local debounced mirror of the search input.
+  const [searchInput, setSearchInput] = useState(searchQuery);
+  useEffect(() => { setSearchInput(searchQuery); }, [searchQuery]);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (searchInput !== searchQuery) setUrlFilters({ q: searchInput, page: '1' });
+    }, 400);
+    return () => clearTimeout(t);
+  }, [searchInput, searchQuery, setUrlFilters]);
+  const page = Number(urlFilters.page) || 1;
+  const setPage = (next: number) => setUrlFilters({ page: String(next) });
+
   const [expandedSession, setExpandedSession] = useState<string | null>(null);
-  const [page, setPage] = useState(1);
 
   // Fetch employees for dropdown
   const { data: employeesData } = useQuery({
@@ -64,7 +92,7 @@ export default function ComprehensiveLogs() {
         <div className="flex flex-col sm:flex-row gap-3 flex-1">
           <select
             value={selectedEmployee}
-            onChange={e => { setSelectedEmployee(e.target.value); setPage(1); }}
+            onChange={e => setSelectedEmployee(e.target.value)}
             className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground"
           >
             <option value="">All Employees</option>
@@ -75,8 +103,8 @@ export default function ComprehensiveLogs() {
           <div className="flex items-center bg-card border border-border rounded-lg px-3 py-2 gap-2 flex-1 max-w-sm">
             <Search className="w-4 h-4 text-muted-foreground" />
             <input
-              value={searchQuery}
-              onChange={e => { setSearchQuery(e.target.value); setPage(1); }}
+              value={searchInput}
+              onChange={e => setSearchInput(e.target.value)}
               placeholder="Search by process or window..."
               className="bg-transparent border-none outline-none text-sm flex-1 text-foreground placeholder:text-muted-foreground"
             />
@@ -189,14 +217,14 @@ export default function ComprehensiveLogs() {
               <p className="text-sm text-muted-foreground">Page {page} of {totalPages}</p>
               <div className="flex gap-2">
                 <button
-                  onClick={() => setPage(p => Math.max(1, p - 1))}
+                  onClick={() => setPage(Math.max(1, page - 1))}
                   disabled={page <= 1}
                   className="px-3 py-1 rounded border border-border text-sm disabled:opacity-50 hover:bg-muted"
                 >
                   Previous
                 </button>
                 <button
-                  onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                  onClick={() => setPage(Math.min(totalPages, page + 1))}
                   disabled={page >= totalPages}
                   className="px-3 py-1 rounded border border-border text-sm disabled:opacity-50 hover:bg-muted"
                 >

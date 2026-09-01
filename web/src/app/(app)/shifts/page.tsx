@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Plus, Edit2, Trash2, Loader2, Search } from 'lucide-react';
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
@@ -9,6 +9,7 @@ import { shiftsApi, type Shift, type CreateShiftPayload } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { useUrlQueryState } from '@/hooks/use-url-query-state';
 
 const ALL_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const;
 
@@ -34,13 +35,30 @@ const DEFAULT_FORM: CreateShiftPayload = {
 const PER_PAGE = 12;
 
 export default function ShiftManagement() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center min-h-[400px]"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>}>
+      <ShiftManagementInner />
+    </Suspense>
+  );
+}
+
+function ShiftManagementInner() {
   const queryClient = useQueryClient();
-  const [searchInput, setSearchInput] = useState('');
-  const [search, setSearch] = useState('');
+  // URL-synced search (debounced locally so the input stays responsive).
+  const [filters, setFilters] = useUrlQueryState(
+    { search: {} },
+    { search: '' },
+  );
+  const [searchInput, setSearchInput] = useState(filters.search);
   useEffect(() => {
-    const t = setTimeout(() => setSearch(searchInput), 400);
+    const t = setTimeout(() => {
+      if (searchInput !== filters.search) setFilters({ search: searchInput });
+    }, 400);
     return () => clearTimeout(t);
-  }, [searchInput]);
+  }, [searchInput, filters.search, setFilters]);
+  useEffect(() => {
+    setSearchInput(filters.search);
+  }, [filters.search]);
 
   const [showDialog, setShowDialog] = useState(false);
   const [editing, setEditing] = useState<Shift | null>(null);
@@ -55,12 +73,12 @@ export default function ShiftManagement() {
     fetchNextPage,
     hasNextPage,
   } = useInfiniteQuery({
-    queryKey: ['shifts', { search, perPage: PER_PAGE }],
+    queryKey: ['shifts', { search: filters.search, perPage: PER_PAGE }],
     queryFn: ({ pageParam }) =>
       shiftsApi.list({
         page: pageParam as number,
         perPage: PER_PAGE,
-        search: search || undefined,
+        search: filters.search || undefined,
       }),
     initialPageParam: 1,
     getNextPageParam: (last) =>

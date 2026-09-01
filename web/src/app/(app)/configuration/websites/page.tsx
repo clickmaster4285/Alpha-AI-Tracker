@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { Globe, Plus, Loader2, X, AlertCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { useQueryClient } from '@tanstack/react-query';
@@ -202,7 +202,7 @@ export default function WebsitesClassification() {
   };
 
   return (
-    <>
+    <Suspense fallback={<div className="flex items-center justify-center min-h-[400px]"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>}>
       <ClassifiedItemsTable<MonitoredSite & ClassifiedItemRow>
         title="Websites"
         description="Classify the websites employees visit. Domains are auto-discovered from observed browsing activity — nothing here is static."
@@ -223,6 +223,6 @@ export default function WebsitesClassification() {
         }
       />
       <AddWebsiteDialog open={dialogOpen} onOpenChange={setDialogOpen} onCreated={refresh} />
-    </>
+    </Suspense>
   );
 }

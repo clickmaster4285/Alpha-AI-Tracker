@@ -1,7 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useSearchParams } from 'next/navigation';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Clock, Loader2 } from 'lucide-react';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
@@ -15,6 +14,7 @@ import {
   type Employee,
 } from '@/lib/api';
 import { formatDateTimeInZone, formatSeconds } from '@/lib/format';
+import { useUrlQueryState } from '@/hooks/use-url-query-state';
 
 const PER_PAGE = 31;
 
@@ -50,25 +50,46 @@ function daysAgo(n: number): string {
 }
 
 export default function TimesheetsPage() {
-  const searchParams = useSearchParams();
-  const deepLinkEmployeeId = searchParams.get('employeeId');
-  const deepLinkFrom = searchParams.get('from');
-  const deepLinkTo = searchParams.get('to');
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center min-h-[400px]"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>}>
+      <TimesheetsPageInner />
+    </Suspense>
+  );
+}
+
+function TimesheetsPageInner() {
+  // URL-synced filter state — `/attendance` deep-links here with
+  // `?employeeId=&from=&to=` and the page must round-trip those values
+  // both ways (URL → state on mount, state → URL on every change).
+  const [filters, setFilters] = useUrlQueryState(
+    { employeeId: {}, from: {}, to: {} },
+    { employeeId: '', from: daysAgo(13), to: localToday() },
+  );
 
   const [employee, setEmployee] = useState<Employee | null>(null);
-  const [from, setFrom] = useState(deepLinkFrom ?? daysAgo(13));
-  const [to, setTo] = useState(deepLinkTo ?? localToday());
+  const from = filters.from;
+  const to = filters.to;
 
   const { data: employeesData } = useQuery({
     queryKey: ['employees', 'selector'],
     queryFn: () => employeesApi.list({ page: 1, perPage: 100 }),
   });
 
+  // Resolve the URL-selected employee UUID → Employee object once the list
+  // arrives. The selector's onChange below pushes the new id back into the URL.
   useEffect(() => {
-    if (!deepLinkEmployeeId || !employeesData) return;
-    const match = employeesData.data.find(e => e.id === deepLinkEmployeeId);
-    if (match) setEmployee(match);
-  }, [deepLinkEmployeeId, employeesData]);
+    if (!filters.employeeId || !employeesData) {
+      setEmployee(prev => (prev && prev.id === filters.employeeId ? prev : null));
+      return;
+    }
+    const match = employeesData.data.find(e => e.id === filters.employeeId);
+    setEmployee(prev => (prev?.id === match?.id ? prev : (match ?? null)));
+  }, [filters.employeeId, employeesData]);
+
+  const handleSelectEmployee = (emp: Employee | null) => {
+    setEmployee(emp);
+    setFilters({ employeeId: emp?.id ?? '' });
+  };
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -85,7 +106,7 @@ export default function TimesheetsPage() {
         <div className="flex flex-col xl:flex-row  gap-3 ">
           <EmployeeSelector
             value={employee?.id ?? ''}
-            onChange={setEmployee}
+            onChange={handleSelectEmployee}
             placeholder="Select employee…"
             className="w-full lg:w-80"
           />
@@ -94,14 +115,14 @@ export default function TimesheetsPage() {
               type="date"
               value={from}
               max={to}
-              onChange={e => setFrom(e.target.value)}
+              onChange={e => setFilters({ from: e.target.value })}
               className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground w-full sm:w-auto"
             />
             <input
               type="date"
               value={to}
               min={from}
-              onChange={e => setTo(e.target.value)}
+              onChange={e => setFilters({ to: e.target.value })}
               className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground w-full sm:w-auto"
             />
 

@@ -1,10 +1,11 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { Suspense, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
-import { AppWindow, Package, Search } from 'lucide-react';
+import { AppWindow, Package, Search, Loader2 } from 'lucide-react';
 import EmployeePage from '@/components/employees/EmployeePage';
 import InventoryTable from '@/components/employees/InventoryTable';
+import { useUrlQueryState } from '@/hooks/use-url-query-state';
 import { formatDate } from '@/lib/format';
 import type { EmployeeDetail } from '@/lib/api';
 
@@ -12,21 +13,33 @@ type TabKey = 'applications' | 'packages';
 
 export default function DeviceSpecsSoftware() {
   return (
-    <EmployeePage
-      title="Installed Software"
+    <Suspense fallback={<div className="flex items-center justify-center min-h-[400px]"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>}>
+      <EmployeePage
+        title="Installed Software"
       subtitle="Applications and packages currently installed on the employee's machine."
       icon={AppWindow}
       fetchDetail
     >
       {({ detail }) => <SoftwareBody detail={detail!} />}
     </EmployeePage>
+    </Suspense>
   );
 }
 
 function SoftwareBody({ detail }: { detail: EmployeeDetail }) {
-  const [tab, setTab] = useState<TabKey>('applications');
-  const [appSearch, setAppSearch] = useState('');
-  const [pkgSearch, setPkgSearch] = useState('');
+  // URL-synced filters for this view: the active tab and one search field
+  // per tab. The `tab` is URL-addressable so deep links land on the right
+  // surface (e.g. /device-specs/software?tab=packages&pkgSearch=npm).
+  const [tabFilters, setFilters] = useUrlQueryState(
+    { tab: {}, appSearch: {}, pkgSearch: {} },
+    { tab: 'applications', appSearch: '', pkgSearch: '' },
+  );
+  const tab = (tabFilters.tab || 'applications') as TabKey;
+  const setTab = (next: TabKey) => setFilters({ tab: next });
+  const appSearch = tabFilters.appSearch;
+  const pkgSearch = tabFilters.pkgSearch;
+  const setAppSearch = (next: string) => setFilters({ appSearch: next });
+  const setPkgSearch = (next: string) => setFilters({ pkgSearch: next });
 
   const { applications, packages } = detail;
 

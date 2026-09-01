@@ -1,11 +1,12 @@
 'use client';
 
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { Globe, Loader2, ExternalLink, ChevronRight, ChevronDown } from 'lucide-react';
 import { keepPreviousData, useInfiniteQuery } from '@tanstack/react-query';
 import EmployeePage from '@/components/employees/EmployeePage';
 import EmptyState from '@/components/employees/EmptyState';
-import ActivityFilters, { createDefaultFilter, type ActivityFilter } from '@/components/journey/ActivityFilters';
+import ActivityFilters, { type ActivityFilter } from '@/components/journey/ActivityFilters';
+import { useUrlActivityFilter } from '@/hooks/use-url-activity-filter';
 import { appItemsApi, type AppItem } from '@/lib/api';
 import { formatDateTime, formatDuration, formatSeconds } from '@/lib/format';
 
@@ -56,19 +57,23 @@ function BrowserBadge({ item }: { item: AppItem }) {
 
 export default function EmployeeJourneyWeb() {
   return (
-    <EmployeePage
-      title="Web Activity"
-      subtitle="Websites the employee visited, captured from browser journeys."
-      icon={Globe}
-    >
-      {({ employee }) => <WebBody employeeId={employee.employeeId} />}
-    </EmployeePage>
+    <Suspense fallback={<div className="flex items-center justify-center min-h-[400px]"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>}>
+      <EmployeePage
+        title="Web Activity"
+        subtitle="Websites the employee visited, captured from browser journeys."
+        icon={Globe}
+      >
+        {({ employee }) => <WebBody employeeId={employee.employeeId} />}
+      </EmployeePage>
+    </Suspense>
   );
 }
 
 function WebBody({ employeeId }: { employeeId: string }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [filter, setFilter] = useState<ActivityFilter>(createDefaultFilter);
+  // URL-synced filter (preset / search / custom date range). The default
+  // is "today" so the URL is empty on first load — see useUrlActivityFilter.
+  const [filter, setFilter] = useUrlActivityFilter();
   const [isFiltering, setIsFiltering] = useState(false);
 
   const toggle = (domain: string) => {

@@ -1,14 +1,16 @@
 'use client';
 
-import { Cpu, MemoryStick, Monitor, HardDrive, Wifi, Globe, Fingerprint, Network, Clock, Activity } from 'lucide-react';
+import { Suspense } from 'react';
+import { Cpu, MemoryStick, Monitor, HardDrive, Wifi, Globe, Fingerprint, Network, Clock, Activity, Loader2 } from 'lucide-react';
 import EmployeePage from '@/components/employees/EmployeePage';
 import EmptyState from '@/components/employees/EmptyState';
 import { formatMb, formatDateTime } from '@/lib/format';
 
 export default function DeviceSpecsHardware() {
   return (
-    <EmployeePage
-      title="Hardware Overview"
+    <Suspense fallback={<div className="flex items-center justify-center min-h-[400px]"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>}>
+      <EmployeePage
+        title="Hardware Overview"
       subtitle="Processor, memory, storage, network and status of the selected employee's machine."
       icon={Monitor}
       fetchDetail
@@ -116,6 +118,7 @@ export default function DeviceSpecsHardware() {
         );
       }}
     </EmployeePage>
+    </Suspense>
   );
 }
 

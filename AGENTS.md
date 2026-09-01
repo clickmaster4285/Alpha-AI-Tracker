@@ -3,6 +3,9 @@
 > **Last audited:** 2026-09-01
 > **Changelog:**
 >
+> - 2026-09-01: **Web: URL-synced filters + no-Clear date modal — *URL-Synced Filters Rule* codified.**
+>   New generic `useUrlQueryState<T>` hook (`web/src/hooks/use-url-query-state.ts`) syncs any typed filter record to the browser URL (debounced, preserves unrelated keys, strips empty values). New `useUrlActivityFilter` (`web/src/hooks/use-url-activity-filter.ts`) bridges `ActivityFilter` to compact URL keys (`?q=&preset=today|7d|all|custom&from=YYYY-MM-DD&to=YYYY-MM-DD`). Wired into 13 pages: employees (search + department), shifts (search), timesheets (employee + from + to), attendance (date + status), employee-journey/timeline (employeeId via shell), employee-journey/apps + web (search + date preset), device-specs/software (tab + per-tab search), configuration/apps + websites (search + type + category + status via `ClassifiedItemsTable`), logs/comprehensive (employee + search + page), settings/user-management (search). `ActivityFilters` lost its search Clear (X) button — clearing now means select "All time" or empty-the-input. Rule added to §6 (conventions table + new rule subsection) and `prompt.md`. Every page using `useSearchParams` is now wrapped in `<Suspense>`. Verified: `npx tsc --noEmit` clean, `next build` clean.
+>
 > - 2026-09-01: **Server + Web: attendance late/present timezone fix — shift IANA zone must match wall-clock, not browser display.**
 >   Root cause: migration 028 defaulted `shifts.timezone` to `UTC` while session events and admins sit in local time (e.g. PKT +05) — a 9:08 arrival looked **Present** in the UI (browser-local `toLocaleString`) but was compared against 09:00 **UTC** on the server. Fix: new `DEFAULT_SHIFT_TIMEZONE` env (`server/.env.example`) — on boot, `ShiftService.ApplyDefaultTimezone` rewrites every active shift still on `UTC`; create-shift fallback when the client omits timezone; `AttendanceResponse` adds `timezone`; late rule unchanged (`firstLocal.After(shiftStart + grace)` in `time_attendance_service.go`). Web: `/shifts` new-shift form defaults to `Intl.DateTimeFormat().resolvedOptions().timeZone`; `/attendance` + `/timesheets` format first/last active via `formatDateTimeInZone(iso, record.timezone)`. Verified: `go build`/`go vet` clean, `npx tsc --noEmit` clean; live IS-131 09:08 + 5 min grace → `late` / 3 min with `Asia/Karachi`.
 > - 2026-09-01: **Web: GPS / Location admin UI gated behind Coming Soon (client + server unchanged).** `/gps-location` and `/employee-journey/location` render `LocationComingSoon` while `web/src/lib/locationUi.ts` sets `LOCATION_UI_ENABLED=false`. Full live implementations preserved in `gps-location/GpsLocationLive.tsx` and `employee-journey/location/LocationTrailLive.tsx` — flip the flag to re-enable. Client `ALPHA_LOCATION_ENABLED` default stays `false`; sync APIs and geofence backend are untouched. Verified: `npx tsc --noEmit`.
@@ -1054,6 +1057,7 @@ flowchart LR
 | **Monorepo tooling**    | No shared tooling (no Turborepo, Nx, etc.). Each service has its own build system.        |
 | **Build parity**        | `dotnet run` is NOT a release test — every change must be verified from an installed build; new assets/config/scripts must be bundled by the `publish/*` scripts (see below) |
 | **Web list pagination** | List/table pages ALWAYS use server-side **infinite scroll** (`useInfiniteQuery` + IntersectionObserver sentinel) — Next/Previous buttons are forbidden (see *Web Infinite-Scroll Rule* below) |
+| **Web filter state** | Every filterable page keeps its filter state (search, picker, date, type, status, …) in the browser URL query string. The URL is the source of truth; React Query keys are derived from the URL; the hooks `useUrlQueryState` / `useUrlActivityFilter` enforce this. Date modals and search inputs have no "Clear" button (see *URL-Synced Filters Rule* below) |
 | **Cross-table boolean flags** | Booleans that depend on a cross-table relationship (e.g. "does this employee have a login account?") MUST be projected by the server in the same query that returns the row — never built client-side from a separate fetch (see *Server-Projected Flags Rule* below) |
 | **Branding & version**  | Product name and version are written in exactly two files — `client/APP_IDENTIFIERS` and `client/VERSION`. No literal product name or version string anywhere else in C#, XAML, or the build scripts (see below) |
 | **Cross-platform OS guards** | Guard platform-specific method bodies with `OperatingSystem.IsWindows/Linux/MacOS()`; do not propagate `[SupportedOSPlatform]` through cross-platform partial/background-service call graphs (see below) |
@@ -1095,6 +1099,23 @@ server in the same query that returns the row — never built client-side from a
 - **First column-level use of this rule:** `Employee.hasUserLogin` (server/ARCHITECTURE.md §4).
   Drop a one-line `> `Server-Projected Flags Rule` note in the relevant API table when a new
   projection is added, mirroring the `hasUserLogin` entry.
+
+### URL-Synced Filters Rule (mandatory since 2026-09-01)
+
+**Every web list/table/filter page MUST keep its filter state in the browser URL query string.** Applying a filter writes the value to `?key=value` first; the React Query call is then re-keyed from the URL. Conversely, when the user manually edits the URL (paste a deep link, browser back/forward, share a link), the page's filter inputs reflect the new URL state and the server query re-fires. The URL is the single source of truth for the page's filter view.
+
+**How to apply:**
+
+- Use `useUrlQueryState<T>` in `web/src/hooks/use-url-query-state.ts` for ad-hoc filter shapes. It returns `[value, setValue]`; `value` is a typed `Record<keyof T, string>` and `setValue(patch)` writes only the supplied keys (preserves unrelated query keys). Empty / null / undefined values are stripped from the URL.
+- Use `useUrlActivityFilter` in `web/src/hooks/use-url-activity-filter.ts` for the rich `{ search, preset, dateFrom, dateTo }` shape consumed by `ActivityFilters`. Presets are encoded as short keys (`today`, `7d`, `all`, `custom`); custom ranges are stored as `from=YYYY-MM-DD&to=YYYY-MM-DD`.
+- For search inputs, keep a LOCAL debounced mirror (~400 ms) of the URL value — the URL holds the canonical value, the mirror drives the `<input>` so rapid keystrokes don't spam `router.replace` + re-fetch.
+- React Query / `useQueries` keys MUST be derived from the URL state, not from local `useState`. The key changes when the URL changes; that's the trigger for the re-fetch.
+- The date modal / filter popovers MUST NOT expose a "Clear" button that wipes the URL state silently. The only ways to clear a filter are (a) select a default preset (e.g. "All time"), (b) clear the search input (no separate X button — typing + delete is the explicit gesture), or (c) navigate to a different URL. The search input has no inline clear (X) button for the same reason.
+- `useSearchParams` requires a `<Suspense>` boundary — wrap any client component using the hook (or the URL hooks above, which are built on it). Convention: a top-level `<Suspense fallback={<Loader2/>}>` around the page body.
+- Pagination, sort, and per-row deep-link query params (`?edit=1&userId=…`, `?create=1&employeeId=…`) flow through the same URL state. The filter state and the deep-link state share the URL — never use `useState` for either.
+- The hooks never touch `localStorage` / `sessionStorage`. They are URL-only.
+
+**Reference implementations:** `web/src/app/(app)/employees/page.tsx` (search + department), `web/src/app/(app)/shifts/page.tsx` (search), `web/src/app/(app)/timesheets/page.tsx` (employee + from + to), `web/src/app/(app)/attendance/page.tsx` (date + status), the three `employee-journey/*` pages (search + date preset), `web/src/components/configuration/ClassifiedItemsTable.tsx` (search + type + category + status — used by both `configuration/apps` and `configuration/websites`), `web/src/app/(app)/device-specs/software/page.tsx` (tab + per-tab search), `web/src/app/(app)/logs/comprehensive/page.tsx` (employee + search + page), `web/src/app/(app)/settings/user-management/page.tsx` (search + the existing `?create=1&edit=1` deep-link).
 
 ### Installer-Parity Rule (mandatory)
 

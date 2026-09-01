@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Search, CalendarRange, Loader2, X } from 'lucide-react';
+import { Search, CalendarRange, Loader2 } from 'lucide-react';
 import { Calendar } from '@/components/ui/calendar';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { endOfDay, format, startOfDay, subDays } from 'date-fns';
@@ -38,7 +38,7 @@ export function createDefaultFilter(): ActivityFilter {
 
 export const DEFAULT_FILTER: ActivityFilter = createDefaultFilter();
 
-function presetRange(preset: DatePreset): { dateFrom?: string; dateTo?: string } {
+export function presetRange(preset: DatePreset): { dateFrom?: string; dateTo?: string } {
   switch (preset) {
     case 'today':
       return { dateFrom: startOfDay(new Date()).toISOString(), dateTo: endOfDay(new Date()).toISOString() };
@@ -89,6 +89,12 @@ export default function ActivityFilters({ value, onChange, loading }: ActivityFi
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchInput]);
 
+  // Sync the local input box if the filter is reset from the URL (e.g. the
+  // user edits ?search=… in the address bar).
+  useEffect(() => {
+    setSearchInput(value.search);
+  }, [value.search]);
+
   const applyPreset = (preset: DatePreset) => {
     const { dateFrom, dateTo } = presetRange(preset);
     onChange({ ...value, preset, dateFrom, dateTo });
@@ -104,10 +110,12 @@ export default function ActivityFilters({ value, onChange, loading }: ActivityFi
     });
   };
 
-  const clearSearch = () => {
-    setSearchInput('');
-    onChange({ ...value, search: '' });
-  };
+  // No "Clear" button per the AGENTS.md / prompt.md URL-state rule — the
+  // search field, preset chips, and the date popover are the only ways to
+  // change the filter. Clearing is done by selecting "All time" / an empty
+  // search / popping the date picker off (which leaves the filter in place
+  // until the user actively changes it). Hiding a destructive button stops
+  // a half-typed clear from accidentally wiping state during a deep link.
 
   const rangeLabel = value.preset === 'custom' && value.dateFrom && value.dateTo
     ? `${format(new Date(value.dateFrom), 'MMM d')} – ${format(new Date(value.dateTo), 'MMM d')}`
@@ -122,19 +130,11 @@ export default function ActivityFilters({ value, onChange, loading }: ActivityFi
           value={searchInput}
           onChange={e => setSearchInput(e.target.value)}
           placeholder="Search apps, pages, URLs…"
-          className="bg-card border border-border rounded-lg pl-9 pr-8 py-2 text-sm outline-none focus:ring-2 focus:ring-primary/30 transition-shadow w-56 placeholder:text-muted-foreground"
+          className="bg-card border border-border rounded-lg pl-9 pr-9 py-2 text-sm outline-none focus:ring-2 focus:ring-primary/30 transition-shadow w-56 placeholder:text-muted-foreground"
         />
-        {searchInput ? (
-          <button
-            onClick={clearSearch}
-            className="absolute right-2 p-0.5 rounded hover:bg-muted transition-colors text-muted-foreground"
-            title="Clear search"
-          >
-            <X className="w-3.5 h-3.5" />
-          </button>
-        ) : (
-          loading && <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground absolute right-2.5" />
-        )}
+        {/* No clear button — see AGENTS.md URL-State Rule. The only signal is
+            the loading spinner when a query is in flight. */}
+        {loading && <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground absolute right-3" />}
       </div>
 
       {/* Date presets */}

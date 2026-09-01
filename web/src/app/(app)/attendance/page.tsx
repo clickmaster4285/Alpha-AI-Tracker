@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { Suspense, useMemo } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
 import { CalendarDays, Loader2 } from 'lucide-react';
@@ -15,6 +15,7 @@ import {
 } from '@/lib/api';
 import { formatDateTimeInZone, formatSeconds } from '@/lib/format';
 import EmptyState from '@/components/employees/EmptyState';
+import { useUrlQueryState } from '@/hooks/use-url-query-state';
 
 const STATUS_LABEL: Record<AttendanceStatus, string> = {
   present: 'Present',
@@ -43,9 +44,23 @@ function localToday(): string {
 type Row = AttendanceRecord & { employeeName: string };
 
 export default function AttendancePage() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center min-h-[400px]"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>}>
+      <AttendancePageInner />
+    </Suspense>
+  );
+}
+
+function AttendancePageInner() {
   const { user } = useAuth();
-  const [date, setDate] = useState(localToday);
-  const [statusFilter, setStatusFilter] = useState<'all' | AttendanceStatus>('all');
+  // URL-synced filter values. Status is encoded as the AttendanceStatus value
+  // (`all` means no filter).
+  const [filters, setFilters] = useUrlQueryState(
+    { date: {}, status: {} },
+    { date: localToday(), status: 'all' },
+  );
+  const date = filters.date;
+  const statusFilter = (filters.status || 'all') as 'all' | AttendanceStatus;
 
   const isSelfOnly = Boolean(user?.employeeId) && user?.role === 'employee';
 
@@ -151,13 +166,13 @@ export default function AttendancePage() {
           <input
             type="date"
             value={date}
-            onChange={e => setDate(e.target.value)}
+            onChange={e => setFilters({ date: e.target.value })}
             className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground"
           />
           {!isSelfOnly && (
             <select
               value={statusFilter}
-              onChange={e => setStatusFilter(e.target.value as typeof statusFilter)}
+              onChange={e => setFilters({ status: e.target.value })}
               className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground"
             >
               <option value="all">All Status</option>

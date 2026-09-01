@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { Search, Loader2, Plus, X, Filter, Globe, Monitor } from 'lucide-react';
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { monitoringApi, type MonitoringCategoryKind, type ClassificationPayload } from '@/lib/api';
+import { useUrlQueryState } from '@/hooks/use-url-query-state';
 
 export interface ClassifiedItemRow {
   id: string | number;
@@ -66,16 +67,35 @@ export default function ClassifiedItemsTable<T extends ClassifiedItemRow>({
 }: Props<T>) {
   const queryClient = useQueryClient();
 
-  const [searchInput, setSearchInput] = useState('');
-  const [search, setSearch] = useState('');
-  useEffect(() => {
-    const t = setTimeout(() => setSearch(searchInput), 400);
-    return () => clearTimeout(t);
-  }, [searchInput]);
+  // URL-synced filter state (q / type / category / status). On first load the
+  // URL is empty so the defaults below apply. A user pasting a deep link like
+  // `?type=2&status=unclassified` lands on the matching view.
+  const [urlFilters, setUrlFilters] = useUrlQueryState(
+    { q: {}, type: {}, category: {}, status: {} },
+    { q: '', type: '', category: '', status: 'all' },
+  );
+  const search = urlFilters.q;
+  const setSearch = (next: string) => setUrlFilters({ q: next });
+  const typeFilter = urlFilters.type;
+  const setTypeFilter = (next: string) => setUrlFilters({ type: next });
+  const categoryFilter = urlFilters.category;
+  const setCategoryFilter = (next: string) => setUrlFilters({ category: next });
+  const statusFilter = urlFilters.status as ClassificationStatus;
+  const setStatusFilter = (next: ClassificationStatus) => setUrlFilters({ status: next });
 
-  const [typeFilter, setTypeFilter] = useState('');
-  const [categoryFilter, setCategoryFilter] = useState('');
-  const [statusFilter, setStatusFilter] = useState<ClassificationStatus>('all');
+  // Local debounced search input. The URL holds the canonical value, but we
+  // only commit a write on the 400ms quiet window so rapid keystrokes don't
+  // spam router.replace + re-fetch.
+  const [searchInput, setSearchInput] = useState(search);
+  useEffect(() => {
+    setSearchInput(search);
+  }, [search]);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (searchInput !== search) setSearch(searchInput);
+    }, 400);
+    return () => clearTimeout(t);
+  }, [searchInput, search, setSearch]);
 
   const filters = useMemo(
     () => ({
@@ -199,10 +219,7 @@ export default function ClassifiedItemsTable<T extends ClassifiedItemRow>({
 
   const clearFilters = () => {
     setSearchInput('');
-    setSearch('');
-    setTypeFilter('');
-    setCategoryFilter('');
-    setStatusFilter('all');
+    setUrlFilters({ q: '', type: '', category: '', status: 'all' });
   };
 
   const hasActiveFilters = searchInput || typeFilter || categoryFilter || statusFilter !== 'all';
@@ -269,7 +286,7 @@ export default function ClassifiedItemsTable<T extends ClassifiedItemRow>({
               className="bg-transparent border-none outline-none text-sm flex-1 text-foreground placeholder:text-muted-foreground"
             />
             {searchInput && (
-              <button onClick={() => { setSearchInput(''); setSearch(''); }} className="text-muted-foreground hover:text-foreground">
+              <button onClick={() => { setSearchInput(''); setUrlFilters({ q: '' }); }} className="text-muted-foreground hover:text-foreground">
                 <X className="w-3.5 h-3.5" />
               </button>
             )}
