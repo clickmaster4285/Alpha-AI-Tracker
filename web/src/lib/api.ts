@@ -992,6 +992,98 @@ export const holidaysApi = {
 };
 
 // ──────────────────────────
+// Location Samples API (Phase 3 GPS)
+// ──────────────────────────
+
+export type LocationSource = 'gps' | 'wifi' | 'ip' | 'manual';
+
+export interface LocationSample {
+  id: string;
+  employeeId: string;
+  employeeName?: string;
+  latitude: number;
+  longitude: number;
+  accuracyM?: number;
+  altitudeM?: number;
+  source: LocationSource | string;
+  address?: string;
+  capturedAt: string;
+  syncedAt?: string;
+  geofenceStatus?: string;
+}
+
+export interface LocationSampleListResponse {
+  data: LocationSample[];
+  total: number;
+  page: number;
+  perPage: number;
+  totalPages: number;
+}
+
+export const locationSamplesApi = {
+  list: (params?: {
+    page?: number;
+    perPage?: number;
+    employeeId?: string;
+    dateFrom?: string;
+    dateTo?: string;
+  }) =>
+    request<LocationSampleListResponse>('/location-samples', {
+      params: params as Record<string, string | number | undefined>,
+    }),
+};
+
+// ──────────────────────────
+// Geofence Zones API (Phase 3 GPS B.8)
+// ──────────────────────────
+
+export interface GeofenceZone {
+  id: number;
+  name: string;
+  latitude: number;
+  longitude: number;
+  radiusM: number;
+  alertOnExit: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GeofenceZoneListResponse {
+  data: GeofenceZone[];
+}
+
+export const geofenceApi = {
+  list: () => request<GeofenceZoneListResponse>('/geofence-zones'),
+  create: (body: {
+    name: string;
+    latitude: number;
+    longitude: number;
+    radiusM: number;
+    alertOnExit?: boolean;
+  }) =>
+    request<GeofenceZone>('/geofence-zones', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  update: (
+    id: number,
+    body: Partial<{
+      name: string;
+      latitude: number;
+      longitude: number;
+      radiusM: number;
+      alertOnExit: boolean;
+    }>,
+  ) =>
+    request<GeofenceZone>(`/geofence-zones/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  delete: (id: number) =>
+    request<{ message: string }>(`/geofence-zones/${id}`, { method: 'DELETE' }),
+};
+
+// ──────────────────────────
 // Health API
 // ──────────────────────────
 

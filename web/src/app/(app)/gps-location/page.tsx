@@ -1,92 +1,388 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
-import { MapPin, Plus, Navigation } from 'lucide-react';
+import { Loader2, MapPin, Navigation, Pencil, Plus, Trash2 } from 'lucide-react';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { geofenceApi, locationSamplesApi, type GeofenceZone } from '@/lib/api';
+import { formatDateTime } from '@/lib/format';
+import EmptyState from '@/components/employees/EmptyState';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Switch } from '@/components/ui/switch';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Label } from '@/components/ui/label';
 
-const locationData = [
-  { employee: 'Yashodhan Kalia', timestamp: '2026-03-10 10:15 AM', address: '123 Tech Park, Bangalore', coords: '12.9716, 77.5946', geofence: 'Inside' },
-  { employee: 'Rakesh Pathania', timestamp: '2026-03-10 10:20 AM', address: '456 Office Tower, Mumbai', coords: '19.0760, 72.8777', geofence: 'Inside' },
-  { employee: 'Arush Sharma', timestamp: '2026-03-10 10:25 AM', address: '789 Coffee Shop, Delhi', coords: '28.6139, 77.2090', geofence: 'Outside' },
-];
+const SOURCE_LABEL: Record<string, string> = {
+  gps: 'GPS',
+  wifi: 'WiFi',
+  ip: 'IP (approx)',
+  manual: 'Manual',
+};
 
-const geofences = [
-  { id: '1', name: 'Office HQ', center: '12.9716, 77.5946', radius: 200, alertOnExit: true },
-  { id: '2', name: 'Warehouse', center: '12.9580, 77.6420', radius: 500, alertOnExit: false },
-];
+function sourceBadgeClass(source: string): string {
+  if (source === 'gps' || source === 'wifi') return 'bg-success/15 text-success';
+  if (source === 'ip') return 'bg-warning/15 text-warning';
+  return 'bg-muted text-muted-foreground';
+}
+
+function geofenceBadgeClass(status?: string): string {
+  if (status?.startsWith('Inside')) return 'bg-success/15 text-success';
+  return 'bg-muted text-muted-foreground';
+}
+
+type ZoneForm = {
+  name: string;
+  latitude: string;
+  longitude: string;
+  radiusM: string;
+  alertOnExit: boolean;
+};
+
+const emptyForm = (): ZoneForm => ({
+  name: '',
+  latitude: '',
+  longitude: '',
+  radiusM: '200',
+  alertOnExit: true,
+});
+
+function zoneToForm(z: GeofenceZone): ZoneForm {
+  return {
+    name: z.name,
+    latitude: String(z.latitude),
+    longitude: String(z.longitude),
+    radiusM: String(z.radiusM),
+    alertOnExit: z.alertOnExit,
+  };
+}
 
 export default function GPSLocationPage() {
-  const [showGeoDialog, setShowGeoDialog] = useState(false);
-  const [geoForm, setGeoForm] = useState({ name: '', center: '', radius: 200, alertOnExit: true });
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const queryClient = useQueryClient();
+  const [showAdd, setShowAdd] = useState(false);
+  const [editZone, setEditZone] = useState<GeofenceZone | null>(null);
+  const [form, setForm] = useState<ZoneForm>(emptyForm());
+
+  const {
+    data,
+    isLoading,
+    isError,
+    error,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery({
+    queryKey: ['location-samples'],
+    queryFn: ({ pageParam }) =>
+      locationSamplesApi.list({ page: pageParam, perPage: 30 }),
+    initialPageParam: 1,
+    getNextPageParam: (last) =>
+      last.page < last.totalPages ? last.page + 1 : undefined,
+  });
+
+  const { data: zonesData, isLoading: zonesLoading } = useQuery({
+    queryKey: ['geofence-zones'],
+    queryFn: () => geofenceApi.list(),
+  });
+
+  const createMutation = useMutation({
+    mutationFn: geofenceApi.create,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['geofence-zones'] });
+      queryClient.invalidateQueries({ queryKey: ['location-samples'] });
+      setShowAdd(false);
+      setForm(emptyForm());
+    },
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: ({ id, body }: { id: number; body: Parameters<typeof geofenceApi.update>[1] }) =>
+      geofenceApi.update(id, body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['geofence-zones'] });
+      queryClient.invalidateQueries({ queryKey: ['location-samples'] });
+      setEditZone(null);
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: geofenceApi.delete,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['geofence-zones'] });
+      queryClient.invalidateQueries({ queryKey: ['location-samples'] });
+    },
+  });
+
+  const rows = useMemo(
+    () => data?.pages.flatMap(p => p.data) ?? [],
+    [data],
+  );
+
+  const zones = zonesData?.data ?? [];
+  const total = data?.pages[0]?.total ?? 0;
+
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el || !hasNextPage || isFetchingNextPage) return;
+    const obs = new IntersectionObserver(
+      entries => {
+        if (entries[0]?.isIntersecting) fetchNextPage();
+      },
+      { rootMargin: '300px' },
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [fetchNextPage, hasNextPage, isFetchingNextPage]);
+
+  const parseForm = () => {
+    const latitude = parseFloat(form.latitude);
+    const longitude = parseFloat(form.longitude);
+    const radiusM = parseFloat(form.radiusM);
+    if (!form.name.trim() || Number.isNaN(latitude) || Number.isNaN(longitude) || Number.isNaN(radiusM)) {
+      return null;
+    }
+    return {
+      name: form.name.trim(),
+      latitude,
+      longitude,
+      radiusM,
+      alertOnExit: form.alertOnExit,
+    };
+  };
+
+  const openEdit = (zone: GeofenceZone) => {
+    setEditZone(zone);
+    setForm(zoneToForm(zone));
+  };
+
+  const ZoneFormFields = () => (
+    <div className="space-y-4">
+      <div>
+        <Label htmlFor="zone-name">Name</Label>
+        <Input
+          id="zone-name"
+          value={form.name}
+          onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+          placeholder="Office HQ"
+        />
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <Label htmlFor="zone-lat">Latitude</Label>
+          <Input
+            id="zone-lat"
+            value={form.latitude}
+            onChange={e => setForm(f => ({ ...f, latitude: e.target.value }))}
+            placeholder="24.8607"
+          />
+        </div>
+        <div>
+          <Label htmlFor="zone-lon">Longitude</Label>
+          <Input
+            id="zone-lon"
+            value={form.longitude}
+            onChange={e => setForm(f => ({ ...f, longitude: e.target.value }))}
+            placeholder="67.0011"
+          />
+        </div>
+      </div>
+      <div>
+        <Label htmlFor="zone-radius">Radius (metres)</Label>
+        <Input
+          id="zone-radius"
+          value={form.radiusM}
+          onChange={e => setForm(f => ({ ...f, radiusM: e.target.value }))}
+          placeholder="200"
+        />
+      </div>
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={form.alertOnExit}
+          onChange={e => setForm(f => ({ ...f, alertOnExit: e.target.checked }))}
+        />
+        Alert on exit
+      </label>
+    </div>
+  );
 
   return (
     <div className="space-y-6 animate-fade-in">
-      {/* Location Log */}
       <div>
         <h3 className="font-display font-bold text-lg text-foreground mb-4">Location Log</h3>
-        <div className="bg-card rounded-xl border border-border overflow-x-auto">
-          <table className="w-full min-w-[700px]">
-            <thead>
-              <tr className="border-b border-border">
-                {['Employee', 'Timestamp', 'Location', 'GPS Coordinates', 'Geofence'].map(h => (
-                  <th key={h} className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground">{h}</th>
+        {isLoading ? (
+          <div className="flex items-center justify-center py-16 text-muted-foreground gap-2">
+            <Loader2 className="w-5 h-5 animate-spin" />
+            Loading location samples…
+          </div>
+        ) : isError ? (
+          <EmptyState
+            icon={MapPin}
+            text={`Failed to load location data: ${error instanceof Error ? error.message : 'Unknown error'}`}
+          />
+        ) : rows.length === 0 ? (
+          <EmptyState
+            icon={MapPin}
+            text="No location data yet. Enable ALPHA_LOCATION_ENABLED=true on the desktop client and grant OS location permission."
+          />
+        ) : (
+          <div className="bg-card rounded-xl border border-border overflow-x-auto">
+            <table className="w-full min-w-[800px]">
+              <thead>
+                <tr className="border-b border-border">
+                  {['Employee', 'Timestamp', 'Location', 'Coordinates', 'Source', 'Geofence'].map(h => (
+                    <th key={h} className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((l, i) => (
+                  <motion.tr
+                    key={l.id}
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    transition={{ delay: Math.min(i * 0.02, 0.3) }}
+                    className="border-b border-border last:border-0 hover:bg-muted/30"
+                  >
+                    <td className="px-4 py-3 text-sm font-medium text-foreground">
+                      {l.employeeName || l.employeeId}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-muted-foreground">
+                      {formatDateTime(l.capturedAt)}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-foreground">
+                      <span className="inline-flex items-center gap-1">
+                        <MapPin className="w-3.5 h-3.5 text-primary shrink-0" />
+                        {l.address || '—'}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-xs font-mono text-muted-foreground">
+                      {l.latitude.toFixed(5)}, {l.longitude.toFixed(5)}
+                      {l.accuracyM != null ? ` (±${Math.round(l.accuracyM)}m)` : ''}
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${sourceBadgeClass(l.source)}`}>
+                        {SOURCE_LABEL[l.source] ?? l.source}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${geofenceBadgeClass(l.geofenceStatus)}`}>
+                        {l.geofenceStatus || 'Outside'}
+                      </span>
+                    </td>
+                  </motion.tr>
                 ))}
-              </tr>
-            </thead>
-            <tbody>
-              {locationData.map((l, i) => (
-                <motion.tr key={i} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: i * 0.03 }} className="border-b border-border last:border-0 hover:bg-muted/30">
-                  <td className="px-4 py-3 text-sm font-medium text-foreground">{l.employee}</td>
-                  <td className="px-4 py-3 text-sm text-muted-foreground">{l.timestamp}</td>
-                  <td className="px-4 py-3 text-sm text-foreground flex items-center gap-1"><MapPin className="w-3.5 h-3.5 text-primary" />{l.address}</td>
-                  <td className="px-4 py-3 text-xs font-mono text-muted-foreground">{l.coords}</td>
-                  <td className="px-4 py-3"><span className={`px-2.5 py-1 rounded-full text-xs font-medium ${l.geofence === 'Inside' ? 'bg-success/15 text-success' : 'bg-destructive/15 text-destructive'}`}>{l.geofence}</span></td>
-                </motion.tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </tbody>
+            </table>
+            <div ref={sentinelRef} className="h-1" />
+            {isFetchingNextPage && (
+              <p className="text-center text-sm text-muted-foreground py-3">Loading more…</p>
+            )}
+            {!hasNextPage && rows.length > 0 && (
+              <p className="text-center text-sm text-muted-foreground py-3">Showing all {total}</p>
+            )}
+          </div>
+        )}
       </div>
 
-      {/* Geofence Config */}
       <div>
         <div className="flex items-center justify-between mb-4">
           <h3 className="font-display font-bold text-lg text-foreground">Geofence Zones</h3>
-          <Button onClick={() => setShowGeoDialog(true)} size="sm" className="gap-1 gradient-primary text-primary-foreground"><Plus className="w-4 h-4" /> Add Zone</Button>
+          <Button size="sm" onClick={() => { setForm(emptyForm()); setShowAdd(true); }}>
+            <Plus className="w-4 h-4 mr-1" />
+            Add Zone
+          </Button>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {geofences.map(g => (
-            <div key={g.id} className="bg-card rounded-xl border border-border p-5">
-              <div className="flex items-center gap-3 mb-3">
-                <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center"><Navigation className="w-5 h-5 text-primary" /></div>
-                <div><h4 className="font-display font-bold text-foreground">{g.name}</h4><p className="text-xs text-muted-foreground font-mono">{g.center}</p></div>
-              </div>
-              <div className="flex justify-between text-sm">
-                <span className="text-muted-foreground">Radius: {g.radius}m</span>
-                <span className={g.alertOnExit ? 'text-warning' : 'text-muted-foreground'}>{g.alertOnExit ? 'Exit alerts ON' : 'No alerts'}</span>
-              </div>
-            </div>
-          ))}
-        </div>
+        {zonesLoading ? (
+          <div className="flex items-center justify-center py-12 text-muted-foreground gap-2">
+            <Loader2 className="w-5 h-5 animate-spin" />
+            Loading zones…
+          </div>
+        ) : zones.length === 0 ? (
+          <div className="bg-card rounded-xl border border-border p-8">
+            <EmptyState
+              icon={Navigation}
+              text="No geofence zones yet. Add a zone to evaluate inside/outside status when location samples arrive."
+            />
+          </div>
+        ) : (
+          <div className="bg-card rounded-xl border border-border overflow-x-auto">
+            <table className="w-full min-w-[640px]">
+              <thead>
+                <tr className="border-b border-border">
+                  {['Name', 'Center', 'Radius', 'Exit alerts', 'Actions'].map(h => (
+                    <th key={h} className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {zones.map(z => (
+                  <tr key={z.id} className="border-b border-border last:border-0 hover:bg-muted/30">
+                    <td className="px-4 py-3 text-sm font-medium">{z.name}</td>
+                    <td className="px-4 py-3 text-xs font-mono text-muted-foreground">
+                      {z.latitude.toFixed(5)}, {z.longitude.toFixed(5)}
+                    </td>
+                    <td className="px-4 py-3 text-sm">{Math.round(z.radiusM)} m</td>
+                    <td className="px-4 py-3 text-sm">{z.alertOnExit ? 'Yes' : 'No'}</td>
+                    <td className="px-4 py-3">
+                      <div className="flex gap-2">
+                        <Button variant="ghost" size="sm" onClick={() => openEdit(z)}>
+                          <Pencil className="w-4 h-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-destructive"
+                          onClick={() => deleteMutation.mutate(z.id)}
+                          disabled={deleteMutation.isPending}
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </Button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
-      <Dialog open={showGeoDialog} onOpenChange={setShowGeoDialog}>
+      <Dialog open={showAdd} onOpenChange={setShowAdd}>
         <DialogContent className="bg-card">
-          <DialogHeader><DialogTitle className="font-display">Add Geofence Zone</DialogTitle></DialogHeader>
-          <div className="space-y-4 mt-2">
-            <div><label className="text-sm font-semibold text-foreground mb-1 block">Zone Name *</label><Input value={geoForm.name} onChange={e => setGeoForm({...geoForm, name: e.target.value})} placeholder="e.g. Office HQ" /></div>
-            <div><label className="text-sm font-semibold text-foreground mb-1 block">Center Point (Lat, Long) *</label><Input value={geoForm.center} onChange={e => setGeoForm({...geoForm, center: e.target.value})} placeholder="12.9716, 77.5946" /></div>
-            <div><label className="text-sm font-semibold text-foreground mb-1 block">Radius (meters) *</label><Input type="number" value={geoForm.radius} onChange={e => setGeoForm({...geoForm, radius: Number(e.target.value)})} min={50} /></div>
-            <div className="flex items-center justify-between">
-              <span className="text-sm font-medium text-foreground">Alert on Exit</span>
-              <Switch checked={geoForm.alertOnExit} onCheckedChange={v => setGeoForm({...geoForm, alertOnExit: v})} />
-            </div>
-            <Button className="w-full gradient-primary text-primary-foreground">Add Zone</Button>
-          </div>
+          <DialogHeader>
+            <DialogTitle className="font-display">Add Geofence Zone</DialogTitle>
+          </DialogHeader>
+          <ZoneFormFields />
+          <Button
+            className="mt-2"
+            disabled={createMutation.isPending}
+            onClick={() => {
+              const body = parseForm();
+              if (body) createMutation.mutate(body);
+            }}
+          >
+            {createMutation.isPending ? 'Saving…' : 'Create Zone'}
+          </Button>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!editZone} onOpenChange={open => { if (!open) setEditZone(null); }}>
+        <DialogContent className="bg-card">
+          <DialogHeader>
+            <DialogTitle className="font-display">Edit Geofence Zone</DialogTitle>
+          </DialogHeader>
+          <ZoneFormFields />
+          <Button
+            className="mt-2"
+            disabled={updateMutation.isPending}
+            onClick={() => {
+              const body = parseForm();
+              if (body && editZone) updateMutation.mutate({ id: editZone.id, body });
+            }}
+          >
+            {updateMutation.isPending ? 'Saving…' : 'Save Changes'}
+          </Button>
         </DialogContent>
       </Dialog>
     </div>
