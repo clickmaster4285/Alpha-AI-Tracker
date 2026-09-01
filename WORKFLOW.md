@@ -52,6 +52,11 @@ npm run lint
 > sentinel). Next/Previous buttons are forbidden — see AGENTS.md §6 *Web Infinite-Scroll Rule* and
 > `web/ARCHITECTURE.md` §4. Reference: `web/src/app/(app)/employees/page.tsx`.
 
+> **GPS / Location pages** (`/gps-location`, `/employee-journey/location`) show a Coming Soon shell
+> while `web/src/lib/locationUi.ts` has `LOCATION_UI_ENABLED=false`. Live UI lives in
+> `GpsLocationLive.tsx` / `LocationTrailLive.tsx` — set the flag to `true` to re-enable. Client
+> collectors and server sync APIs are unchanged.
+
 ### Client
 
 ```bash

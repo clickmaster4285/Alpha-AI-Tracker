@@ -198,7 +198,7 @@ web/
             │   ├── apps/        #   App usage — real API, duration aggregation, expandable session groups
             │   ├── web/         #   Web activity — real API, domain-grouped, browser badges, search flat view
             │   ├── screenshots/ #   Placeholder — client collects none
-            │   └── location/    #   Placeholder — client collects none
+            │   └── location/    #   Coming Soon shell (live UI: LocationTrailLive.tsx; see locationUi.ts)
             ├── device-specs/    # Per-employee machine picture (detail API)
             │   ├── page.tsx     #   Hardware overview
             │   ├── software/    #   Installed software (apps/packages tabs + search)
@@ -223,7 +223,7 @@ web/
             ├── shifts/             # Shift management (mock data)
             ├── timesheets/         # Timesheets (mock data)
             ├── attendance/         # Attendance log (mock data)
-            ├── gps-location/       # GPS & Location (mock data)
+            ├── gps-location/       # Coming Soon shell (live UI: GpsLocationLive.tsx; see locationUi.ts)
             ├── hours-insights/     # Hours insights (mock data)
             ├── productivity-scoring/  # Score card (mock data)
             ├── goals/              # Goals & OKRs (mock data)
@@ -340,7 +340,7 @@ in the `updateMutation`).
 | `/employee-journey/apps` | App usage | Server (aggregated `GET /app-sessions`) | ✅ |
 | `/employee-journey/web` | Web activity | Server (`GET /app-items?itemType=browser_tab`) | ✅ |
 | `/employee-journey/screenshots` | Screenshots | Placeholder — client collects none | ❌ |
-| `/employee-journey/location` | Location trail | Placeholder — client collects none | ❌ |
+| `/employee-journey/location` | Location trail | Coming Soon (`LOCATION_UI_ENABLED=false`; live code in `LocationTrailLive.tsx`) | ⏸ |
 | `/device-specs` | Hardware overview | Server (`GET /employees/:id/detail`) | ✅ |
 | `/device-specs/software` | Installed software | Server (detail payload) | ✅ |
 | `/device-specs/peripherals` | Peripherals | Server (detail payload) | ✅ |
@@ -361,7 +361,7 @@ in the `updateMutation`).
 | `/shifts` | Shift management | Hardcoded demo data (scaffolding) | ❌ |
 | `/timesheets` | Timesheets | Hardcoded demo data (scaffolding) | ❌ |
 | `/attendance` | Attendance | Hardcoded demo data (scaffolding) | ❌ |
-| `/gps-location` | GPS & Location | Hardcoded demo data (scaffolding) | ❌ |
+| `/gps-location` | GPS & Location | Coming Soon (`LOCATION_UI_ENABLED=false`; live code in `GpsLocationLive.tsx`) | ⏸ |
 | `/hours-insights` | Hours insights | Honest empty state (no endpoint) | ❌ |
 | `/productivity-scoring` | Score card | Hardcoded demo data (scaffolding) | ❌ |
 | `/goals` | Goals & OKRs | Hardcoded demo data (scaffolding) | ❌ |
@@ -391,6 +391,21 @@ in the `updateMutation`).
 > `app/page.tsx` purges orphaned `alpha_ai_tracker_*` keys from visitors' localStorage on first hit.
 > The legacy client-side permission matrix (`/settings/permissions` page + its localStorage store)
 > was deleted in the same pass — permissions are now server-driven only (§6).
+
+### Location UI gate (Phase 3 GPS — web surface paused)
+
+Location **client sync** and **server APIs** (`GET /location-samples`, geofence CRUD, ingest evaluation) remain in the product. The **admin dashboard pages are intentionally hidden** behind a Coming Soon shell:
+
+| File | Role |
+|------|------|
+| `web/src/lib/locationUi.ts` | `LOCATION_UI_ENABLED` — set `true` to show live UI |
+| `web/src/components/location/LocationComingSoon.tsx` | Shared Coming Soon card |
+| `web/src/app/(app)/gps-location/page.tsx` | Route shell → Coming Soon or `GpsLocationLive.tsx` |
+| `web/src/app/(app)/gps-location/GpsLocationLive.tsx` | Full fleet log + geofence CRUD (preserved) |
+| `web/src/app/(app)/employee-journey/location/page.tsx` | Route shell → Coming Soon or `LocationTrailLive.tsx` |
+| `web/src/app/(app)/employee-journey/location/LocationTrailLive.tsx` | Per-employee trail (preserved) |
+
+Client default: `ALPHA_LOCATION_ENABLED=false` in `.env.example`. No server or client collector code is removed when the web UI is gated.
 
 ---
 
