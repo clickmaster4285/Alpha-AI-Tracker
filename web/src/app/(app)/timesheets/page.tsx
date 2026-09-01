@@ -54,7 +54,7 @@ export default function TimesheetsPage() {
 
   return (
     <div className="space-y-4 animate-fade-in">
-      <div className="flex lg:flex-row flex-col justify-between">
+      <div className="flex md:flex-row flex-col justify-between">
         <div className="flex flex-col gap-4 ">
           <div>
             <h3 className="font-display font-bold text-lg text-foreground">Timesheets</h3>
@@ -64,27 +64,30 @@ export default function TimesheetsPage() {
           </div>
         </div>
 
-        <div className="flex flex-col sm:flex-row gap-3 ">
+        <div className="flex flex-col xl:flex-row  gap-3 ">
           <EmployeeSelector
             value={employee?.id ?? ''}
             onChange={setEmployee}
             placeholder="Select employee…"
             className="w-full lg:w-80"
           />
-          <input
-            type="date"
-            value={from}
-            max={to}
-            onChange={e => setFrom(e.target.value)}
-            className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground w-full sm:w-auto"
-          />
-          <input
-            type="date"
-            value={to}
-            min={from}
-            onChange={e => setTo(e.target.value)}
-            className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground w-full sm:w-auto"
-          />
+          <div className="flex gap-3 ">
+            <input
+              type="date"
+              value={from}
+              max={to}
+              onChange={e => setFrom(e.target.value)}
+              className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground w-full sm:w-auto"
+            />
+            <input
+              type="date"
+              value={to}
+              min={from}
+              onChange={e => setTo(e.target.value)}
+              className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground w-full sm:w-auto"
+            />
+
+          </div>
         </div>
       </div>
       {!employee ? (
