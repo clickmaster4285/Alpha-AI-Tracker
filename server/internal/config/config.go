@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -22,6 +23,11 @@ type Config struct {
 	// LinkStaleDays is the staleness threshold (in days) after which an
 	// employee↔app/package junction link is marked is_active = false.
 	LinkStaleDays int
+
+	// DefaultShiftTimezone is the IANA timezone applied to shifts that still
+	// carry the migration default UTC (and used as the create fallback when the
+	// client omits timezone). Empty = leave UTC unchanged.
+	DefaultShiftTimezone string
 }
 
 type ServerConfig struct {
@@ -126,6 +132,8 @@ func Load() (*Config, error) {
 		LogLevel: getEnv("LOG_LEVEL", "info"),
 
 		LinkStaleDays: getEnvInt("LINK_STALE_DAYS", 7),
+
+		DefaultShiftTimezone: strings.TrimSpace(getEnv("DEFAULT_SHIFT_TIMEZONE", "")),
 	}
 
 	if cfg.Database.Password == "" {

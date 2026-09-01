@@ -12,6 +12,14 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 
 const ALL_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const;
 
+function browserTimezone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  } catch {
+    return 'UTC';
+  }
+}
+
 const DEFAULT_FORM: CreateShiftPayload = {
   name: '',
   startTime: '09:00',
@@ -130,7 +138,7 @@ export default function ShiftManagement() {
   // ── Form helpers ──
   const openNew = () => {
     setEditing(null);
-    setForm(DEFAULT_FORM);
+    setForm({ ...DEFAULT_FORM, timezone: browserTimezone() });
     setShowDialog(true);
   };
 

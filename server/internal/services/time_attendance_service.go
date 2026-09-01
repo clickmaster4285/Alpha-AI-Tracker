@@ -258,7 +258,8 @@ func (s *TimeAttendanceService) attendanceForDay(
 				}
 				return dto.AttendanceResponse{
 					EmployeeID: employeeID, WorkDate: dayStart.Format("2006-01-02"),
-					Status: status,
+					Timezone: schedule.Timezone,
+					Status:   status,
 				}, nil
 			}
 			firstLocal := first.In(location)
@@ -283,6 +284,7 @@ func (s *TimeAttendanceService) attendanceForDay(
 
 	return dto.AttendanceResponse{
 		EmployeeID: employeeID, WorkDate: dayStart.Format("2006-01-02"),
+		Timezone: scheduleTimezone(schedule),
 		FirstActiveAt: first, LastActiveAt: last,
 		ActiveSeconds: int(math.Round(active)), IdleSeconds: int(math.Round(idle)),
 		OffShiftSeconds: int(math.Round(offShift)), Status: status, LateMinutes: lateMinutes,
@@ -313,6 +315,13 @@ func shortTime(value string) string {
 
 func weekdayKey(day time.Weekday) string {
 	return strings.ToLower(day.String()[:3])
+}
+
+func scheduleTimezone(schedule *repository.ScheduleRecord) string {
+	if schedule == nil {
+		return ""
+	}
+	return schedule.Timezone
 }
 
 func isActiveMarker(eventType string) bool {

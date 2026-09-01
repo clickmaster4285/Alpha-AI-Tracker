@@ -26,6 +26,7 @@ type ScheduleResponse struct {
 type AttendanceResponse struct {
 	EmployeeID      string     `json:"employeeId"`
 	WorkDate        string     `json:"workDate"`
+	Timezone        string     `json:"timezone"`
 	FirstActiveAt   *time.Time `json:"firstActiveAt"`
 	LastActiveAt    *time.Time `json:"lastActiveAt"`
 	ActiveSeconds   int        `json:"activeSeconds"`

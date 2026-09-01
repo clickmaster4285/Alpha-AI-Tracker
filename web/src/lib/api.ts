@@ -923,6 +923,7 @@ export type AttendanceStatus =
 export interface AttendanceRecord {
   employeeId: string;
   workDate: string;
+  timezone?: string;
   firstActiveAt?: string | null;
   lastActiveAt?: string | null;
   activeSeconds: number;

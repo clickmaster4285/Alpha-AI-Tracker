@@ -85,7 +85,7 @@ func main() {
 	newSchemaService := services.NewNewSchemaService(newSchemaRepo, employeeRepo, geofenceService)
 	monitoringService := services.NewMonitoringService(monitoringRepo)
 	rbacService := services.NewRBACService(rbacRepo)
-	shiftService := services.NewShiftService(shiftRepo)
+	shiftService := services.NewShiftService(shiftRepo, cfg.DefaultShiftTimezone)
 	timeAttendanceService := services.NewTimeAttendanceService(timeAttendanceRepo)
 
 	// Cast Redis client to interface
@@ -118,6 +118,14 @@ func main() {
 	// ────────────────
 	if err := authService.EnsureCompanyAdmin(ctx); err != nil {
 		log.Fatalf("[server] failed to ensure company admin: %v", err)
+	}
+
+	shiftTzUpdated, err := shiftService.ApplyDefaultTimezone(ctx)
+	if err != nil {
+		log.Fatalf("[server] failed to apply default shift timezone: %v", err)
+	}
+	if shiftTzUpdated > 0 {
+		log.Printf("[server] applied DEFAULT_SHIFT_TIMEZONE to %d shift(s) still on UTC", shiftTzUpdated)
 	}
 
 	// ────────────────

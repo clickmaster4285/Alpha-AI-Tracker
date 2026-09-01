@@ -23,6 +23,22 @@ export function formatDateTime(iso?: string | null): string {
   });
 }
 
+/** Format an instant in the shift IANA timezone (matches server late/present math). */
+export function formatDateTimeInZone(iso?: string | null, timeZone?: string | null): string {
+  if (!iso) return '—';
+  const options: Intl.DateTimeFormatOptions = {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  };
+  if (timeZone) {
+    try {
+      return new Date(iso).toLocaleString(undefined, { ...options, timeZone });
+    } catch {
+      // invalid IANA name — fall back to browser local
+    }
+  }
+  return formatDateTime(iso);
+}
+
 export function formatDuration(start: string, end: string): string {
   const diff = new Date(end).getTime() - new Date(start).getTime();
   const mins = Math.floor(diff / 60000);

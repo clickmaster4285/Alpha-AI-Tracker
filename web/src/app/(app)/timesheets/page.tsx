@@ -12,7 +12,7 @@ import {
   type AttendanceStatus,
   type Employee,
 } from '@/lib/api';
-import { formatDateTime, formatSeconds } from '@/lib/format';
+import { formatDateTimeInZone, formatSeconds } from '@/lib/format';
 
 const PER_PAGE = 31;
 
@@ -210,8 +210,8 @@ function TimesheetBody({
                 className="border-b border-border last:border-0 hover:bg-muted/30"
               >
                 <td className="px-4 py-3 text-sm text-muted-foreground">{row.workDate}</td>
-                <td className="px-4 py-3 text-sm text-foreground">{formatDateTime(row.firstActiveAt)}</td>
-                <td className="px-4 py-3 text-sm text-foreground">{formatDateTime(row.lastActiveAt)}</td>
+                <td className="px-4 py-3 text-sm text-foreground">{formatDateTimeInZone(row.firstActiveAt, row.timezone)}</td>
+                <td className="px-4 py-3 text-sm text-foreground">{formatDateTimeInZone(row.lastActiveAt, row.timezone)}</td>
                 <td className="px-4 py-3 text-sm text-success font-medium">{formatSeconds(row.activeSeconds)}</td>
                 <td className="px-4 py-3 text-sm text-muted-foreground">{formatSeconds(row.idleSeconds)}</td>
                 <td className="px-4 py-3 text-sm text-info">{formatSeconds(row.offShiftSeconds)}</td>

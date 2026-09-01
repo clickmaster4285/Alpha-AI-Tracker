@@ -293,3 +293,18 @@ func (r *ShiftRepo) Delete(ctx context.Context, id int) error {
 	}
 	return nil
 }
+
+// ApplyDefaultTimezone replaces the migration placeholder UTC on every active
+// shift row. Idempotent — safe to run on every boot when DEFAULT_SHIFT_TIMEZONE
+// is configured.
+func (r *ShiftRepo) ApplyDefaultTimezone(ctx context.Context, timezone string) (int64, error) {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE shifts
+		SET timezone = $1, updated_at = NOW()
+		WHERE deleted_at IS NULL AND timezone = 'UTC'
+	`, timezone)
+	if err != nil {
+		return 0, fmt.Errorf("apply default shift timezone: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}

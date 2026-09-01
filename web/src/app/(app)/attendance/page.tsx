@@ -12,7 +12,7 @@ import {
   type AttendanceStatus,
   type Employee,
 } from '@/lib/api';
-import { formatDateTime, formatSeconds } from '@/lib/format';
+import { formatDateTimeInZone, formatSeconds } from '@/lib/format';
 import EmptyState from '@/components/employees/EmptyState';
 
 const STATUS_LABEL: Record<AttendanceStatus, string> = {
@@ -95,6 +95,7 @@ export default function AttendancePage() {
         workDate: date,
         firstActiveAt: record?.firstActiveAt ?? null,
         lastActiveAt: record?.lastActiveAt ?? null,
+        timezone: record?.timezone ?? '',
         activeSeconds: record?.activeSeconds ?? 0,
         idleSeconds: record?.idleSeconds ?? 0,
         offShiftSeconds: record?.offShiftSeconds ?? 0,
@@ -221,8 +222,8 @@ export default function AttendancePage() {
                       {STATUS_LABEL[a.status]}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-sm text-foreground">{formatDateTime(a.firstActiveAt)}</td>
-                  <td className="px-4 py-3 text-sm text-foreground">{formatDateTime(a.lastActiveAt)}</td>
+                  <td className="px-4 py-3 text-sm text-foreground">{formatDateTimeInZone(a.firstActiveAt, a.timezone)}</td>
+                  <td className="px-4 py-3 text-sm text-foreground">{formatDateTimeInZone(a.lastActiveAt, a.timezone)}</td>
                   <td className="px-4 py-3 text-sm text-success">{formatSeconds(a.activeSeconds)}</td>
                   <td className="px-4 py-3 text-sm text-muted-foreground">{formatSeconds(a.idleSeconds)}</td>
                   <td className="px-4 py-3 text-sm text-warning">
