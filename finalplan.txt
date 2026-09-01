@@ -6,27 +6,26 @@ Scope         : Build the "Time & Attendance" sidebar module end-to-end
 Phase         : Client Phase 1 (this plan) + Server/Web Phase 2 (flagged)
 Audience      : Senior engineer/architect; future contributors
 Doc standards : AGENTS.md §6 rules
-Last updated  : 2026-08-28
-Status        : FINAL — codebase-audited, execution COMPLETE through A.11
-              [IMPLEMENTED: A.0–A.11 + A.9/A.10 (2026-09-01)]
-              Phase 1 client foundation is DONE: SessionEvent + IEventRecorder +
-              ShutdownSentinel + WAL/read conn + SystemEventWatcher + IdleDetector +
-              ScheduleCacheService + LocalTimeSkewService + AttendanceAggregator +
-              docs (§19) + cross-OS verification checklist. All built green, 0 warnings.
-              A.9/A.10 server-coupling (SVR-2 aggregate payload) is DESIGNED but
-              GATED on Phase 2 server work. A.12 (ship-test) needs an installed
-              build + all 3 OSes; A.13 (release) follows A.12.
+Last updated  : 2026-09-01
+Status        : FINAL — T&A Phase 1 + Phase 2 server/web DONE in code
+              [IMPLEMENTED: A.0–A.11, A.9/A.10, SVR-1…SVR-5, web attendance pages]
+              Linux A.12 ship-test MOSTLY DONE (2026-09-01): rebuilt .deb with
+              retention FK fix (verified — no FK spam after install); service active,
+              WAL, TaEnabled, aggregation (power_on count=2 on server), contract test,
+              systemctl stop → power_off, loginctl lock/unlock, idle rollup, watermark.
+              Still open: full OS reboot power_on/off proof, Windows + macOS manual pass.
+              A.13 release can proceed after reboot proof or with documented waiver.
+              Phase 3 GPS & Location (lat/lon coordinates) — PLANNED in §16, not built.
 
 EXPLICIT SCOPE DECISION (user-confirmed):
   - NO break-in / break-out tracking. "Hours Insights" reports
     Worked / Idle / Off-shift only.
   - Punch in/out (explicit employee action) is OUT of scope for v1.
     Attendance is auto-detected from PC events only.
-  - GPS / Location tracking is OUT of scope for v1. The "GPS & Location"
-    sidebar entry is hidden (no `module` permission key registered)
-    until a dedicated phase adds it.
-  - The 4 sub-pages in the sidebar will exist; `GPS & Location` is a
-    hidden placeholder, not an empty state.
+  - GPS / Location with coordinates (lat/lon) is OUT of scope for the T&A v1
+    release (A.0–A.13). Sidebar pages exist with mock/empty states today.
+    Phase 3 (§16) adds real coordinate capture + sync + geofence — feasible
+    on Windows/macOS/Linux with OS location APIs (accuracy varies; see §16).
 
 ================================================================================
 SECTION 0 — RULES THIS PLAN MUST OBEY
@@ -140,7 +139,11 @@ SECTION 1 — CURRENT STATE (actual codebase, 2026-08-28)
       still PENDING in step A.6.
 
 1.9  GPS / location (today)
-      [OUT OF SCOPE — Phase 2 only]
+      [NOT BUILT — Phase 3 §16; mock UI only]
+      Client collects NO lat/lon. Web has hardcoded demo rows on
+      /gps-location and an honest empty state on /employee-journey/location.
+      RBAC module key gps-location IS registered server-side (migration 025
+      catalog) — admins with grant see the page; data is still fake until B.x.
 
 1.10 The T&A sidebar (today)
       [DOCUMENTED — web server-side filter is Phase 2]
@@ -342,15 +345,14 @@ S9  WAL mode + read/write connection separation.              [DONE (A.0/A.1/A.2
     SqliteConnection opened for concurrent readers.
 
 ================================================================================
-SECTION 6 — SERVER-SIDE DEPENDENCIES (Phase 2 — flagged, not built here)
+SECTION 6 — SERVER/WEB PHASE 2 (IMPLEMENTED 2026-08-31)
 ================================================================================
 
-The Phase 1 CLIENT work below assumes the following SERVER endpoints
-exist. If they do not, Phase 1 still builds and runs, but the
-ScheduleCacheService and the Time-Skew measurement degrade to
-no-ops. They are listed here so Phase 2 has a clean punch-list.
+Phase 2 is BUILT. Migration 028, attendance APIs, holiday CRUD, shift timezone,
+and web pages (/attendance, /timesheets, /holidays) are live. Client A.9/A.10
+aggregate sync pairs with SVR-2.
 
-SVR-1  GET  /api/v1/schedules/me
+SVR-1  GET  /api/v1/schedules/me                                    [DONE]
        Returns the calling employee's current schedule + active
        holidays. JSON:
          {
@@ -562,11 +564,20 @@ SECTION 8 — BUILD ORDER (smallest verifiable steps)
        - client/docs/VERIFICATION_TA.md cross-OS checklist added (T4).
        - No stale references; all file paths verified.
 
-  [ ] A.12 Full Ship-Test pass (R1 mandatory) — checklist READY (VERIFICATION_TA.md)
-       - Requires an installed build + all 3 OSes. Cannot be executed in this
-         environment (no installer build / OS access here).
+  [~] A.12 Full Ship-Test pass (R1 mandatory) — LINUX MOSTLY DONE 2026-09-01
+       - Linux PASS: dotnet build 0/0; .deb 1.1.0 installed; --print-config TaEnabled;
+         journalctl SystemEventWatcher + IdleDetector; WAL; contract test 13 types;
+         systemctl stop → power_off row; loginctl lock/unlock → screen_lock/unlock;
+         Postgres aggregation (event_count=2 on power_on/tracker_login buckets);
+         daily_attendance_cache idle_seconds growing; ta_last_known_os_event_at updates.
+       - Linux FIX shipped: retention FK (skip uninstalled apps still referenced by
+         app_sessions) — SqliteLogStore.DeleteSyncedDataOlderThanAsync.
+       - Linux OPEN: graceful OS shutdown/reboot power_off + next-boot power_on (needs
+         real reboot, not just systemctl stop).
+       - Windows + macOS: entire checklist still manual on those OSes.
+       - Checklist: client/docs/VERIFICATION_TA.md
 
-  [ ] A.13 Release — blocked on A.12.
+  [ ] A.13 Release — ready once Linux reboot proof done (or waived).
 
 ================================================================================
 SECTION 9 — SHIP-TEST COMMANDS (verbatim, copy-paste safe)
@@ -849,11 +860,12 @@ SECTION 14 — IMPLEMENTATION STATUS (running tracker)
   [X] 15. A.6 EXECUTION COMPLETE — ScheduleCacheService (pull /schedules/me every 6h).
   [X] 16. A.7 EXECUTION COMPLETE — LocalTimeSkewService (clock-skew measurement).
   [X] 17. A.8 EXECUTION COMPLETE — AttendanceAggregator (daily rollup).
-  [X] 18. A.9 — SessionEventRecorder aggregation (DESIGNED — 5s dedup live; aggregate payload GATED on SVR-2).
-  [X] 19. A.10 — SyncService updates (PARTIAL — S3 watermark keys done; S2/S6 GATED on SVR-2).
-  [X] 20. A.11 EXECUTION COMPLETE — Docs (ARCHITECTURE.md §19) + AGENTS changelog + VERIFICATION_TA.md.
-  [ ] 21. A.12 — Full Ship-Test pass (checklist ready; needs installed builds + 3 OSes).
+  [X] 18. A.9 — SessionEvent sync aggregation (S1) — DONE 2026-09-01.
+  [X] 19. A.10 — SyncService S6 ceiling + aggregate drain — DONE 2026-09-01.
+  [X] 20. A.11 EXECUTION COMPLETE — Docs + VERIFICATION_TA.md + contract test.
+  [~] 21. A.12 — Linux mostly done; reboot + Win/mac pending.
   [ ] 22. A.13 — Release.
+  [ ] 23. Phase 3 GPS — see §16 (planned, coordinates feasible).
 
 ================================================================================
 SECTION 15 — IMPLEMENTATION SUMMARY (2026-08-28)
@@ -899,5 +911,89 @@ SECTION 15 — IMPLEMENTATION SUMMARY (2026-08-28)
 
   REMAINING (process):
     - BUG-11: Windows WTS message pump → TODO A.3.2 follow-up (SystemEvents path covers Phase 1)
-    - A.12: Full Ship-Test pass (R1 mandatory — installed build, all 3 OSes)
-    - A.13: Release
+    - A.12: Linux mostly done (2026-09-01); reboot + Win/mac pending
+    - A.13: Release (after reboot proof or waiver)
+    - Phase 3 GPS (§16): lat/lon coordinates — planned, not started
+
+================================================================================
+SECTION 16 — PHASE 3: GPS & LOCATION (coordinates) — PLANNED, NOT BUILT
+================================================================================
+
+16.0  FEASIBILITY ANSWER: YES — with platform limits
+      The product CAN report latitude + longitude on employee PCs. The desktop
+      client does NOT collect location today (grep confirms zero lat/lon in
+      client/). Web /gps-location uses hardcoded demo rows; /employee-journey/
+      location is an honest empty state.
+
+      How coordinates are obtained (realistic sources, best-first):
+
+      | Platform | Primary API / path              | Typical accuracy |
+      |----------|---------------------------------|------------------|
+      | Windows  | Windows.Devices.Geolocation       | 10–500 m (WiFi)  |
+      | macOS    | CoreLocation (CLLocationManager)  | 10–500 m         |
+      | Linux    | GeoClue2 D-Bus (org.freedesktop   | 10–500 m on GNOME|
+      |          | .GeoClue2) — same as browsers   |                  |
+      | All      | Optional IP geolocation fallback| 1–50 km (coarse) |
+
+      Caveats (must be documented to HR/legal):
+      - Most office desktops/laptops have NO GPS chip; fixes are WiFi/cell/IP
+        fusion, not survey-grade GPS.
+      - OS location permission is REQUIRED (Windows Settings, macOS Privacy,
+        Linux polkit for GeoClue). Denied permission → no fix or IP-only.
+      - Battery/network: poll on an interval, not continuous high-rate GPS.
+      - Employee consent: default OFF (ALPHA_LOCATION_ENABLED=false).
+
+16.1  TARGET DATA MODEL (server Postgres + client SQLite mirror)
+
+      Table: location_samples (new)
+        id              UUID (client-generated, sync idempotent)
+        employee_id     VARCHAR (FK employees)
+        latitude        DOUBLE PRECISION NOT NULL
+        longitude       DOUBLE PRECISION NOT NULL
+        accuracy_m      REAL NULL          -- horizontal accuracy from OS
+        altitude_m      REAL NULL
+        source          TEXT NOT NULL      -- gps | wifi | ip | manual
+        address         TEXT NULL          -- reverse-geocode optional Phase 3.1
+        captured_at     TIMESTAMPTZ NOT NULL
+        synced_at       TIMESTAMPTZ
+
+      Optional: geofence_zones + geofence_events (inside/outside) for the
+      existing web geofence UI on /gps-location (currently local mock only).
+
+16.2  CLIENT (build order B.0–B.5)
+
+      [ ] B.0  Feature flag ALPHA_LOCATION_ENABLED (default false) +
+               ALPHA_LOCATION_POLL_SEC (default 300 = 5 min, not continuous).
+      [ ] B.1  LocationSamplerService (BackgroundService):
+               - Windows: Geolocator.GetGeopositionAsync
+               - macOS: CLLocationManager wrapper (net10.0-maccatalyst or shell)
+               - Linux: GeoClue2 Simple client over D-Bus
+               - Fallback: reuse public IP geo only when OS API unavailable
+                 (store source=ip, low accuracy — never pretend it is GPS).
+      [ ] B.2  SQLite location_samples + is_synced; retention like session_events.
+      [ ] B.3  POST /api/v1/location-samples/sync (DeviceAuth, gzip batch).
+      [ ] B.4  Permission wizard step: Location (reuse permission_status sync).
+      [ ] B.5  Installer-Parity: polkit/GeoClue note in Linux postinst docs.
+
+16.3  SERVER (build order B.6–B.8)
+
+      [ ] B.6  Migration 029_location_samples.sql + geofence tables (optional).
+      [ ] B.7  GET /api/v1/location-samples?employeeId=&from=&to= (paginated).
+      [ ] B.8  Geofence CRUD + server-side inside/outside evaluation on ingest.
+
+16.4  WEB (build order B.9–B.10)
+
+      [ ] B.9  Replace mock locationData in web/src/app/(app)/gps-location/page.tsx
+               with live API + infinite scroll (Web Infinite-Scroll Rule).
+      [ ] B.10 Wire /employee-journey/location map/trail from same API.
+
+16.5  RELATION TO T&A (A.0–A.13)
+
+      GPS Phase 3 is INDEPENDENT of the T&A release train. Ship A.13 first;
+      start B.0 after A.12 passes. Do NOT block T&A release on GPS.
+
+16.6  OUT OF SCOPE for Phase 3 v1 (defer)
+
+      - Turn-by-turn live map streaming / WebSocket fleet view
+      - Mobile native apps (this plan is desktop client only)
+      - Covert tracking without OS permission banner (illegal in many regions)
