@@ -54,35 +54,37 @@ export default function TimesheetsPage() {
 
   return (
     <div className="space-y-4 animate-fade-in">
-      <div className="flex flex-col lg:flex-row lg:items-end gap-3 justify-between">
-        <div>
-          <h3 className="font-display font-bold text-lg text-foreground">Timesheets</h3>
-          <p className="text-xs text-muted-foreground mt-0.5">
-            Daily active, idle, and off-shift totals computed on the server.
-          </p>
+        <div className="flex flex-col lg:flex-row lg:items-end gap-4 justify-between">
+          <div>
+            <h3 className="font-display font-bold text-lg text-foreground">Timesheets</h3>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Daily active, idle, and off-shift totals computed on the server.
+            </p>
+          </div>
         </div>
-        <div className="flex flex-col sm:flex-row gap-3 sm:items-center">
+
+        <div className="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-end">
           <EmployeeSelector
             value={employee?.id ?? ''}
             onChange={setEmployee}
             placeholder="Select employee…"
+            className="w-full lg:w-80"
           />
           <input
             type="date"
             value={from}
             max={to}
             onChange={e => setFrom(e.target.value)}
-            className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground"
+            className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground w-full sm:w-auto"
           />
           <input
             type="date"
             value={to}
             min={from}
             onChange={e => setTo(e.target.value)}
-            className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground"
+            className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground w-full sm:w-auto"
           />
         </div>
-      </div>
 
       {!employee ? (
         <EmptyState icon={Clock} text="Select an employee to view their timesheet history." />
