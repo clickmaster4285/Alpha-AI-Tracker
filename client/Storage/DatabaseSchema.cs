@@ -151,6 +151,9 @@ internal static class DatabaseSchema
             event_type       TEXT NOT NULL,
             os_username      TEXT NOT NULL DEFAULT '',
             event_at         TEXT NOT NULL,
+            event_count      INTEGER,
+            first_at         TEXT,
+            last_at          TEXT,
             is_synced        INTEGER NOT NULL DEFAULT 0,
             synced_at        TEXT,
             created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
@@ -426,6 +429,11 @@ internal static class DatabaseSchema
         -- NOTE: the v1 dedup DELETE + UNIQUE fingerprint index were REMOVED here — the
         -- rows-per-cycle lifecycle model deliberately allows multiple rows per package
         -- (one per install cycle) and a UNIQUE constraint would break reinstall history.
+        -- T&A aggregate metadata on session_events (A.9/A.10): used by old_data_dropped
+        -- sentinel rows; normal OS events leave these NULL and aggregation happens at sync.
+        ALTER TABLE session_events ADD COLUMN event_count INTEGER;
+        ALTER TABLE session_events ADD COLUMN first_at TEXT;
+        ALTER TABLE session_events ADD COLUMN last_at TEXT;
     ";
 
     // PHASE 1: INSERT STATEMENTS
@@ -517,9 +525,9 @@ internal static class DatabaseSchema
 
     internal const string InsertSessionEventSql = @"
         INSERT INTO session_events
-            (id, event_type, os_username, event_at)
+            (id, event_type, os_username, event_at, event_count, first_at, last_at)
         VALUES
-            ($id, $event_type, $os_username, $event_at)
+            ($id, $event_type, $os_username, $event_at, $event_count, $first_at, $last_at)
     ";
 
     internal const string MarkSessionEventsSentSql = @"

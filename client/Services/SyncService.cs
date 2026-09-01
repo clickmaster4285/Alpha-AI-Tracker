@@ -252,19 +252,7 @@ public class SyncService : BackgroundService
             e => e.Id,
             sw, budget, ct));
 
-        tasks.Add((sw, budget, ct) => DrainTableAsync<SessionEvent>(
-            "/api/v1/session-events/sync",
-            (limit, token) => _store.GetUnsentSessionEventsAsync(limit, token),
-            e => new
-            {
-                id = e.Id,
-                eventType = e.EventType,
-                osUsername = e.OsUsername,
-                eventAt = e.EventAt.ToString("O"),
-            },
-            (ids, token) => _store.MarkSessionEventsSentAsync(ids, token),
-            e => e.Id,
-            sw, budget, ct));
+        tasks.Add((sw, budget, ct) => DrainSessionEventsAsync(sw, budget, ct));
 
         tasks.Add((sw, budget, ct) => DrainTableAsync<InstalledApplication>(
             "/api/v1/installed-apps/sync",
@@ -401,6 +389,129 @@ public class SyncService : BackgroundService
             sw, budget, ct));
 
         return tasks;
+    }
+
+    /// <summary>
+    /// Drains session_events with 5-minute bucket aggregation (S1 / A.9). Raw rows stay in
+    /// SQLite until their bucket window closes; the sync payload carries count/firstAt/lastAt.
+    /// Applies the S6 local row ceiling before each fetch.
+    /// </summary>
+    private async Task<bool> DrainSessionEventsAsync(
+        Stopwatch passSw,
+        TimeSpan passBudget,
+        CancellationToken ct)
+    {
+        const string endpoint = "/api/v1/session-events/sync";
+        var synced = 0;
+        try
+        {
+            while (true)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (passSw.Elapsed >= passBudget) break;
+
+                var rolled = await _store.RollupExcessUnsentSessionEventsAsync(_config.TaMaxLocalRows, ct);
+                if (rolled > 0)
+                {
+                    _logger.LogWarning(
+                        "Rolled up {Count} excess unsynced session_events rows into old_data_dropped sentinel",
+                        rolled);
+                }
+
+                var entries = await _store.GetUnsentSessionEventsAsync(_config.SyncMaxRows, ct);
+                if (entries.Count == 0) break;
+
+                var sourceById = entries.ToDictionary(e => e.Id);
+                var aggregates = SessionEventSyncAggregator.BuildAggregates(
+                    entries,
+                    _config.EventAggregationWindowSec,
+                    DateTime.UtcNow);
+
+                if (aggregates.Count == 0)
+                    break;
+
+                var remaining = aggregates;
+                while (remaining.Count > 0)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    if (passSw.Elapsed >= passBudget) break;
+
+                    var slice = remaining;
+                    byte[] json;
+                    while (true)
+                    {
+                        var payload = new
+                        {
+                            employeeId = _employeeId,
+                            token = _token,
+                            entries = slice.Select(agg => MapSessionEventAggregate(agg, sourceById)).ToList()
+                        };
+                        json = JsonSerializer.SerializeToUtf8Bytes(payload);
+                        if (json.Length <= _config.SyncMaxBytes || slice.Count <= 1) break;
+                        slice = slice.Take(slice.Count / 2).ToList();
+                    }
+
+                    if (!await SendAsync(endpoint, json, ct))
+                        return true;
+
+                    var ids = slice.SelectMany(a => a.SourceIds).Distinct().ToList();
+                    if (ids.Count > 0)
+                        await _store.MarkSessionEventsSentAsync(ids, ct);
+                    synced += slice.Count;
+
+                    remaining = slice.Count < remaining.Count
+                        ? remaining.Skip(slice.Count).ToList()
+                        : Array.Empty<SessionEventAggregate>();
+
+                    if (_config.SyncChunkDelayMs > 0)
+                        await Task.Delay(_config.SyncChunkDelayMs, ct);
+                }
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error draining {Endpoint}", endpoint);
+            return true;
+        }
+
+        if (synced > 0)
+            _logger.LogDebug("Synced {Count} session_event aggregates to {Endpoint}", synced, endpoint);
+        return false;
+    }
+
+    private static object MapSessionEventAggregate(
+        SessionEventAggregate agg,
+        IReadOnlyDictionary<string, SessionEvent> sourceById)
+    {
+        if (sourceById.TryGetValue(agg.SyncId, out var source)
+            && source.EventType == SessionEventTypes.OldDataDropped
+            && source.EventCount is > 0)
+        {
+            var firstAt = source.FirstAt ?? source.EventAt;
+            var lastAt = source.LastAt ?? source.EventAt;
+            return new
+            {
+                id = agg.SyncId,
+                eventType = agg.EventType,
+                osUsername = agg.OsUsername,
+                eventAt = firstAt.ToString("O"),
+                count = source.EventCount.Value,
+                firstAt = firstAt.ToString("O"),
+                lastAt = lastAt.ToString("O"),
+            };
+        }
+
+        return new
+        {
+            id = agg.SyncId,
+            eventType = agg.EventType,
+            osUsername = agg.OsUsername,
+            eventAt = agg.EventAt.ToString("O"),
+            count = agg.Count,
+            firstAt = agg.FirstAt.ToString("O"),
+            lastAt = agg.LastAt.ToString("O"),
+        };
     }
 
     /// <summary>

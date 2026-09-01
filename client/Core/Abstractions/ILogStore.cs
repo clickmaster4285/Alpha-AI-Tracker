@@ -46,6 +46,14 @@ public interface ILogStore
     Task StoreSessionEventsAsync(IReadOnlyList<SessionEvent> entries, CancellationToken ct);
     Task<IReadOnlyList<SessionEvent>> GetUnsentSessionEventsAsync(int limit, CancellationToken ct);
     Task MarkSessionEventsSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
+    /// <summary>Count of unsynced session_events rows (S6 ceiling check).</summary>
+    Task<int> CountUnsentSessionEventsAsync(CancellationToken ct);
+    /// <summary>
+    /// When unsynced session_events exceed <paramref name="maxRows"/>, delete the oldest
+    /// excess rows and insert a single <see cref="SessionEventTypes.OldDataDropped"/> sentinel
+    /// carrying the rolled-up count + time span. Returns the number of rows removed.
+    /// </summary>
+    Task<int> RollupExcessUnsentSessionEventsAsync(int maxRows, CancellationToken ct);
     /// <summary>Most recent session event (for login/logout state machine — avoids duplicate login rows).</summary>
     Task<SessionEvent?> GetLastSessionEventAsync(CancellationToken ct);
 

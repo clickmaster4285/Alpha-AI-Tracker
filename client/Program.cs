@@ -61,6 +61,8 @@ if (args.Contains("--print-config"))
     Console.WriteLine($"IdleAwayThresholdSeconds={cfg.IdleAwayThresholdSeconds}");
     Console.WriteLine($"IdlePollSeconds={cfg.IdlePollSeconds}");
     Console.WriteLine($"LockHysteresisSeconds={cfg.LockHysteresisSeconds}");
+    Console.WriteLine($"EventAggregationWindowSec={cfg.EventAggregationWindowSec}");
+    Console.WriteLine($"TaMaxLocalRows={cfg.TaMaxLocalRows}");
     return;
 }
 

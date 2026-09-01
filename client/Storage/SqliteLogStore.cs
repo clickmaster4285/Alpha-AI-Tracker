@@ -1339,6 +1339,9 @@ public class SqliteLogStore : ILogStore, IDisposable
             var pType = cmd.Parameters.Add("$event_type", SqliteType.Text);
             var pUser = cmd.Parameters.Add("$os_username", SqliteType.Text);
             var pEventAt = cmd.Parameters.Add("$event_at", SqliteType.Text);
+            var pCount = cmd.Parameters.Add("$event_count", SqliteType.Integer);
+            var pFirstAt = cmd.Parameters.Add("$first_at", SqliteType.Text);
+            var pLastAt = cmd.Parameters.Add("$last_at", SqliteType.Text);
 
             await using var tx = await _connection.BeginTransactionAsync(ct);
             ((DbCommand)cmd).Transaction = tx;
@@ -1348,6 +1351,9 @@ public class SqliteLogStore : ILogStore, IDisposable
                 pType.Value = e.EventType;
                 pUser.Value = e.OsUsername;
                 pEventAt.Value = e.EventAt.ToString("O");
+                pCount.Value = e.EventCount.HasValue ? e.EventCount.Value : DBNull.Value;
+                pFirstAt.Value = e.FirstAt.HasValue ? e.FirstAt.Value.ToString("O") : DBNull.Value;
+                pLastAt.Value = e.LastAt.HasValue ? e.LastAt.Value.ToString("O") : DBNull.Value;
                 await cmd.ExecuteNonQueryAsync(ct);
             }
             await tx.CommitAsync(ct);
@@ -1381,6 +1387,95 @@ public class SqliteLogStore : ILogStore, IDisposable
     public async Task MarkSessionEventsSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
         await MarkSentCoreAsync("session_events", "id", ids, ct);
+    }
+
+    public async Task<int> CountUnsentSessionEventsAsync(CancellationToken ct)
+    {
+        if (_connection == null) return 0;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM session_events WHERE is_synced = 0";
+            var result = await cmd.ExecuteScalarAsync(ct);
+            return Convert.ToInt32(result);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task<int> RollupExcessUnsentSessionEventsAsync(int maxRows, CancellationToken ct)
+    {
+        if (_connection == null || maxRows < 1) return 0;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var countCmd = _connection.CreateCommand();
+            countCmd.CommandText = "SELECT COUNT(*) FROM session_events WHERE is_synced = 0";
+            var unsynced = Convert.ToInt32(await countCmd.ExecuteScalarAsync(ct));
+            if (unsynced <= maxRows) return 0;
+
+            var excess = unsynced - maxRows;
+            var fetchCmd = _connection.CreateCommand();
+            fetchCmd.CommandText = @"SELECT * FROM session_events
+                WHERE is_synced = 0
+                ORDER BY event_at ASC
+                LIMIT $limit";
+            fetchCmd.Parameters.AddWithValue("$limit", excess);
+
+            var toRoll = new List<SessionEvent>();
+            await using (var reader = await fetchCmd.ExecuteReaderAsync(ct))
+            {
+                while (await reader.ReadAsync(ct))
+                    toRoll.Add(MapSessionEventReader(reader));
+            }
+
+            if (toRoll.Count == 0) return 0;
+
+            var firstAt = toRoll.Min(e => e.EventAt);
+            var lastAt = toRoll.Max(e => e.EventAt);
+            var sentinel = new SessionEvent
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                EventType = SessionEventTypes.OldDataDropped,
+                OsUsername = toRoll[0].OsUsername,
+                EventAt = firstAt,
+                EventCount = toRoll.Count,
+                FirstAt = firstAt,
+                LastAt = lastAt,
+            };
+
+            await using var tx = await _connection.BeginTransactionAsync(ct);
+
+            var deleteCmd = _connection.CreateCommand();
+            ((DbCommand)deleteCmd).Transaction = tx;
+            deleteCmd.CommandText = $"DELETE FROM session_events WHERE id IN ({string.Join(",", toRoll.Select((_, i) => $"$id{i}"))})";
+            for (var i = 0; i < toRoll.Count; i++)
+                deleteCmd.Parameters.AddWithValue($"$id{i}", toRoll[i].Id);
+            await deleteCmd.ExecuteNonQueryAsync(ct);
+
+            var insertCmd = _connection.CreateCommand();
+            ((DbCommand)insertCmd).Transaction = tx;
+            insertCmd.CommandText = DatabaseSchema.InsertSessionEventSql;
+            insertCmd.Parameters.AddWithValue("$id", sentinel.Id);
+            insertCmd.Parameters.AddWithValue("$event_type", sentinel.EventType);
+            insertCmd.Parameters.AddWithValue("$os_username", sentinel.OsUsername);
+            insertCmd.Parameters.AddWithValue("$event_at", sentinel.EventAt.ToString("O"));
+            insertCmd.Parameters.AddWithValue("$event_count", sentinel.EventCount!.Value);
+            insertCmd.Parameters.AddWithValue("$first_at", sentinel.FirstAt!.Value.ToString("O"));
+            insertCmd.Parameters.AddWithValue("$last_at", sentinel.LastAt!.Value.ToString("O"));
+            await insertCmd.ExecuteNonQueryAsync(ct);
+
+            await tx.CommitAsync(ct);
+
+            return toRoll.Count;
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
     }
 
     public async Task<SessionEvent?> GetLastSessionEventAsync(CancellationToken ct)
@@ -2927,6 +3022,9 @@ public class SqliteLogStore : ILogStore, IDisposable
                     System.Globalization.CultureInfo.InvariantCulture,
                     System.Globalization.DateTimeStyles.RoundtripKind)
                 .UtcDateTime,
+            EventCount = TryGetInt(r, "event_count"),
+            FirstAt = TryGetDateTime(r, "first_at"),
+            LastAt = TryGetDateTime(r, "last_at"),
             IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
             SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
             CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),
@@ -3076,6 +3174,23 @@ public class SqliteLogStore : ILogStore, IDisposable
         {
             var ordinal = r.GetOrdinal(column);
             return r.IsDBNull(ordinal) ? (double?)null : r.GetDouble(ordinal);
+        }
+        catch (IndexOutOfRangeException)
+        {
+            return null;
+        }
+    }
+
+    private static DateTime? TryGetDateTime(SqliteDataReader r, string column)
+    {
+        try
+        {
+            var ordinal = r.GetOrdinal(column);
+            if (r.IsDBNull(ordinal)) return null;
+            return DateTimeOffset.Parse(
+                r.GetString(ordinal),
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.RoundtripKind).UtcDateTime;
         }
         catch (IndexOutOfRangeException)
         {

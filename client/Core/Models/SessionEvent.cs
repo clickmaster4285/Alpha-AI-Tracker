@@ -17,6 +17,10 @@ public class SessionEvent
     public string EventType { get; set; } = string.Empty;
     public string OsUsername { get; set; } = string.Empty;
     public DateTime EventAt { get; set; } = DateTime.UtcNow;
+    /// <summary>Populated only on <see cref="SessionEventTypes.OldDataDropped"/> sentinel rows.</summary>
+    public int? EventCount { get; set; }
+    public DateTime? FirstAt { get; set; }
+    public DateTime? LastAt { get; set; }
     public bool IsSynced { get; set; }
     public string? SyncedAt { get; set; }
     public string CreatedAt { get; set; } = string.Empty;
@@ -58,6 +62,11 @@ public static class SessionEventTypes
     // AttendanceAggregator (A.8) accumulates idle_seconds from these.
     public const string IdleStart    = "idle_start";
     public const string IdleEnd      = "idle_end";
+
+    // ── Sync back-pressure (SyncService S6) ──
+    // Emitted when unsynced session_events exceed ALPHA_TA_MAX_LOCAL_ROWS and the
+    // oldest backlog rows are rolled up so the server knows telemetry was dropped.
+    public const string OldDataDropped = "old_data_dropped";
 
     // Back-compat alias for rows written before the rename. Reading code
     // (server-side filters, web dashboard) still sees "login" in legacy

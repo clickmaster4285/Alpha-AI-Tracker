@@ -62,6 +62,8 @@ public class AppConfig
     public int IdleAwayThresholdSeconds { get; init; } = 600; // when does "away" start (A.8)
     public int IdlePollSeconds { get; init; } = 30;         // poll cadence
     public int LockHysteresisSeconds { get; init; } = 30;   // screen_lock dedup window
+    public int EventAggregationWindowSec { get; init; } = 300; // 5-min sync buckets (S1)
+    public int TaMaxLocalRows { get; init; } = 50_000;       // unsynced row ceiling (S6)
 
     // ─── Self-update (GitHub Releases) ───
     // The client checks https://github.com/{UpdateRepo}/releases/latest for an
@@ -111,6 +113,8 @@ public class AppConfig
             IdleAwayThresholdSeconds = Math.Max(30, int.TryParse(GetEnv("ALPHA_IDLE_AWAY_THRESHOLD_SEC"), out var idleAway) ? idleAway : 600),
             IdlePollSeconds = Math.Max(5, int.TryParse(GetEnv("ALPHA_IDLE_POLL_SEC"), out var idlePoll) ? idlePoll : 30),
             LockHysteresisSeconds = Math.Max(5, int.TryParse(GetEnv("ALPHA_TA_LOCK_HYSTERESIS_SEC"), out var lockHys) ? lockHys : 30),
+            EventAggregationWindowSec = Math.Max(60, int.TryParse(GetEnv("ALPHA_EVENT_AGGREGATION_WINDOW_SEC"), out var aggWin) ? aggWin : 300),
+            TaMaxLocalRows = Math.Max(1000, int.TryParse(GetEnv("ALPHA_TA_MAX_LOCAL_ROWS"), out var taMax) ? taMax : 50_000),
         };
     }
 
