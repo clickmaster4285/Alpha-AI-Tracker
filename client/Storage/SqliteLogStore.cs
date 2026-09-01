@@ -2661,12 +2661,22 @@ public class SqliteLogStore : ILogStore, IDisposable
 
             var appsCmd = _connection.CreateCommand();
             ((DbCommand)appsCmd).Transaction = tx;
-            appsCmd.CommandText = "DELETE FROM installed_applications WHERE is_installed = 0 AND is_synced = 1";
+            appsCmd.CommandText = @"
+                DELETE FROM installed_applications
+                WHERE is_installed = 0 AND is_synced = 1
+                  AND NOT EXISTS (
+                      SELECT 1 FROM app_sessions
+                      WHERE app_sessions.installed_app_id = installed_applications.id)";
             var appsDeleted = await appsCmd.ExecuteNonQueryAsync(ct);
 
             var pkgsCmd = _connection.CreateCommand();
             ((DbCommand)pkgsCmd).Transaction = tx;
-            pkgsCmd.CommandText = "DELETE FROM installed_packages WHERE is_installed = 0 AND is_synced = 1";
+            pkgsCmd.CommandText = @"
+                DELETE FROM installed_packages
+                WHERE is_installed = 0 AND is_synced = 1
+                  AND NOT EXISTS (
+                      SELECT 1 FROM app_sessions
+                      WHERE app_sessions.installed_package_id = installed_packages.id)";
             var pkgsDeleted = await pkgsCmd.ExecuteNonQueryAsync(ct);
 
             var netCmd = _connection.CreateCommand();
