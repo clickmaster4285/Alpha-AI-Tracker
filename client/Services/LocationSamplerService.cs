@@ -50,7 +50,8 @@ public sealed class LocationSamplerService : BackgroundService
         {
             try
             {
-                var fix = await LocationProbe.TryGetFixAsync(_http, stoppingToken);
+                var fix = await LocationProbe.TryGetFixAsync(
+                    _http, stoppingToken, _config.LocationIpFallback);
                 if (fix.HasValue)
                 {
                     var sample = new LocationSample

@@ -69,6 +69,8 @@ public class AppConfig
     // Default OFF — requires OS location permission + employee consent.
     public bool LocationEnabled { get; init; } = false;
     public int LocationPollSec { get; init; } = 300;         // 5 min — not continuous GPS
+    /// <summary>When false, only OS GPS/WiFi fixes are stored — no coarse IP geolocation.</summary>
+    public bool LocationIpFallback { get; init; } = false;
 
     // ─── Self-update (GitHub Releases) ───
     // The client checks https://github.com/{UpdateRepo}/releases/latest for an
@@ -122,6 +124,7 @@ public class AppConfig
             TaMaxLocalRows = Math.Max(1000, int.TryParse(GetEnv("ALPHA_TA_MAX_LOCAL_ROWS"), out var taMax) ? taMax : 50_000),
             LocationEnabled = GetEnv("ALPHA_LOCATION_ENABLED") is ("1" or "true" or "True"),
             LocationPollSec = Math.Max(60, int.TryParse(GetEnv("ALPHA_LOCATION_POLL_SEC"), out var locPoll) ? locPoll : 300),
+            LocationIpFallback = GetEnv("ALPHA_LOCATION_IP_FALLBACK") is ("1" or "true" or "True"),
         };
     }
 

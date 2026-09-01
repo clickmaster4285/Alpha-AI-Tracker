@@ -75,7 +75,7 @@ function LocationTrailBody({ employee }: { employee: Employee }) {
     return (
       <EmptyState
         icon={MapPin}
-        text="No location samples for this employee yet. Enable ALPHA_LOCATION_ENABLED on their desktop client."
+        text="This employee has not shared any location updates yet. They need to grant location permission on their desktop client."
       />
     );
   }

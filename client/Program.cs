@@ -64,6 +64,7 @@ if (args.Contains("--print-config"))
     Console.WriteLine($"EventAggregationWindowSec={cfg.EventAggregationWindowSec}");
     Console.WriteLine($"TaMaxLocalRows={cfg.TaMaxLocalRows}");
     Console.WriteLine($"LocationEnabled={cfg.LocationEnabled}");
+    Console.WriteLine($"LocationIpFallback={cfg.LocationIpFallback}");
     Console.WriteLine($"LocationPollSec={cfg.LocationPollSec}");
     return;
 }

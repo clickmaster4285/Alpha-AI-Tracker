@@ -223,7 +223,7 @@ export default function GPSLocationPage() {
         ) : rows.length === 0 ? (
           <EmptyState
             icon={MapPin}
-            text="No location data yet. Enable ALPHA_LOCATION_ENABLED=true on the desktop client and grant OS location permission."
+            text="No employees have shared location yet. Location appears here after an employee grants location permission on their desktop client."
           />
         ) : (
           <div className="bg-card rounded-xl border border-border overflow-x-auto">
