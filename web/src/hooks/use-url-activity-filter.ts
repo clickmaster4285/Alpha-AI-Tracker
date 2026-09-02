@@ -21,27 +21,82 @@ import { presetRange } from '@/components/journey/ActivityFilters';
  *   page reload without round-tripping through `new Date()`.
  * - Empty `q` is stripped from the URL — `?q=&preset=today` is not stored.
  *
- * Returns the same `[filter, setFilter]` shape `ActivityFilters` expects.
+ * Single-instance guarantee
+ * -------------------------
+ * Multiple `useUrlQueryState` hooks on the same page each maintain their own
+ * diff ref. A sibling hook writing a disjoint key looks like "URL changed" to
+ * this hook's effect — the new diff in `use-url-query-state` ignores
+ * non-owned keys, but TWO independent hooks still race on writes: whichever
+ * flushes second reads a `searchParams` closure captured mid-flight and may
+ * briefly drop the other's keys. The only race-free solution is ONE
+ * `useUrlQueryState` per page. To support pages that mix the activity filter
+ * with sibling URL state (e.g. `/timesheets` also has an `?employeeId=`
+ * picker), this hook accepts an `extraSchema` / `extraInitial` pair and
+ * merges the two schemas into a single underlying `useUrlQueryState` call.
+ *
+ * Returns `[filter, setFilter, extra, setExtra]` — `extra`/`setExtra` are
+ * the `useState`-shaped tuple for the sibling keys (typed as `T`).
  */
-export function useUrlActivityFilter(): [ActivityFilter, (next: ActivityFilter) => void] {
-  const [url, setUrl] = useUrlQueryState(
+export interface UseUrlActivityFilterResult<T extends Record<string, string>> {
+  /** Current activity filter (search + preset + ISO dateFrom/dateTo). */
+  filter: ActivityFilter;
+  /** Replace the activity filter — writes only the filter's URL keys. */
+  setFilter: (next: ActivityFilter) => void;
+  /** Current values for any extra schema keys passed in. */
+  extra: T;
+  /** Patch the extra keys — writes only the extra keys' URL slots. */
+  setExtra: (patch: Partial<T> | ((prev: T) => T)) => void;
+}
+
+export function useUrlActivityFilter<T extends Record<string, string> = Record<string, never>>(
+  extraSchema: Record<keyof T, { parse?: (raw: string) => T[keyof T] }> = {} as Record<keyof T, { parse?: (raw: string) => T[keyof T] }>,
+  extraInitial: T = {} as T,
+): UseUrlActivityFilterResult<T> {
+  // Merge the activity filter schema with the extra schema into ONE
+  // underlying `useUrlQueryState`. Same instance → same `lastSerialized` ref
+  // → one diff per URL change, zero ping-pong.
+  const [merged, setMerged] = useUrlQueryState<Record<string, string>>(
     {
       q: {},
       preset: {},
       from: {},
       to: {},
-    },
+      ...extraSchema,
+    } as Record<string, { parse?: (raw: string) => string }>,
     {
       q: '',
       preset: 'today',
       from: '',
       to: '',
-    },
+      ...extraInitial,
+    } as Record<string, string>,
   );
+
+  // Split the merged record back into the activity filter URL shape and the
+  // extra URL shape so callers can use each independently.
+  const url = {
+    q: merged.q,
+    preset: merged.preset,
+    from: merged.from,
+    to: merged.to,
+  };
+  const extra = {} as T;
+  for (const key of Object.keys(extraSchema) as (keyof T)[]) {
+    const v = merged[String(key)];
+    extra[key] = (v === undefined ? extraInitial[key] : v) as T[keyof T];
+  }
 
   // Decode URL → ActivityFilter. `from`/`to` are stored as YYYY-MM-DD for
   // `custom` ranges; otherwise they are derived from the preset.
-  const preset = (url.preset || 'today') as DatePreset;
+  //
+  // Deep-link fallback: when the caller hands us explicit `from`/`to`
+  // dates but no `preset` (e.g. the `/attendance` link
+  // `?employeeId=<uuid>&from=YYYY-MM-DD&to=YYYY-MM-DD` to `/timesheets`),
+  // treat that as a `custom` range — otherwise the default `today` would
+  // silently overwrite the caller's dates.
+  const hasExplicitRange = Boolean(url.from && url.to);
+  const rawPreset = (url.preset || (hasExplicitRange ? 'custom' : 'today')) as DatePreset;
+  const preset: DatePreset = rawPreset === 'custom' || hasExplicitRange ? 'custom' : rawPreset;
   const isCustom = preset === 'custom';
   const { dateFrom: presetFrom, dateTo: presetTo } = presetRange(preset);
   const filter: ActivityFilter = {
@@ -56,16 +111,33 @@ export function useUrlActivityFilter(): [ActivityFilter, (next: ActivityFilter) 
   };
 
   const setFilter = (next: ActivityFilter) => {
-    // Re-encode ActivityFilter → compact URL form.
-    setUrl({
+    // Re-encode ActivityFilter → compact URL form, preserving extra keys.
+    setMerged(prev => ({
+      ...prev,
       q: next.search || '',
       preset: next.preset,
       from: next.preset === 'custom' && next.dateFrom ? isoToYmd(next.dateFrom) : '',
       to: next.preset === 'custom' && next.dateTo ? isoToYmd(next.dateTo) : '',
+    }));
+  };
+
+  const setExtra = (patch: Partial<T> | ((prev: T) => T)) => {
+    setMerged(prev => {
+      const base = {} as Record<string, string>;
+      for (const key of Object.keys(extraSchema) as (keyof T)[]) {
+        const v = prev[String(key)];
+        base[String(key)] = v === undefined ? extraInitial[key] : v;
+      }
+      const nextExtra = typeof patch === 'function' ? (patch as (p: T) => T)(base as T) : { ...base, ...patch };
+      const out: Record<string, string> = { ...prev };
+      for (const key of Object.keys(extraSchema) as (keyof T)[]) {
+        out[String(key)] = nextExtra[key] as string;
+      }
+      return out;
     });
   };
 
-  return [filter, setFilter];
+  return { filter, setFilter, extra, setExtra };
 }
 
 function isoToYmd(iso: string): string {

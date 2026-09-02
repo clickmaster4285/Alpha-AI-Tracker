@@ -104,17 +104,21 @@ export function useUrlQueryState<T extends Record<string, string>>(
   }));
 
   // When the URL changes from outside the page (back/forward, manual edit,
-  // a programmatic push from a sibling component) propagate it back into
-  // `value`. We diff by stringified records to avoid render loops.
+  // a programmatic push from a sibling component OR from a sibling
+  // `useUrlQueryState` / `useUrlActivityFilter` instance managing a
+  // disjoint key set) propagate the change back into `value`.
+  //
+  // We diff ONLY against the keys this hook owns — a sibling hook writing
+  // its own key must not be treated as a "reset to defaults" signal for
+  // this hook, otherwise two hooks on the same page ping-pong each other
+  // into their initial values on every write. See AGENTS.md → URL-Synced
+  // Filters Rule.
   const lastSerialized = useRef<string>('');
   useEffect(() => {
-    const next = readFromUrl(searchParams, schema);
-    const merged = { ...value, ...next, ...initial, ...next };
-    // Carry `initial` defaults only for keys the URL does not specify.
-    const carry: T = { ...initial };
+    const carry = {} as T;
     for (const key of Object.keys(schema) as (keyof T)[]) {
       const fromUrl = searchParams.get(String(key));
-      carry[key] = fromUrl === null ? initial[key] : merged[key];
+      carry[key] = fromUrl === null ? initial[key] : (fromUrl as T[keyof T]);
     }
     const serialized = JSON.stringify(carry);
     if (serialized !== lastSerialized.current) {

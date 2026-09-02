@@ -48,7 +48,7 @@ function AppUsageBody({ employeeId }: { employeeId: string }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   // URL-synced filter (preset / search / custom date range). The default
   // is "today" so the URL is empty on first load — see useUrlActivityFilter.
-  const [filter, setFilter] = useUrlActivityFilter();
+  const { filter, setFilter } = useUrlActivityFilter();
   const [isFiltering, setIsFiltering] = useState(false);
 
   const toggle = (key: string) => {
