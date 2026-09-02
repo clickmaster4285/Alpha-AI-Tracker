@@ -15,7 +15,8 @@ import {
 } from '@/lib/api';
 import { formatDateTimeInZone, formatSeconds } from '@/lib/format';
 import EmptyState from '@/components/employees/EmptyState';
-import { useUrlQueryState } from '@/hooks/use-url-query-state';
+import ActivityFilters from '@/components/journey/ActivityFilters';
+import { useUrlActivityFilter } from '@/hooks/use-url-activity-filter';
 
 const STATUS_LABEL: Record<AttendanceStatus, string> = {
   present: 'Present',
@@ -35,8 +36,17 @@ const statusColors: Record<AttendanceStatus, string> = {
   unknown: 'bg-muted text-muted-foreground',
 };
 
-function localToday(): string {
-  const d = new Date();
+/**
+ * Convert an ISO timestamp (from `ActivityFilter.dateFrom`/`dateTo`) to the
+ * `YYYY-MM-DD` form the server's `GET /attendance/day` expects. The
+ * attendance log is conceptually one row per (employee, day), so we use the
+ * start of the active range — for presets (`today`, `7d`, …) that's the
+ * first day; for `custom` ranges the user picked the same from/to.
+ */
+function isoToYmd(iso: string | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
@@ -53,14 +63,18 @@ export default function AttendancePage() {
 
 function AttendancePageInner() {
   const { user } = useAuth();
-  // URL-synced filter values. Status is encoded as the AttendanceStatus value
-  // (`all` means no filter).
-  const [filters, setFilters] = useUrlQueryState(
-    { date: {}, status: {} },
-    { date: localToday(), status: 'all' },
+  // Single underlying URL state for BOTH the activity filter and the status
+  // dropdown — one `useUrlQueryState` instance, one diff ref, no race
+  // between sibling hooks writing disjoint URL keys. The status filter is
+  // encoded as the AttendanceStatus value (`all` means no filter).
+  const { filter, setFilter, extra, setExtra } = useUrlActivityFilter(
+    { status: {} },
+    { status: 'all' },
   );
-  const date = filters.date;
-  const statusFilter = (filters.status || 'all') as 'all' | AttendanceStatus;
+  const statusFilter = (extra.status || 'all') as 'all' | AttendanceStatus;
+  // The attendance log is one row per employee per day — derive the single
+  // date from the start of the activity filter's range.
+  const date = useMemo(() => isoToYmd(filter.dateFrom), [filter.dateFrom]);
 
   const isSelfOnly = Boolean(user?.employeeId) && user?.role === 'employee';
 
@@ -162,27 +176,25 @@ function AttendancePageInner() {
             Server-computed daily status from synced session events.
           </p>
         </div>
-        <div className="flex gap-3">
-          <input
-            type="date"
-            value={date}
-            onChange={e => setFilters({ date: e.target.value })}
+        {!isSelfOnly && (
+          <select
+            value={statusFilter}
+            onChange={e => setExtra({ status: e.target.value })}
             className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground"
-          />
-          {!isSelfOnly && (
-            <select
-              value={statusFilter}
-              onChange={e => setFilters({ status: e.target.value })}
-              className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground"
-            >
-              <option value="all">All Status</option>
-              {Object.entries(STATUS_LABEL).map(([value, label]) => (
-                <option key={value} value={value}>{label}</option>
-              ))}
-            </select>
-          )}
-        </div>
+          >
+            <option value="all">All Status</option>
+            {Object.entries(STATUS_LABEL).map(([value, label]) => (
+              <option key={value} value={value}>{label}</option>
+            ))}
+          </select>
+        )}
       </div>
+
+      {/* Server-side filters: search + date preset/custom range. Same
+          component as /employee-journey/apps and the other journey pages —
+          the native <input type="date"> overflow that broke the popover is
+          gone, replaced by the Radix popover that anchors to the filter bar. */}
+      <ActivityFilters value={filter} onChange={setFilter} />
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         {[
@@ -232,6 +244,11 @@ function AttendancePageInner() {
                 >
                   <td className="px-4 py-3 text-sm font-medium text-foreground">
                     <Link
+                      // Deep-link into /timesheets with the same `from`/`to`
+                      // the attendance filter is currently scoped to — the
+                      // /timesheets page reads those keys via
+                      // useUrlActivityFilter's deep-link fallback and treats
+                      // them as a `custom` range.
                       href={{ pathname: '/timesheets', query: { employeeId: empUuid, from: date, to: date } }}
                       className="hover:text-primary hover:underline"
                     >
