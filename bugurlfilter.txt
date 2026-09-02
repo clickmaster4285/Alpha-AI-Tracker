@@ -1,5 +1,0 @@
-1. on /timesheets/page.tsx when i open the date modal , the date modal are overlapped by the screen (half modal goes to right ), fixes as if right side wiedth not available then left side go,
-2. on /timesheets/page.tsx /attendance/page.tsx when i click the 'clear' btn two time on date modal then on the url query remove that related query and got error like 'Failed to load ...' fix that
-3. on /employee-journey/apps /employee-journey/web /device-specs/software i select the employee and then apply other filter but not goes to url query and also deselect the employee why???
-4. built a page on /configuration/productivity-rules/page.tsx as "comming soon ..."
-5. redesign my /logs/comprehensive/
