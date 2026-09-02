@@ -55,6 +55,25 @@ export interface UrlQueryStateOptions {
 
 export type UrlQueryStatePatch<T extends Record<string, unknown>> = Partial<T> | ((prev: T) => T);
 
+/**
+ * Module-level "latest URL search string any hook on this page wrote" slot.
+ *
+ * Sibling `useUrlQueryState` hooks (e.g. one for the employee picker, one
+ * for the activity filter) call `flush` from the same React batch when the
+ * user interacts with both in one tick. Each `flush` needs to read the
+ * URL *including* the previous sibling's just-written keys — not the
+ * stale `useSearchParams()` value, which only updates after the router
+ * commits. Sharing a single mutable slot (cleared on every page load so
+ * cross-page links never leak state) lets the chain stay consistent.
+ */
+const latestWrittenSearch: { current: string } = { current: '' };
+
+if (typeof window !== 'undefined') {
+  // Reset the chain when the user navigates to a new page so a stale slot
+  // from the previous route can't leak into this page's first flush.
+  window.addEventListener('popstate', () => { latestWrittenSearch.current = ''; }, { passive: true });
+}
+
 const stripEmpty = (record: Record<string, unknown>): Record<string, string> => {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(record)) {
@@ -140,7 +159,24 @@ export function useUrlQueryState<T extends Record<string, string>>(
     setValueState(prev => {
       const nextResolved = typeof patch === 'function' ? patch(prev) : { ...prev, ...patch };
       // Merge with initial defaults so the URL only carries keys we manage.
-      const urlParams = new URLSearchParams(searchParams.toString());
+      //
+      // Read the FRESHEST search string, NOT the `searchParams` captured
+      // in this `flush` closure. When two URL hooks write in the same
+      // React batch (e.g. a row click sets `employeeId` AND the user
+      // changes a filter chip in the same tick), both `setValue`s fire
+      // before either `router.replace` resolves; the closure's
+      // `searchParams` still reflects the URL *before* the first write,
+      // so the second flush would erase the first hook's key. We chain
+      // writes through a module-level "last URL we wrote" slot: each
+      // flush reads the previous flush's result, merges its own keys,
+      // and updates the slot. `window.location.search` is also updated
+      // by Next's router (synchronously via history.replaceState) — fall
+      // back to it when the chain slot is empty (first flush ever).
+      const baseSearch =
+        (typeof window !== 'undefined' && latestWrittenSearch.current)
+          || (typeof window !== 'undefined' ? window.location.search : '')
+          || searchParams.toString();
+      const urlParams = new URLSearchParams(baseSearch);
       // Remove all keys managed by this hook (we'll re-add the current ones).
       for (const key of Object.keys(schema) as (keyof T)[]) {
         urlParams.delete(String(key));
@@ -150,6 +186,10 @@ export function useUrlQueryState<T extends Record<string, string>>(
         ...stripEmpty(nextResolved as unknown as Record<string, unknown>),
       };
       const qs = new URLSearchParams(merged).toString();
+      // Record what we're about to write so the next sibling hook's flush
+      // (in the same React batch) sees this hook's keys instead of the
+      // pre-write URL.
+      latestWrittenSearch.current = qs ? `?${qs}` : '';
       lastSerialized.current = JSON.stringify(nextResolved);
       const url = qs ? `${pathname}?${qs}` : pathname;
       if (history === 'push') router.push(url); else router.replace(url);

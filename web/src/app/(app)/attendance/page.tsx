@@ -135,10 +135,20 @@ function AttendancePageInner() {
     });
   }, [employees, attendanceQueries, date]);
 
-  const filtered = useMemo(
-    () => (statusFilter === 'all' ? rows : rows.filter(r => r.status === statusFilter)),
-    [rows, statusFilter],
-  );
+  const filtered = useMemo(() => {
+    const q = filter.search.trim().toLowerCase();
+    return rows.filter(r => {
+      if (statusFilter !== 'all' && r.status !== statusFilter) return false;
+      if (!q) return true;
+      // Match employee name, employee code, or any name fragment. The
+      // /attendance server endpoint returns ONE row per employee for a
+      // given day, so search has to be a client-side filter over the
+      // already-fetched rows.
+      const name = r.employeeName.toLowerCase();
+      const code = r.employeeId.toLowerCase();
+      return name.includes(q) || code.includes(q);
+    });
+  }, [rows, statusFilter, filter.search]);
 
   const stats = useMemo(() => ({
     present: rows.filter(r => r.status === 'present').length,
@@ -194,7 +204,17 @@ function AttendancePageInner() {
           component as /employee-journey/apps and the other journey pages —
           the native <input type="date"> overflow that broke the popover is
           gone, replaced by the Radix popover that anchors to the filter bar. */}
-      <ActivityFilters value={filter} onChange={setFilter} />
+      <ActivityFilters
+        value={filter}
+        onChange={setFilter}
+        // The /attendance server endpoint returns ONE row per employee for
+        // a single day (`GET /attendance/day`). Restrict the UI to a
+        // single-day filter so a multi-day range can't be silently passed
+        // to the endpoint (which would be coerced to the range's start
+        // day and mislead the user about what they were looking at).
+        availablePresets={['today', 'yesterday']}
+        singleDay
+      />
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         {[
