@@ -305,37 +305,55 @@ func (r *NewSchemaRepo) BulkInsertAppSessions(ctx context.Context, entries []mod
 		}
 		batch := entries[i:end]
 		valueStrings := make([]string, 0, len(batch))
-		args := make([]interface{}, 0, len(batch)*19)
+		args := make([]interface{}, 0, len(batch)*21)
 		argIdx := 1
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
 				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
 				argIdx+10, argIdx+11, argIdx+12, argIdx+13, argIdx+14,
-				argIdx+15, argIdx+16, argIdx+17, argIdx+18,
+				argIdx+15, argIdx+16, argIdx+17, argIdx+18, argIdx+19,
+				argIdx+20,
 			))
+			now := time.Now()
+			// Default last_activity_at to started_at when client omits it
+			// (older client builds pre-2026-09-02) so the sweep has a
+			// sane baseline from row 1.
+			lastActivity := e.LastActivityAt
+			if lastActivity == nil {
+				lastActivity = &e.StartedAt
+			}
 			args = append(args,
 				e.ID, e.EmployeeID, e.ProcessName, e.AppDisplayName, e.StartedAt,
 				e.EndedAt, e.MachineID, e.SessionID, e.Platform, e.ProcessID, e.ParentProcessID,
 				e.InstalledAppID, e.InstalledPackageID, e.GroupedBy, e.CgroupScope, e.ContextLabel,
 				e.ForegroundSeconds, e.BackgroundSeconds,
-				time.Now(),
+				now,
+				lastActivity,
+				now, // last_sync_at = NOW() — server records the moment this row arrived
 			)
-			argIdx += 19
+			argIdx += 21
 		}
 
+		// Upsert semantics for the 3-state lifecycle (2026-09-02):
+		//   - last_sync_at / last_activity_at always refresh to the
+		//     latest values from the client (the client is the live
+		//     source; the server has no better information).
+		//   - foreground_seconds / background_seconds still EXCLUDED-
+		//     overwrite (client keeps a cumulative total).
+		//   - ended_at, status: see below — these are subject to state
+		//     transitions handled by the lifecycle sweeper.
 		query := fmt.Sprintf(`
 			INSERT INTO app_sessions
 				(id, employee_id, process_name, app_display_name, started_at,
 				 ended_at, machine_id, session_id, platform, process_id, parent_process_id,
 				 installed_app_id, installed_package_id, grouped_by, cgroup_scope, context_label,
 				 foreground_seconds, background_seconds,
-				 synced_at)
+				 synced_at, last_activity_at, last_sync_at)
 			VALUES %s
 			ON CONFLICT (id) DO UPDATE SET
-				ended_at = COALESCE(EXCLUDED.ended_at, app_sessions.ended_at),
 				parent_process_id = COALESCE(EXCLUDED.parent_process_id, app_sessions.parent_process_id),
 				installed_app_id = COALESCE(EXCLUDED.installed_app_id, app_sessions.installed_app_id),
 				installed_package_id = COALESCE(EXCLUDED.installed_package_id, app_sessions.installed_package_id),
@@ -344,7 +362,21 @@ func (r *NewSchemaRepo) BulkInsertAppSessions(ctx context.Context, entries []mod
 				context_label = COALESCE(EXCLUDED.context_label, app_sessions.context_label),
 				foreground_seconds = EXCLUDED.foreground_seconds,
 				background_seconds = EXCLUDED.background_seconds,
-				synced_at = EXCLUDED.synced_at
+				synced_at = EXCLUDED.synced_at,
+				last_activity_at = EXCLUDED.last_activity_at,
+				last_sync_at = EXCLUDED.last_sync_at,
+				-- A live client always promotes STALE/CLOSED back to ACTIVE
+				-- and clears a premature server-side ended_at so the
+				-- session can resume its real lifecycle.
+				status = CASE
+					WHEN app_sessions.status = 'CLOSED' AND EXCLUDED.ended_at IS NULL THEN 'ACTIVE'
+					WHEN app_sessions.status = 'STALE'  AND EXCLUDED.ended_at IS NULL THEN 'ACTIVE'
+					ELSE app_sessions.status
+				END,
+				ended_at = CASE
+					WHEN app_sessions.status IN ('STALE','CLOSED') AND EXCLUDED.ended_at IS NULL THEN NULL
+					ELSE COALESCE(EXCLUDED.ended_at, app_sessions.ended_at)
+				END
 		`, strings.Join(valueStrings, ", "))
 
 		tag, err := r.pool.Exec(ctx, query, args...)
@@ -512,7 +544,8 @@ func (r *NewSchemaRepo) ListAppSessions(ctx context.Context, params AppSessionLi
 		SELECT id, employee_id, process_name, app_display_name, started_at, ended_at,
 		       machine_id, session_id, platform, process_id, parent_process_id,
 		       installed_app_id, installed_package_id, grouped_by, cgroup_scope, context_label,
-		       foreground_seconds, background_seconds, synced_at, created_at
+		       foreground_seconds, background_seconds, synced_at,
+		       status, last_activity_at, last_sync_at, created_at
 		FROM app_sessions %s
 		ORDER BY started_at DESC
 		LIMIT $%d OFFSET $%d
@@ -532,7 +565,8 @@ func (r *NewSchemaRepo) ListAppSessions(ctx context.Context, params AppSessionLi
 			&s.ID, &s.EmployeeID, &s.ProcessName, &s.AppDisplayName, &s.StartedAt, &s.EndedAt,
 			&s.MachineID, &s.SessionID, &s.Platform, &s.ProcessID, &s.ParentProcessID,
 			&s.InstalledAppID, &s.InstalledPackageID, &s.GroupedBy, &s.CgroupScope, &s.ContextLabel,
-			&s.ForegroundSeconds, &s.BackgroundSeconds, &s.SyncedAt, &s.CreatedAt,
+			&s.ForegroundSeconds, &s.BackgroundSeconds, &s.SyncedAt,
+			&s.Status, &s.LastActivityAt, &s.LastSyncAt, &s.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan app_session row: %w", err)
 		}

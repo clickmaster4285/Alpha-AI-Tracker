@@ -140,6 +140,9 @@ func main() {
 	retentionWorker := jobs.NewRetentionWorker(pool)
 	go retentionWorker.Start(sweepCtx)
 
+	sessionLifecycleSweep := jobs.NewSessionLifecycleSweep(pool)
+	go sessionLifecycleSweep.Start(sweepCtx)
+
 	// ────────────────
 	// Setup Echo
 	// ────────────────

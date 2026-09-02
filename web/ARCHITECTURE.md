@@ -1,7 +1,9 @@
 # Web Architecture — Alpha AI Tracker Dashboard
 
-> **Last audited:** 2026-09-01
+> **Last audited:** 2026-09-02 (3-state session status badge)
 > **Changelog:**
+> - 2026-09-02: **3-state session status badge across journey + logs pages.**
+>   New shared `components/sessions/SessionStatusBadge.tsx` renders ACTIVE (green pulse + "Running"), STALE (amber dot + "Stale · last sync X ago"), and CLOSED (muted) from the server-projected `AppSession.status` field. The accompanying `sessionStatus()` and `isSessionLive()` helpers fall back to the legacy `endedAt ? CLOSED : ACTIVE` rule for pre-031 rows so older backends still render correctly. The 3-state duration end is now used everywhere a session duration is computed: CLOSED → `endedAt` (frozen), STALE → `lastSyncAt` (don't pretend it's still growing), ACTIVE → `now`. New helper `formatRelative(iso)` in `lib/format.ts` produces the "3m ago / 2h ago / 1d ago" labels the STALE badge needs. `AppSession` in `lib/api.ts` gained `status`, `lastActivityAt`, `lastSyncAt`. Pages wired: `employee-journey/timeline`, `employee-journey/apps` (parent row "Status" + per-session expanded row), `logs/comprehensive` (3-state-aware `formatDuration` IIFE).
 > - 2026-09-01: **Attendance/timesheets display aligned with server shift timezone.**
 >   `/attendance` and `/timesheets` format `firstActiveAt`/`lastActiveAt` with
 >   `formatDateTimeInZone(iso, record.timezone)` so the table matches late/present math (not
@@ -165,7 +167,9 @@ web/
     │   │   ├── InventoryTable.tsx  EmptyState.tsx  DeviceClassIcon.tsx
     │   ├── journey/
     │   │   ├── ActivityFilters.tsx  Shared search + date presets + custom range filter bar
-    │   │   └── FocusTime.tsx    #   Foreground/background stacked bar
+    │   │   ├── FocusTime.tsx    #   Foreground/background stacked bar
+    │   ├── sessions/            # Session status badge (3-state app_sessions lifecycle)
+    │   │   └── SessionStatusBadge.tsx  # ACTIVE / STALE / CLOSED pill — server-projected status with legacy endedAt fallback
     │   ├── ui/                  # ~45 shadcn/ui component files (button, card, dialog, table, chart, etc.)
     │   │   ├── button.tsx       #  (all are standard shadcn/ui, no customization)
     │   │   ├── card.tsx

@@ -1,7 +1,9 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-08-22
+> **Last audited:** 2026-09-02 (3-state session lifecycle, last_activity_at)
 > **Changelog:**
+> - 2026-09-02: **Client: app_sessions last_activity_at tracking for the 3-state server lifecycle.**
+>   `Core/Models/AppSession.cs` gained a `DateTime? LastActivityAt` property. `Storage/DatabaseSchema.cs` adds the column via an idempotent `MigrateSql` ALTER, refreshes it on `InsertAppSessionSql` (new session = `log.Timestamp`), on the `CONFLICT` update, on `UpdateAppSessionFocusSql` (sets it to NOW() on every focus change), and on `UpdateAppSessionEndedSql` (freezes it to the close moment). `SqliteLogStore.cs` carries the new parameter through the batched INSERT and reads it back in `MapAppSessionReader`. `Services/LogCollectorService.cs` stamps `LastActivityAt = log.Timestamp` when opening a new session, so the server's `session_lifecycle_sweep` has a meaningful `last_activity_at` value to freeze at CLOSE time. `Services/SyncService.cs` includes `lastActivityAt` in the `POST /api/v1/app-sessions/sync` payload (falling back to `startedAt` when null so older calls still validate). The client's local SQLite is the source of truth for activity history; the server is the source of truth for the projected `status` column. No env knob required on the client.
 > - 2026-08-22: **Flatpak `bwrap` PPID chain walk in embedded Python probe.**
 >   `resolve_app_name(pid)` in `LinuxAtSpiBrowserReader.cs` now detects when the AT-SPI PID belongs to Flatpak's `bwrap` or `xdg-dbus-proxy` and walks up the PPID chain (via `/proc/<pid>/stat`) until it reaches the real app process. The FLATPAK_ID / snap / comm resolution then runs against the real PID, so Floorp/LibreWolf/Waterfox Flatpak installs resolve to their short app ID (`floorp`, `librewolf`, `waterfox`) instead of the proxy name. Verified: `dotnet build` 0/0, 0 warnings.
 > - 2026-08-21: **All hardcoded browser names removed — dynamic `IBrowserRegistry` replaces `BrowserProcessHints` / `IsBrowserProcess` / `BROWSER_HINTS` / `ResolveFamily`.**

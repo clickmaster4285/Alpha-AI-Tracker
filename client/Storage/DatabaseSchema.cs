@@ -189,7 +189,8 @@ internal static class DatabaseSchema
             parent_process_id   INTEGER,
             is_synced           INTEGER NOT NULL DEFAULT 0,
             synced_at           TEXT,
-            created_at          TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+            created_at          TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')),
+            last_activity_at    TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_app_sessions_unsent
@@ -412,6 +413,12 @@ internal static class DatabaseSchema
         -- is re-synced so the server learns the totals.
         ALTER TABLE app_sessions ADD COLUMN foreground_seconds REAL NOT NULL DEFAULT 0;
         ALTER TABLE app_sessions ADD COLUMN background_seconds REAL NOT NULL DEFAULT 0;
+        -- 3-state lifecycle (2026-09-02): last_activity_at carries the
+        -- wall-clock moment of the latest client-side activity on the
+        -- session. Refreshed on every collection cycle for open rows;
+        -- sent on every sync so the server sweeper can STALE/CLOSED
+        -- rows whose trackers stopped reporting.
+        ALTER TABLE app_sessions ADD COLUMN last_activity_at TEXT;
         ALTER TABLE network_info ADD COLUMN first_seen_at TEXT;
         ALTER TABLE network_info ADD COLUMN last_seen_at TEXT;
         ALTER TABLE network_info ADD COLUMN is_current INTEGER NOT NULL DEFAULT 1;
@@ -594,15 +601,20 @@ internal static class DatabaseSchema
             (id, process_name, app_display_name, started_at, ended_at,
              machine_id, employee_id, employee_name, session_id, platform,
              installed_app_id, installed_package_id, process_id, parent_process_id,
-             grouped_by, cgroup_scope, context_label, foreground_seconds, background_seconds)
+             grouped_by, cgroup_scope, context_label, foreground_seconds, background_seconds,
+             last_activity_at)
         VALUES
             ($id, $process_name, $app_display_name, $started_at, $ended_at,
              $machine_id, $employee_id, $employee_name, $session_id, $platform,
              $installed_app_id, $installed_package_id, $process_id, $parent_process_id,
-             $grouped_by, $cgroup_scope, $context_label, $foreground_seconds, $background_seconds)
+             $grouped_by, $cgroup_scope, $context_label, $foreground_seconds, $background_seconds,
+             $last_activity_at)
         ON CONFLICT(id) DO UPDATE SET
             ended_at = COALESCE(excluded.ended_at, app_sessions.ended_at),
             parent_process_id = COALESCE(excluded.parent_process_id, app_sessions.parent_process_id),
+            -- Refresh last_activity_at on every conflict (the row exists, the
+            -- collector re-stored it, the user is still active).
+            last_activity_at = COALESCE(excluded.last_activity_at, app_sessions.last_activity_at),
             -- Any re-stored (updated) row must re-sync so the server learns the change
             -- even when the row was already synced (user rule 2026-08-12).
             is_synced = 0
@@ -611,6 +623,7 @@ internal static class DatabaseSchema
     internal const string UpdateAppSessionEndedSql = @"
         UPDATE app_sessions
         SET ended_at = $ended_at,
+            last_activity_at = $ended_at,
             -- Final focus durations ride along on close when known; NULL keeps the
             -- last flushed value (sessions closed by paths that don't track focus).
             foreground_seconds = COALESCE($foreground_seconds, foreground_seconds),
@@ -633,6 +646,9 @@ internal static class DatabaseSchema
         UPDATE app_sessions
         SET foreground_seconds = COALESCE(foreground_seconds, 0) + $foreground_seconds,
             background_seconds = COALESCE(background_seconds, 0) + $background_seconds,
+            -- Touch last_activity_at on focus changes (the user just moved
+            -- the focus; the server sweeper should know the tracker is alive).
+            last_activity_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'),
             is_synced = 0
         WHERE id = $id
     ";

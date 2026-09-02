@@ -6,6 +6,8 @@ import { Search, ChevronDown, ChevronUp, Loader2, Monitor, Globe, FolderOpen, Ex
 import { useQuery } from '@tanstack/react-query';
 import { appSessionsApi, appItemsApi, employeesApi, type AppSession, type AppItem } from '@/lib/api';
 import { useUrlQueryState } from '@/hooks/use-url-query-state';
+import SessionStatusBadge, { sessionStatus } from '@/components/sessions/SessionStatusBadge';
+import { formatRelative } from '@/lib/format';
 
 export default function ComprehensiveLogs() {
   return (
@@ -196,14 +198,38 @@ function ComprehensiveLogsBody() {
                     <td className="px-4 py-3 text-sm text-muted-foreground">
                       <div className="flex items-center gap-1">
                         {new Date(session.startedAt).toLocaleTimeString()}
-                        {session.endedAt && (
+                        {session.endedAt ? (
                           <span className="text-xs">
                             → {new Date(session.endedAt).toLocaleTimeString()}
                           </span>
+                        ) : (
+                          <SessionStatusBadge
+                            status={sessionStatus(session)}
+                            staleSinceLabel={
+                              sessionStatus(session) === 'STALE'
+                                ? formatRelative(session.lastSyncAt)
+                                : undefined
+                            }
+                          />
                         )}
                       </div>
                       <p className="text-xs">
-                        {formatDuration(session.startedAt, session.endedAt || new Date().toISOString())}
+                        {(() => {
+                          // 3-state-aware duration end (2026-09-02):
+                          //   CLOSED → endedAt (final).
+                          //   STALE  → lastSyncAt (don't pretend it's still growing).
+                          //   ACTIVE → now (still live).
+                          const status = sessionStatus(session);
+                          let end: string;
+                          if (session.endedAt) {
+                            end = session.endedAt;
+                          } else if (status === 'STALE' && session.lastSyncAt) {
+                            end = session.lastSyncAt;
+                          } else {
+                            end = new Date().toISOString();
+                          }
+                          return formatDuration(session.startedAt, end);
+                        })()}
                       </p>
                     </td>
                   </tr>

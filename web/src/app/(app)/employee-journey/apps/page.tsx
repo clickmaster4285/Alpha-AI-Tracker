@@ -6,8 +6,9 @@ import { keepPreviousData, useQueries } from '@tanstack/react-query';
 import EmployeePage from '@/components/employees/EmployeePage';
 import EmptyState from '@/components/employees/EmptyState';
 import ActivityFilters, { type ActivityFilter } from '@/components/journey/ActivityFilters';
+import SessionStatusBadge, { isSessionLive, sessionStatus } from '@/components/sessions/SessionStatusBadge';
 import { appSessionsApi, type AppSession } from '@/lib/api';
-import { formatDateTime, formatSeconds } from '@/lib/format';
+import { formatDateTime, formatRelative, formatSeconds } from '@/lib/format';
 
 interface AppUsage {
   appDisplayName: string;
@@ -19,10 +20,26 @@ interface AppUsage {
   sessions: AppSession[];
 }
 
-/** Total time the session was open: endedAt - startedAt (or now - startedAt while running). */
+/**
+ * Total time the session was open. The end moment depends on the lifecycle
+ * status (2026-09-02 3-state model):
+ *   - CLOSED → endedAt (final).
+ *   - ACTIVE → "now" (the tracker is live; duration grows while open).
+ *   - STALE  → lastSyncAt (we know the tracker stopped reporting then;
+ *              we MUST NOT pretend the session is still growing, but we
+ *              also don't trust any later moment — use the last sync).
+ * Falls back to endedAt then Date.now() for pre-031 rows that lack status.
+ */
 function sessionDurationSeconds(s: AppSession): number {
   const start = new Date(s.startedAt).getTime();
-  const end = s.endedAt ? new Date(s.endedAt).getTime() : Date.now();
+  let end: number;
+  if (s.endedAt) {
+    end = new Date(s.endedAt).getTime();
+  } else if (sessionStatus(s) === 'STALE' && s.lastSyncAt) {
+    end = new Date(s.lastSyncAt).getTime();
+  } else {
+    end = Date.now();
+  }
   return Math.max(0, (end - start) / 1000);
 }
 
@@ -116,8 +133,11 @@ function AppUsageBody({
       entry.sessionCount += 1;
       entry.durationSeconds += sessionDurationSeconds(s);
       entry.sessions.push(s);
-      if (s.startedAt > entry.lastActiveAt) entry.lastActiveAt = s.startedAt;
-      if (!s.endedAt) entry.running = true;
+      const activity = s.lastActivityAt ?? s.lastSyncAt ?? s.startedAt;
+      if (activity > entry.lastActiveAt) entry.lastActiveAt = activity;
+      // "running" = at least one ACTIVE child session whose tracker is live.
+      // STALE / CLOSED sessions are NOT counted as open even if they lack endedAt.
+      if (isSessionLive(s)) entry.running = true;
       map.set(key, entry);
     }
     return [...map.values()].sort((a, b) => b.durationSeconds - a.durationSeconds);
@@ -203,13 +223,9 @@ function AppUsageBody({
                     <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">{formatDateTime(u.lastActiveAt)}</td>
                     <td className="px-4 py-3">
                       {u.running ? (
-                        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-success/15 text-success">
-                          <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse-soft" /> Running
-                        </span>
+                        <SessionStatusBadge status="ACTIVE" />
                       ) : (
-                        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-muted text-muted-foreground">
-                          <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground" /> Closed
-                        </span>
+                        <SessionStatusBadge status="CLOSED" />
                       )}
                     </td>
                   </tr>
@@ -247,25 +263,27 @@ function ExpandedSessions({ sessions }: { sessions: AppSession[] }) {
           </tr>
         </thead>
         <tbody>
-          {sessions.map(s => (
-            <tr key={s.id} className="border-b border-border last:border-0">
-              <td className="px-3 py-2.5 text-sm text-foreground whitespace-nowrap">{formatDateTime(s.startedAt)}</td>
-              <td className="px-3 py-2.5 text-sm text-muted-foreground whitespace-nowrap">
-                {s.endedAt ? (
-                  formatDateTime(s.endedAt)
-                ) : (
-                  <span className="inline-flex items-center gap-1.5 text-xs font-medium bg-success/15 text-success px-2 py-0.5 rounded-full">
-                    <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse-soft" /> Running
-                  </span>
-                )}
-              </td>
-              <td className="px-3 py-2.5 text-sm text-foreground font-medium whitespace-nowrap">{formatSeconds(sessionDurationSeconds(s))}</td>
-              <td className="px-3 py-2.5 text-xs text-muted-foreground">
-                <span className="font-mono">{s.processName || '—'}</span>
-                {s.contextLabel && <span className="text-muted-foreground"> · {s.contextLabel}</span>}
-              </td>
-            </tr>
-          ))}
+          {sessions.map(s => {
+            const status = sessionStatus(s);
+            const staleLabel = status === 'STALE' ? formatRelative(s.lastSyncAt) : undefined;
+            return (
+              <tr key={s.id} className="border-b border-border last:border-0">
+                <td className="px-3 py-2.5 text-sm text-foreground whitespace-nowrap">{formatDateTime(s.startedAt)}</td>
+                <td className="px-3 py-2.5 text-sm text-muted-foreground whitespace-nowrap">
+                  {s.endedAt ? (
+                    formatDateTime(s.endedAt)
+                  ) : (
+                    <SessionStatusBadge status={status} staleSinceLabel={staleLabel} />
+                  )}
+                </td>
+                <td className="px-3 py-2.5 text-sm text-foreground font-medium whitespace-nowrap">{formatSeconds(sessionDurationSeconds(s))}</td>
+                <td className="px-3 py-2.5 text-xs text-muted-foreground">
+                  <span className="font-mono">{s.processName || '—'}</span>
+                  {s.contextLabel && <span className="text-muted-foreground"> · {s.contextLabel}</span>}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>

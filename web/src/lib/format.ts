@@ -59,3 +59,19 @@ export function formatSeconds(sec?: number | null): string {
   const h = Math.floor(m / 60);
   return `${h}h ${m % 60}m`;
 }
+
+/** Compact "3m ago / 2h ago / 1d ago" used for the STALE session pill. */
+export function formatRelative(iso?: string | null, now: Date = new Date()): string {
+  if (!iso) return '—';
+  const diffMs = now.getTime() - new Date(iso).getTime();
+  if (Number.isNaN(diffMs) || diffMs < 0) return 'just now';
+  const sec = Math.floor(diffMs / 1000);
+  if (sec < 5) return 'just now';
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  return `${day}d ago`;
+}

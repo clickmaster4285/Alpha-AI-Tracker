@@ -587,6 +587,14 @@ export interface AppSession {
   foregroundSeconds?: number;
   backgroundSeconds?: number;
   syncedAt?: string;
+  // 3-state lifecycle (2026-09-02). The server sweeper transitions
+  // ACTIVE → STALE → CLOSED based on lastSyncAt. Only CLOSED is
+  // terminal — a live client re-uploading activity with no endedAt
+  // promotes the row back to ACTIVE. Status defaults to ACTIVE when
+  // the field is absent (pre-031 rows).
+  status?: 'ACTIVE' | 'STALE' | 'CLOSED' | string;
+  lastActivityAt?: string;
+  lastSyncAt?: string;
 }
 
 export interface AppSessionListResponse {

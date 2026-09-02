@@ -338,6 +338,11 @@ public class SyncService : BackgroundService
                 contextLabel = e.ContextLabel,
                 foregroundSeconds = e.ForegroundSeconds ?? 0,
                 backgroundSeconds = e.BackgroundSeconds ?? 0,
+                // 3-state lifecycle (2026-09-02): the server sweeper
+                // uses this to flip ACTIVE → STALE → CLOSED. Default to
+                // the sync moment when the client row predates the
+                // migration so older builds still produce a valid row.
+                lastActivityAt = (e.LastActivityAt ?? e.StartedAt).ToString("O"),
             },
             (ids, token) => _store.MarkAppSessionsSentAsync(ids, token),
             e => e.Id,

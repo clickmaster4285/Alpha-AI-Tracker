@@ -524,6 +524,11 @@ public class LogCollectorService : BackgroundService
                         GroupedBy = string.IsNullOrEmpty(scope) ? "pid" : "cgroup",
                         CgroupScope = scope,
                         ContextLabel = SessionLabelResolver.Resolve(baseProcessName, log.ProcessId, _browserRegistry),
+                        // Initial activity stamp = start time. The store + the
+                        // focus-flush UPDATE both refresh this on every cycle
+                        // while the session is open, so the server sweeper
+                        // can tell a live tracker from an offline one.
+                        LastActivityAt = log.Timestamp,
                     };
                     newSessions.Add(session);
                     currentKeys[key] = session.Id;

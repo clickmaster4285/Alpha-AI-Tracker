@@ -1824,6 +1824,7 @@ public class SqliteLogStore : ILogStore, IDisposable
                 var pContextLabel = cmd.Parameters.Add("$context_label", SqliteType.Text);
                 var pFg = cmd.Parameters.Add("$foreground_seconds", SqliteType.Real);
                 var pBg = cmd.Parameters.Add("$background_seconds", SqliteType.Real);
+                var pLastActivity = cmd.Parameters.Add("$last_activity_at", SqliteType.Text);
 
                 foreach (var e in newSessions)
                 {
@@ -1846,6 +1847,7 @@ public class SqliteLogStore : ILogStore, IDisposable
                     pContextLabel.Value = (object?)e.ContextLabel ?? DBNull.Value;
                     pFg.Value = e.ForegroundSeconds ?? 0;
                     pBg.Value = e.BackgroundSeconds ?? 0;
+                    pLastActivity.Value = e.LastActivityAt?.ToString("O") ?? (object)DBNull.Value;
                     await cmd.ExecuteNonQueryAsync(ct);
                 }
             }
@@ -3171,6 +3173,9 @@ public class SqliteLogStore : ILogStore, IDisposable
             ContextLabel = TryGetString(r, "context_label"),
             ForegroundSeconds = TryGetDouble(r, "foreground_seconds"),
             BackgroundSeconds = TryGetDouble(r, "background_seconds"),
+            LastActivityAt = r.IsDBNull(r.GetOrdinal("last_activity_at"))
+                ? null
+                : DateTime.Parse(r.GetString(r.GetOrdinal("last_activity_at"))),
             IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
             SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
             CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),

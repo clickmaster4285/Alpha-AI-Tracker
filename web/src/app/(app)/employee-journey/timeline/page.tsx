@@ -7,7 +7,8 @@ import EmployeePage from '@/components/employees/EmployeePage';
 import EmptyState from '@/components/employees/EmptyState';
 import FocusTime from '@/components/journey/FocusTime';
 import { appSessionsApi } from '@/lib/api';
-import { formatDateTime, formatDuration } from '@/lib/format';
+import { formatDateTime, formatDuration, formatRelative } from '@/lib/format';
+import SessionStatusBadge, { sessionStatus } from '@/components/sessions/SessionStatusBadge';
 
 const PER_PAGE = 30;
 
@@ -104,6 +105,14 @@ function TimelineBody({ employeeId }: { employeeId: string }) {
             {sessions.map(s => {
               const fg = s.foregroundSeconds ?? 0;
               const bg = s.backgroundSeconds ?? 0;
+              const status = sessionStatus(s);
+              // 3-state duration end (2026-09-02): CLOSED → endedAt,
+              // STALE → lastSyncAt, ACTIVE → now.
+              const endIso =
+                s.endedAt
+                || (status === 'STALE' && s.lastSyncAt)
+                || new Date().toISOString();
+              const staleLabel = status === 'STALE' ? formatRelative(s.lastSyncAt) : undefined;
               return (
                 <tr key={s.id} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
                   <td className="px-4 py-3">
@@ -124,22 +133,14 @@ function TimelineBody({ employeeId }: { employeeId: string }) {
                     </div>
                   </td>
                   <td className="px-4 py-3">
-                    {s.endedAt ? (
-                      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-muted text-muted-foreground">
-                        <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground" /> Closed
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-success/15 text-success">
-                        <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse-soft" /> Running
-                      </span>
-                    )}
+                    <SessionStatusBadge status={status} staleSinceLabel={staleLabel} />
                   </td>
                   <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">{formatDateTime(s.startedAt)}</td>
                   <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">
                     {s.endedAt ? formatDateTime(s.endedAt) : '—'}
                   </td>
                   <td className="px-4 py-3 text-sm text-foreground font-medium whitespace-nowrap">
-                    {formatDuration(s.startedAt, s.endedAt || new Date().toISOString())}
+                    {formatDuration(s.startedAt, endIso)}
                   </td>
                   <td className="px-4 py-3">
                     <FocusTime fg={fg} bg={bg} />

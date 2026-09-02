@@ -29,15 +29,11 @@ sudo mkdir -p /usr/share/wine
 sudo ln -s ~/.wine/drive_c/InnoSetup/ISCC.exe /usr/share/wine/ISCC.exe
 ```
 
-
-
 ### Linux installer (.deb)
 
 ```bash
 sudo apt install dpkg  # pre-installed on Ubuntu/Debian
 ```
-
-
 
 ### macOS installer (.dmg) — run ON a Mac
 
@@ -46,8 +42,6 @@ brew install create-dmg
 ```
 
 ---
-
-
 
 ## Build Commands
 
@@ -68,21 +62,15 @@ bash publish/build-installer.sh -h
 
 ---
 
-
-
 ## Output Files
 
-
-| Command    | Output                                        | Format                      |
-| ---------- | --------------------------------------------- | --------------------------- |
+| Command      | Output                                          | Format                      |
+| ------------ | ----------------------------------------------- | --------------------------- |
 | `-b win`   | `installers/AlphaAITracker-Setup-0.2.0.exe`   | Inno Setup wizard installer |
 | `-b linux` | `installers/alpha-ai-tracker_0.2.0_amd64.deb` | Debian package              |
 | `-b mac`   | `installers/AlphaAITracker.dmg`               | macOS disk image            |
 
-
 ---
-
-
 
 ## Rebuilding After Code Changes
 
@@ -95,16 +83,12 @@ cd client
 dotnet build
 ```
 
-
-
 ### Rebuild and Run Locally
 
 ```bash
 cd client
 dotnet run
 ```
-
-
 
 ### Rebuild for Release
 
@@ -113,8 +97,6 @@ cd client
 dotnet build -c Release
 ```
 
-
-
 ### Full Rebuild (Clean + Build)
 
 ```bash
@@ -122,8 +104,6 @@ cd client
 dotnet clean
 dotnet build
 ```
-
-
 
 ### Create Installers After Rebuild
 
@@ -137,8 +117,6 @@ bash publish/build-installer.sh
 
 ---
 
-
-
 ## Stopping the Client
 
 The client runs as a **systemd user service**. Use these commands to stop it:
@@ -149,8 +127,6 @@ The client runs as a **systemd user service**. Use these commands to stop it:
 systemctl --user stop alpha-ai-tracker.service
 ```
 
-
-
 ### Stop + Prevent Auto-Start
 
 ```bash
@@ -158,15 +134,11 @@ systemctl --user stop alpha-ai-tracker.service
 systemctl --user disable alpha-ai-tracker.service
 ```
 
-
-
 ### Kill Immediately
 
 ```bash
 killall -9 client
 ```
-
-
 
 ### Remove Auto-Start on Desktop Login
 
@@ -175,8 +147,6 @@ rm ~/.config/autostart/alpha-ai-tracker.desktop
 ```
 
 ---
-
-
 
 ## Release to GitHub
 
@@ -193,8 +163,6 @@ sudo apt install gh   # Ubuntu/Debian
 echo "YOUR_GITHUB_TOKEN" | gh auth login --with-token
 # Or: gh auth login  # interactive browser-based auth
 ```
-
-
 
 ### Create a Release (One Command)
 
@@ -216,8 +184,6 @@ This will:
 4. Create a GitHub Release with the installer files attached
 5. Verify the release was created
 
-
-
 ### Manual Upload
 
 If you prefer to upload manually:
@@ -231,11 +197,7 @@ bash publish/build-installer.sh
 
 ---
 
-
-
 ## Sending to a Friend
-
-
 
 ### Windows
 
@@ -255,8 +217,6 @@ sudo dpkg -i alpha-ai-tracker_0.2.0_amd64.deb
 > sudo dpkg -r alpha-ai-tracker
 > sudo dpkg -i alpha-ai-tracker_0.2.0_amd64.deb
 > ```
-
-
 
 ### macOS
 

@@ -1,7 +1,9 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-09-01 (shift timezone + attendance display alignment)
+> **Last audited:** 2026-09-02 (3-state app_sessions lifecycle)
 > **Changelog:**
+> - 2026-09-02: **3-state app_sessions lifecycle (ACTIVE / STALE / CLOSED) — orphan "Running forever" bug fixed at the schema level.**
+>   Migration **031** adds 3 columns to `app_sessions` — `status TEXT NOT NULL DEFAULT 'ACTIVE'`, `last_activity_at TIMESTAMPTZ`, `last_sync_at TIMESTAMPTZ` — plus 2 indexes (`status, last_sync_at DESC` and a partial `WHERE status='ACTIVE'`) and backfills 1131 pre-existing rows. New background job `internal/jobs/session_lifecycle_sweep.go` runs every minute, transitioning `ACTIVE → STALE` (no sync for > `SESSION_STALE_AFTER_MINUTES`, default 10) and `STALE → CLOSED` (no sync for > `SESSION_CLOSE_AFTER_HOURS`, default 24). When transitioning to CLOSED, the sweep freezes `ended_at = COALESCE(last_activity_at, last_sync_at, started_at)` so duration reflects real activity. **Upsert recovery in `BulkInsertAppSessions`:** a `ON CONFLICT (id) DO UPDATE` CASE flips STALE/CLOSED back to ACTIVE and clears the premature server-side `ended_at` when a live client re-uploads the row with `ended_at=NULL`; a non-NULL `ended_at` from the client keeps the row CLOSED with the new value. `AppSession` model + DTO + list query updated. Live-tested: 1131 ACTIVE→STALE then 1131 STALE→CLOSED in 62 ms; a live `POST /api/v1/app-sessions/sync` with `ended_at=NULL` flipped a CLOSED row back to ACTIVE in one round-trip.
 > - 2026-09-01: **Attendance late/present uses shift IANA timezone; legacy UTC rows auto-migrated.**
 >   Shifts created before admins set a timezone stayed on migration 028's `UTC` default while
 >   `session_events` carried local offsets — status math disagreed with the web table (e.g. 09:08
@@ -132,7 +134,10 @@ server/
 │   ├── 025_rbac_roles_modules.sql   # roles/modules/submodules/role_submodule_permissions; users.role_id sole source of truth
 │   ├── 026_refresh_tokens.sql        # rotating web refresh-token persistence
 │   ├── 027_shifts.sql               # relational shift catalog + employee assignment
-│   └── 028_time_attendance_phase2.sql # timezone, holidays, aggregate event fields
+│   ├── 028_time_attendance_phase2.sql # timezone, holidays, aggregate event fields
+│   ├── 029_location_samples.sql    # location_samples table (Phase 1 of GPS / geofence)
+│   ├── 030_geofence_zones.sql      # geofence_zones table
+│   └── 031_app_sessions_status.sql # 3-state lifecycle: status + last_activity_at + last_sync_at + 2 indexes (backfill of existing rows)
 │
 └── internal/
     ├── config/config.go         # Loads env vars, builds Config struct (incl. LINK_STALE_DAYS, DEFAULT_SHIFT_TIMEZONE)
@@ -140,6 +145,7 @@ server/
     ├── redis/redis.go           # Redis client wrapper (StoreSecret, ValidateSecret, DeleteSecret)
     ├── jobs/staleness_sweep.go  # Hourly background job deactivating stale employee↔catalog links
     ├── jobs/retention_sweep.go  # Hourly purge of stale app_items and ended app_sessions (RETENTION_DAYS)
+    ├── jobs/session_lifecycle_sweep.go # 1-min sweep: ACTIVE→STALE→CLOSED by last_sync_at; honors SESSION_STALE_AFTER_MINUTES / SESSION_CLOSE_AFTER_HOURS
     │
     ├── models/                  # Database models (structs with db/json tags)
     │   ├── user.go              # User + UserPublic (safe for API)
@@ -349,8 +355,10 @@ Employee token is carried in the request body (`{employeeId, token, entries: [..
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/app-sessions` | List sessions (paginated, filterable: `search`, `platform`, `dateFrom`, `dateTo`, `employeeId`) |
+| GET | `/app-sessions` | List sessions (paginated, filterable: `search`, `platform`, `dateFrom`, `dateTo`, `employeeId`). Each row carries `status` (`ACTIVE`/`STALE`/`CLOSED`), `lastActivityAt`, `lastSyncAt` (3-state lifecycle — see below) |
 | GET | `/app-items` | List items (paginated, filterable: `search` matches title/identifier/url/domain, `dateFrom`, `dateTo`, `itemType`, `session`) |
+
+> **3-state app_sessions lifecycle (migration 031 + `jobs/session_lifecycle_sweep.go`).** Every `app_sessions` row carries a server-projected `status` field (`ACTIVE` / `STALE` / `CLOSED`) plus `lastActivityAt` and `lastSyncAt` timestamps. A 1-minute background sweeper promotes `ACTIVE → STALE` when no sync has been received for `SESSION_STALE_AFTER_MINUTES` (default 10), then `STALE → CLOSED` when no sync has been received for `SESSION_CLOSE_AFTER_HOURS` (default 24). Only CLOSED is terminal. The sweep freezes `ended_at = COALESCE(last_activity_at, last_sync_at, started_at)` at the moment of CLOSE so the duration reflects real activity. **A live client re-uploading a STALE/CLOSED row with `ended_at=NULL` flips it back to ACTIVE** in the upsert (the `ON CONFLICT` CASE in `BulkInsertAppSessions`) and clears the premature server-side `ended_at` — so a network outage never destroys information that may still exist on the client. When the client supplies a non-NULL `ended_at`, the row stays CLOSED with the new value. Pre-031 rows default `status='ACTIVE'`; the web's `sessionStatus()` helper falls back to the legacy `endedAt ? CLOSED : ACTIVE` interpretation for forward compatibility.
 
 ### Employee Detail (Protected)
 

@@ -215,6 +215,10 @@ type AppSessionEntry struct {
 	ContextLabel       *string `json:"contextLabel,omitempty"`
 	ForegroundSeconds  float64 `json:"foregroundSeconds"`
 	BackgroundSeconds  float64 `json:"backgroundSeconds"`
+	// Optional — client populates on heartbeat so the server sweeper
+	// can distinguish "activity within last X min" from "just the
+	// session record survived". Server defaults to started_at on INSERT.
+	LastActivityAt     *string `json:"lastActivityAt,omitempty"`
 }
 
 type SyncAppSessionsRequest struct {
@@ -243,6 +247,10 @@ type AppSessionResponse struct {
 	ForegroundSeconds  float64    `json:"foregroundSeconds"`
 	BackgroundSeconds  float64    `json:"backgroundSeconds"`
 	SyncedAt           *time.Time `json:"syncedAt,omitempty"`
+	// 3-state lifecycle (2026-09-02): ACTIVE → STALE → CLOSED.
+	Status         string     `json:"status"`
+	LastActivityAt *time.Time `json:"lastActivityAt,omitempty"`
+	LastSyncAt     *time.Time `json:"lastSyncAt,omitempty"`
 }
 
 // ────────────────────────────────

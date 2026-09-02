@@ -363,6 +363,12 @@ func (s *NewSchemaService) SyncAppSessions(ctx context.Context, req *dto.SyncApp
 				ended = &t
 			}
 		}
+		var lastActivity *time.Time
+		if e.LastActivityAt != nil {
+			if t, err := time.Parse(time.RFC3339, *e.LastActivityAt); err == nil {
+				lastActivity = &t
+			}
+		}
 		entries = append(entries, models.AppSession{
 			ID:                 e.ID,
 			EmployeeID:         req.EmployeeID,
@@ -382,6 +388,7 @@ func (s *NewSchemaService) SyncAppSessions(ctx context.Context, req *dto.SyncApp
 			ContextLabel:       e.ContextLabel,
 			ForegroundSeconds:  e.ForegroundSeconds,
 			BackgroundSeconds:  e.BackgroundSeconds,
+			LastActivityAt:     lastActivity,
 			SyncedAt:           &now,
 		})
 	}
@@ -460,6 +467,10 @@ func (s *NewSchemaService) ListAppSessions(ctx context.Context, params repositor
 
 	sessions := make([]dto.AppSessionResponse, len(result.Sessions))
 	for i, s := range result.Sessions {
+		status := s.Status
+		if status == "" {
+			status = "ACTIVE" // backfill for pre-031 rows
+		}
 		sessions[i] = dto.AppSessionResponse{
 			ID:                 s.ID,
 			EmployeeID:         s.EmployeeID,
@@ -478,6 +489,9 @@ func (s *NewSchemaService) ListAppSessions(ctx context.Context, params repositor
 			CgroupScope:        s.CgroupScope,
 			ContextLabel:       s.ContextLabel,
 			SyncedAt:           s.SyncedAt,
+			Status:         status,
+			LastActivityAt: s.LastActivityAt,
+			LastSyncAt:     s.LastSyncAt,
 		}
 	}
 
