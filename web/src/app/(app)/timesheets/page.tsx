@@ -6,6 +6,7 @@ import { Clock, Loader2 } from 'lucide-react';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import EmployeeSelector from '@/components/EmployeeSelector';
 import EmptyState from '@/components/employees/EmptyState';
+import ActivityFilters from '@/components/journey/ActivityFilters';
 import {
   attendanceApi,
   employeesApi,
@@ -14,7 +15,7 @@ import {
   type Employee,
 } from '@/lib/api';
 import { formatDateTimeInZone, formatSeconds } from '@/lib/format';
-import { useUrlQueryState } from '@/hooks/use-url-query-state';
+import { useUrlActivityFilter } from '@/hooks/use-url-activity-filter';
 
 const PER_PAGE = 31;
 
@@ -36,16 +37,15 @@ const statusColors: Record<AttendanceStatus, string> = {
   unknown: 'bg-muted text-muted-foreground',
 };
 
-function localToday(): string {
-  const d = new Date();
+/**
+ * Convert an ISO timestamp (from `ActivityFilter.dateFrom`/`dateTo`) to the
+ * `YYYY-MM-DD` form the server's `GET /attendance/range` expects.
+ */
+function isoToYmd(iso: string | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
   const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-
-function daysAgo(n: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() - n);
-  const pad = (v: number) => String(v).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
@@ -58,17 +58,47 @@ export default function TimesheetsPage() {
 }
 
 function TimesheetsPageInner() {
-  // URL-synced filter state — `/attendance` deep-links here with
-  // `?employeeId=&from=&to=` and the page must round-trip those values
-  // both ways (URL → state on mount, state → URL on every change).
-  const [filters, setFilters] = useUrlQueryState(
-    { employeeId: {}, from: {}, to: {} },
-    { employeeId: '', from: daysAgo(13), to: localToday() },
-  );
+  // Single underlying URL state for BOTH the activity filter and the
+  // employee picker — one `useUrlQueryState` instance, one diff ref, no
+  // race between sibling hooks writing disjoint URL keys.
+  const { filter, setFilter, extra: employeeUrl, setExtra: setEmployeeUrl } =
+    useUrlActivityFilter(
+      { employeeId: {} },
+      { employeeId: '' },
+    );
+
+  // One-time default = "Last 14 days" when no preset/from/to is in the URL.
+  // Mirrors the prior `daysAgo(13) → today` window without flooding the
+  // address bar on first load.
+  const [didApplyDefault, setDidApplyDefault] = useState(false);
+  useEffect(() => {
+    if (didApplyDefault) return;
+    const url = new URL(window.location.href);
+    const hasPreset = url.searchParams.has('preset');
+    const hasFrom = url.searchParams.has('from');
+    const hasTo = url.searchParams.has('to');
+    if (!hasPreset && !hasFrom && !hasTo) {
+      // Default: Last 14 days (today + 13 days back)
+      const today = new Date();
+      const start = new Date();
+      start.setDate(start.getDate() - 13);
+      setFilter({
+        search: filter.search,
+        preset: 'custom',
+        dateFrom: new Date(start.getFullYear(), start.getMonth(), start.getDate(), 0, 0, 0).toISOString(),
+        dateTo: new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59).toISOString(),
+      });
+    }
+    setDidApplyDefault(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const [employee, setEmployee] = useState<Employee | null>(null);
-  const from = filters.from;
-  const to = filters.to;
+
+  // Server expects YYYY-MM-DD; ActivityFilter stores ISO. Convert at the call
+  // site (memoized so the query key only changes when the date really changed).
+  const from = useMemo(() => isoToYmd(filter.dateFrom), [filter.dateFrom]);
+  const to = useMemo(() => isoToYmd(filter.dateTo), [filter.dateTo]);
 
   const { data: employeesData } = useQuery({
     queryKey: ['employees', 'selector'],
@@ -78,23 +108,23 @@ function TimesheetsPageInner() {
   // Resolve the URL-selected employee UUID → Employee object once the list
   // arrives. The selector's onChange below pushes the new id back into the URL.
   useEffect(() => {
-    if (!filters.employeeId || !employeesData) {
-      setEmployee(prev => (prev && prev.id === filters.employeeId ? prev : null));
+    if (!employeeUrl.employeeId || !employeesData) {
+      setEmployee(prev => (prev && prev.id === employeeUrl.employeeId ? prev : null));
       return;
     }
-    const match = employeesData.data.find(e => e.id === filters.employeeId);
+    const match = employeesData.data.find(e => e.id === employeeUrl.employeeId);
     setEmployee(prev => (prev?.id === match?.id ? prev : (match ?? null)));
-  }, [filters.employeeId, employeesData]);
+  }, [employeeUrl.employeeId, employeesData]);
 
   const handleSelectEmployee = (emp: Employee | null) => {
     setEmployee(emp);
-    setFilters({ employeeId: emp?.id ?? '' });
+    setEmployeeUrl({ employeeId: emp?.id ?? '' });
   };
 
   return (
     <div className="space-y-4 animate-fade-in">
-      <div className="flex md:flex-row flex-col justify-between">
-        <div className="flex flex-col gap-4 ">
+      <div className="flex md:flex-row flex-col justify-between gap-4">
+        <div className="flex flex-col gap-4">
           <div>
             <h3 className="font-display font-bold text-lg text-foreground">Timesheets</h3>
             <p className="text-xs text-muted-foreground mt-0.5">
@@ -103,36 +133,31 @@ function TimesheetsPageInner() {
           </div>
         </div>
 
-        <div className="flex flex-col xl:flex-row  gap-3 ">
+        <div className="flex flex-col xl:flex-row gap-3">
           <EmployeeSelector
             value={employee?.id ?? ''}
             onChange={handleSelectEmployee}
             placeholder="Select employee…"
             className="w-full lg:w-80"
           />
-          <div className="flex gap-3 ">
-            <input
-              type="date"
-              value={from}
-              max={to}
-              onChange={e => setFilters({ from: e.target.value })}
-              className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground w-full sm:w-auto"
-            />
-            <input
-              type="date"
-              value={to}
-              min={from}
-              onChange={e => setFilters({ to: e.target.value })}
-              className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground w-full sm:w-auto"
-            />
-
-          </div>
         </div>
       </div>
+
+      {/* Server-side filters: search + date (preset/custom range). Mounted
+          above the table so the search input never loses focus on
+          loading/error/empty states. Same component as /employee-journey/apps
+          and the other journey pages. */}
+      <ActivityFilters value={filter} onChange={setFilter} />
+
       {!employee ? (
         <EmptyState icon={Clock} text="Select an employee to view their timesheet history." />
       ) : (
-        <TimesheetBody employee={employee} from={from} to={to} />
+        <TimesheetBody
+          employee={employee}
+          from={from}
+          to={to}
+          search={filter.search}
+        />
       )}
     </div>
   );
@@ -142,10 +167,12 @@ function TimesheetBody({
   employee,
   from,
   to,
+  search,
 }: {
   employee: Employee;
   from: string;
   to: string;
+  search: string;
 }) {
   const {
     data,
@@ -156,7 +183,7 @@ function TimesheetBody({
     fetchNextPage,
     hasNextPage,
   } = useInfiniteQuery({
-    queryKey: ['attendance', 'range', employee.employeeId, from, to, PER_PAGE],
+    queryKey: ['attendance', 'range', employee.employeeId, from, to, search, PER_PAGE],
     queryFn: ({ pageParam }) =>
       attendanceApi.range({
         employeeId: employee.employeeId,
