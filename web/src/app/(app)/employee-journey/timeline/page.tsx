@@ -106,13 +106,16 @@ function TimelineBody({ employeeId }: { employeeId: string }) {
               const fg = s.foregroundSeconds ?? 0;
               const bg = s.backgroundSeconds ?? 0;
               const status = sessionStatus(s);
-              // 3-state duration end (2026-09-02): CLOSED → endedAt,
-              // STALE → lastSyncAt, ACTIVE → now.
+              // 4-state duration end (2026-09-02 + OFFLINE 2026-09-02):
+              // CLOSED → endedAt, STALE/OFFLINE → lastSyncAt, ACTIVE → now.
               const endIso =
                 s.endedAt
-                || (status === 'STALE' && s.lastSyncAt)
+                || ((status === 'STALE' || status === 'OFFLINE') && s.lastSyncAt)
                 || new Date().toISOString();
-              const staleLabel = status === 'STALE' ? formatRelative(s.lastSyncAt) : undefined;
+              const sinceLabel =
+                status === 'OFFLINE' || status === 'STALE'
+                  ? formatRelative(s.lastSyncAt)
+                  : undefined;
               return (
                 <tr key={s.id} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
                   <td className="px-4 py-3">
@@ -133,7 +136,7 @@ function TimelineBody({ employeeId }: { employeeId: string }) {
                     </div>
                   </td>
                   <td className="px-4 py-3">
-                    <SessionStatusBadge status={status} staleSinceLabel={staleLabel} />
+                    <SessionStatusBadge status={status} staleSinceLabel={sinceLabel} />
                   </td>
                   <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">{formatDateTime(s.startedAt)}</td>
                   <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">

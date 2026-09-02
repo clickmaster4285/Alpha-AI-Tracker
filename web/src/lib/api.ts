@@ -587,12 +587,14 @@ export interface AppSession {
   foregroundSeconds?: number;
   backgroundSeconds?: number;
   syncedAt?: string;
-  // 3-state lifecycle (2026-09-02). The server sweeper transitions
-  // ACTIVE → STALE → CLOSED based on lastSyncAt. Only CLOSED is
-  // terminal — a live client re-uploading activity with no endedAt
-  // promotes the row back to ACTIVE. Status defaults to ACTIVE when
-  // the field is absent (pre-031 rows).
-  status?: 'ACTIVE' | 'STALE' | 'CLOSED' | string;
+  // 4-state lifecycle (2026-09-02 + OFFLINE 2026-09-02). The server
+  // sweeper (server/internal/jobs/session_lifecycle_sweep.go) transitions
+  // ACTIVE → OFFLINE → STALE → CLOSED per machine_id based on whether any
+  // row for that machine has a recent lastSyncAt. Only CLOSED is terminal
+  // — a live client re-uploading with no endedAt promotes OFFLINE/STALE
+  // back to ACTIVE; a CLOSED row stays CLOSED. Status defaults to ACTIVE
+  // when the field is absent (pre-031 rows).
+  status?: 'ACTIVE' | 'OFFLINE' | 'STALE' | 'CLOSED' | string;
   lastActivityAt?: string;
   lastSyncAt?: string;
 }

@@ -6,7 +6,11 @@ import { keepPreviousData, useQueries } from '@tanstack/react-query';
 import EmployeePage from '@/components/employees/EmployeePage';
 import EmptyState from '@/components/employees/EmptyState';
 import ActivityFilters, { type ActivityFilter } from '@/components/journey/ActivityFilters';
-import SessionStatusBadge, { isSessionLive, sessionStatus } from '@/components/sessions/SessionStatusBadge';
+import SessionStatusBadge, {
+  isSessionLive,
+  sessionStatus,
+  type SessionStatus,
+} from '@/components/sessions/SessionStatusBadge';
 import { appSessionsApi, type AppSession } from '@/lib/api';
 import { formatDateTime, formatRelative, formatSeconds } from '@/lib/format';
 
@@ -17,25 +21,39 @@ interface AppUsage {
   durationSeconds: number;
   lastActiveAt: string;
   running: boolean;
+  /**
+   * 4-state lifecycle rollup across the group's child sessions.
+   * Priority (highest → lowest): ACTIVE > OFFLINE > STALE > CLOSED.
+   * At least one ACTIVE child ⇒ ACTIVE; otherwise the most "live" non-CLOSED
+   * status; otherwise CLOSED.
+   */
+  topStatus: SessionStatus;
   sessions: AppSession[];
 }
 
 /**
  * Total time the session was open. The end moment depends on the lifecycle
- * status (2026-09-02 3-state model):
- *   - CLOSED → endedAt (final).
- *   - ACTIVE → "now" (the tracker is live; duration grows while open).
- *   - STALE  → lastSyncAt (we know the tracker stopped reporting then;
- *              we MUST NOT pretend the session is still growing, but we
- *              also don't trust any later moment — use the last sync).
+ * status (2026-09-02 4-state model):
+ *   - CLOSED  → endedAt (final).
+ *   - ACTIVE  → "now" (the tracker is live; duration grows while open).
+ *   - STALE   → lastSyncAt (we know the tracker stopped reporting then;
+ *               we MUST NOT pretend the session is still growing, but we
+ *               also don't trust any later moment — use the last sync).
+ *   - OFFLINE → lastSyncAt (machine may come back; freeze the clock).
  * Falls back to endedAt then Date.now() for pre-031 rows that lack status.
  */
 function sessionDurationSeconds(s: AppSession): number {
   const start = new Date(s.startedAt).getTime();
+  // 4-state duration end (2026-09-02 + OFFLINE 2026-09-02):
+  //   CLOSED  → endedAt (final).
+  //   STALE   → lastSyncAt (don't pretend it's still growing).
+  //   OFFLINE → lastSyncAt (machine may come back; freeze the clock).
+  //   ACTIVE  → now (still live).
+  const status = sessionStatus(s);
   let end: number;
   if (s.endedAt) {
     end = new Date(s.endedAt).getTime();
-  } else if (sessionStatus(s) === 'STALE' && s.lastSyncAt) {
+  } else if ((status === 'STALE' || status === 'OFFLINE') && s.lastSyncAt) {
     end = new Date(s.lastSyncAt).getTime();
   } else {
     end = Date.now();
@@ -119,6 +137,13 @@ function AppUsageBody({
 
   const usage = useMemo(() => {
     const map = new Map<string, AppUsage>();
+    // 4-state priority for the group rollup (most-live wins).
+    const rank: Record<SessionStatus, number> = {
+      ACTIVE: 4,
+      OFFLINE: 3,
+      STALE: 2,
+      CLOSED: 1,
+    };
     for (const s of sessions) {
       const key = s.appDisplayName || s.processName || s.id;
       const entry = map.get(key) ?? {
@@ -128,6 +153,7 @@ function AppUsageBody({
         durationSeconds: 0,
         lastActiveAt: s.startedAt,
         running: false,
+        topStatus: 'CLOSED' as SessionStatus,
         sessions: [],
       };
       entry.sessionCount += 1;
@@ -136,8 +162,13 @@ function AppUsageBody({
       const activity = s.lastActivityAt ?? s.lastSyncAt ?? s.startedAt;
       if (activity > entry.lastActiveAt) entry.lastActiveAt = activity;
       // "running" = at least one ACTIVE child session whose tracker is live.
-      // STALE / CLOSED sessions are NOT counted as open even if they lack endedAt.
+      // STALE / OFFLINE / CLOSED sessions are NOT counted as open even if
+      // they lack endedAt — the tracker can't currently be doing work.
       if (isSessionLive(s)) entry.running = true;
+      const childStatus = sessionStatus(s);
+      if (rank[childStatus] > rank[entry.topStatus]) {
+        entry.topStatus = childStatus;
+      }
       map.set(key, entry);
     }
     return [...map.values()].sort((a, b) => b.durationSeconds - a.durationSeconds);
@@ -222,11 +253,11 @@ function AppUsageBody({
                     <td className="px-4 py-3 text-sm text-success font-medium whitespace-nowrap">{formatSeconds(u.durationSeconds)}</td>
                     <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">{formatDateTime(u.lastActiveAt)}</td>
                     <td className="px-4 py-3">
-                      {u.running ? (
-                        <SessionStatusBadge status="ACTIVE" />
-                      ) : (
-                        <SessionStatusBadge status="CLOSED" />
-                      )}
+                      {/* 4-state rollup: at least one ACTIVE child ⇒ ACTIVE;
+                          otherwise the most "live" status across the group
+                          (OFFLINE > STALE > CLOSED) so the pill reflects the
+                          actual machine state, not a binary running flag. */}
+                      <SessionStatusBadge status={u.topStatus} />
                     </td>
                   </tr>
                   {isOpen && (
@@ -265,7 +296,13 @@ function ExpandedSessions({ sessions }: { sessions: AppSession[] }) {
         <tbody>
           {sessions.map(s => {
             const status = sessionStatus(s);
-            const staleLabel = status === 'STALE' ? formatRelative(s.lastSyncAt) : undefined;
+            // Show a relative "since" label for both OFFLINE and STALE rows —
+            // OFFLINE = machine went silent, STALE = gap confirmed large.
+            // (ACTIVE never needs a label; CLOSED has its own absolute timestamps.)
+            const sinceLabel =
+              status === 'OFFLINE' || status === 'STALE'
+                ? formatRelative(s.lastSyncAt)
+                : undefined;
             return (
               <tr key={s.id} className="border-b border-border last:border-0">
                 <td className="px-3 py-2.5 text-sm text-foreground whitespace-nowrap">{formatDateTime(s.startedAt)}</td>
@@ -273,7 +310,7 @@ function ExpandedSessions({ sessions }: { sessions: AppSession[] }) {
                   {s.endedAt ? (
                     formatDateTime(s.endedAt)
                   ) : (
-                    <SessionStatusBadge status={status} staleSinceLabel={staleLabel} />
+                    <SessionStatusBadge status={status} staleSinceLabel={sinceLabel} />
                   )}
                 </td>
                 <td className="px-3 py-2.5 text-sm text-foreground font-medium whitespace-nowrap">{formatSeconds(sessionDurationSeconds(s))}</td>

@@ -206,24 +206,28 @@ function ComprehensiveLogsBody() {
                           <SessionStatusBadge
                             status={sessionStatus(session)}
                             staleSinceLabel={
-                              sessionStatus(session) === 'STALE'
-                                ? formatRelative(session.lastSyncAt)
-                                : undefined
+                              (() => {
+                                const s = sessionStatus(session);
+                                return s === 'OFFLINE' || s === 'STALE'
+                                  ? formatRelative(session.lastSyncAt)
+                                  : undefined;
+                              })()
                             }
                           />
                         )}
                       </div>
                       <p className="text-xs">
                         {(() => {
-                          // 3-state-aware duration end (2026-09-02):
-                          //   CLOSED → endedAt (final).
-                          //   STALE  → lastSyncAt (don't pretend it's still growing).
-                          //   ACTIVE → now (still live).
+                          // 4-state-aware duration end (2026-09-02 + OFFLINE 2026-09-02):
+                          //   CLOSED  → endedAt (final).
+                          //   STALE   → lastSyncAt (don't pretend it's still growing).
+                          //   OFFLINE → lastSyncAt (machine may come back; freeze the clock).
+                          //   ACTIVE  → now (still live).
                           const status = sessionStatus(session);
                           let end: string;
                           if (session.endedAt) {
                             end = session.endedAt;
-                          } else if (status === 'STALE' && session.lastSyncAt) {
+                          } else if ((status === 'STALE' || status === 'OFFLINE') && session.lastSyncAt) {
                             end = session.lastSyncAt;
                           } else {
                             end = new Date().toISOString();
