@@ -34,6 +34,17 @@ export interface EmployeePageContext {
    */
   filter: import('@/components/journey/ActivityFilters').ActivityFilter;
   setFilter: (next: import('@/components/journey/ActivityFilters').ActivityFilter) => void;
+  /**
+   * URL-synced body keys (anything the body wants to keep on the URL —
+   * e.g. `tab` + `appSearch` + `pkgSearch` for the Installed Software
+   * page). The shell forwards its `useUrlActivityFilter`'s `extraSchema`
+   * / `extraInitial` into the same underlying `useUrlQueryState` so
+   * body writes never erase the picker. Bodies that need to read/write
+   * their own URL keys should destructure `body` and use it instead of
+   * calling `useUrlQueryState` themselves.
+   */
+  body: Record<string, string>;
+  setBody: (patch: Record<string, string> | ((prev: Record<string, string>) => Record<string, string>)) => void;
 }
 
 interface EmployeePageProps {
@@ -43,10 +54,19 @@ interface EmployeePageProps {
   /** Fetch the aggregate GET /employees/:id/detail payload for the selected employee. */
   fetchDetail?: boolean;
   /**
+   * Optional body-specific URL keys (e.g. `{tab, appSearch, pkgSearch}`
+   * for the Installed Software page). Forwarded into the shell's
+   * `useUrlActivityFilter` so the body shares the single underlying
+   * `useUrlQueryState` with the picker — no second hook instance, no
+   * race, no "previous filter got reset" surprise.
+   */
+  bodySchema?: Record<string, { parse?: (raw: string) => string }>;
+  bodyInitial?: Record<string, string>;
+  /**
    * Render-prop that builds the page body once an employee is selected.
-   * Receives the resolved employee + the shell's filter state + an
-   * optional `setEmployeeId` callback for bodies that want to share
-   * this shell's URL state.
+   * Receives the resolved employee + the shell's filter state + the
+   * body's URL state + an optional `setEmployeeId` callback for bodies
+   * that want to share this shell's URL state.
    */
   children: (ctx: EmployeePageContext) => React.ReactNode;
 }
@@ -79,20 +99,31 @@ export default function EmployeePage({
   subtitle,
   icon: Icon,
   fetchDetail = false,
+  bodySchema,
+  bodyInitial,
   children,
 }: EmployeePageProps) {
   // The single URL hook for the whole page — owns `employeeId` plus the
-  // four activity-filter keys (`q/preset/from/to`). Bodies receive
-  // `filter`/`setFilter` from the render-prop and use them directly
-  // (instead of calling `useUrlActivityFilter` themselves). This is
-  // the structural fix for the "pick employee then change filter wipes
-  // the picker" bug — there is now exactly one `useUrlQueryState` on
-  // the page and no race window between two instances.
+  // four activity-filter keys (`q/preset/from/to`) plus any body-supplied
+  // keys (e.g. `tab` + `appSearch` + `pkgSearch` for the Installed
+  // Software page). Bodies receive `filter`/`setFilter` AND `body`/`setBody`
+  // from the render-prop and use them directly (instead of calling
+  // `useUrlActivityFilter` / `useUrlQueryState` themselves). This is the
+  // structural fix for the "pick employee then change filter wipes the
+  // picker" bug — there is now exactly one `useUrlQueryState` on the
+  // page and no race window between two instances.
   const { filter, setFilter, extra: urlExtra, setExtra } = useUrlActivityFilter(
-    { employeeId: {} },
-    { employeeId: '' },
+    { employeeId: {}, ...(bodySchema ?? {}) },
+    { employeeId: '', ...(bodyInitial ?? {}) },
   );
   const employeeId = urlExtra.employeeId;
+  // Body's own URL state — everything in `extra` except `employeeId` (the
+  // shell's picker key). The body destructures this and calls `setBody`
+  // instead of maintaining its own `useUrlQueryState`.
+  const body: Record<string, string> = {};
+  for (const key of Object.keys(bodySchema ?? {})) {
+    body[key] = (urlExtra as unknown as Record<string, string>)[key] ?? '';
+  }
 
   // Same query key as EmployeeSelector — one shared cache entry.
   const { data: employeesData } = useQuery({
@@ -156,6 +187,14 @@ export default function EmployeePage({
           setEmployeeId: (id: string) => setExtra({ employeeId: id }),
           filter,
           setFilter,
+          body,
+          // `setBody` only writes the body keys (never the picker's
+          // `employeeId` or the activity-filter `q/preset/from/to`), so
+          // it can never erase the sibling URL state.
+          setBody: (patch) => {
+            const next = typeof patch === 'function' ? patch(body) : { ...body, ...patch };
+            setExtra(next as Partial<Record<string, string>>);
+          },
         })
       )}
     </div>
