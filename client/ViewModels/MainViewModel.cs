@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Runtime.InteropServices;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using client.Configuration;
@@ -763,7 +764,20 @@ public partial class MainViewModel : ViewModelBase
         try
         {
             var serverUrl = _config.ServerUrl ?? "http://localhost:8080";
-            var payload = new { employeeId = EmployeeId.Trim(), secretKey = SecretKey.Trim() };
+            // Include machineId/platform/clientVersion so the server binds the device
+            // record to THIS specific machine (its persisted .machine-id), not the
+            // "default-<employeeId>" fallback. Without it, every login rotates the
+            // device record under the same synthetic key, and any other live client
+            // (or a manual curl re-login) can revoke the token this client just got
+            // back — the next sync then 401s with a token whose server row is gone.
+            var payload = new
+            {
+                employeeId = EmployeeId.Trim(),
+                secretKey = SecretKey.Trim(),
+                machineId = _config.ClientId,
+                platform = RuntimeInformation.OSDescription,
+                clientVersion = AppInfo.Version,
+            };
             var json = JsonSerializer.Serialize(payload);
             var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
 

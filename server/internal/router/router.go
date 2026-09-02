@@ -16,6 +16,7 @@ func Setup(
 	cfg *config.Config,
 	authService *services.AuthService,
 	deviceRepo *repository.DeviceRepo,
+	userRepo *repository.UserRepo,
 	authHandler *handlers.AuthHandler,
 	userHandler *handlers.UserHandler,
 	employeeHandler *handlers.EmployeeHandler,
@@ -72,7 +73,7 @@ func Setup(
 	// ─────────────────────────────
 	syncGroup := e.Group("/api/v1")
 	if deviceRepo != nil {
-		syncGroup.Use(appMiddleware.DeviceAuth(deviceRepo, authService))
+		syncGroup.Use(appMiddleware.DeviceAuth(deviceRepo, userRepo, authService))
 	}
 
 	// Phase 1 sync endpoints

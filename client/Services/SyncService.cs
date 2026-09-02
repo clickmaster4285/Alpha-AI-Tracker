@@ -47,6 +47,24 @@ public class SyncService : BackgroundService
     private string? _token;
     private string? _deviceToken;
 
+    // When a sync returns 401, we clear _deviceToken so the NEXT pass falls back to
+    // the long-lived Bearer JWT (JWT_EMPLOYEE_ACCESS_EXPIRY=360h on the server). A
+    // single 401 is not yet conclusive — the device record may simply have been
+    // rotated by another login. So we only "give up" after the JWT fallback ALSO
+    // fails within a short window. The flag is cleared the moment any sync
+    // succeeds, so a transient server hiccup doesn't lock us out of the device path.
+    private bool _authLooksDead;
+    private DateTime _lastAuthFailureAt = DateTime.MinValue;
+    private static readonly TimeSpan AuthGiveUpWindow = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Raised when SyncService has concluded that the stored credentials are no longer
+    /// accepted by the server (both the device token AND the Bearer JWT rejected).
+    /// MainViewModel listens to surface a clear "please re-login" message instead of
+    /// letting the warning loop silently retry.
+    /// </summary>
+    public event Action? OnAuthCredentialsDead;
+
     // Exponential backoff on failed passes: 5s → 10s → 20s → … → SyncBackoffMaxSec.
     private TimeSpan _backoff = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan LoginPollDelay = TimeSpan.FromSeconds(5);
@@ -662,11 +680,18 @@ public class SyncService : BackgroundService
             var response = await _httpClient.SendAsync(request, cts.Token);
 
             if (response.IsSuccessStatusCode)
+            {
+                // A sync that succeeded with the device token proves the device record
+                // is still live on the server — clear the "auth looks dead" state if a
+                // previous 401 trip had set it.
+                _authLooksDead = false;
                 return true;
+            }
 
             if ((int)response.StatusCode == 401 || (int)response.StatusCode == 403)
             {
                 _logger.LogWarning("Auth failed (status {Status}) for {Endpoint}", (int)response.StatusCode, endpoint);
+                await HandleAuthFailureAsync(endpoint, ct);
             }
             else
             {
@@ -701,17 +726,76 @@ public class SyncService : BackgroundService
             if (info == null || string.IsNullOrEmpty(info.Token))
             {
                 _employeeId = _employeeName = _token = _deviceToken = null;
+                _authLooksDead = false;
                 return false;
             }
             _employeeId = info.EmployeeId;
             _employeeName = info.Name;
             _token = info.Token;
             _deviceToken = info.DeviceToken;
+            // Fresh credentials from SQLite — clear the dead state so the next
+            // 401 (if any) is treated as a fresh first failure, not a continuation.
+            _authLooksDead = false;
+            _lastAuthFailureAt = DateTime.MinValue;
             return true;
         }
         catch
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// Called when a sync endpoint returns 401/403. The server's DeviceAuth middleware
+    /// rejects the credential for one of three reasons: (1) the device record was
+    /// revoked by a re-login from another client, (2) the JWT is malformed or expired,
+    /// (3) the server was restarted and lost in-memory state. The first two are
+    /// recoverable on the NEXT pass by falling back from Device to Bearer (or vice
+    /// versa); only persistent rejections trigger the "please re-login" callback.
+    /// </summary>
+    private async Task HandleAuthFailureAsync(string endpoint, CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+
+        // If we were using the device token and just got 401, drop it so the next
+        // request tries the Bearer JWT (which is 360h long-lived and only dies on a
+        // server restart with the in-memory signing key gone). One Device→Bearer
+        // rotation per failure window.
+        if (!string.IsNullOrEmpty(_deviceToken))
+        {
+            _logger.LogInformation(
+                "Device token rejected for {Endpoint} — falling back to Bearer JWT on next pass",
+                endpoint);
+            _deviceToken = null;
+            _lastAuthFailureAt = now;
+            return;
+        }
+
+        // We were already on the Bearer JWT and STILL got 401. This is the
+        // conclusive "credentials are dead" state — only reached when both the
+        // device record AND the JWT are invalid (e.g. server restart wiped
+        // in-memory state, or the employee was deleted). Mark dead and fire the
+        // event so the UI can prompt for re-login. Only fire the event ONCE per
+        // dead-credential episode — otherwise every subsequent 401 logs and pings
+        // the UI again.
+        if (!string.IsNullOrEmpty(_token) && (now - _lastAuthFailureAt) < AuthGiveUpWindow)
+        {
+            if (!_authLooksDead)
+            {
+                _authLooksDead = true;
+                _logger.LogWarning(
+                    "Both Device token and Bearer JWT rejected for {Endpoint} within {Window}s — credentials are dead. " +
+                    "Open the GUI and log in again.",
+                    endpoint, (int)AuthGiveUpWindow.TotalSeconds);
+                try { OnAuthCredentialsDead?.Invoke(); }
+                catch (Exception ex) { _logger.LogDebug(ex, "OnAuthCredentialsDead handler threw"); }
+            }
+            return;
+        }
+
+        // Reset the failure window so a single isolated 401 doesn't accumulate into
+        // the "dead" verdict.
+        _lastAuthFailureAt = now;
+        await Task.CompletedTask;
     }
 }

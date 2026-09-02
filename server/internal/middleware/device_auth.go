@@ -14,7 +14,7 @@ import (
 
 // DeviceAuth creates middleware that authenticates device tokens (or fallback employee JWTs)
 // and attaches employee_id and device_id to Echo context.
-func DeviceAuth(deviceRepo *repository.DeviceRepo, authService *services.AuthService) echo.MiddlewareFunc {
+func DeviceAuth(deviceRepo *repository.DeviceRepo, userRepo *repository.UserRepo, authService *services.AuthService) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			authHeader := c.Request().Header.Get("Authorization")
@@ -61,7 +61,19 @@ func DeviceAuth(deviceRepo *repository.DeviceRepo, authService *services.AuthSer
 				claims, err := authService.ValidateToken(token)
 				if err == nil && claims != nil && claims.UserID != "" &&
 					claims.Issuer == "alpha-ai-tracker-employee" {
-					c.Set("employee_id", claims.UserID)
+					// The JWT's UserID is the users.id (a UUID), but the sync
+					// handlers look up by employee_id (e.g. "IS-131"). Resolve
+					// the user row to get the human-readable employee_id —
+					// this is the only way a Bearer-only request lands data
+					// on the right employee when the device record has been
+					// rotated out by another login.
+					empID := claims.UserID
+					if userRepo != nil {
+						if u, uerr := userRepo.GetByID(c.Request().Context(), claims.UserID); uerr == nil && u != nil {
+							empID = u.EmployeeID
+						}
+					}
+					c.Set("employee_id", empID)
 					return next(c)
 				}
 			}
