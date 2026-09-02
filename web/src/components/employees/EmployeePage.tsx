@@ -4,7 +4,7 @@ import { Loader2, UserX } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import EmployeeSelector from '@/components/EmployeeSelector';
 import { useEmployeeDetail } from '@/hooks/use-employee-detail';
-import { useUrlQueryState } from '@/hooks/use-url-query-state';
+import { useUrlActivityFilter } from '@/hooks/use-url-activity-filter';
 import { employeesApi, type Employee, type EmployeeDetail } from '@/lib/api';
 
 export interface EmployeePageContext {
@@ -13,6 +13,27 @@ export interface EmployeePageContext {
   /** Aggregate machine picture — only present when fetchDetail is enabled. */
   detail?: EmployeeDetail;
   detailLoading: boolean;
+  /**
+   * URL setter for the `?employeeId=` key. Bodies normally just read
+   * `employee.employeeId` and leave the picker as the sole writer, but
+   * this is exposed for bodies that need to round-trip the employee
+   * (e.g. a "deep link to a different employee" button).
+   */
+  setEmployeeId?: (employeeId: string) => void;
+  /**
+   * URL-synced activity filter (search + date preset + dateFrom/dateTo).
+   * The shell owns the underlying `useUrlActivityFilter` and SHARES its
+   * state with the body via this render-prop — there is exactly one
+   * `useUrlQueryState` instance per page, so writes from the picker
+   * (changing `employeeId`) and writes from the body's filter chips
+   * (changing `q/preset/from/to`) never race, never erase each other,
+   * never produce a "previous filter got reset" surprise. Bodies that
+   * also have their own URL state should merge their keys into the
+   * same extra schema (see the shell call site for the canonical
+   * `{employeeId}` extra).
+   */
+  filter: import('@/components/journey/ActivityFilters').ActivityFilter;
+  setFilter: (next: import('@/components/journey/ActivityFilters').ActivityFilter) => void;
 }
 
 interface EmployeePageProps {
@@ -21,6 +42,12 @@ interface EmployeePageProps {
   icon: React.ElementType;
   /** Fetch the aggregate GET /employees/:id/detail payload for the selected employee. */
   fetchDetail?: boolean;
+  /**
+   * Render-prop that builds the page body once an employee is selected.
+   * Receives the resolved employee + the shell's filter state + an
+   * optional `setEmployeeId` callback for bodies that want to share
+   * this shell's URL state.
+   */
   children: (ctx: EmployeePageContext) => React.ReactNode;
 }
 
@@ -32,11 +59,20 @@ interface EmployeePageProps {
  *
  * URL state
  * ---------
- * The selected employee is mirrored to `?employeeId=<uuid>`. Any sibling
- * page (the employees table action menu, an external link) can deep-link
- * to a specific journey or device-specs subpage by adding that param; a
- * manual address-bar edit propagates back into the picker on the next
- * render. See the Web URL-State Rule in AGENTS.md §6.
+ * The shell owns the SINGLE `useUrlActivityFilter` instance for the
+ * page, exposing BOTH the activity filter (search + date) and the
+ * `?employeeId=<uuid>` picker key through the same hook — one
+ * underlying `useUrlQueryState`, one `lastSerialized` ref, one
+ * `latestWrittenSearch` chain slot. There is no second
+ * `useUrlQueryState` instance to race against, so picking an employee
+ * and then clicking a date preset (or vice versa) never resets the
+ * sibling key.
+ *
+ * Any sibling page (the employees table action menu, an external link)
+ * can deep-link to a specific journey or device-specs subpage by adding
+ * `?employeeId=<uuid>`; a manual address-bar edit propagates back into
+ * the picker on the next render. See the Web URL-State Rule in
+ * AGENTS.md §6.
  */
 export default function EmployeePage({
   title,
@@ -45,11 +81,18 @@ export default function EmployeePage({
   fetchDetail = false,
   children,
 }: EmployeePageProps) {
-  const [filters, setFilters] = useUrlQueryState(
+  // The single URL hook for the whole page — owns `employeeId` plus the
+  // four activity-filter keys (`q/preset/from/to`). Bodies receive
+  // `filter`/`setFilter` from the render-prop and use them directly
+  // (instead of calling `useUrlActivityFilter` themselves). This is
+  // the structural fix for the "pick employee then change filter wipes
+  // the picker" bug — there is now exactly one `useUrlQueryState` on
+  // the page and no race window between two instances.
+  const { filter, setFilter, extra: urlExtra, setExtra } = useUrlActivityFilter(
     { employeeId: {} },
     { employeeId: '' },
   );
-  const employeeId = filters.employeeId;
+  const employeeId = urlExtra.employeeId;
 
   // Same query key as EmployeeSelector — one shared cache entry.
   const { data: employeesData } = useQuery({
@@ -62,7 +105,7 @@ export default function EmployeePage({
   const detailQuery = useEmployeeDetail(fetchDetail ? employeeId : '');
 
   const handleChange = (emp: Employee | null) => {
-    setFilters({ employeeId: emp?.id ?? '' });
+    setExtra({ employeeId: emp?.id ?? '' });
   };
 
   return (
@@ -106,7 +149,14 @@ export default function EmployeePage({
           </p>
         </div>
       ) : (
-        children({ employee, detail: detailQuery.data, detailLoading: detailQuery.isLoading })
+        children({
+          employee,
+          detail: detailQuery.data,
+          detailLoading: detailQuery.isLoading,
+          setEmployeeId: (id: string) => setExtra({ employeeId: id }),
+          filter,
+          setFilter,
+        })
       )}
     </div>
   );

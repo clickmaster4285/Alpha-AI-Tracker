@@ -6,7 +6,6 @@ import { keepPreviousData, useInfiniteQuery } from '@tanstack/react-query';
 import EmployeePage from '@/components/employees/EmployeePage';
 import EmptyState from '@/components/employees/EmptyState';
 import ActivityFilters, { type ActivityFilter } from '@/components/journey/ActivityFilters';
-import { useUrlActivityFilter } from '@/hooks/use-url-activity-filter';
 import { appItemsApi, type AppItem } from '@/lib/api';
 import { formatDateTime, formatDuration, formatSeconds } from '@/lib/format';
 
@@ -63,17 +62,29 @@ export default function EmployeeJourneyWeb() {
         subtitle="Websites the employee visited, captured from browser journeys."
         icon={Globe}
       >
-        {({ employee }) => <WebBody employeeId={employee.employeeId} />}
+        {({ employee, filter, setFilter }) => (
+          <WebBody employeeId={employee.employeeId} filter={filter} setFilter={setFilter} />
+        )}
       </EmployeePage>
     </Suspense>
   );
 }
 
-function WebBody({ employeeId }: { employeeId: string }) {
+function WebBody({
+  employeeId,
+  filter,
+  setFilter,
+}: {
+  employeeId: string;
+  filter: ActivityFilter;
+  setFilter: (next: ActivityFilter) => void;
+}) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  // URL-synced filter (preset / search / custom date range). The default
-  // is "today" so the URL is empty on first load — see useUrlActivityFilter.
-  const { filter, setFilter } = useUrlActivityFilter();
+  // The filter (`q/preset/from/to`) and the picker (`?employeeId=`) are
+  // managed by the surrounding <EmployeePage> shell through ONE
+  // `useUrlActivityFilter` instance, so the body never has its own URL
+  // hook to race against. Picking an employee, then changing a date
+  // preset (or vice versa) preserves the sibling key.
   const [isFiltering, setIsFiltering] = useState(false);
 
   const toggle = (domain: string) => {

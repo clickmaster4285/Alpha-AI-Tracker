@@ -71,9 +71,28 @@ interface ActivityFiltersProps {
   value: ActivityFilter;
   onChange: (filter: ActivityFilter) => void;
   loading?: boolean;
+  /**
+   * Restrict the visible preset chips. The custom-range popover is always
+   * available (drives `from`/`to` for `preset=custom`). Pages whose server
+   * endpoint accepts a single date (`/attendance/day`) pass
+   * `['today', 'yesterday']` so users can only pick one day or an explicit
+   * custom day — multi-day ranges are still encodable in the URL via
+   * `?from=&to=` (so deep-links from other pages still work) but cannot be
+   * picked from the popover UI.
+   *
+   * When omitted, all five presets are shown.
+   */
+  availablePresets?: DatePreset[];
+  /**
+   * Lock the custom-range popover to single-day selection. The Calendar is
+   * rendered in `single` mode and `applyCustomRange` sets `dateFrom = dateTo`.
+   * Used by `/attendance` so a one-row-per-day log cannot accidentally show
+   * "Monday's row" for a Tuesday–Wednesday range.
+   */
+  singleDay?: boolean;
 }
 
-export default function ActivityFilters({ value, onChange, loading }: ActivityFiltersProps) {
+export default function ActivityFilters({ value, onChange, loading, availablePresets, singleDay }: ActivityFiltersProps) {
   const [searchInput, setSearchInput] = useState(value.search);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -100,13 +119,18 @@ export default function ActivityFilters({ value, onChange, loading }: ActivityFi
     onChange({ ...value, preset, dateFrom, dateTo });
   };
 
-  const applyCustomRange = (range: { from?: Date; to?: Date } | undefined) => {
-    if (!range?.from || !range.to) return;
+  const applyCustomRange = (range: { from?: Date; to?: Date } | Date | undefined) => {
+    // Range mode: { from, to } (both required).
+    // Single mode: a single Date — treat from === to so the URL state
+    // stays symmetric and `/attendance` shows one row for the picked day.
+    const from = range instanceof Date ? range : range?.from;
+    if (!from) return;
+    const to = range instanceof Date ? range : range?.to ?? from;
     onChange({
       ...value,
       preset: 'custom',
-      dateFrom: startOfDay(range.from).toISOString(),
-      dateTo: endOfDay(range.to).toISOString(),
+      dateFrom: startOfDay(from).toISOString(),
+      dateTo: endOfDay(to).toISOString(),
     });
   };
 
@@ -117,8 +141,14 @@ export default function ActivityFilters({ value, onChange, loading }: ActivityFi
   // until the user actively changes it). Hiding a destructive button stops
   // a half-typed clear from accidentally wiping state during a deep link.
 
+  const visiblePresets = (availablePresets ?? PRESETS.map(p => p.key)).filter(
+    key => PRESETS.some(p => p.key === key),
+  );
+
   const rangeLabel = value.preset === 'custom' && value.dateFrom && value.dateTo
-    ? `${format(new Date(value.dateFrom), 'MMM d')} – ${format(new Date(value.dateTo), 'MMM d')}`
+    ? singleDay
+      ? format(new Date(value.dateFrom), 'MMM d, yyyy')
+      : `${format(new Date(value.dateFrom), 'MMM d')} – ${format(new Date(value.dateTo), 'MMM d')}`
     : presetLabel(value.preset);
 
   return (
@@ -139,22 +169,25 @@ export default function ActivityFilters({ value, onChange, loading }: ActivityFi
 
       {/* Date presets */}
       <div className="flex items-center gap-1 flex-wrap">
-        {PRESETS.map(p => (
-          <button
-            key={p.key}
-            onClick={() => applyPreset(p.key)}
-            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
-              value.preset === p.key
-                ? 'bg-primary text-primary-foreground shadow-card-hover'
-                : 'text-muted-foreground hover:text-foreground hover:bg-muted'
-            }`}
-          >
-            {p.label}
-          </button>
-        ))}
+        {visiblePresets.map(key => {
+          const p = PRESETS.find(pp => pp.key === key)!;
+          return (
+            <button
+              key={p.key}
+              onClick={() => applyPreset(p.key)}
+              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
+                value.preset === p.key
+                  ? 'bg-primary text-primary-foreground shadow-card-hover'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-muted'
+              }`}
+            >
+              {p.label}
+            </button>
+          );
+        })}
       </div>
 
-      {/* Custom date range */}
+      {/* Custom date range (single day when the page is single-day-scoped) */}
       <Popover>
         <PopoverTrigger asChild>
           <button
@@ -169,15 +202,24 @@ export default function ActivityFilters({ value, onChange, loading }: ActivityFi
           </button>
         </PopoverTrigger>
         <PopoverContent className="w-auto p-0 bg-card border-border" align="start">
-          <Calendar
-            mode="range"
-            selected={{
-              from: value.dateFrom ? new Date(value.dateFrom) : undefined,
-              to: value.dateTo ? new Date(value.dateTo) : undefined,
-            }}
-            onSelect={applyCustomRange}
-            numberOfMonths={2}
-          />
+          {singleDay ? (
+            <Calendar
+              mode="single"
+              selected={value.dateFrom ? new Date(value.dateFrom) : undefined}
+              onSelect={applyCustomRange}
+              initialFocus
+            />
+          ) : (
+            <Calendar
+              mode="range"
+              selected={{
+                from: value.dateFrom ? new Date(value.dateFrom) : undefined,
+                to: value.dateTo ? new Date(value.dateTo) : undefined,
+              }}
+              onSelect={applyCustomRange}
+              numberOfMonths={2}
+            />
+          )}
         </PopoverContent>
       </Popover>
     </div>
