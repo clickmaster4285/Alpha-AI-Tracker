@@ -1866,8 +1866,21 @@ public class SqliteLogStore : ILogStore, IDisposable
         await _connectionGate.WaitAsync(ct);
         try
         {
+            // Zombie-prevention (2026-09-02): skip closed sessions.
+            // A row with `ended_at IS NOT NULL` is already a clean close
+            // — the upsert finalizes it on the next push, and re-sending
+            // it on every focus-flush was the source of the 26h "Stale"
+            // chrome session. The legitimate case for a closed row to
+            // re-sync is a late foreground/background flush where
+            // last_activity_at is still moving past ended_at, so we keep
+            // those (rare; focus flush now respects ended_at too).
             var cmd = _connection.CreateCommand();
-            cmd.CommandText = "SELECT * FROM app_sessions WHERE is_synced = 0 ORDER BY started_at ASC LIMIT $limit";
+            cmd.CommandText = @"
+                SELECT * FROM app_sessions
+                 WHERE is_synced = 0
+                   AND (ended_at IS NULL OR last_activity_at > ended_at)
+                 ORDER BY started_at ASC
+                 LIMIT $limit";
             cmd.Parameters.AddWithValue("$limit", limit);
             var results = new List<AppSession>();
             await using var reader = await cmd.ExecuteReaderAsync(ct);

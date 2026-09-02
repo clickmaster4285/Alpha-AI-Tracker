@@ -648,8 +648,20 @@ internal static class DatabaseSchema
             background_seconds = COALESCE(background_seconds, 0) + $background_seconds,
             -- Touch last_activity_at on focus changes (the user just moved
             -- the focus; the server sweeper should know the tracker is alive).
-            last_activity_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'),
-            is_synced = 0
+            -- ZOMBIE-PREVENTION (2026-09-02): only do this for an open session.
+            -- A closed session (`ended_at IS NOT NULL`) must not be re-queued
+            -- or re-stamped with a fresh activity timestamp — that was the
+            -- source of the 26h Stale chrome session bug. Focus updates
+            -- arriving after close are still accumulated (the final flush
+            -- happens via a dedicated close path, not the focus loop).
+            last_activity_at = CASE
+                WHEN ended_at IS NULL THEN strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')
+                ELSE last_activity_at
+            END,
+            is_synced = CASE
+                WHEN ended_at IS NULL THEN 0
+                ELSE is_synced
+            END
         WHERE id = $id
     ";
 

@@ -337,14 +337,17 @@ func (r *NewSchemaRepo) BulkInsertAppSessions(ctx context.Context, entries []mod
 			argIdx += 21
 		}
 
-		// Upsert semantics for the 3-state lifecycle (2026-09-02):
-		//   - last_sync_at / last_activity_at always refresh to the
-		//     latest values from the client (the client is the live
-		//     source; the server has no better information).
-		//   - foreground_seconds / background_seconds still EXCLUDED-
-		//     overwrite (client keeps a cumulative total).
-		//   - ended_at, status: see below — these are subject to state
-		//     transitions handled by the lifecycle sweeper.
+		// Upsert semantics for the 4-state lifecycle (2026-09-02 + OFFLINE 2026-09-02):
+		//   States: ACTIVE → OFFLINE → STALE → CLOSED.
+		//     ACTIVE  = client is syncing in real time (< SESSION_STALE_AFTER_MINUTES)
+		//     OFFLINE = client hasn't synced for STALE_AFTER min but < 24h (client unreachable)
+		//     STALE   = sweep confirmed the gap is real (≥ STALE_AFTER min of no sync)
+		//     CLOSED  = terminal (≥ CLOSE_AFTER hours of no sync, or client sent ended_at)
+		//   - last_sync_at / last_activity_at always refresh from the client
+		//     (the client is the live source for the activity it observed).
+		//   - foreground_seconds / background_seconds still EXCLUDED-overwrite
+		//     (client keeps a cumulative total).
+		//   - ended_at + status: see CASE blocks below.
 		query := fmt.Sprintf(`
 			INSERT INTO app_sessions
 				(id, employee_id, process_name, app_display_name, started_at,
@@ -365,17 +368,31 @@ func (r *NewSchemaRepo) BulkInsertAppSessions(ctx context.Context, entries []mod
 				synced_at = EXCLUDED.synced_at,
 				last_activity_at = EXCLUDED.last_activity_at,
 				last_sync_at = EXCLUDED.last_sync_at,
-				-- A live client always promotes STALE/CLOSED back to ACTIVE
-				-- and clears a premature server-side ended_at so the
-				-- session can resume its real lifecycle.
+				-- Client-driven status transitions.
+				--   * Client says ended_at + last_sync_at just landed → CLOSED
+				--     (finalizes an ACTIVE/OFFLINE/STALE row immediately, no 24h wait)
+				--   * Client re-uploads an OFFLINE or STALE row with ended_at=NULL → ACTIVE
+				--     (network came back, the process is still alive; the per-machine
+				--     sweeper had flipped the row, the live client proves the machine
+				--     is back, so resurrect).
+				--   * CLOSED is TERMINAL. Once closed (by the client or by the sweeper
+				--     after CLOSE_AFTER_HOURS), a re-uploaded ended_at=NULL must NOT
+				--     resurrect the row -- that would override the sweeper's frozen
+				--     ended_at and re-open a finalized duration. The row stays CLOSED.
+				--   * Otherwise keep the existing server-side state (the sweeper
+				--     manages ACTIVE→OFFLINE→STALE→CLOSED per-machine).
 				status = CASE
-					WHEN app_sessions.status = 'CLOSED' AND EXCLUDED.ended_at IS NULL THEN 'ACTIVE'
-					WHEN app_sessions.status = 'STALE'  AND EXCLUDED.ended_at IS NULL THEN 'ACTIVE'
+					WHEN EXCLUDED.ended_at IS NOT NULL
+						AND app_sessions.status IN ('ACTIVE','OFFLINE','STALE') THEN 'CLOSED'
+					WHEN EXCLUDED.ended_at IS NULL
+						AND app_sessions.status IN ('OFFLINE','STALE') THEN 'ACTIVE'
 					ELSE app_sessions.status
 				END,
 				ended_at = CASE
-					WHEN app_sessions.status IN ('STALE','CLOSED') AND EXCLUDED.ended_at IS NULL THEN NULL
-					ELSE COALESCE(EXCLUDED.ended_at, app_sessions.ended_at)
+					WHEN EXCLUDED.ended_at IS NOT NULL THEN EXCLUDED.ended_at
+					WHEN app_sessions.status IN ('OFFLINE','STALE')
+						AND EXCLUDED.ended_at IS NULL THEN NULL
+					ELSE app_sessions.ended_at
 				END
 		`, strings.Join(valueStrings, ", "))
 
