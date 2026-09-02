@@ -53,6 +53,24 @@ const PER_PAGE = 30;
 
 type ClassificationStatus = 'all' | 'classified' | 'unclassified';
 
+/**
+ * The server's `unclassified` query param only narrows the result set
+ * down to "neither typeId nor categoryId is set" — there is no
+ * `classified` shortcut. So the `classified` and `all` tabs are
+ * implemented here as a client-side predicate over the merged pages.
+ * `getStatusBadge` already encodes the same three states
+ * (Classified / Partial / Unclassified); this predicate matches the
+ * `Classified` and `Unclassified` chips the user clicks.
+ */
+function matchesStatusFilter(item: ClassifiedItemRow, status: ClassificationStatus): boolean {
+  if (status === 'all') return true;
+  const hasType = item.typeId !== undefined && item.typeId !== null;
+  const hasCategory = item.categoryId !== undefined && item.categoryId !== null;
+  if (status === 'classified') return hasType && hasCategory;
+  if (status === 'unclassified') return !hasType && !hasCategory;
+  return true;
+}
+
 export default function ClassifiedItemsTable<T extends ClassifiedItemRow>({
   title,
   description,
@@ -102,7 +120,17 @@ export default function ClassifiedItemsTable<T extends ClassifiedItemRow>({
       search,
       typeId: typeFilter || undefined,
       categoryId: categoryFilter || undefined,
-      unclassified: statusFilter === 'unclassified' || undefined,
+      // The server only knows an `unclassified=true` shortcut — there is
+      // no `classified=true` parameter, and `unclassified=false` would be
+      // the same as omitting it (and confusing the cache key). For the
+      // "Classified" / "Unclassified" tabs we therefore let the server
+      // return every page and filter the result rows client-side below
+      // (the `isClassifiedRow` predicate) — the page size is small
+      // enough (30/page) that the extra rows are negligible, and the
+      // server can still narrow the very-largest tenant with the
+      // `unclassified=true` shortcut when the user has explicitly asked
+      // for the Unclassified tab.
+      unclassified: statusFilter === 'unclassified' ? true : undefined,
       page: 1,
       perPage: PER_PAGE,
     }),
@@ -148,8 +176,22 @@ export default function ClassifiedItemsTable<T extends ClassifiedItemRow>({
     placeholderData: keepPreviousData,
   });
 
-  const rows = useMemo(() => (listData?.pages.flatMap(p => p.data) ?? []) as T[], [listData]);
+  const rawRows = useMemo(() => (listData?.pages.flatMap(p => p.data) ?? []) as T[], [listData]);
+  // Apply the `classified` / `unclassified` / `all` client-side filter on
+  // top of the server's response. Without this, the "Classified" tab
+  // shows unclassified + partial rows (the server has no `classified`
+  // parameter — see the `matchesStatusFilter` doc).
+  const rows = useMemo(
+    () => rawRows.filter(r => matchesStatusFilter(r, statusFilter)),
+    [rawRows, statusFilter],
+  );
+  // `total` is the unfiltered server total. When the user is on the
+  // `all` tab that matches; on the `classified` / `unclassified` tabs
+  // the visible count is `rows.length` (the count after the client-side
+  // filter) — we surface that in the "X results" badge so the badge
+  // doesn't lie about how many rows the user can actually see.
   const total = listData?.pages[0]?.total ?? 0;
+  const visibleTotal = statusFilter === 'all' ? total : rows.length;
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -185,23 +227,39 @@ export default function ClassifiedItemsTable<T extends ClassifiedItemRow>({
   const updateCache = (id: string | number, payload: ClassificationPayload) => {
     queryClient.setQueryData<InfiniteListData<T>>([queryKeyPrefix, filters], (old) => {
       if (!old) return old;
+      // The server's PATCH can clear one or both of typeId / categoryId,
+      // so a row that was "classified" can become "unclassified" (or
+      // vice versa) in a single mutation. Re-derive the post-patch
+      // typeId / categoryId from the payload so the next step can
+      // decide whether the row still belongs in the current cache entry.
+      const nextTypeId = payload.typeId !== undefined ? (payload.typeId ?? undefined) : undefined;
+      const nextCategoryId = payload.categoryId !== undefined ? (payload.categoryId ?? undefined) : undefined;
       return {
         ...old,
         pages: old.pages.map(page => ({
           ...page,
-          data: page.data.map(row => {
-            if (row.id !== id) return row;
-            const type = payload.typeId !== undefined && payload.typeId !== null ? typeMap.get(payload.typeId) : undefined;
-            const cat = payload.categoryId !== undefined && payload.categoryId !== null ? categoryMap.get(payload.categoryId) : undefined;
-            return {
-              ...row,
-              typeId: payload.typeId ?? undefined,
-              typeName: type?.name ?? '',
-              typeColor: type?.color ?? '',
-              categoryId: payload.categoryId ?? undefined,
-              categoryName: cat?.name ?? '',
-            } as T;
-          }),
+          data: page.data
+            .map(row => {
+              if (row.id !== id) return row;
+              const type = payload.typeId !== undefined && payload.typeId !== null ? typeMap.get(payload.typeId) : undefined;
+              const cat = payload.categoryId !== undefined && payload.categoryId !== null ? categoryMap.get(payload.categoryId) : undefined;
+              return {
+                ...row,
+                typeId: nextTypeId,
+                typeName: type?.name ?? '',
+                typeColor: type?.color ?? '',
+                categoryId: nextCategoryId,
+                categoryName: cat?.name ?? '',
+              } as T;
+            })
+            // Drop the row if the user is currently filtering by
+            // Classified / Unclassified and the new state no longer
+            // matches. Without this, classifying an unclassified row
+            // while the Unclassified tab is active would leave the
+            // now-classified row visible in the list until the next
+            // refetch — the chip would say "Unclassified" but the row
+            // would be Classified.
+            .filter(row => row.id !== id || matchesStatusFilter(row, statusFilter)),
         })),
       };
     });
@@ -358,7 +416,7 @@ export default function ClassifiedItemsTable<T extends ClassifiedItemRow>({
           {/* Active filter count */}
           {hasActiveFilters && (
             <span className="inline-flex items-center px-2 py-1 rounded-md bg-primary/10 text-primary text-xs font-medium">
-              {total.toLocaleString()} result{total === 1 ? '' : 's'}
+              {visibleTotal.toLocaleString()} result{visibleTotal === 1 ? '' : 's'}
             </span>
           )}
         </div>
@@ -477,7 +535,7 @@ export default function ClassifiedItemsTable<T extends ClassifiedItemRow>({
       ) : (
         rows.length > 0 && (
           <p className="text-sm text-muted-foreground text-center">
-            Showing all {total.toLocaleString()} {title.toLowerCase()}
+            Showing all {visibleTotal.toLocaleString()} {title.toLowerCase()}
           </p>
         )
       )}
