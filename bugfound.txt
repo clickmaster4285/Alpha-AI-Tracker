@@ -13,8 +13,9 @@ TABLE OF CONTENTS
   4. Bug #4 — Cinnamon Autostart Reliability Gap
   5. Bug #5 — Shift Management: Soft-Deleted Shift Names Block Re-Creation
   6. Bug #6 — installed_applications: version and publisher always empty on Linux
-  7. How Each Fix Should Be Applied (No Code Changes Yet)
-  8. Diagnostic Commands for Linux Mint 22.2
+  7. Bug #7 — Peripherals Page: Duplicate Devices Shown (Connected + Disconnected)
+  8. How Each Fix Should Be Applied (No Code Changes Yet)
+  9. Diagnostic Commands for Linux Mint 22.2
 
 
 ================================================================================
@@ -538,6 +539,111 @@ DIAGNOSTIC COMMANDS:
   flatpak list --columns=application,version 2>/dev/null | grep -i "warpinator\|floorp"
 
   # Expected: dpkg/flatpak return version+publisher, but the DB shows empty
+
+
+================================================================================
+  BUG #7 — Peripherals Page: Duplicate Devices Shown (Connected + Disconnected)
+  Date Found: 2026-09-02
+  Environment: Web Dashboard — Device Specs > Peripherals page
+  Affects: All platforms
+================================================================================
+
+SEVERITY: MEDIUM
+AFFECTS: Web dashboard peripherals page — every device with a connect/disconnect
+         history shows TWO cards instead of one
+
+DESCRIPTION:
+  The peripherals page renders one card per hardware_devices row, including
+  both the current (connected) row AND old disconnected rows. For example,
+  a USB microphone with 2 history entries (plugged → unplugged → plugged)
+  shows TWO cards:
+
+    Card 1: "Microphone (3- USB Audio Device)" — Connected
+    Card 2: "Microphone (3- USB Audio Device)" — Disconnected
+
+  Same for "USB Composite Device", "Headset", etc. — every device that
+  was ever unplugged and reconnected shows a duplicate card. The page
+  currently renders ALL rows from hardwareDevices without grouping.
+
+STEPS TO REPRODUCE:
+  1. Plug in a USB device (e.g. microphone) — a Connected card appears
+  2. Unplug it — the card shows Disconnected
+  3. Plug it back in — a NEW Connected card appears
+  4. Now the page shows TWO cards for the same device
+
+ROOT CAUSE:
+  web/src/app/(app)/device-specs/peripherals/page.tsx:29
+  iterates over hardwareDevices.map() directly — every row in the
+  hardware_devices table gets its own card. When a device is
+  unplugged and replugged, the server creates a new row (new id,
+  new plugged_at, unplugged_at set on the old row). The page
+  displays BOTH rows independently.
+
+  The data is correct (the table stores the full history), but the
+  UI should group by device identity and show only ONE card per
+  device, with the history accessible via an expand/collapse arrow.
+
+EXPECTED BEHAVIOR:
+  By default, show a SINGLE card per device (the most recent state).
+  If the device has history (multiple connect/disconnect rows), show
+  a chevron/arrow button that expands to reveal previous connect and
+  disconnect events. The default view should always show the current
+  state (Connected or Disconnected) as the top-level card.
+
+AFFECTED FILES:
+  - web/src/app/(app)/device-specs/peripherals/page.tsx (renders raw rows)
+
+
+================================================================================
+  RESOLUTION PLAN FOR BUG #7
+================================================================================
+
+NOTE: No code changes made yet. This is the plan only.
+
+FIX #7 — Group hardware devices by identity, show history in expandable rows
+---------------------------------------------------------------------------
+
+  WHERE: web/src/app/(app)/device-specs/peripherals/page.tsx
+
+  WHAT:
+
+  1. GROUP rows by device identity:
+     - Primary key: device.product + device.deviceClass + device.vendor
+       (same product name, same class, same vendor = same physical device)
+     - Fallback: if product is empty, use device.serial as identity
+     - Grouping logic: reduce hardwareDevices into a Map<string, HardwareDevice[]>
+       where the key is the identity and the value is the history sorted by
+       pluggedAt descending (newest first)
+
+  2. DEFAULT CARD — show only the most recent row per group:
+     - Each group renders ONE card
+     - The card shows: product name, vendor, device class, serial, pluggedAt
+     - Status badge: Connected if unpluggedAt is null, Disconnected otherwise
+     - If the group has only 1 row (no history), render as-is (no arrow)
+
+  3. EXPANDABLE HISTORY — arrow button when history exists:
+     - If the group has >1 row, show a small chevron (▼/▶) button in the
+       top-right corner of the card
+     - Clicking the arrow expands a sub-list below the card showing all
+       historical rows (sorted by pluggedAt DESC)
+     - Each history row shows: status (Connected/Disconnected), pluggedAt,
+       unpluggedAt (if present), formatted with formatDateShort
+     - The arrow button indicates "view history" — collapsed by default
+
+  4. UI details:
+     - Arrow button: lucide ChevronDown/ChevronRight, 16px, muted color,
+       positioned next to the status badge
+     - Expanded history: subtle left-border accent (e.g. border-l-2
+       border-muted), slightly smaller text, indented under the card
+     - Animation: smooth height transition when expanding/collapsing
+       (framer-motion or CSS transition)
+     - Empty history (single row): no arrow rendered, card is static
+
+  WHY: The current UI shows raw table rows as cards, which is confusing
+  when a device has history. The fix groups by device identity and makes
+  history optional — the default view is clean (one card per device) and
+  the history is available on demand. This matches the pattern already
+  used on the App Usage page (expandable per-app session groups).
 
 
 ================================================================================
