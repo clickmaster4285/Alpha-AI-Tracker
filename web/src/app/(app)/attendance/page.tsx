@@ -181,10 +181,21 @@ function AttendancePageInner() {
     <div className="space-y-4 animate-fade-in">
       <div className="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
         <div>
-          <h3 className="font-display font-bold text-lg text-foreground">Attendance Log</h3>
-          <p className="text-xs text-muted-foreground mt-0.5">
-            Server-computed daily status from synced session events.
-          </p>
+          {/* Server-side filters: search + date preset/custom range. Same
+          component as /employee-journey/apps and the other journey pages —
+          the native <input type="date"> overflow that broke the popover is
+          gone, replaced by the Radix popover that anchors to the filter bar. */}
+      <ActivityFilters
+        value={filter}
+        onChange={setFilter}
+        // The /attendance server endpoint returns ONE row per employee for
+        // a single day (`GET /attendance/day`). Restrict the UI to a
+        // single-day filter so a multi-day range can't be silently passed
+        // to the endpoint (which would be coerced to the range's start
+        // day and mislead the user about what they were looking at).
+        availablePresets={['today', 'yesterday']}
+        singleDay
+      />
         </div>
         {!isSelfOnly && (
           <select
@@ -200,21 +211,7 @@ function AttendancePageInner() {
         )}
       </div>
 
-      {/* Server-side filters: search + date preset/custom range. Same
-          component as /employee-journey/apps and the other journey pages —
-          the native <input type="date"> overflow that broke the popover is
-          gone, replaced by the Radix popover that anchors to the filter bar. */}
-      <ActivityFilters
-        value={filter}
-        onChange={setFilter}
-        // The /attendance server endpoint returns ONE row per employee for
-        // a single day (`GET /attendance/day`). Restrict the UI to a
-        // single-day filter so a multi-day range can't be silently passed
-        // to the endpoint (which would be coerced to the range's start
-        // day and mislead the user about what they were looking at).
-        availablePresets={['today', 'yesterday']}
-        singleDay
-      />
+      
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         {[
