@@ -125,12 +125,12 @@ function TimesheetsPageInner() {
     <div className="space-y-4 animate-fade-in">
       <div className="flex md:flex-row flex-col justify-between gap-4">
         <div className="flex flex-col gap-4">
-          <div>
-            <h3 className="font-display font-bold text-lg text-foreground">Timesheets</h3>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              Daily active, idle, and off-shift totals computed on the server.
-            </p>
-          </div>
+          {/* Server-side filters: search + date (preset/custom range). Mounted
+          above the table so the search input never loses focus on
+          loading/error/empty states. Same component as /employee-journey/apps
+          and the other journey pages. */}
+          <ActivityFilters value={filter} onChange={setFilter} />
+
         </div>
 
         <div className="flex flex-col xl:flex-row gap-3">
@@ -143,12 +143,7 @@ function TimesheetsPageInner() {
         </div>
       </div>
 
-      {/* Server-side filters: search + date (preset/custom range). Mounted
-          above the table so the search input never loses focus on
-          loading/error/empty states. Same component as /employee-journey/apps
-          and the other journey pages. */}
-      <ActivityFilters value={filter} onChange={setFilter} />
-
+      
       {!employee ? (
         <EmptyState icon={Clock} text="Select an employee to view their timesheet history." />
       ) : (
