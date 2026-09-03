@@ -1,37 +1,133 @@
-.PHONY: build run dev clean test deps
+.PHONY: build run dev clean test deps setup-env setup
 
-# Build the server binary
+# ============================================================
+# Alpha AI Tracker Server
+# Cross-platform Makefile
+# Windows + Linux + macOS
+# ============================================================
+
+ifeq ($(OS),Windows_NT)
+
+PLATFORM := windows
+EXE := .exe
+
+else
+
+PLATFORM := unix
+EXE :=
+
+endif
+
+
+# ============================================================
+# BUILD
+# ============================================================
+
 build:
-	go build -o bin/alpha-ai-server ./cmd/server
+	@echo Building Alpha AI Tracker server...
+	go build -o bin/alpha-ai-server$(EXE) ./cmd/server
+	@echo Build completed successfully.
 
-# Run the server
+
+# ============================================================
+# RUN
+# ============================================================
+
+ifeq ($(PLATFORM),windows)
+
 run: build
+	@echo Starting Alpha AI Tracker server...
+	.\bin\alpha-ai-server.exe
+
+else
+
+run: build
+	@echo Starting Alpha AI Tracker server...
 	./bin/alpha-ai-server
 
-# Run with hot-reload (requires air: go install github.com/air-verse/air@latest)
-dev:
-	air --build.cmd "go build -o bin/alpha-ai-server ./cmd/server" --build.bin "./bin/alpha-ai-server"
+endif
 
-# Clean build artifacts
+
+# ============================================================
+# DEVELOPMENT / HOT RELOAD
+# ============================================================
+
+ifeq ($(PLATFORM),windows)
+
+dev:
+	air --build.cmd "go build -o bin/alpha-ai-server.exe ./cmd/server" --build.bin "bin/alpha-ai-server.exe"
+
+else
+
+dev:
+	air --build.cmd "go build -o bin/alpha-ai-server ./cmd/server" --build.bin "bin/alpha-ai-server"
+
+endif
+
+
+# ============================================================
+# CLEAN
+# ============================================================
+
+ifeq ($(PLATFORM),windows)
+
+clean:
+	if exist bin rmdir /s /q bin
+
+else
+
 clean:
 	rm -rf bin/
 
-# Run tests
+endif
+
+
+# ============================================================
+# TEST
+# ============================================================
+
 test:
 	go test ./... -v -count=1
 
-# Download dependencies
+
+# ============================================================
+# DEPENDENCIES
+# ============================================================
+
 deps:
 	go mod tidy
 	go mod download
 
-# Create a .env from example if it doesn't exist
+
+# ============================================================
+# ENVIRONMENT
+# ============================================================
+
+ifeq ($(PLATFORM),windows)
+
 setup-env:
-	@if [ ! -f .env ]; then \
+	if exist .env (echo .env already exists.) else (copy .env.example .env && echo Created .env from .env.example - edit it with your settings.)
+
+else
+
+setup-env:
+	if [ ! -f .env ]; then \
 		cp .env.example .env; \
-		echo "Created .env from .env.example — edit it with your settings"; \
+		echo "Created .env from .env.example - edit it with your settings"; \
+	else \
+		echo ".env already exists."; \
 	fi
 
-# Quick start
+endif
+
+
+# ============================================================
+# QUICK SETUP
+# ============================================================
+
 setup: setup-env deps build
-	@echo "Server built successfully. Run 'make run' to start."
+	@echo.
+	@echo ==========================================
+	@echo Alpha AI Tracker server setup completed.
+	@echo ==========================================
+	@echo Run 'make run' to start the server.
