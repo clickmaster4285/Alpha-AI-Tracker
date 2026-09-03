@@ -6,6 +6,7 @@
 # Windows + Linux + macOS
 # ============================================================
 
+# Detect Windows
 ifeq ($(OS),Windows_NT)
 
 PLATFORM := windows
@@ -50,6 +51,8 @@ endif
 
 # ============================================================
 # DEVELOPMENT / HOT RELOAD
+# Requires Air:
+# go install github.com/air-verse/air@latest
 # ============================================================
 
 ifeq ($(PLATFORM),windows)
@@ -106,7 +109,8 @@ deps:
 ifeq ($(PLATFORM),windows)
 
 setup-env:
-	if exist .env (echo .env already exists.) else (copy .env.example .env && echo Created .env from .env.example - edit it with your settings.)
+	if not exist .env copy .env.example .env
+	if exist .env echo Environment file ready.
 
 else
 
