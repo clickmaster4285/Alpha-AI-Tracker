@@ -58,6 +58,12 @@ destroy information that may still exist on the client.
 page renders `lastClosed - firstOpened` (not `Σ durations`) so multi-tab windows never inflate the
 per-app total. Route is registered BEFORE `GET /app-sessions` for safe future `:id` routing.
 
+**Per-app session list** (`GET /app-sessions/usage/sessions`, since 2026-09-04). Powers the
+chevron expand under each app row on `/employee-journey/apps` — paginated server-side (20/page)
+with the same `(appDisplayName, processName)` group key as the aggregate, so the inner count
+always matches the parent `sessionCount`. Both keys required (400 if both empty). Live test
+playbook: `TESTING.md` §3-7.
+
 ### Web
 
 ```bash

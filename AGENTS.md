@@ -3,6 +3,8 @@
 > **Last audited:** 2026-09-04
 > **Changelog:**
 >
+> - 2026-09-04: **Web: per-app session list under each app row on `/employee-journey/apps` (chevron expand).** Each app row on the "App Usage" page now has a chevron; clicking it expands an inline table listing every individual session for that app — opened, closed, duration (3-state-aware: CLOSED → `endedAt`, STALE/OFFLINE → `lastSyncAt`, ACTIVE → `now`), process name, context label (window title), foreground + background seconds (the 2026-08-15 focus totals). The expansion fires its own paginated server call (`GET /api/v1/app-sessions/usage/sessions?appDisplayName=X&processName=Y&page=N&perPage=20`) so a heavy user (200+ chrome opens/week) doesn't ship every row up front. The `(appDisplayName, processName)` tuple is the same GROUP BY key the aggregate uses, so the inner count always matches the parent's `sessionCount`. The inner list uses `useInfiniteQuery` per the *Web Infinite-Scroll Rule* — sentinel is a "Load more sessions" button (the inline area isn't tall enough for an IntersectionObserver to feel natural). The route is registered BEFORE the existing `/app-sessions/usage` in `router.go`. Postgres NULL handling: when a side of the tuple is empty (e.g. a row with no `appDisplayName`), the server matches `IS NULL OR = ''` on that side so the rare empty-named rows still come back. Cross-service contract: server `new_schema_dto.AppSessionListResponse` (existing shape, reused); new `AppSessionForAppListParams` + repo `ListAppSessionsForApp` + service `ListAppSessionsForApp` + handler `ListAppSessionsForApp` (returns 400 when both keys are empty — a single key without its pair is ambiguous). Web `lib/api.ts` gains `appSessionsApi.usageSessions({appDisplayName, processName, page, perPage, employeeId, dateFrom, dateTo})`; `AppUsageRow` is unchanged. The page does NOT render the expandable per-session table on initial load — it's purely an on-expand fetch, so a 100-row aggregate is still one HTTP call. Verified: `go build`/`go vet` clean, `npx tsc --noEmit` clean, `next build` passes (`/employee-journey/apps` 4.34 kB). Manual test plan in `TESTING.md` (requires a live pg + redis + server).
+>
 > - 2026-09-04: **Core: chrome "App Usage" duration is wrong on the web (3 layers).** A chrome
 >   window with 3 tabs × 10 min used to render as "30 min" because (1) the a11y reader returns a
 >   fresh `WindowKey` per tab, the old `ResolveWindowKey` only collapsed tabs when their titles
@@ -975,6 +977,7 @@ flowchart LR
 - Hourly `jobs/staleness_sweep.go` deactivates junction links idle > `LINK_STALE_DAYS=7`
 - App sessions + app items listing (`GET /app-sessions`, `GET /app-items`) with filtering/pagination
 - Per-app usage aggregate (`GET /app-sessions/usage`, since 2026-09-04) — one row per `(appDisplayName, processName)` with `firstOpenedAt` / `lastClosedAt` / `totalDurationSeconds`. The web "App Usage" page renders `lastClosed - firstOpened` (NOT `Σ durations`) so multi-tab windows never inflate the per-app total.
+- Per-app session list (`GET /app-sessions/usage/sessions`, since 2026-09-04) — paginated server-side; powers the chevron-expanded table on `/employee-journey/apps` (one row per `app_sessions` for the chosen `(appDisplayName, processName)` pair; page 1 returns the 20 most recent).
 - Company admin auto-initialization on first run
 - Graceful shutdown
 

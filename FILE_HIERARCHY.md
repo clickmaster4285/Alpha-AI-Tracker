@@ -14,6 +14,7 @@ Annotated node tree for the whole monorepo. Every directory that holds source is
 Alpha-AI-TrackerV2.0/
 ├── AGENTS.md              ⭐ repo constitution — rules, contracts, completion state. Read first.
 ├── FILE_HIERARCHY.md         this file
+├── TESTING.md                live test playbooks for endpoints that need a running server (curl + expected responses)
 ├── WORKFLOW.md               dev loop, rebrand, add-a-page, release pipeline
 ├── client/                   .NET 10 / Avalonia desktop agent (the tracked machine)
 ├── server/                   Go API + Postgres + Redis (the collector of record)
@@ -160,7 +161,8 @@ server/
 │   │   ├── monitoring_handler.go    types/categories/apps/websites classification
 │   │   ├── rbac_handler.go          GET /modules + roles CRUD
 │   │   └── new_schema_handler.go    the client-ingest surface (sessions, apps, packages, hardware) +
-│   │                                 ListAppSessions + ListAppSessionsUsage (per-app aggregate for /employee-journey/apps)
+│   │                                 ListAppSessions + ListAppSessionsUsage (per-app aggregate for /employee-journey/apps) +
+│   │                                 ListAppSessionsForApp (per-app paginated list, fired on chevron expand)
 │   │
 │   ├── services/                business rules — the only layer allowed to orchestrate repos
 │   │   ├── auth_service.go · user_service.go · employee_service.go
