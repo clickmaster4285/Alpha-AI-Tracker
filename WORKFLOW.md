@@ -52,6 +52,12 @@ Tune for your deployment. The server will report the chosen values at boot
 re-syncs any STALE/CLOSED row with `ended_at=NULL` flips it back to ACTIVE — the sweep will never
 destroy information that may still exist on the client.
 
+**Per-app usage aggregate** (migration 032 + `GET /app-sessions/usage`, since 2026-09-04). The
+"App Usage" page reads this endpoint instead of the raw `GET /app-sessions` list — one row per
+`(appDisplayName, processName)` with `firstOpenedAt` / `lastClosedAt` / `totalDurationSeconds`. The
+page renders `lastClosed - firstOpened` (not `Σ durations`) so multi-tab windows never inflate the
+per-app total. Route is registered BEFORE `GET /app-sessions` for safe future `:id` routing.
+
 ### Web
 
 ```bash

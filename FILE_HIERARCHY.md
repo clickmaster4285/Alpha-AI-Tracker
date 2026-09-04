@@ -4,7 +4,7 @@ Annotated node tree for the whole monorepo. Every directory that holds source is
 
 **How to read it:** ⭐ marks an entry point or a single-source-of-truth file — start there. 🔒 marks a file with a rule attached; changing it without reading the rule breaks something in the field. Generated / vendored trees are marked and should never be edited by hand.
 
-*Last audited: 2026-09-02. Companion docs: [AGENTS.md](./AGENTS.md) (rules + completion state), [WORKFLOW.md](./WORKFLOW.md) (how work moves through the tree), [client/ARCHITECTURE.md](./client/ARCHITECTURE.md), [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md), [server/ARCHITECTURE.md](./server/ARCHITECTURE.md), [web/ARCHITECTURE.md](./web/ARCHITECTURE.md).*
+*Last audited: 2026-09-04. Companion docs: [AGENTS.md](./AGENTS.md) (rules + completion state), [WORKFLOW.md](./WORKFLOW.md) (how work moves through the tree), [client/ARCHITECTURE.md](./client/ARCHITECTURE.md), [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md), [server/ARCHITECTURE.md](./server/ARCHITECTURE.md), [web/ARCHITECTURE.md](./web/ARCHITECTURE.md).*
 
 ---
 
@@ -159,7 +159,8 @@ server/
 │   │   ├── department_handler.go
 │   │   ├── monitoring_handler.go    types/categories/apps/websites classification
 │   │   ├── rbac_handler.go          GET /modules + roles CRUD
-│   │   └── new_schema_handler.go    the client-ingest surface (sessions, apps, packages, hardware)
+│   │   └── new_schema_handler.go    the client-ingest surface (sessions, apps, packages, hardware) +
+│   │                                 ListAppSessions + ListAppSessionsUsage (per-app aggregate for /employee-journey/apps)
 │   │
 │   ├── services/                business rules — the only layer allowed to orchestrate repos
 │   │   ├── auth_service.go · user_service.go · employee_service.go
@@ -178,7 +179,7 @@ server/
 │                                · retention_sweep.go (hourly data purge, RETENTION_DAYS)
 │                                · session_lifecycle_sweep.go (1-min ACTIVE→STALE→CLOSED sweep, SESSION_STALE_AFTER_MINUTES / SESSION_CLOSE_AFTER_HOURS)
 │
-├── migrations/               ⭐ 32 sequential SQL files, 001_init → 031_app_sessions_status.
+├── migrations/               ⭐ 33 sequential SQL files, 001_init → 032_app_sessions_usage_index (composite index for /app-sessions/usage).
 │                                Append-only: never edit a migration that has been applied.
 └── bin/                      ⚠️ build output
 ```

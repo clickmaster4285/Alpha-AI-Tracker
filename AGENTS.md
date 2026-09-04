@@ -1,7 +1,39 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-09-02
+> **Last audited:** 2026-09-04
 > **Changelog:**
+>
+> - 2026-09-04: **Core: chrome "App Usage" duration is wrong on the web (3 layers).** A chrome
+>   window with 3 tabs × 10 min used to render as "30 min" because (1) the a11y reader returns a
+>   fresh `WindowKey` per tab, the old `ResolveWindowKey` only collapsed tabs when their titles
+>   matched (transient "Loading…" states slipped through and opened a session per tab), and
+>   (2) the web page summed per-row `endedAt - startedAt` over every row with the same
+>   `appDisplayName`. **Layer 1 — client (`AccessibilityBrowserTracker.ResolveWindowKey`):**
+>   two new collapse rules — (a) exact URL match (stronger than title, kills the "3 tabs all
+>   titled 'Loading…'" transient case), and (b) fresh-key recency window of `poll×2` seconds
+>   that attaches a new same-PID key to the FRESHEST tracked window (the recency guard is what
+>   prevents two real long-lived windows from collapsing — when both are old, the guard fails
+>   on every candidate). Existing title-match and single-window-count rules stay as fallbacks.
+>   `IsBrowser` detection is already metadata-driven (`.desktop Categories=WebBrowser`, Windows
+>   `URLAssociations`, macOS `CFBundleURLSchemes`), so chrome variants are caught without code
+>   changes. **Layer 2 — web (`/employee-journey/apps`):** the `useMemo` now recomputes
+>   duration as `lastClosedAt - firstOpenedAt` regardless of what the server returns, so a
+>   future regression on the server side can't reintroduce the sum. **Layer 3 — server (the
+>   user-visible win regardless of layer 1):** new `GET /api/v1/app-sessions/usage` returns
+>   one row per `(appDisplayName, processName)` with `MIN(started_at)`, `MAX(COALESCE(ended_at,
+>   last_sync_at, started_at))`, `SUM(...)` for `totalDurationSeconds`. Composite index
+>   `idx_app_sessions_employee_started_name` (migration 032) covers the WHERE + GROUP BY.
+>   Route is registered BEFORE the existing `GET /app-sessions` (safe ordering even if a
+>   `:id` route is added later). Web switched from a 5×100 raw-row fan-out (silent 500-row
+>   truncation bug) to a single `appSessionsApi.usage` call. The page now shows "First Opened"
+>   and "Last Closed" columns so the open range is visible directly. Result: chrome 3 tabs
+>   × 10 min renders as **Duration: 10m** (lastClosed - firstOpened), Sessions: 3; chrome
+>   where tab1 stays open 9:00→9:12 with the others at 9:00→9:10 renders as **Duration:
+>   12m**, Sessions: 3. Verified: `go build`/`go vet` clean, `dotnet build` 0/0, `npx tsc
+>   --noEmit` clean, `next build` passes (`/employee-journey/apps` 2.89 kB). ⚠️ Pre-existing
+>   split chrome sessions in deployed DBs are NOT deduped (destructive to rewrite); new
+>   sessions after deploy will be 1-row-per-window. Layer 1 ships only in a new installer
+>   build (Installer-Parity Rule); layers 2 + 3 deploy with just the server restart.
 >
 > - 2026-09-02: **Core: 3-state app_sessions lifecycle (ACTIVE / STALE / CLOSED) — orphan "Running forever" bug fixed at the schema level.**
 >   `app_sessions` rows with `ended_at=NULL` used to stay "Running" on the web dashboard forever once a PC went offline, was uninstalled, or never rebooted (see `project-orphan-sessions.md` for the live-DB evidence). The new model lets the SERVER own the session state, while the CLIENT remains the source of truth for activity history. **Migration 031** (`server/migrations/031_app_sessions_status.sql`) adds 3 columns to `app_sessions` — `status TEXT NOT NULL DEFAULT 'ACTIVE'`, `last_activity_at TIMESTAMPTZ`, `last_sync_at TIMESTAMPTZ` — plus 2 indexes (`status, last_sync_at DESC` and a partial `WHERE status='ACTIVE'`). 1131 pre-existing rows were backfilled in place. **State machine** (`server/internal/jobs/session_lifecycle_sweep.go`, every 1 min): `ACTIVE → STALE` when `last_sync_at < NOW() - SESSION_STALE_AFTER_MINUTES` (default 10), `STALE → CLOSED` when `last_sync_at < NOW() - SESSION_CLOSE_AFTER_HOURS` (default 24). Only CLOSED is terminal; the sweeper freezes `ended_at = COALESCE(last_activity_at, last_sync_at, started_at)` at the moment of CLOSE so duration reflects real usage, not the sweep moment. **Upsert recovery** (server `new_schema_repo.BulkInsertAppSessions`): when a live client re-uploads any row with `ended_at=NULL`, the `ON CONFLICT` CASE flips STALE/CLOSED back to ACTIVE and clears the premature server-side `ended_at` — so a 2-hour network outage never destroys information that may still exist on the client. When the client supplies a non-NULL `ended_at`, the row stays CLOSED with the new value (client's decision wins). **Cross-service contract kept in sync** — server `AppSession` model + DTO + service + repo + JSON; client `Core/Models/AppSession.cs` (`LastActivityAt`) + `Storage/DatabaseSchema.cs` (idempotent ALTER, insert + focus + ended SQL) + `SqliteLogStore.cs` (mapper) + `Services/LogCollectorService.cs` (sets `LastActivityAt = log.Timestamp` on new sessions) + `Services/SyncService.cs` (payload includes `lastActivityAt`); web `lib/api.ts` (3 new fields) + `lib/format.ts` (`formatRelative`) + new `components/sessions/SessionStatusBadge.tsx` (reusable `sessionStatus()` + `isSessionLive()` helpers — pre-031 rows fall back to the legacy `endedAt ? CLOSED : ACTIVE` rule) + all three consuming pages (`employee-journey/timeline`, `employee-journey/apps`, `logs/comprehensive`) now use a 3-state-aware duration end: CLOSED → `endedAt`, STALE → `lastSyncAt`, ACTIVE → `now` (eliminates the "Running for 2h 17m" lie for a STALE row). Live-tested end-to-end against the dev PostgreSQL: with `SESSION_STALE_AFTER_MINUTES=1` the sweep promoted 1131 ACTIVE→STALE then 1131 STALE→CLOSED in 62 ms; a fresh `POST /api/v1/app-sessions/sync` re-uploading a CLOSED row with `ended_at=NULL` flipped it back to ACTIVE in one round-trip; supplying a non-NULL `ended_at` left it CLOSED with the new value. **Env knobs** added to `server/.env` and `server/.env.example`: `SESSION_STALE_AFTER_MINUTES=10`, `SESSION_CLOSE_AFTER_HOURS=24`. Verified: `go build`/`go vet` clean, `dotnet build` 0/0, `npx tsc --noEmit` clean, `next build` passes (3 pages using the new badge).
@@ -942,6 +974,7 @@ flowchart LR
 - Catalog dedup: apps keyed by `app_fingerprint` (desktop_id|binary_name), packages by `package_fingerprint` (package_name|source_manager), per-employee junction tables with `first_seen_at`/`last_seen_at`/`is_active`
 - Hourly `jobs/staleness_sweep.go` deactivates junction links idle > `LINK_STALE_DAYS=7`
 - App sessions + app items listing (`GET /app-sessions`, `GET /app-items`) with filtering/pagination
+- Per-app usage aggregate (`GET /app-sessions/usage`, since 2026-09-04) — one row per `(appDisplayName, processName)` with `firstOpenedAt` / `lastClosedAt` / `totalDurationSeconds`. The web "App Usage" page renders `lastClosed - firstOpened` (NOT `Σ durations`) so multi-tab windows never inflate the per-app total.
 - Company admin auto-initialization on first run
 - Graceful shutdown
 

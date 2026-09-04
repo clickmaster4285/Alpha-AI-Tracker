@@ -1,7 +1,23 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-09-02 (3-state session lifecycle, last_activity_at)
+> **Last audited:** 2026-09-04 (browser window-key collapse for multi-tab chrome)
 > **Changelog:**
+> - 2026-09-04: **Client: `ResolveWindowKey` collapse rules — multi-tab chrome is one session, not N.**
+>   The accessibility reader returns a fresh `WindowKey` per tab; the old title-only collapse rule let
+>   transient "Loading…" states slip through and opened a separate `app_sessions` row per tab — which
+>   then summed on the web to 3× the real open time. Two new collapse rules, layered BEFORE the
+>   single-window count guard: (a) **exact URL match** (stronger than title — kills the
+>   "3 tabs all titled 'Loading…'" transient case; both sides must have a non-empty URL to match);
+>   (b) **fresh-key recency window of `poll×2` seconds** — if a same-PID tracked window was seen
+>   within the recency window, the incoming key is treated as churn of the FRESHEST such window.
+>   The recency guard is what keeps two real long-lived windows from collapsing: when both are old,
+>   both `LastSeen` are far in the past and the guard fails on every candidate, so a new session
+>   is opened instead. Existing title-match and single-window-count rules stay as primary
+>   fallbacks. The reader's per-OS WindowKey generation is unchanged — this is purely a tracker-
+>   side identity-resolution fix. Layer 1 of 3 for the "chrome 3 tabs × 10 min renders as 30m on
+>   the web" bug; layers 2 (web defense in depth) and 3 (server `GET /app-sessions/usage`) ship
+>   independently so the page is correct even before the next installer build carries this fix.
+>   No env knob; no DDL change. Verified: `dotnet build` 0/0, 0 warnings.
 > - 2026-09-02: **Client: app_sessions last_activity_at tracking for the 3-state server lifecycle.**
 >   `Core/Models/AppSession.cs` gained a `DateTime? LastActivityAt` property. `Storage/DatabaseSchema.cs` adds the column via an idempotent `MigrateSql` ALTER, refreshes it on `InsertAppSessionSql` (new session = `log.Timestamp`), on the `CONFLICT` update, on `UpdateAppSessionFocusSql` (sets it to NOW() on every focus change), and on `UpdateAppSessionEndedSql` (freezes it to the close moment). `SqliteLogStore.cs` carries the new parameter through the batched INSERT and reads it back in `MapAppSessionReader`. `Services/LogCollectorService.cs` stamps `LastActivityAt = log.Timestamp` when opening a new session, so the server's `session_lifecycle_sweep` has a meaningful `last_activity_at` value to freeze at CLOSE time. `Services/SyncService.cs` includes `lastActivityAt` in the `POST /api/v1/app-sessions/sync` payload (falling back to `startedAt` when null so older calls still validate). The client's local SQLite is the source of truth for activity history; the server is the source of truth for the projected `status` column. No env knob required on the client.
 > - 2026-08-22: **Flatpak `bwrap` PPID chain walk in embedded Python probe.**
