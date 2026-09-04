@@ -504,6 +504,35 @@ func (s *NewSchemaService) ListAppSessions(ctx context.Context, params repositor
 	}, nil
 }
 
+// ── App sessions usage (per-app aggregate for web dashboard) ──
+
+func (s *NewSchemaService) ListAppSessionsUsage(ctx context.Context, params repository.AppSessionUsageListParams) (*dto.AppUsageListResponse, error) {
+	result, err := s.repo.AggregateAppSessionsUsage(ctx, params)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate app sessions usage: %w", err)
+	}
+
+	rows := make([]dto.AppUsageRow, len(result.Rows))
+	for i, r := range result.Rows {
+		rows[i] = dto.AppUsageRow{
+			AppDisplayName:       r.AppDisplayName,
+			ProcessName:          r.ProcessName,
+			SessionCount:         r.SessionCount,
+			FirstOpenedAt:        r.FirstOpenedAt,
+			LastClosedAt:         r.LastClosedAt,
+			TotalDurationSeconds: r.TotalDurationSeconds,
+		}
+	}
+
+	return &dto.AppUsageListResponse{
+		Data:       rows,
+		Total:      result.Total,
+		Page:       result.Page,
+		PerPage:    result.PerPage,
+		TotalPages: result.TotalPages,
+	}, nil
+}
+
 // ── List app items (for web dashboard — URLs, file paths, etc.) ──
 
 func (s *NewSchemaService) ListAppItems(ctx context.Context, params repository.AppItemListParams) (*dto.AppItemListResponse, error) {

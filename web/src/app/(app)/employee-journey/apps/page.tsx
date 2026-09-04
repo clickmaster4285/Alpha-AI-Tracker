@@ -1,75 +1,20 @@
 'use client';
 
-import { Fragment, Suspense, useEffect, useMemo, useState } from 'react';
-import { AppWindow, Timer, Layers, Activity, Loader2, ChevronRight, ChevronDown } from 'lucide-react';
-import { keepPreviousData, useQueries } from '@tanstack/react-query';
+import { Suspense, useEffect, useMemo, useState } from 'react';
+import { AppWindow, Timer, Layers, Activity, Loader2 } from 'lucide-react';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import EmployeePage from '@/components/employees/EmployeePage';
 import EmptyState from '@/components/employees/EmptyState';
 import ActivityFilters, { type ActivityFilter } from '@/components/journey/ActivityFilters';
-import SessionStatusBadge, {
-  isSessionLive,
-  sessionStatus,
-  type SessionStatus,
-} from '@/components/sessions/SessionStatusBadge';
-import { appSessionsApi, type AppSession } from '@/lib/api';
-import { formatDateTime, formatRelative, formatSeconds } from '@/lib/format';
-
-interface AppUsage {
-  appDisplayName: string;
-  processName: string;
-  sessionCount: number;
-  durationSeconds: number;
-  lastActiveAt: string;
-  running: boolean;
-  /**
-   * 4-state lifecycle rollup across the group's child sessions.
-   * Priority (highest → lowest): ACTIVE > OFFLINE > STALE > CLOSED.
-   * At least one ACTIVE child ⇒ ACTIVE; otherwise the most "live" non-CLOSED
-   * status; otherwise CLOSED.
-   */
-  topStatus: SessionStatus;
-  sessions: AppSession[];
-}
-
-/**
- * Total time the session was open. The end moment depends on the lifecycle
- * status (2026-09-02 4-state model):
- *   - CLOSED  → endedAt (final).
- *   - ACTIVE  → "now" (the tracker is live; duration grows while open).
- *   - STALE   → lastSyncAt (we know the tracker stopped reporting then;
- *               we MUST NOT pretend the session is still growing, but we
- *               also don't trust any later moment — use the last sync).
- *   - OFFLINE → lastSyncAt (machine may come back; freeze the clock).
- * Falls back to endedAt then Date.now() for pre-031 rows that lack status.
- */
-function sessionDurationSeconds(s: AppSession): number {
-  const start = new Date(s.startedAt).getTime();
-  // 4-state duration end (2026-09-02 + OFFLINE 2026-09-02):
-  //   CLOSED  → endedAt (final).
-  //   STALE   → lastSyncAt (don't pretend it's still growing).
-  //   OFFLINE → lastSyncAt (machine may come back; freeze the clock).
-  //   ACTIVE  → now (still live).
-  const status = sessionStatus(s);
-  let end: number;
-  if (s.endedAt) {
-    end = new Date(s.endedAt).getTime();
-  } else if ((status === 'STALE' || status === 'OFFLINE') && s.lastSyncAt) {
-    end = new Date(s.lastSyncAt).getTime();
-  } else {
-    end = Date.now();
-  }
-  return Math.max(0, (end - start) / 1000);
-}
-
-const AGGREGATE_PAGES = 5; // most recent 5 × 100 = 500 sessions
-const PER_PAGE = 100;
+import { appSessionsApi, type AppUsageRow } from '@/lib/api';
+import { formatDateTime, formatSeconds } from '@/lib/format';
 
 export default function EmployeeJourneyApps() {
   return (
     <Suspense fallback={<div className="flex items-center justify-center min-h-[400px]"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>}>
       <EmployeePage
         title="App Usage"
-        subtitle="Time spent per application across the employee's most recent sessions."
+        subtitle="Time spent per application across the employee&apos;s most recent sessions."
         icon={AppWindow}
       >
         {({ employee, filter, setFilter }) => (
@@ -89,93 +34,58 @@ function AppUsageBody({
   filter: ActivityFilter;
   setFilter: (next: ActivityFilter) => void;
 }) {
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  // The filter (`q/preset/from/to`) and the picker (`?employeeId=`) are
-  // managed by the surrounding <EmployeePage> shell through ONE
-  // `useUrlActivityFilter` instance, so the body never has its own URL
-  // hook to race against. Picking an employee, then changing a date
-  // preset (or vice versa) preserves the sibling key — no more
-  // "the employee got deselected and `?employeeId=` disappeared" race.
   const [isFiltering, setIsFiltering] = useState(false);
 
-  const toggle = (key: string) => {
-    setExpanded(prev => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  };
-
-  const queries = useQueries({
-    queries: Array.from({ length: AGGREGATE_PAGES }, (_, i) => ({
-      queryKey: ['app-sessions', 'usage', { employeeId, page: i + 1, perPage: PER_PAGE, ...filter }],
-      queryFn: () => appSessionsApi.list({
-        employeeId,
-        page: i + 1,
-        perPage: PER_PAGE,
-        search: filter.search || undefined,
-        dateFrom: filter.dateFrom,
-        dateTo: filter.dateTo,
-      }),
-      // Keep the previous result rendered while a filter/search refetch runs,
-      // so the table never flashes to a full-page spinner mid-typing.
-      placeholderData: keepPreviousData,
-    })),
+  // The per-app aggregate is computed server-side in a single
+  // GROUP BY (app_display_name, process_name), so one query is
+  // enough — no more 5×100 fan-out. Each row already carries
+  // firstOpenedAt / lastClosedAt, so the "Duration" cell is just
+  // (lastClosedAt - firstOpenedAt). This is correct even when the
+  // client emits multiple rows per window (e.g. one row per tab) —
+  // the bug where "3 tabs × 10 min" rendered as "30 min" is fixed
+  // at the server, not by summing in the page.
+  const query = useQuery({
+    queryKey: ['app-sessions', 'usage', { employeeId, ...filter }],
+    queryFn: () => appSessionsApi.usage({
+      employeeId,
+      page: 1,
+      perPage: 100,
+      search: filter.search || undefined,
+      dateFrom: filter.dateFrom,
+      dateTo: filter.dateTo,
+    }),
+    // Keep the previous result rendered while a filter/search refetch runs,
+    // so the table never flashes to a full-page spinner mid-typing.
+    placeholderData: keepPreviousData,
   });
 
-  // Reflect query activity into the filter bar spinner (search in flight).
-  const anyFetching = queries.some(q => q.isFetching);
-  useEffect(() => { setIsFiltering(anyFetching); }, [anyFetching]);
+  useEffect(() => { setIsFiltering(query.isFetching); }, [query.isFetching]);
 
-  // Only show the full-page spinner on the very first load (no data at all yet);
-  // filter/search refetches keep the previous table rendered via keepPreviousData.
-  const hasData = queries.some(q => (q.data?.data?.length ?? 0) > 0);
-  const loading = !hasData && queries.some(q => q.isLoading);
-  const error = queries.find(q => q.isError);
-  const sessions: AppSession[] = queries.flatMap(q => q.data?.data ?? []);
+  // Defense in depth (Layer 2): even if the server somehow returned
+  // a stale sum, the page recomputes duration as (lastClosedAt -
+  // firstOpenedAt) here too. This is the user's stated rule:
+  // "first opened → last close, NOT Σ durations". MAX/MIN over the
+  // already-aggregated row is a no-op (one row per app), so the
+  // cost is negligible. If a future server change reintroduces the
+  // sum, the page stays correct.
+  const usage: AppUsageRow[] = useMemo(() => {
+    const rows = query.data?.data ?? [];
+    return rows.map(r => {
+      const first = new Date(r.firstOpenedAt).getTime();
+      const last = new Date(r.lastClosedAt).getTime();
+      const openRangeSeconds = Math.max(0, (last - first) / 1000);
+      return { ...r, totalDurationSeconds: openRangeSeconds };
+    }).sort((a, b) => b.totalDurationSeconds - a.totalDurationSeconds);
+  }, [query.data]);
 
-  const usage = useMemo(() => {
-    const map = new Map<string, AppUsage>();
-    // 4-state priority for the group rollup (most-live wins).
-    const rank: Record<SessionStatus, number> = {
-      ACTIVE: 4,
-      OFFLINE: 3,
-      STALE: 2,
-      CLOSED: 1,
-    };
-    for (const s of sessions) {
-      const key = s.appDisplayName || s.processName || s.id;
-      const entry = map.get(key) ?? {
-        appDisplayName: s.appDisplayName,
-        processName: s.processName,
-        sessionCount: 0,
-        durationSeconds: 0,
-        lastActiveAt: s.startedAt,
-        running: false,
-        topStatus: 'CLOSED' as SessionStatus,
-        sessions: [],
-      };
-      entry.sessionCount += 1;
-      entry.durationSeconds += sessionDurationSeconds(s);
-      entry.sessions.push(s);
-      const activity = s.lastActivityAt ?? s.lastSyncAt ?? s.startedAt;
-      if (activity > entry.lastActiveAt) entry.lastActiveAt = activity;
-      // "running" = at least one ACTIVE child session whose tracker is live.
-      // STALE / OFFLINE / CLOSED sessions are NOT counted as open even if
-      // they lack endedAt — the tracker can't currently be doing work.
-      if (isSessionLive(s)) entry.running = true;
-      const childStatus = sessionStatus(s);
-      if (rank[childStatus] > rank[entry.topStatus]) {
-        entry.topStatus = childStatus;
-      }
-      map.set(key, entry);
-    }
-    return [...map.values()].sort((a, b) => b.durationSeconds - a.durationSeconds);
-  }, [sessions]);
-
-  const totalDuration = usage.reduce((n, u) => n + u.durationSeconds, 0);
-  const runningCount = usage.filter(u => u.running).length;
+  // Total = sum of per-app (lastClosed - firstOpened) so the "Active
+  // Time" tile reflects the user's mental model: "the time the app
+  // was open", not the sum of overlapping child sessions.
+  const totalDuration = usage.reduce((n, u) => n + u.totalDurationSeconds, 0);
+  const totalSessions = usage.reduce((n, u) => n + u.sessionCount, 0);
+  const runningCount = usage.filter(u =>
+    new Date(u.lastClosedAt).getTime() > Date.now() - 60_000
+  ).length;
   const filtered = filter.search !== '' || filter.preset !== 'all';
 
   return (
@@ -184,14 +94,14 @@ function AppUsageBody({
           never unmounted by loading/error/empty states so the search input keeps focus. */}
       <ActivityFilters value={filter} onChange={setFilter} loading={isFiltering} />
 
-      {loading ? (
+      {query.isLoading ? (
         <div className="flex items-center justify-center py-12">
           <Loader2 className="w-6 h-6 animate-spin text-primary" />
         </div>
-      ) : error ? (
+      ) : query.isError ? (
         <div className="flex flex-col items-center justify-center py-12 gap-3 text-center">
           <p className="text-sm text-destructive font-medium">Failed to load app usage</p>
-          <p className="text-xs text-muted-foreground">{(error.error as Error)?.message || 'Unknown error'}</p>
+          <p className="text-xs text-muted-foreground">{(query.error as Error)?.message || 'Unknown error'}</p>
         </div>
       ) : usage.length === 0 ? (
         <EmptyState
@@ -203,7 +113,7 @@ function AppUsageBody({
       {/* Stat tiles */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <UsageTile icon={AppWindow} label="Applications" value={usage.length} accent="bg-primary/10 text-primary" />
-        <UsageTile icon={Layers} label="Sessions" value={sessions.length} accent="bg-info/15 text-info" />
+        <UsageTile icon={Layers} label="Sessions" value={totalSessions} accent="bg-info/15 text-info" />
         <UsageTile icon={Timer} label="Active Time" value={formatSeconds(totalDuration)} accent="bg-success/15 text-success" />
         <UsageTile icon={Activity} label="Open Now" value={runningCount} accent="bg-warning/15 text-warning" />
       </div>
@@ -212,7 +122,7 @@ function AppUsageBody({
         <table className="w-full min-w-[760px]">
           <thead>
             <tr className="border-b border-border">
-              {['Application', 'Sessions', 'Duration', 'Last Active', 'Status'].map(h => (
+              {['Application', 'Sessions', 'Duration', 'First Opened', 'Last Closed'].map(h => (
                 <th key={h} className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground whitespace-nowrap">{h}</th>
               ))}
             </tr>
@@ -220,54 +130,27 @@ function AppUsageBody({
           <tbody>
             {usage.map(u => {
               const rowKey = `${u.appDisplayName}|${u.processName}`;
-              const isOpen = expanded.has(rowKey);
-              const expandable = u.sessionCount > 1;
               return (
-                <Fragment key={rowKey}>
-                  <tr className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
-                    <td className="px-4 py-3">
-                      <div
-                        className={`flex items-center gap-2 ${expandable ? 'cursor-pointer select-none' : ''}`}
-                        onClick={expandable ? () => toggle(rowKey) : undefined}
-                        title={expandable ? (isOpen ? 'Collapse sessions' : 'Expand sessions') : undefined}
-                      >
-                        {expandable ? (
-                          isOpen
-                            ? <ChevronDown className="w-4 h-4 text-muted-foreground flex-shrink-0" />
-                            : <ChevronRight className="w-4 h-4 text-muted-foreground flex-shrink-0" />
-                        ) : (
-                          <span className="w-4 flex-shrink-0" />
-                        )}
-                        <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">
-                          <AppWindow className="w-4 h-4 text-primary" />
-                        </div>
-                        <div className="min-w-0">
-                          <p className="text-sm font-medium text-foreground truncate">{u.appDisplayName || u.processName}</p>
-                          {u.processName && u.processName !== u.appDisplayName && (
-                            <p className="text-xs text-muted-foreground font-mono truncate">{u.processName}</p>
-                          )}
-                        </div>
+                <tr key={rowKey} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <span className="w-4 flex-shrink-0" />
+                      <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">
+                        <AppWindow className="w-4 h-4 text-primary" />
                       </div>
-                    </td>
-                    <td className="px-4 py-3 text-sm text-foreground font-medium">{u.sessionCount}</td>
-                    <td className="px-4 py-3 text-sm text-success font-medium whitespace-nowrap">{formatSeconds(u.durationSeconds)}</td>
-                    <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">{formatDateTime(u.lastActiveAt)}</td>
-                    <td className="px-4 py-3">
-                      {/* 4-state rollup: at least one ACTIVE child ⇒ ACTIVE;
-                          otherwise the most "live" status across the group
-                          (OFFLINE > STALE > CLOSED) so the pill reflects the
-                          actual machine state, not a binary running flag. */}
-                      <SessionStatusBadge status={u.topStatus} />
-                    </td>
-                  </tr>
-                  {isOpen && (
-                    <tr className="border-b border-border bg-muted/20">
-                      <td colSpan={5} className="px-0 py-0">
-                        <ExpandedSessions sessions={u.sessions} />
-                      </td>
-                    </tr>
-                  )}
-                </Fragment>
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-foreground truncate">{u.appDisplayName || u.processName}</p>
+                        {u.processName && u.processName !== u.appDisplayName && (
+                          <p className="text-xs text-muted-foreground font-mono truncate">{u.processName}</p>
+                        )}
+                      </div>
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 text-sm text-foreground font-medium">{u.sessionCount}</td>
+                  <td className="px-4 py-3 text-sm text-success font-medium whitespace-nowrap">{formatSeconds(u.totalDurationSeconds)}</td>
+                  <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">{formatDateTime(u.firstOpenedAt)}</td>
+                  <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">{formatDateTime(u.lastClosedAt)}</td>
+                </tr>
               );
             })}
           </tbody>
@@ -275,54 +158,6 @@ function AppUsageBody({
       </div>
         </>
       )}
-    </div>
-  );
-}
-
-function ExpandedSessions({ sessions }: { sessions: AppSession[] }) {
-  return (
-    <div className="px-4 py-3">
-      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
-        {sessions.length} session{sessions.length === 1 ? '' : 's'}
-      </div>
-      <table className="w-full">
-        <thead>
-          <tr className="border-b border-border">
-            {['Opened', 'Closed', 'Duration', 'Details'].map(h => (
-              <th key={h} className="text-left px-3 py-2 text-xs font-semibold text-muted-foreground whitespace-nowrap">{h}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {sessions.map(s => {
-            const status = sessionStatus(s);
-            // Show a relative "since" label for both OFFLINE and STALE rows —
-            // OFFLINE = machine went silent, STALE = gap confirmed large.
-            // (ACTIVE never needs a label; CLOSED has its own absolute timestamps.)
-            const sinceLabel =
-              status === 'OFFLINE' || status === 'STALE'
-                ? formatRelative(s.lastSyncAt)
-                : undefined;
-            return (
-              <tr key={s.id} className="border-b border-border last:border-0">
-                <td className="px-3 py-2.5 text-sm text-foreground whitespace-nowrap">{formatDateTime(s.startedAt)}</td>
-                <td className="px-3 py-2.5 text-sm text-muted-foreground whitespace-nowrap">
-                  {s.endedAt ? (
-                    formatDateTime(s.endedAt)
-                  ) : (
-                    <SessionStatusBadge status={status} staleSinceLabel={sinceLabel} />
-                  )}
-                </td>
-                <td className="px-3 py-2.5 text-sm text-foreground font-medium whitespace-nowrap">{formatSeconds(sessionDurationSeconds(s))}</td>
-                <td className="px-3 py-2.5 text-xs text-muted-foreground">
-                  <span className="font-mono">{s.processName || '—'}</span>
-                  {s.contextLabel && <span className="text-muted-foreground"> · {s.contextLabel}</span>}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
     </div>
   );
 }

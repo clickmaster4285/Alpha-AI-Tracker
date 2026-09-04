@@ -139,6 +139,7 @@ func Setup(
 	protected.POST("/devices/:id/revoke", authHandler.RevokeDevice)
 
 	// App Sessions listing (protected — web admin access)
+	protected.GET("/app-sessions/usage", newSchemaHandler.ListAppSessionsUsage)
 	protected.GET("/app-sessions", newSchemaHandler.ListAppSessions)
 
 	// App Items listing (protected — web admin access)

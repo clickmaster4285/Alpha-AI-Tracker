@@ -222,6 +222,40 @@ func (h *NewSchemaHandler) ListAppSessions(c echo.Context) error {
 }
 
 // ────────────────────────────────
+// List App Sessions Usage (per-app aggregate for web dashboard)
+// ────────────────────────────────
+//
+// Returns one row per (appDisplayName, processName) with session count,
+// first opened, last closed, and total duration. The "Duration" cell
+// the page renders is (lastClosedAt - firstOpenedAt), NOT the sum of
+// per-session durations — so multi-tab windows never inflate the total.
+
+func (h *NewSchemaHandler) ListAppSessionsUsage(c echo.Context) error {
+	page, _ := strconv.Atoi(c.QueryParam("page"))
+	perPage, _ := strconv.Atoi(c.QueryParam("perPage"))
+
+	params := repository.AppSessionUsageListParams{
+		EmployeeID: c.QueryParam("employeeId"),
+		Search:     c.QueryParam("search"),
+		Platform:   c.QueryParam("platform"),
+		DateFrom:   parseTimeParam(c.QueryParam("dateFrom")),
+		DateTo:     parseTimeParam(c.QueryParam("dateTo")),
+		Page:       page,
+		PerPage:    perPage,
+	}
+
+	result, err := h.service.ListAppSessionsUsage(c.Request().Context(), params)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, dto.APIError{
+			Code:    http.StatusInternalServerError,
+			Message: "Failed to list app sessions usage",
+			Detail:  err.Error(),
+		})
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+// ────────────────────────────────
 // List App Items (browser URLs, file paths, etc.)
 // ────────────────────────────────
 

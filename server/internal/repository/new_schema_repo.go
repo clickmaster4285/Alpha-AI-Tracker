@@ -600,6 +600,168 @@ func (r *NewSchemaRepo) ListAppSessions(ctx context.Context, params AppSessionLi
 }
 
 // ────────────────────────────────
+// App Sessions Usage (per-app aggregate for web dashboard)
+// ────────────────────────────────
+//
+// The web "App Usage" page needs per-application totals, not the raw
+// session list. Summing (endedAt - startedAt) per row inflates the
+// total when one window opens multiple tabs (each tab was historically
+// a separate row in the client's data; we still defensively use
+// MIN/MAX here so the math is right even before any client-side
+// dedupe lands). Returns one row per (appDisplayName, processName)
+// with: sessionCount, firstOpenedAt, lastClosedAt, totalDurationSeconds.
+
+type AppSessionUsageListParams struct {
+	EmployeeID string
+	Search     string
+	Platform   string
+	DateFrom   time.Time
+	DateTo     time.Time
+	Page       int
+	PerPage    int
+}
+
+type AppSessionUsageRow struct {
+	AppDisplayName     string
+	ProcessName        string
+	SessionCount       int
+	FirstOpenedAt      time.Time
+	LastClosedAt       time.Time
+	TotalDurationSeconds float64
+}
+
+type AppSessionUsageListResult struct {
+	Rows      []AppSessionUsageRow
+	Total     int
+	Page      int
+	PerPage   int
+	TotalPages int
+}
+
+func (r *NewSchemaRepo) AggregateAppSessionsUsage(ctx context.Context, params AppSessionUsageListParams) (*AppSessionUsageListResult, error) {
+	if params.Page < 1 {
+		params.Page = 1
+	}
+	if params.PerPage < 1 || params.PerPage > 100 {
+		params.PerPage = 20
+	}
+
+	var conditions []string
+	var args []interface{}
+	argIdx := 1
+
+	conditions = append(conditions, "deleted_at IS NULL")
+
+	if params.EmployeeID != "" {
+		conditions = append(conditions, fmt.Sprintf("employee_id = $%d", argIdx))
+		args = append(args, params.EmployeeID)
+		argIdx++
+	}
+	if params.Search != "" {
+		conditions = append(conditions, fmt.Sprintf(
+			"(LOWER(process_name) LIKE LOWER($%d) OR LOWER(app_display_name) LIKE LOWER($%d))",
+			argIdx, argIdx))
+		args = append(args, "%"+params.Search+"%")
+		argIdx++
+	}
+	if params.Platform != "" {
+		conditions = append(conditions, fmt.Sprintf("platform = $%d", argIdx))
+		args = append(args, params.Platform)
+		argIdx++
+	}
+	if !params.DateFrom.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("started_at >= $%d", argIdx))
+		args = append(args, params.DateFrom)
+		argIdx++
+	}
+	if !params.DateTo.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("started_at <= $%d", argIdx))
+		args = append(args, params.DateTo)
+		argIdx++
+	}
+
+	whereClause := ""
+	if len(conditions) > 0 {
+		whereClause = "WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	// Count distinct (app_display_name, process_name) groups so the page
+	// can paginate through results, matching the rest of the dashboard.
+	countQuery := fmt.Sprintf(`
+		SELECT COUNT(*) FROM (
+			SELECT 1 FROM app_sessions %s
+			GROUP BY app_display_name, process_name
+		) g
+	`, whereClause)
+	var total int
+	if err := r.pool.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, fmt.Errorf("count app_sessions usage: %w", err)
+	}
+
+	offset := (params.Page - 1) * params.PerPage
+	totalPages := (total + params.PerPage - 1) / params.PerPage
+
+	// Per-app aggregate:
+	//   - sessionCount        = COUNT(*)
+	//   - firstOpenedAt       = MIN(started_at)
+	//   - lastClosedAt        = MAX(COALESCE(ended_at, last_sync_at, started_at))
+	//     (2026-09-02 3-state lifecycle: for ACTIVE/STALE sessions the real
+	//      "end" we know about is last_sync_at; for CLOSED rows ended_at
+	//      is final. Using COALESCE picks the most-recent truthful moment
+	//      regardless of status — same shape the web page uses for the
+	//      STALE/CLOSED case in sessionDurationSeconds.)
+	//   - totalDurationSeconds = SUM of (COALESCE(ended, last_sync, started) - started_at)
+	//     NOTE: this is the SUM-OF-DURATIONS shape. The page intentionally
+	//     displays max(lastClosed) - min(firstOpened) for the "Duration"
+	//     column so multi-tab sessions never inflate the per-app total.
+	//     The SUM is provided for backwards-compat and for the
+	//     "Active Time" tile that sums across all apps.
+	query := fmt.Sprintf(`
+		SELECT app_display_name,
+		       COALESCE(process_name, '') AS process_name,
+		       COUNT(*) AS session_count,
+		       MIN(started_at) AS first_opened_at,
+		       MAX(COALESCE(ended_at, last_sync_at, started_at)) AS last_closed_at,
+		       COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(ended_at, last_sync_at, started_at) - started_at))), 0) AS total_duration_seconds
+		FROM app_sessions %s
+		GROUP BY app_display_name, process_name
+		ORDER BY total_duration_seconds DESC
+		LIMIT $%d OFFSET $%d
+	`, whereClause, argIdx, argIdx+1)
+	args = append(args, params.PerPage, offset)
+
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate app_sessions usage: %w", err)
+	}
+	defer rows.Close()
+
+	var usage []AppSessionUsageRow
+	for rows.Next() {
+		var u AppSessionUsageRow
+		if err := rows.Scan(
+			&u.AppDisplayName,
+			&u.ProcessName,
+			&u.SessionCount,
+			&u.FirstOpenedAt,
+			&u.LastClosedAt,
+			&u.TotalDurationSeconds,
+		); err != nil {
+			return nil, fmt.Errorf("scan app_sessions usage row: %w", err)
+		}
+		usage = append(usage, u)
+	}
+
+	return &AppSessionUsageListResult{
+		Rows:       usage,
+		Total:      total,
+		Page:       params.Page,
+		PerPage:    params.PerPage,
+		TotalPages: totalPages,
+	}, nil
+}
+
+// ────────────────────────────────
 // App Items (list for web dashboard)
 // ────────────────────────────────
 

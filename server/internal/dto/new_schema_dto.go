@@ -254,6 +254,27 @@ type AppSessionResponse struct {
 }
 
 // ────────────────────────────────
+// App Usage (per-app aggregate for web dashboard)
+// ────────────────────────────────
+
+type AppUsageRow struct {
+	AppDisplayName       string    `json:"appDisplayName"`
+	ProcessName          string    `json:"processName"`
+	SessionCount         int       `json:"sessionCount"`
+	FirstOpenedAt        time.Time `json:"firstOpenedAt"`
+	LastClosedAt         time.Time `json:"lastClosedAt"`
+	TotalDurationSeconds float64   `json:"totalDurationSeconds"`
+}
+
+type AppUsageListResponse struct {
+	Data       []AppUsageRow `json:"data"`
+	Total      int           `json:"total"`
+	Page       int           `json:"page"`
+	PerPage    int           `json:"perPage"`
+	TotalPages int           `json:"totalPages"`
+}
+
+// ────────────────────────────────
 // App Items (replaces browser_contexts, file_explorer_contexts, urls, url_visits)
 // ────────────────────────────────
 
