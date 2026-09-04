@@ -1,137 +1,51 @@
-.PHONY: build run dev clean test deps setup-env setup
+.PHONY: build run dev clean test deps
 
-# ============================================================
-# Alpha AI Tracker Server
-# Cross-platform Makefile
-# Windows + Linux + macOS
-# ============================================================
-
-# Detect Windows
-ifeq ($(OS),Windows_NT)
-
-PLATFORM := windows
-EXE := .exe
-
-else
-
-PLATFORM := unix
-EXE :=
-
-endif
-
-
-# ============================================================
-# BUILD
-# ============================================================
-
+# Build the server binary
 build:
-	@echo Building Alpha AI Tracker server...
-	go build -o bin/alpha-ai-server$(EXE) ./cmd/server
-	@echo Build completed successfully.
-
-
-# ============================================================
-# RUN
-# ============================================================
-
-ifeq ($(PLATFORM),windows)
-
-run: build
-	@echo Starting Alpha AI Tracker server...
-	.\bin\alpha-ai-server.exe
-
+ifeq ($(OS),Windows_NT)
+	go build -o bin/alpha-ai-server.exe ./cmd/server
 else
-
-run: build
-	@echo Starting Alpha AI Tracker server...
-	./bin/alpha-ai-server
-
+	go build -o bin/alpha-ai-server ./cmd/server
 endif
 
-
-# ============================================================
-# DEVELOPMENT / HOT RELOAD
-# Requires Air:
-# go install github.com/air-verse/air@latest
-# ============================================================
-
-ifeq ($(PLATFORM),windows)
-
-dev:
-	air --build.cmd "go build -o bin/alpha-ai-server.exe ./cmd/server" --build.bin "bin/alpha-ai-server.exe"
-
+ifeq ($(OS),Windows_NT)
+SERVER_BIN := ./bin/alpha-ai-server.exe
 else
-
-dev:
-	air --build.cmd "go build -o bin/alpha-ai-server ./cmd/server" --build.bin "bin/alpha-ai-server"
-
+SERVER_BIN := ./bin/alpha-ai-server
 endif
 
+# Run the server
+run: build
+	$(SERVER_BIN)
 
-# ============================================================
-# CLEAN
-# ============================================================
-
-ifeq ($(PLATFORM),windows)
-
-clean:
-	if exist bin rmdir /s /q bin
-
+# Run with hot-reload (requires air: go install github.com/air-verse/air@latest)
+dev:
+ifeq ($(OS),Windows_NT)
+	air --build.cmd "go build -o bin/alpha-ai-server.exe ./cmd/server" --build.bin "$(SERVER_BIN)"
 else
+	air --build.cmd "go build -o bin/alpha-ai-server ./cmd/server" --build.bin "$(SERVER_BIN)"
+endif
 
+# Clean build artifacts
 clean:
 	rm -rf bin/
 
-endif
-
-
-# ============================================================
-# TEST
-# ============================================================
-
+# Run tests
 test:
 	go test ./... -v -count=1
 
-
-# ============================================================
-# DEPENDENCIES
-# ============================================================
-
+# Download dependencies
 deps:
 	go mod tidy
 	go mod download
 
-
-# ============================================================
-# ENVIRONMENT
-# ============================================================
-
-ifeq ($(PLATFORM),windows)
-
+# Create a .env from example if it doesn't exist
 setup-env:
-	if not exist .env copy .env.example .env
-	if exist .env echo Environment file ready.
-
-else
-
-setup-env:
-	if [ ! -f .env ]; then \
+	@if [ ! -f .env ]; then \
 		cp .env.example .env; \
-		echo "Created .env from .env.example - edit it with your settings"; \
-	else \
-		echo ".env already exists."; \
+		echo "Created .env from .env.example — edit it with your settings"; \
 	fi
 
-endif
-
-
-# ============================================================
-# QUICK SETUP
-# ============================================================
-
+# Quick start
 setup: setup-env deps build
-	@echo.
-	@echo ==========================================
-	@echo Alpha AI Tracker server setup completed.
-	@echo ==========================================
-	@echo Run 'make run' to start the server.
+	@echo "Server built successfully. Run 'make run' to start."
