@@ -533,6 +533,55 @@ func (s *NewSchemaService) ListAppSessionsUsage(ctx context.Context, params repo
 	}, nil
 }
 
+// ── List app sessions for a specific app (per-app chevron expand) ──
+
+func (s *NewSchemaService) ListAppSessionsForApp(ctx context.Context, params repository.AppSessionForAppListParams) (*dto.AppSessionListResponse, error) {
+	result, err := s.repo.ListAppSessionsForApp(ctx, params)
+	if err != nil {
+		return nil, fmt.Errorf("list app sessions for app: %w", err)
+	}
+
+	sessions := make([]dto.AppSessionResponse, len(result.Sessions))
+	for i, sess := range result.Sessions {
+		status := sess.Status
+		if status == "" {
+			status = "ACTIVE"
+		}
+		sessions[i] = dto.AppSessionResponse{
+			ID:                 sess.ID,
+			EmployeeID:         sess.EmployeeID,
+			ProcessName:        sess.ProcessName,
+			AppDisplayName:     sess.AppDisplayName,
+			StartedAt:          sess.StartedAt,
+			EndedAt:            sess.EndedAt,
+			MachineID:          sess.MachineID,
+			SessionID:          sess.SessionID,
+			Platform:           sess.Platform,
+			ProcessID:          sess.ProcessID,
+			ParentProcessID:    sess.ParentProcessID,
+			InstalledAppID:     sess.InstalledAppID,
+			InstalledPackageID: sess.InstalledPackageID,
+			GroupedBy:          sess.GroupedBy,
+			CgroupScope:        sess.CgroupScope,
+			ContextLabel:       sess.ContextLabel,
+			ForegroundSeconds:  sess.ForegroundSeconds,
+			BackgroundSeconds:  sess.BackgroundSeconds,
+			SyncedAt:           sess.SyncedAt,
+			Status:             status,
+			LastActivityAt:     sess.LastActivityAt,
+			LastSyncAt:         sess.LastSyncAt,
+		}
+	}
+
+	return &dto.AppSessionListResponse{
+		Data:       sessions,
+		Total:      result.Total,
+		Page:       result.Page,
+		PerPage:    result.PerPage,
+		TotalPages: result.TotalPages,
+	}, nil
+}
+
 // ── List app items (for web dashboard — URLs, file paths, etc.) ──
 
 func (s *NewSchemaService) ListAppItems(ctx context.Context, params repository.AppItemListParams) (*dto.AppItemListResponse, error) {

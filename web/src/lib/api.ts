@@ -642,6 +642,28 @@ export const appSessionsApi = {
     dateFrom?: string; dateTo?: string;
   }) =>
     request<AppUsageListResponse>('/app-sessions/usage', { params: params as Record<string, string | number | undefined> }),
+  /**
+   * Per-app session list — fired when the user expands a row on
+   * /employee-journey/apps to see every individual session. The
+   * (appDisplayName, processName) pair is the same GROUP BY key the
+   * aggregate uses, so the result is consistent with the parent row's
+   * sessionCount. Paginated server-side (page/perPage) so a heavy
+   * user (e.g. 200 chrome opens/week) doesn't ship every row up
+   * front. The page re-keys the call when the date filter changes
+   * (dateFrom/dateTo are part of the React Query key).
+   */
+  usageSessions: (params: {
+    appDisplayName: string;
+    processName: string;
+    page?: number;
+    perPage?: number;
+    employeeId?: string;
+    dateFrom?: string;
+    dateTo?: string;
+  }) =>
+    request<AppSessionListResponse>('/app-sessions/usage/sessions', {
+      params: params as Record<string, string | number | undefined>,
+    }),
 };
 
 export interface AppItem {

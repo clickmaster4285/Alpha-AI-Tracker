@@ -256,6 +256,57 @@ func (h *NewSchemaHandler) ListAppSessionsUsage(c echo.Context) error {
 }
 
 // ────────────────────────────────
+// List App Sessions For A Specific App (per-app chevron expand)
+// ────────────────────────────────
+//
+// Used by the /employee-journey/apps page when the user expands a row
+// to see the individual sessions that make up the per-app aggregate.
+// The (appDisplayName, processName) pair is the same GROUP BY key the
+// aggregate uses, so the result is consistent with the parent row's
+// sessionCount. Paginated server-side so a heavy user (e.g. 200 chrome
+// opens in a week) doesn't ship every row up front.
+//
+// Both appDisplayName AND processName MUST be provided — an empty
+// processName matches rows where process_name IS NULL (the aggregate
+// rows can have an empty processName when the client didn't supply one).
+
+func (h *NewSchemaHandler) ListAppSessionsForApp(c echo.Context) error {
+	page, _ := strconv.Atoi(c.QueryParam("page"))
+	perPage, _ := strconv.Atoi(c.QueryParam("perPage"))
+
+	appDisplayName := c.QueryParam("appDisplayName")
+	processName := c.QueryParam("processName")
+
+	// Either both or neither — a single key without its pair is ambiguous.
+	if appDisplayName == "" && processName == "" {
+		return c.JSON(http.StatusBadRequest, dto.APIError{
+			Code:    http.StatusBadRequest,
+			Message: "appDisplayName and processName are required (both, or both empty for the IS NULL case)",
+		})
+	}
+
+	params := repository.AppSessionForAppListParams{
+		EmployeeID:     c.QueryParam("employeeId"),
+		AppDisplayName: appDisplayName,
+		ProcessName:    processName,
+		DateFrom:       parseTimeParam(c.QueryParam("dateFrom")),
+		DateTo:         parseTimeParam(c.QueryParam("dateTo")),
+		Page:           page,
+		PerPage:        perPage,
+	}
+
+	result, err := h.service.ListAppSessionsForApp(c.Request().Context(), params)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, dto.APIError{
+			Code:    http.StatusInternalServerError,
+			Message: "Failed to list app sessions for app",
+			Detail:  err.Error(),
+		})
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+// ────────────────────────────────
 // List App Items (browser URLs, file paths, etc.)
 // ────────────────────────────────
 

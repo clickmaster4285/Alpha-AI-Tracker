@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -421,6 +422,40 @@ func (r *NewSchemaRepo) BulkInsertAppItems(ctx context.Context, entries []models
 			end = len(entries)
 		}
 		batch := entries[i:end]
+
+		// Orphan preflight: app_items.app_session_id has a NOT NULL FK to
+		// app_sessions.id. The client sends sessions and items in separate
+		// HTTP calls — a retry, a second client process, or a network blip
+		// can land the items batch BEFORE the parent session row arrives,
+		// which used to 500 the whole batch and silently drop every row
+		// (the client marks them sent on the 2xx it would have wanted).
+		// The fix: query which app_session_ids actually exist right now,
+		// drop the orphans from THIS batch, and proceed. The dropped rows
+		// are re-sent on the client's next sync (where the parent session
+		// is already in the DB). The orphan count is logged at WARN with
+		// the first 20 ids so the client-side root cause stays visible.
+		//
+		// Why preflight (not ON CONFLICT DO NOTHING on the FK): Postgres
+		// checks FKs at row-insert time, not at ON CONFLICT time, so the
+		// preflight is the only way to make the rest of the batch succeed
+		// atomically without aborting the whole statement.
+		//
+		// Why log (not return error): the orphan rows are recoverable —
+		// the client's next sync will re-send them after the parent
+		// session lands. Returning an error here would make the client
+		// treat the entire batch as failed and stop sending until a
+		// restart, which is exactly the wrong failure mode.
+		orphanIDs, survivorIdx := r.filterOrphanAppItems(ctx, batch)
+		if len(orphanIDs) > 0 {
+			logOrphanAppItems(entries, orphanIDs)
+		}
+		if len(survivorIdx) == 0 {
+			// entire batch was orphans — nothing to insert, but the
+			// request itself is well-formed, so report 0 inserted.
+			continue
+		}
+		batch = survivorIdxOf(batch, survivorIdx)
+
 		valueStrings := make([]string, 0, len(batch))
 		args := make([]interface{}, 0, len(batch)*21)
 		argIdx := 1
@@ -477,6 +512,117 @@ func (r *NewSchemaRepo) BulkInsertAppItems(ctx context.Context, entries []models
 		inserted += int(tag.RowsAffected())
 	}
 	return inserted, nil
+}
+
+// filterOrphanAppItems returns the set of appSessionId values in `batch`
+// that are missing from app_sessions right now, plus the indices of the
+// batch rows that are NOT orphans (so the caller can re-slice). The
+// query is O(1) round-trips (one SELECT with ANY($1) over the distinct
+// ids in the batch, indexed lookup on app_sessions.id).
+func (r *NewSchemaRepo) filterOrphanAppItems(ctx context.Context, batch []models.AppItem) (orphanIDs []string, survivorIdx []int) {
+	seen := make(map[string]struct{}, len(batch))
+	distinct := make([]string, 0, len(batch))
+	for _, e := range batch {
+		if e.AppSessionID == "" {
+			continue
+		}
+		if _, ok := seen[e.AppSessionID]; ok {
+			continue
+		}
+		seen[e.AppSessionID] = struct{}{}
+		distinct = append(distinct, e.AppSessionID)
+	}
+	if len(distinct) == 0 {
+		// every row had an empty app_session_id — that's a client bug,
+		// but the FK is NOT NULL on this column, so those rows would
+		// fail to insert anyway. Treat them all as orphans (the server
+		// can't tell if it's a missing FK or a NULL FK — both are bad).
+		for i, e := range batch {
+			if e.AppSessionID == "" {
+				orphanIDs = append(orphanIDs, "<empty>")
+				continue
+			}
+			survivorIdx = append(survivorIdx, i)
+		}
+		return orphanIDs, survivorIdx
+	}
+
+	rows, err := r.pool.Query(ctx, "SELECT id FROM app_sessions WHERE id = ANY($1)", distinct)
+	if err != nil {
+		// If the preflight itself fails, fail closed — return the full
+		// batch so the caller 500s. Better to alert than to silently
+		// drop data on a transient pg error.
+		return nil, nil
+	}
+	defer rows.Close()
+	present := make(map[string]struct{}, len(distinct))
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err == nil {
+			present[id] = struct{}{}
+		}
+	}
+
+	orphanSet := make(map[string]struct{})
+	for i, e := range batch {
+		// Empty appSessionID is treated as an orphan (the FK is NOT NULL
+		// on app_items.app_session_id, so the INSERT would 500 anyway).
+		if e.AppSessionID == "" {
+			if _, already := orphanSet["<empty>"]; !already {
+				orphanIDs = append(orphanIDs, "<empty>")
+				orphanSet["<empty>"] = struct{}{}
+			}
+			continue
+		}
+		if _, ok := present[e.AppSessionID]; !ok {
+			if _, already := orphanSet[e.AppSessionID]; !already {
+				orphanIDs = append(orphanIDs, e.AppSessionID)
+				orphanSet[e.AppSessionID] = struct{}{}
+			}
+			continue
+		}
+		survivorIdx = append(survivorIdx, i)
+	}
+	return orphanIDs, survivorIdx
+}
+
+// survivorIdxOf returns the entries in `batch` at the indices in `idx`,
+// preserving order. The idx slice comes from filterOrphanAppItems.
+func survivorIdxOf(batch []models.AppItem, idx []int) []models.AppItem {
+	out := make([]models.AppItem, 0, len(idx))
+	for _, i := range idx {
+		out = append(out, batch[i])
+	}
+	return out
+}
+
+// logOrphanAppItems writes a single WARN line per batch with the orphan
+// count and the first 20 appSessionIds. Using log.Printf here (not
+// the structured logger) because this file is mid-import-build and
+// adding a logger dep is out of scope. The cap keeps a single misbehaving
+// client from spamming the log on every sync.
+func logOrphanAppItems(entries []models.AppItem, orphanIDs []string) {
+	cap := 20
+	preview := orphanIDs
+	if len(preview) > cap {
+		preview = preview[:cap]
+	}
+	emp := ""
+	if len(entries) > 0 {
+		emp = entries[0].EmployeeID
+	}
+	log.Printf(
+		"[new_schema] WARN: app-items batch contained %d orphan app_session_id(s) for employee=%s (dropped from this batch, will re-sync next pass). ids=%v%s",
+		len(orphanIDs), emp, preview,
+		ifMore(len(orphanIDs), cap),
+	)
+}
+
+func ifMore(have, cap int) string {
+	if have <= cap {
+		return ""
+	}
+	return fmt.Sprintf(" (and %d more)", have-cap)
 }
 
 // ────────────────────────────────
@@ -754,6 +900,145 @@ func (r *NewSchemaRepo) AggregateAppSessionsUsage(ctx context.Context, params Ap
 
 	return &AppSessionUsageListResult{
 		Rows:       usage,
+		Total:      total,
+		Page:       params.Page,
+		PerPage:    params.PerPage,
+		TotalPages: totalPages,
+	}, nil
+}
+
+// ────────────────────────────────
+// Per-app session list (powers the /employee-journey/apps chevron expand)
+// ────────────────────────────────
+//
+// The "App Usage" page lists one row per (appDisplayName, processName).
+// When the user clicks a row's chevron, the page calls this endpoint to
+// fetch the raw app_sessions rows that make up that app's aggregate —
+// with server-side pagination so an employee who opened Chrome 200
+// times in a week doesn't ship 200 rows up front. The page is responsible
+// for re-keying the call when the date filter changes (the URL `?from`
+// and `?to` query params become part of the React Query key).
+//
+// `appDisplayName` and `processName` MUST both be passed: the
+// `(appDisplayName, processName)` tuple is the same grouping key the
+// aggregate uses, so missing either would match too many or too few
+// rows. `appDisplayName` may be empty (rare — only when the aggregate
+// group has no display name and fell back to processName alone); an
+// empty processName matches rows where process_name IS NULL (Postgres
+// NULLs don't match `= ''`, so we special-case to IS NULL).
+
+type AppSessionForAppListParams struct {
+	EmployeeID     string
+	AppDisplayName string
+	ProcessName    string
+	DateFrom       time.Time
+	DateTo         time.Time
+	Page           int
+	PerPage        int
+}
+
+func (r *NewSchemaRepo) ListAppSessionsForApp(ctx context.Context, params AppSessionForAppListParams) (*AppSessionListResult, error) {
+	if params.Page < 1 {
+		params.Page = 1
+	}
+	if params.PerPage < 1 || params.PerPage > 100 {
+		params.PerPage = 20
+	}
+
+	var conditions []string
+	var args []interface{}
+	argIdx := 1
+
+	conditions = append(conditions, "deleted_at IS NULL")
+
+	if params.EmployeeID != "" {
+		conditions = append(conditions, fmt.Sprintf("employee_id = $%d", argIdx))
+		args = append(args, params.EmployeeID)
+		argIdx++
+	}
+
+	// Group key: match the aggregate's GROUP BY exactly so the per-app
+	// session list is consistent with the per-app row's sessionCount.
+	// Postgres NULL doesn't match `= ''`, so each side of the pair needs
+	// its own IS NULL / = '' branch.
+	//
+	// Both real cases:
+	//   - appDisplayName + processName both non-empty: exact match
+	//   - one or both empty: the empty side is treated as "match IS NULL
+	//     OR = ''" so it catches the rows the aggregate grouped together.
+	if params.AppDisplayName == "" {
+		conditions = append(conditions, fmt.Sprintf("(app_display_name = '' OR app_display_name IS NULL)"))
+	} else {
+		conditions = append(conditions, fmt.Sprintf("app_display_name = $%d", argIdx))
+		args = append(args, params.AppDisplayName)
+		argIdx++
+	}
+	if params.ProcessName == "" {
+		conditions = append(conditions, "(process_name = '' OR process_name IS NULL)")
+	} else {
+		conditions = append(conditions, fmt.Sprintf("process_name = $%d", argIdx))
+		args = append(args, params.ProcessName)
+		argIdx++
+	}
+
+	if !params.DateFrom.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("started_at >= $%d", argIdx))
+		args = append(args, params.DateFrom)
+		argIdx++
+	}
+	if !params.DateTo.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("started_at <= $%d", argIdx))
+		args = append(args, params.DateTo)
+		argIdx++
+	}
+
+	whereClause := "WHERE " + strings.Join(conditions, " AND ")
+
+	// Reuse the same count + SELECT shape as ListAppSessions.
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM app_sessions %s", whereClause)
+	var total int
+	if err := r.pool.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, fmt.Errorf("count app_sessions for app: %w", err)
+	}
+
+	offset := (params.Page - 1) * params.PerPage
+	totalPages := (total + params.PerPage - 1) / params.PerPage
+
+	query := fmt.Sprintf(`
+		SELECT id, employee_id, process_name, app_display_name, started_at, ended_at,
+		       machine_id, session_id, platform, process_id, parent_process_id,
+		       installed_app_id, installed_package_id, grouped_by, cgroup_scope, context_label,
+		       foreground_seconds, background_seconds, synced_at,
+		       status, last_activity_at, last_sync_at, created_at
+		FROM app_sessions %s
+		ORDER BY started_at DESC
+		LIMIT $%d OFFSET $%d
+	`, whereClause, argIdx, argIdx+1)
+	args = append(args, params.PerPage, offset)
+
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list app_sessions for app: %w", err)
+	}
+	defer rows.Close()
+
+	var sessions []models.AppSession
+	for rows.Next() {
+		var s models.AppSession
+		if err := rows.Scan(
+			&s.ID, &s.EmployeeID, &s.ProcessName, &s.AppDisplayName, &s.StartedAt, &s.EndedAt,
+			&s.MachineID, &s.SessionID, &s.Platform, &s.ProcessID, &s.ParentProcessID,
+			&s.InstalledAppID, &s.InstalledPackageID, &s.GroupedBy, &s.CgroupScope, &s.ContextLabel,
+			&s.ForegroundSeconds, &s.BackgroundSeconds, &s.SyncedAt,
+			&s.Status, &s.LastActivityAt, &s.LastSyncAt, &s.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan app_session row: %w", err)
+		}
+		sessions = append(sessions, s)
+	}
+
+	return &AppSessionListResult{
+		Sessions:   sessions,
 		Total:      total,
 		Page:       params.Page,
 		PerPage:    params.PerPage,
