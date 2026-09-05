@@ -2,7 +2,8 @@
 
 > **Last audited:** 2026-09-04 (browser window-key collapse for multi-tab chrome)
 > **Changelog:**
-> - 2026-09-04: **Client: `ResolveWindowKey` collapse rules — multi-tab chrome is one session, not N.**
+> - 2026-09-05: **Core: Windows `power_off` event now fires on shutdown/restart — `SystemEventWatcher` subscribes to `SystemEvents.SessionEnding`.**
+>   The Windows half of `SystemEventWatcher` was missing `SystemEvents.SessionEnding`, so shutdown/restart never emitted `power_off` (sleep/resume via `PowerModeChanged` worked; lock/unlock via `SessionSwitch` worked; power_on worked via `LogCollectorService` on boot). `SessionEnding` with `SessionEndReasons.SystemShutdown` is now subscribed in `SubscribeWindows()` (fire-and-forget, mirrors Linux's synchronous `PrepareForShutdown` handler), with matching unsubscription in `UnsubscribeWindows()`. `Logoff` is intentionally skipped to avoid duplicating the existing `SessionSwitch` → `os_logout` path. `ShutdownSentinel` remains as fallback. This makes Windows match Linux's two-layer power-off detection pattern. Verified: `dotnet build` 0/0, 0 warnings. Real-world test requires a Windows shutdown/restart cycle against an installed build.
 >   The accessibility reader returns a fresh `WindowKey` per tab; the old title-only collapse rule let
 >   transient "Loading…" states slip through and opened a separate `app_sessions` row per tab — which
 >   then summed on the web to 3× the real open time. Two new collapse rules, layered BEFORE the
