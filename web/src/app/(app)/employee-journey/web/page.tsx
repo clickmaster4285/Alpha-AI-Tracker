@@ -1,7 +1,7 @@
 'use client';
 
 import { Fragment, Suspense, useEffect, useMemo, useRef, useState } from 'react';
-import { Globe, Loader2, ExternalLink, ChevronRight, ChevronDown } from 'lucide-react';
+import { Globe, Loader2, ExternalLink, ChevronRight, ChevronDown, Search } from 'lucide-react';
 import { keepPreviousData, useInfiniteQuery } from '@tanstack/react-query';
 import EmployeePage from '@/components/employees/EmployeePage';
 import EmptyState from '@/components/employees/EmptyState';
@@ -17,6 +17,34 @@ interface WebGroup {
   count: number;
   totalDuration: number;
   lastVisitedAt: string;
+  isSearch?: boolean;
+  searchEngine?: string;
+  searchQuery?: string;
+}
+
+function searchQueryOf(item: AppItem): { engine: string; query: string } | null {
+  try {
+    const url = new URL(item.url || '');
+    const host = url.hostname.toLowerCase();
+    const params = url.searchParams;
+
+    if (host === 'www.google.com' || host === 'google.com') {
+      const q = params.get('q');
+      if (q) return { engine: 'Google', query: q };
+    } else if (host === 'www.bing.com' || host === 'bing.com') {
+      const q = params.get('q');
+      if (q) return { engine: 'Bing', query: q };
+    } else if (host === 'search.yahoo.com' || host === 'yahoo.com') {
+      const p = params.get('p');
+      if (p) return { engine: 'Yahoo', query: p };
+    } else if (host === 'duckduckgo.com') {
+      const q = params.get('q');
+      if (q) return { engine: 'DuckDuckGo', query: q };
+    }
+  } catch {
+    // ignore
+  }
+  return null;
 }
 
 function domainOf(item: AppItem): string {
@@ -26,6 +54,14 @@ function domainOf(item: AppItem): string {
     if (host) return host;
   } catch { /* fall through */ }
   return 'Other';
+}
+
+function groupKeyOf(item: AppItem): { key: string; isSearch: boolean; engine?: string; query?: string } {
+  const sq = searchQueryOf(item);
+  if (sq) {
+    return { key: `${sq.engine}: ${sq.query}`, isSearch: true, engine: sq.engine, query: sq.query };
+  }
+  return { key: domainOf(item), isSearch: false };
 }
 
 function visitDurationSeconds(item: AppItem): number {
@@ -132,19 +168,22 @@ function WebBody({
   const groups = useMemo(() => {
     const map = new Map<string, WebGroup>();
     for (const item of items) {
-      const domain = domainOf(item);
-      const group = map.get(domain) ?? {
-        domain,
+      const { key, isSearch, engine, query } = groupKeyOf(item);
+      const group = map.get(key) ?? {
+        domain: key,
         items: [],
         count: 0,
         totalDuration: 0,
         lastVisitedAt: item.openedAt,
+        isSearch,
+        searchEngine: engine,
+        searchQuery: query,
       };
       group.items.push(item);
       group.count += 1;
       group.totalDuration += visitDurationSeconds(item);
       if (item.openedAt > group.lastVisitedAt) group.lastVisitedAt = item.openedAt;
-      map.set(domain, group);
+      map.set(key, group);
     }
     return [...map.values()].sort((a, b) => b.lastVisitedAt.localeCompare(a.lastVisitedAt));
   }, [items]);
@@ -204,19 +243,7 @@ function WebBody({
                 </div>
                 <span className="text-xs text-muted-foreground">{total.toLocaleString()} page{total === 1 ? '' : 's'}</span>
               </div>
-              <table className="w-full min-w-[820px]">
-                <thead>
-                  <tr className="border-b border-border">
-                    {['Page', 'URL', 'Domain', 'Visited', 'Duration'].map(h => (
-                      <th key={h} className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground whitespace-nowrap">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {items.map(item => <PageRow key={item.id} item={item} withDomain />)}
-                  {isFetchingNextPage && <LoadingRow colSpan={5} />}
-                </tbody>
-              </table>
+              <SearchGroups items={items} expanded={expanded} toggle={toggle} isFetchingNextPage={isFetchingNextPage} />
             </>
           ) : (
             <>
@@ -258,11 +285,22 @@ function WebBody({
                                 <span className="w-4 flex-shrink-0" />
                               )}
                               <div className="w-8 h-8 rounded-lg bg-info/10 flex items-center justify-center flex-shrink-0">
-                                <Globe className="w-4 h-4 text-info" />
+                                {g.isSearch ? (
+                                  <Search className="w-4 h-4 text-info" />
+                                ) : (
+                                  <Globe className="w-4 h-4 text-info" />
+                                )}
                               </div>
                               <div className="min-w-0">
-                                <div className="flex items-center gap-1.5">
-                                  <p className="text-sm font-medium text-foreground truncate">{g.domain}</p>
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <p className="text-sm font-medium text-foreground truncate">
+                                    {g.isSearch ? g.searchQuery : g.domain}
+                                  </p>
+                                  {g.isSearch && g.searchEngine && (
+                                    <span className="px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-info/10 text-info whitespace-nowrap">
+                                      {g.searchEngine}
+                                    </span>
+                                  )}
                                   {browsers.slice(0, 3).map(b => (
                                     <span key={b} className="px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-muted text-muted-foreground whitespace-nowrap">
                                       {b}
@@ -371,6 +409,128 @@ function PageRow({ item, withDomain = false }: { item: AppItem; withDomain?: boo
         {item.closedAt ? formatDuration(item.openedAt, item.closedAt) : '—'}
       </td>
     </tr>
+  );
+}
+
+function SearchGroups({ items, expanded, toggle, isFetchingNextPage }: { items: AppItem[]; expanded: Set<string>; toggle: (key: string) => void; isFetchingNextPage: boolean }) {
+  const groups = useMemo(() => {
+    const map = new Map<string, WebGroup>();
+    for (const item of items) {
+      const { key, isSearch, engine, query } = groupKeyOf(item);
+      const group = map.get(key) ?? {
+        domain: key,
+        items: [],
+        count: 0,
+        totalDuration: 0,
+        lastVisitedAt: item.openedAt,
+        isSearch,
+        searchEngine: engine,
+        searchQuery: query,
+      };
+      group.items.push(item);
+      group.count += 1;
+      group.totalDuration += visitDurationSeconds(item);
+      if (item.openedAt > group.lastVisitedAt) group.lastVisitedAt = item.openedAt;
+      map.set(key, group);
+    }
+    return [...map.values()].sort((a, b) => b.lastVisitedAt.localeCompare(a.lastVisitedAt));
+  }, [items]);
+
+  return (
+    <table className="w-full min-w-[820px]">
+      <thead>
+        <tr className="border-b border-border">
+          {['Search / Page', 'URL', 'Visited', 'Duration'].map(h => (
+            <th key={h} className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground whitespace-nowrap">{h}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {groups.map(g => {
+          const isOpen = expanded.has(g.domain);
+          const expandable = g.count > 1;
+          const browsers = [...new Set(g.items.map(browserOf).filter((b): b is string => !!b))];
+          return (
+            <Fragment key={g.domain}>
+              <tr className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
+                <td className="px-4 py-3">
+                  <div
+                    className={`flex items-center gap-2 ${expandable ? 'cursor-pointer select-none' : ''}`}
+                    onClick={expandable ? () => toggle(g.domain) : undefined}
+                    title={expandable ? (isOpen ? 'Collapse' : 'Expand') : undefined}
+                  >
+                    {expandable ? (
+                      isOpen
+                        ? <ChevronDown className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                        : <ChevronRight className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                    ) : (
+                      <span className="w-4 flex-shrink-0" />
+                    )}
+                    <div className="w-8 h-8 rounded-lg bg-info/10 flex items-center justify-center flex-shrink-0">
+                      {g.isSearch ? (
+                        <Search className="w-4 h-4 text-info" />
+                      ) : (
+                        <Globe className="w-4 h-4 text-info" />
+                      )}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <p className="text-sm font-medium text-foreground truncate">
+                          {g.isSearch ? g.searchQuery : (g.items[0]?.title || 'Untitled page')}
+                        </p>
+                        {g.isSearch && g.searchEngine && (
+                          <span className="px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-info/10 text-info whitespace-nowrap">
+                            {g.searchEngine}
+                          </span>
+                        )}
+                        {browsers.slice(0, 3).map(b => (
+                          <span key={b} className="px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-muted text-muted-foreground whitespace-nowrap">
+                            {b}
+                          </span>
+                        ))}
+                        {browsers.length > 3 && (
+                          <span className="text-[10px] text-muted-foreground whitespace-nowrap">+{browsers.length - 3}</span>
+                        )}
+                      </div>
+                      <p className="text-xs text-muted-foreground truncate">
+                        {g.count} visit{g.count === 1 ? '' : 's'}
+                        {g.count > 1 && !isOpen ? ' — click to view' : ''}
+                      </p>
+                    </div>
+                  </div>
+                </td>
+                <td className="px-4 py-3">
+                  {g.items[0]?.url ? (
+                    <a
+                      href={g.items[0].url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-sm text-primary hover:underline underline-offset-2 max-w-[260px] truncate"
+                      title={g.items[0].url}
+                    >
+                      <span className="truncate">{g.items[0].url}</span>
+                      <ExternalLink className="w-3 h-3 flex-shrink-0" />
+                    </a>
+                  ) : (
+                    <span className="text-sm text-muted-foreground">—</span>
+                  )}
+                </td>
+                <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">{formatDateTime(g.lastVisitedAt)}</td>
+                <td className="px-4 py-3 text-sm text-foreground font-medium whitespace-nowrap">{formatSeconds(g.totalDuration)}</td>
+              </tr>
+              {isOpen && (
+                <tr className="border-b border-border bg-muted/20">
+                  <td colSpan={4} className="px-0 py-0">
+                    <ExpandedPages items={g.items} />
+                  </td>
+                </tr>
+              )}
+            </Fragment>
+          );
+        })}
+        {isFetchingNextPage && <LoadingRow colSpan={4} />}
+      </tbody>
+    </table>
   );
 }
 
