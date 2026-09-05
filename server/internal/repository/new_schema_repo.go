@@ -2,9 +2,12 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1850,6 +1853,57 @@ type LocationSampleListResult struct {
 	TotalPages int
 }
 
+// ────────────────────────────────
+// Hours Insights
+// ────────────────────────────────
+
+type HoursInsightsParams struct {
+	EmployeeID string
+	DateFrom   time.Time
+	DateTo     time.Time
+	Preset     string
+}
+
+type HoursInsightsSummary struct {
+	TotalSeconds        float64
+	ProductiveSeconds   float64
+	UnproductiveSeconds float64
+	NeutralSeconds      float64
+	FocusScore          float64
+	AppCount            int
+	SiteCount           int
+}
+
+type HoursInsightsChartBucket struct {
+	Bucket       string
+	Productive   float64
+	Unproductive float64
+	Neutral      float64
+}
+
+type HoursInsightsTopItem struct {
+	Name         string
+	Kind         string
+	Category     string
+	Type         string
+	Color        string
+	TotalSeconds float64
+	FocusScore   float64
+	IsBrowser    bool
+}
+
+type HoursInsightsResult struct {
+	EmployeeID   string
+	EmployeeName string
+	Department   string
+	RangeFrom    time.Time
+	RangeTo      time.Time
+	RangeLabel   string
+	Summary      HoursInsightsSummary
+	Chart        []HoursInsightsChartBucket
+	TopItems     []HoursInsightsTopItem
+}
+
 func (r *NewSchemaRepo) ListLocationSamples(ctx context.Context, params LocationSampleListParams) (*LocationSampleListResult, error) {
 	if params.Page < 1 {
 		params.Page = 1
@@ -1937,4 +1991,314 @@ func (r *NewSchemaRepo) ListLocationSamples(ctx context.Context, params Location
 		PerPage:    params.PerPage,
 		TotalPages: totalPages,
 	}, nil
+}
+
+// GetHoursInsights returns aggregated usage data for the hours-insights page.
+// It computes summary stats, chart buckets, and a top-items list for a
+// single employee over the requested date range.
+func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsightsParams) (*HoursInsightsResult, error) {
+	if params.EmployeeID == "" {
+		return nil, fmt.Errorf("employee_id is required")
+	}
+	if params.DateFrom.IsZero() {
+		params.DateFrom = time.Now().AddDate(0, 0, -30)
+	}
+	if params.DateTo.IsZero() {
+		params.DateTo = time.Now()
+	}
+
+	result := &HoursInsightsResult{
+		EmployeeID: params.EmployeeID,
+		RangeFrom:  params.DateFrom,
+		RangeTo:    params.DateTo,
+	}
+
+	// 1) Employee info
+	if err := r.pool.QueryRow(ctx, `
+		SELECT e.name, COALESCE(d.name, '')
+		FROM employees e
+		LEFT JOIN departments d ON d.id = e.department_id AND d.deleted_at IS NULL
+		WHERE e.employee_id = $1 AND e.deleted_at IS NULL
+	`, params.EmployeeID).Scan(&result.EmployeeName, &result.Department); err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("employee not found")
+		}
+		return nil, fmt.Errorf("load employee: %w", err)
+	}
+
+	// Determine bucket size for chart: hourly for ranges <= 3 days, daily otherwise.
+	bucketSize := "1 day"
+	bucketField := "day"
+	if params.DateTo.Sub(params.DateFrom) <= 72*time.Hour {
+		bucketSize = "1 hour"
+		bucketField = "hour"
+	}
+	bucketFormat := "HH24:00"
+	if bucketSize == "1 day" {
+		bucketFormat = "Mon DD"
+	}
+
+	// 2) Summary + top items in one query using CTEs.
+	summaryQuery := `
+	WITH params AS (
+		SELECT $1::varchar AS emp_id, $2::timestamptz AS from_ts, $3::timestamptz AS to_ts
+	),
+	emp AS (
+		SELECT e.employee_id, e.name, COALESCE(d.name, '') AS department
+		FROM employees e
+		LEFT JOIN departments d ON d.id = e.department_id AND d.deleted_at IS NULL
+		WHERE e.employee_id = (SELECT emp_id FROM params) AND e.deleted_at IS NULL
+	),
+	app_usage AS (
+		SELECT
+			app_display_name,
+			installed_app_id,
+			GREATEST(started_at, (SELECT from_ts FROM params)) AS eff_start,
+			LEAST(COALESCE(ended_at, NOW()), (SELECT to_ts FROM params)) AS eff_end,
+			foreground_seconds,
+			background_seconds
+		FROM app_sessions
+		WHERE employee_id = (SELECT emp_id FROM params)
+			AND deleted_at IS NULL
+			AND started_at < (SELECT to_ts FROM params)
+			AND (ended_at IS NULL OR ended_at > (SELECT from_ts FROM params))
+	),
+	site_usage AS (
+		SELECT
+			domain,
+			GREATEST(opened_at, (SELECT from_ts FROM params)) AS eff_start,
+			LEAST(COALESCE(closed_at, NOW()), (SELECT to_ts FROM params)) AS eff_end
+		FROM app_items
+		WHERE employee_id = (SELECT emp_id FROM params)
+			AND deleted_at IS NULL
+			AND item_type IN ('tab', 'browser_tab', 'browser_navigation')
+			AND domain IS NOT NULL
+			AND domain <> ''
+			AND opened_at < (SELECT to_ts FROM params)
+			AND (closed_at IS NULL OR closed_at > (SELECT from_ts FROM params))
+	),
+	app_cat AS (
+		SELECT DISTINCT ON (ia.id) ia.id,
+			NULLIF(mt.name, '') AS type_name,
+			COALESCE(NULLIF(mt.color, ''), '#6b7280') AS type_color
+		FROM installed_applications ia
+		LEFT JOIN monitoring_types mt ON mt.id = ia.type_id AND mt.deleted_at IS NULL
+		WHERE ia.employee_id = (SELECT emp_id FROM params) AND ia.deleted_at IS NULL
+	),
+	site_cat AS (
+		SELECT DISTINCT ON (ms.domain) ms.domain,
+			NULLIF(mt.name, '') AS type_name,
+			COALESCE(NULLIF(mt.color, ''), '#6b7280') AS type_color
+		FROM monitoring_sites ms
+		LEFT JOIN monitoring_types mt ON mt.id = ms.type_id AND mt.deleted_at IS NULL
+		WHERE ms.domain IN (SELECT DISTINCT domain FROM site_usage) AND ms.deleted_at IS NULL
+	),
+	app_summary AS (
+		SELECT
+			COALESCE(SUM(EXTRACT(EPOCH FROM (eff_end - eff_start))), 0) AS total_sec,
+			COALESCE(SUM(CASE WHEN ac.type_name = 'Productive' THEN EXTRACT(EPOCH FROM (eff_end - eff_start)) ELSE 0 END), 0) AS productive_sec,
+			COALESCE(SUM(CASE WHEN ac.type_name = 'Unproductive' THEN EXTRACT(EPOCH FROM (eff_end - eff_start)) ELSE 0 END), 0) AS unproductive_sec,
+			COALESCE(SUM(CASE WHEN ac.type_name = 'Neutral' OR ac.type_name IS NULL THEN EXTRACT(EPOCH FROM (eff_end - eff_start)) ELSE 0 END), 0) AS neutral_sec,
+			COUNT(DISTINCT app_display_name) AS app_count,
+			COALESCE(SUM(foreground_seconds), 0) AS fg_sec,
+			COALESCE(SUM(background_seconds), 0) AS bg_sec
+		FROM app_usage au
+		LEFT JOIN app_cat ac ON ac.id = au.installed_app_id
+	),
+	site_summary AS (
+		SELECT
+			COALESCE(SUM(EXTRACT(EPOCH FROM (eff_end - eff_start))), 0) AS total_sec,
+			COUNT(DISTINCT su.domain) AS site_count,
+			COALESCE(SUM(CASE WHEN sc.type_name = 'Productive' THEN EXTRACT(EPOCH FROM (eff_end - eff_start)) ELSE 0 END), 0) AS productive_sec,
+			COALESCE(SUM(CASE WHEN sc.type_name = 'Unproductive' THEN EXTRACT(EPOCH FROM (eff_end - eff_start)) ELSE 0 END), 0) AS unproductive_sec,
+			COALESCE(SUM(CASE WHEN sc.type_name = 'Neutral' OR sc.type_name IS NULL THEN EXTRACT(EPOCH FROM (eff_end - eff_start)) ELSE 0 END), 0) AS neutral_sec
+		FROM site_usage su
+		LEFT JOIN site_cat sc ON sc.domain = su.domain
+	),
+	combined AS (
+		SELECT
+			(asu.total_sec + ssu.total_sec) AS total_seconds,
+			(asu.productive_sec + ssu.productive_sec) AS productive_seconds,
+			(asu.unproductive_sec + ssu.unproductive_sec) AS unproductive_seconds,
+			(asu.neutral_sec + ssu.neutral_sec) AS neutral_seconds,
+			asu.app_count,
+			ssu.site_count,
+			asu.fg_sec AS fg_sec,
+			asu.bg_sec AS bg_sec
+		FROM app_summary asu, site_summary ssu
+	),
+	top_apps AS (
+		SELECT
+			au.app_display_name AS name,
+			'app' AS kind,
+			COALESCE(ac.type_name, 'Neutral') AS category,
+			COALESCE(ac.type_name, 'Neutral') AS type,
+			COALESCE(ac.type_color, '#6b7280') AS color,
+			SUM(EXTRACT(EPOCH FROM (au.eff_end - au.eff_start))) AS totalSeconds,
+			CASE WHEN SUM(au.foreground_seconds + au.background_seconds) > 0
+				THEN ROUND(SUM(au.foreground_seconds) / SUM(au.foreground_seconds + au.background_seconds) * 1000) / 10
+				ELSE 0 END AS focusScore,
+			COALESCE(ia.is_browser, FALSE) AS isBrowser
+		FROM app_usage au
+		LEFT JOIN app_cat ac ON ac.id = au.installed_app_id
+		LEFT JOIN installed_applications ia ON ia.id = au.installed_app_id AND ia.deleted_at IS NULL
+		GROUP BY au.app_display_name, ac.type_name, ac.type_color, ia.is_browser
+	),
+top_sites AS (
+	SELECT
+		su.domain AS name,
+		'site' AS kind,
+		COALESCE(sc.type_name, 'Neutral') AS category,
+		COALESCE(sc.type_name, 'Neutral') AS type,
+		COALESCE(sc.type_color, '#6b7280') AS color,
+		SUM(EXTRACT(EPOCH FROM (su.eff_end - su.eff_start))) AS totalSeconds,
+		(SELECT CASE WHEN c.fg_sec + c.bg_sec > 0 THEN ROUND(c.fg_sec / (c.fg_sec + c.bg_sec) * 1000) / 10 ELSE 0 END FROM combined c) AS focusScore,
+		FALSE AS isBrowser
+		FROM site_usage su
+		LEFT JOIN site_cat sc ON sc.domain = su.domain
+		WHERE su.domain <> ''
+		GROUP BY su.domain, sc.type_name, sc.type_color
+	)
+	SELECT
+		(SELECT row_to_json(e) FROM (SELECT employee_id, name, department FROM emp WHERE employee_id = (SELECT emp_id FROM params)) e) AS employee,
+		(SELECT row_to_json(c) FROM combined c) AS summary,
+		COALESCE(
+			(SELECT json_agg(t ORDER BY t.totalSeconds DESC) FROM (
+				SELECT * FROM top_apps
+				UNION ALL
+				SELECT * FROM top_sites
+				LIMIT 20
+			) t),
+			'[]'::json
+		) AS top_items
+	`
+
+	var employeeJSON []byte
+	var summaryJSON []byte
+	var topItemsJSON []byte
+
+	if err := r.pool.QueryRow(ctx, summaryQuery, params.EmployeeID, params.DateFrom, params.DateTo).Scan(
+		&employeeJSON, &summaryJSON, &topItemsJSON,
+	); err != nil {
+		return nil, fmt.Errorf("hours insights summary query: %w", err)
+	}
+
+	// Parse employee JSON
+	var empMap map[string]interface{}
+	if err := json.Unmarshal(employeeJSON, &empMap); err != nil {
+		return nil, fmt.Errorf("parse employee json: %w", err)
+	}
+	if name, ok := empMap["name"].(string); ok {
+		result.EmployeeName = name
+	}
+	if dept, ok := empMap["department"].(string); ok {
+		result.Department = dept
+	}
+
+	// Parse summary JSON
+	var summaryMap map[string]interface{}
+	if err := json.Unmarshal(summaryJSON, &summaryMap); err != nil {
+		return nil, fmt.Errorf("parse summary json: %w", err)
+	}
+	result.Summary = HoursInsightsSummary{
+		TotalSeconds:        parseFloat(summaryMap["total_seconds"]),
+		ProductiveSeconds:   parseFloat(summaryMap["productive_seconds"]),
+		UnproductiveSeconds: parseFloat(summaryMap["unproductive_seconds"]),
+		NeutralSeconds:      parseFloat(summaryMap["neutral_seconds"]),
+		AppCount:            int(parseFloat(summaryMap["app_count"])),
+		SiteCount:           int(parseFloat(summaryMap["site_count"])),
+	}
+	fg := parseFloat(summaryMap["fg_sec"])
+	bg := parseFloat(summaryMap["bg_sec"])
+	if fg+bg > 0 {
+		result.Summary.FocusScore = math.Round(fg / (fg + bg) * 1000) / 10
+	}
+
+	// Parse top items JSON
+	var topItems []HoursInsightsTopItem
+	if err := json.Unmarshal(topItemsJSON, &topItems); err != nil {
+		return nil, fmt.Errorf("parse top items json: %w", err)
+	}
+	result.TopItems = topItems
+
+	// 3) Chart data — hourly or daily buckets depending on range length.
+	chartQuery := `
+	WITH params AS (
+		SELECT $1::varchar AS emp_id, $2::timestamptz AS from_ts, $3::timestamptz AS to_ts
+	),
+	app_usage AS (
+		SELECT
+			app_display_name,
+			installed_app_id,
+			GREATEST(started_at, (SELECT from_ts FROM params)) AS eff_start,
+			LEAST(COALESCE(ended_at, NOW()), (SELECT to_ts FROM params)) AS eff_end,
+			foreground_seconds,
+			background_seconds
+		FROM app_sessions
+		WHERE employee_id = (SELECT emp_id FROM params)
+			AND deleted_at IS NULL
+			AND started_at < (SELECT to_ts FROM params)
+			AND (ended_at IS NULL OR ended_at > (SELECT from_ts FROM params))
+	),
+	app_cat AS (
+		SELECT DISTINCT ON (ia.id) ia.id,
+			NULLIF(mt.name, '') AS type_name,
+			COALESCE(NULLIF(mt.color, ''), '#6b7280') AS type_color
+		FROM installed_applications ia
+		LEFT JOIN monitoring_types mt ON mt.id = ia.type_id AND mt.deleted_at IS NULL
+		WHERE ia.employee_id = (SELECT emp_id FROM params) AND ia.deleted_at IS NULL
+	),
+	buckets AS (
+		SELECT generate_series(
+			date_trunc($4, (SELECT from_ts FROM params)),
+			date_trunc($4, (SELECT to_ts FROM params)),
+			$5::interval
+		) AS bucket_start
+	)
+	SELECT
+		to_char(b.bucket_start, $6) AS bucket,
+		COALESCE(SUM(CASE WHEN ac.type_name = 'Productive' THEN EXTRACT(EPOCH FROM (LEAST(au.eff_end, b.bucket_start + $5::interval) - GREATEST(au.eff_start, b.bucket_start))) ELSE 0 END), 0) AS productive,
+		COALESCE(SUM(CASE WHEN ac.type_name = 'Unproductive' THEN EXTRACT(EPOCH FROM (LEAST(au.eff_end, b.bucket_start + $5::interval) - GREATEST(au.eff_start, b.bucket_start))) ELSE 0 END), 0) AS unproductive,
+		COALESCE(SUM(CASE WHEN ac.type_name = 'Neutral' OR ac.type_name IS NULL THEN EXTRACT(EPOCH FROM (LEAST(au.eff_end, b.bucket_start + $5::interval) - GREATEST(au.eff_start, b.bucket_start))) ELSE 0 END), 0) AS neutral
+	FROM buckets b
+	LEFT JOIN app_usage au ON au.eff_start < b.bucket_start + $5::interval AND au.eff_end > b.bucket_start
+	LEFT JOIN app_cat ac ON ac.id = au.installed_app_id
+	GROUP BY b.bucket_start
+	ORDER BY b.bucket_start
+	`
+
+	rows, err := r.pool.Query(ctx, chartQuery,
+		params.EmployeeID, params.DateFrom, params.DateTo,
+		bucketField, bucketSize, bucketFormat,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("hours insights chart query: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var b HoursInsightsChartBucket
+		if err := rows.Scan(&b.Bucket, &b.Productive, &b.Unproductive, &b.Neutral); err != nil {
+			return nil, fmt.Errorf("scan chart row: %w", err)
+		}
+		result.Chart = append(result.Chart, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
+// parseFloat is a tiny helper for JSON number extraction.
+func parseFloat(v interface{}) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case string:
+		if f, err := strconv.ParseFloat(n, 64); err == nil {
+			return f
+		}
+	}
+	return 0
 }

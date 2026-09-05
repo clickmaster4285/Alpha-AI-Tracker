@@ -143,6 +143,9 @@ func Setup(
 	protected.GET("/app-sessions/usage", newSchemaHandler.ListAppSessionsUsage)
 	protected.GET("/app-sessions", newSchemaHandler.ListAppSessions)
 
+	// Hours Insights
+	protected.GET("/hours-insights", newSchemaHandler.GetHoursInsights)
+
 	// App Items listing (protected — web admin access)
 	protected.GET("/app-items", newSchemaHandler.ListAppItems)
 

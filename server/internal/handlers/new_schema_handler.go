@@ -507,3 +507,33 @@ func (h *NewSchemaHandler) GetEmployeeDetail(c echo.Context) error {
 	}
 	return c.JSON(http.StatusOK, detail)
 }
+
+// ────────────────────────────────
+// Hours Insights (web dashboard — GET /hours-insights)
+// ────────────────────────────────
+
+func (h *NewSchemaHandler) GetHoursInsights(c echo.Context) error {
+	employeeID := c.QueryParam("employeeId")
+	if employeeID == "" {
+		return c.JSON(http.StatusBadRequest, dto.APIError{Code: http.StatusBadRequest, Message: "employeeId is required"})
+	}
+
+	dateFrom := parseTimeParam(c.QueryParam("dateFrom"))
+	dateTo := parseTimeParam(c.QueryParam("dateTo"))
+
+	result, err := h.service.GetHoursInsights(c.Request().Context(), repository.HoursInsightsParams{
+		EmployeeID: employeeID,
+		DateFrom:   dateFrom,
+		DateTo:     dateTo,
+		Preset:     c.QueryParam("preset"),
+	})
+	if err != nil {
+		log.Printf("[new_schema] GetHoursInsights error: %v", err)
+		return c.JSON(http.StatusInternalServerError, dto.APIError{
+			Code:    http.StatusInternalServerError,
+			Message: "Failed to load hours insights",
+			Detail:  err.Error(),
+		})
+	}
+	return c.JSON(http.StatusOK, result)
+}

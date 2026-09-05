@@ -462,3 +462,55 @@ type LocationSampleListResponse struct {
 	PerPage    int                      `json:"perPage"`
 	TotalPages int                      `json:"totalPages"`
 }
+
+// ────────────────────────────────
+// Hours Insights
+// ────────────────────────────────
+
+type HoursInsightsResponse struct {
+	Employee HoursInsightsEmployee `json:"employee"`
+	Range    HoursInsightsRange    `json:"range"`
+	Summary  HoursInsightsSummary  `json:"summary"`
+	Chart    []HoursInsightsBucket `json:"chart"`
+	TopItems []HoursInsightsTopItem `json:"topItems"`
+}
+
+type HoursInsightsEmployee struct {
+	EmployeeID   string `json:"employeeId"`
+	Name         string `json:"name"`
+	Department   string `json:"department"`
+}
+
+type HoursInsightsRange struct {
+	From  time.Time `json:"from"`
+	To    time.Time `json:"to"`
+	Label string    `json:"label"`
+}
+
+type HoursInsightsSummary struct {
+	TotalSeconds        float64 `json:"totalSeconds"`
+	ProductiveSeconds   float64 `json:"productiveSeconds"`
+	UnproductiveSeconds float64 `json:"unproductiveSeconds"`
+	NeutralSeconds      float64 `json:"neutralSeconds"`
+	FocusScore          float64 `json:"focusScore"`
+	AppCount            int     `json:"appCount"`
+	SiteCount           int     `json:"siteCount"`
+}
+
+type HoursInsightsBucket struct {
+	Bucket        string  `json:"bucket"`
+	Productive    float64 `json:"productive"`
+	Unproductive  float64 `json:"unproductive"`
+	Neutral       float64 `json:"neutral"`
+}
+
+type HoursInsightsTopItem struct {
+	Name        string  `json:"name"`
+	Kind        string  `json:"kind"`
+	Category    string  `json:"category"`
+	Type        string  `json:"type"`
+	Color       string  `json:"color"`
+	TotalSeconds float64 `json:"totalSeconds"`
+	FocusScore  float64 `json:"focusScore"`
+	IsBrowser   bool    `json:"isBrowser"`
+}

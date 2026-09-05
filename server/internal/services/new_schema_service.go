@@ -1098,3 +1098,78 @@ func (s *NewSchemaService) GetEmployeeDetail(ctx context.Context, id string) (*d
 
 	return resp, nil
 }
+
+// ── Hours Insights ──
+
+func (s *NewSchemaService) GetHoursInsights(ctx context.Context, params repository.HoursInsightsParams) (*dto.HoursInsightsResponse, error) {
+	result, err := s.repo.GetHoursInsights(ctx, params)
+	if err != nil {
+		return nil, fmt.Errorf("get hours insights: %w", err)
+	}
+
+	rangeLabel := presetLabel(params.Preset)
+
+	topItems := make([]dto.HoursInsightsTopItem, len(result.TopItems))
+	for i, t := range result.TopItems {
+		topItems[i] = dto.HoursInsightsTopItem{
+			Name:         t.Name,
+			Kind:         t.Kind,
+			Category:     t.Category,
+			Type:         t.Type,
+			Color:        t.Color,
+			TotalSeconds: t.TotalSeconds,
+			FocusScore:   t.FocusScore,
+			IsBrowser:    t.IsBrowser,
+		}
+	}
+
+	return &dto.HoursInsightsResponse{
+		Employee: dto.HoursInsightsEmployee{
+			EmployeeID: result.EmployeeID,
+			Name:       result.EmployeeName,
+			Department: result.Department,
+		},
+		Range: dto.HoursInsightsRange{
+			From:  result.RangeFrom,
+			To:    result.RangeTo,
+			Label: rangeLabel,
+		},
+		Summary: dto.HoursInsightsSummary{
+			TotalSeconds:        result.Summary.TotalSeconds,
+			ProductiveSeconds:   result.Summary.ProductiveSeconds,
+			UnproductiveSeconds: result.Summary.UnproductiveSeconds,
+			NeutralSeconds:      result.Summary.NeutralSeconds,
+			FocusScore:          result.Summary.FocusScore,
+			AppCount:            result.Summary.AppCount,
+			SiteCount:           result.Summary.SiteCount,
+		},
+		Chart: func() []dto.HoursInsightsBucket {
+			chart := make([]dto.HoursInsightsBucket, len(result.Chart))
+			for i, c := range result.Chart {
+				chart[i] = dto.HoursInsightsBucket{
+					Bucket:       c.Bucket,
+					Productive:   c.Productive,
+					Unproductive: c.Unproductive,
+					Neutral:      c.Neutral,
+				}
+			}
+			return chart
+		}(),
+		TopItems: topItems,
+	}, nil
+}
+
+func presetLabel(preset string) string {
+	switch preset {
+	case "today":
+		return "Today"
+	case "yesterday":
+		return "Yesterday"
+	case "7d":
+		return "Last 7 days"
+	case "30d":
+		return "Last 30 days"
+	default:
+		return "Custom"
+	}
+}

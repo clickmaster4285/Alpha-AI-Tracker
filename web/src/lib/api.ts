@@ -1153,4 +1153,68 @@ export const healthApi = {
   check: () => request<{ status: string; timestamp: string }>('/health'),
 };
 
+// ──────────────────────────
+// Hours Insights API
+// ──────────────────────────
+
+export interface HoursInsightsEmployee {
+  employeeId: string;
+  name: string;
+  department: string;
+}
+
+export interface HoursInsightsRange {
+  from: string;
+  to: string;
+  label: string;
+}
+
+export interface HoursInsightsSummary {
+  totalSeconds: number;
+  productiveSeconds: number;
+  unproductiveSeconds: number;
+  neutralSeconds: number;
+  focusScore: number;
+  appCount: number;
+  siteCount: number;
+}
+
+export interface HoursInsightsChartBucket {
+  bucket: string;
+  productive: number;
+  unproductive: number;
+  neutral: number;
+}
+
+export interface HoursInsightsTopItem {
+  name: string;
+  kind: 'app' | 'site';
+  category: string;
+  type: string;
+  color: string;
+  totalSeconds: number;
+  focusScore: number;
+  isBrowser: boolean;
+}
+
+export interface HoursInsightsResponse {
+  employee: HoursInsightsEmployee;
+  range: HoursInsightsRange;
+  summary: HoursInsightsSummary;
+  chart: HoursInsightsChartBucket[];
+  topItems: HoursInsightsTopItem[];
+}
+
+export const hoursInsightsApi = {
+  get: (params: {
+    employeeId: string;
+    dateFrom?: string;
+    dateTo?: string;
+    preset?: string;
+  }) =>
+    request<HoursInsightsResponse>('/hours-insights', {
+      params: params as Record<string, string | number | undefined>,
+    }),
+};
+
 export { ApiError };
