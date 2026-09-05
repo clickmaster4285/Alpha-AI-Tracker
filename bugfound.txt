@@ -14,9 +14,8 @@ TABLE OF CONTENTS
   5. Bug #5 — Shift Management: Soft-Deleted Shift Names Block Re-Creation
   6. Bug #6 — installed_applications: version and publisher always empty on Linux
   7. Bug #7 — Peripherals Page: Duplicate Devices Shown (Connected + Disconnected)
-  8. Bug #8 — App Usage Duration: Multiplied When Multiple Tabs Open
-  9. How Each Fix Should Be Applied (No Code Changes Yet)
-  10. Diagnostic Commands for Linux Mint 22.2
+  8. How Each Fix Should Be Applied (No Code Changes Yet)
+  9. Diagnostic Commands for Linux Mint 22.2
 
 
 ================================================================================
@@ -647,119 +646,6 @@ FIX #7 — Group hardware devices by identity, show history in expandable rows
   used on the App Usage page (expandable per-app session groups).
 
 
-================================================================================
-  BUG #8 — App Usage Duration: Multiplied When Multiple Tabs Open
-  Date Found: 2026-09-02
-  Environment: Web Dashboard — Employee Journey > App Usage page
-  Affects: All platforms (Chrome/Edge/Brave with multiple tabs)
-================================================================================
-
-SEVERITY: HIGH
-AFFECTS: Web dashboard App Usage page — total duration shown is
-         inflated when the same browser app has multiple open tabs
-
-DESCRIPTION:
-  When an employee opens a browser (Chrome, Edge, or Brave) with multiple
-  tabs (e.g., 10+ tabs) and works actively for 2 hours, the App Usage page
-  shows a total duration of 20+ hours instead of 2 hours.
-
-  Example scenario:
-    - User opens Chrome with 12 tabs
-    - User works in Chrome for 2 hours (active focus)
-    - App Usage page displays: "Chrome: 24 hours" or "Chrome: 20+ hours"
-    - Expected: "Chrome: 2 hours"
-
-  The duration shown is always approximately: (number of tabs) × (actual
-  work time). With 10 tabs and 2 hours work, it shows ~20 hours.
-
-STEPS TO REPRODUCE:
-  1. Open Chrome (or Edge/Brave) with multiple tabs (at least 5-10)
-  2. Actively use the browser for exactly 2 hours
-  3. Navigate to the web dashboard → Employee Journey → App Usage
-  4. Observe Chrome entry shows duration ≈ 2h × (number of tabs)
-
-ROOT CAUSE:
-  The browser journey tracker (`AccessibilityBrowserTracker`) creates one
-  `app_sessions` row per browser window, but when multiple tabs are open
-  in the same window, the system may be creating separate sessions per tab
-  or counting each tab's activity independently.
-
-  Possible root causes:
-  a) The window key derivation does not properly group tabs under one
-     browser window — each tab may get its own session key
-  b) `foreground_seconds` / `background_seconds` are accumulated per tab
-     rather than per browser window
-  c) The flush logic (`FlushSessionFocusAsync`) may be running per-tab
-     instead of per-window, multiplying the delta each cycle
-  d) The `AccessibilityBrowserTracker` may not correctly identify that
-     multiple tabs belong to the same top-level window process
-
-  In the live DB, Chrome with 12 tabs open for 2 hours resulted in
-  12 separate `app_sessions` rows (one per tab), each with 2 hours of
-  foreground time, totaling 24 hours displayed.
-
-AFFECTED FILES:
-  - client/Core/AccessibilityBrowserTracker.cs (window/session key derivation)
-  - client/Core/LogCollectorService.cs (flush logic, focus accumulation)
-  - client/Core/ProcessCollector.cs (active window detection per cycle)
-
-EXPECTED BEHAVIOR:
-  All tabs within the same browser window should be grouped into ONE
-  `app_sessions` row. The foreground/background accumulation should be
-  per window, not per tab. When a user works in Chrome for 2 hours with
-  10 tabs open, the App Usage page should show exactly 2 hours for Chrome,
-  regardless of tab count.
-
-  The duration should reflect real user activity time, not a mathematical
-  product of tab count × work time.
-
-
-================================================================================
-  RESOLUTION PLAN FOR BUG #8
-================================================================================
-
-NOTE: No code changes made yet. This is the plan only.
-
-FIX #8 — Group browser tabs under one window session, accumulate duration per window
----------------------------------------------------------------------------
-
-  WHERE: client/Core/AccessibilityBrowserTracker.cs and
-         client/Core/ProcessCollector.cs
-
-  WHAT:
-
-  1. IMPROVE WINDOW KEY DERIVATION:
-     - `ResolveWindowKey` should merge all tabs belonging to the same
-       top-level process (same ProcessId / exe name)
-     - Use the AT-SPI role 95 (DOCUMENT_WEB) node's parent window ID
-       to group tabs, rather than deriving a key per tab
-     - Cache window identity per ProcessId for the session duration
-
-  2. ACCUMULATE DURATION PER WINDOW (NOT PER TAB):
-     - `foreground_seconds` and `background_seconds` should be tracked
-       per window key, not per individual tab/session item
-     - When a tab navigates, update the SAME window's session in place
-       (ON CONFLICT DO UPDATE the window root), NOT create a new row
-     - The poll interval delta should be added once per cycle to the
-       window's totals, regardless of how many tabs changed state
-
-  3. FLUSH LOGIC CORRECTION:
-     - `FlushSessionFocusAsync` must flush per-window key, not per-tab
-     - Ensure the in-memory dictionary key is the window identity, not
-       the tab-specific key
-     - On close, close the window session once, not each tab's session
-
-  4. SESSION DEDUP ON BOOT:
-     - `ReconcileStaleSessionsOnBootAsync` should detect and merge
-       duplicate window sessions that belong to the same browser process
-     - Keep only the earliest-created session row, close the rest
-
-  WHY: Currently each tab or each focus change may be spawning a new
-  session row or accumulating focus time independently. The fix ensures
-  that ALL tabs of a browser window share one session, and the total
-  focus time is the real user activity time — not tab-count × time.
-
-
-================================================================================
-  END OF BUG REPORT
+ ================================================================================
+   END OF BUG REPORT
 ================================================================================
