@@ -11,6 +11,7 @@ namespace client.Services.Watchers;
 /// <see cref="SystemEvents"/> wrapper around the Win32 message pump for:
 ///   - <c>PowerModeChanged</c>  - power status changes (Resume / Suspend)
 ///   - <c>SessionSwitch</c>     - logon / logoff / lock / unlock / remote connect
+///   - <c>SessionEnding</c>     - system shutdown / restart (writes power_off)
 ///
 /// The SystemEvents class is a managed wrapper around the Win32 hidden message
 /// window that the framework creates on first use. It works in both GUI and
@@ -27,11 +28,13 @@ public sealed partial class SystemEventWatcher
 
     private SessionSwitchEventHandler? _winSessionSwitch;
 
+    private SessionEndingEventHandler? _winSessionEnding;
+
     private void SubscribeWindows()
     {
         if (!OperatingSystem.IsWindows()) return;
 
-        _logger.LogInformation("SystemEventWatcher: subscribing to SystemEvents (PowerModeChanged, SessionSwitch)");
+        _logger.LogInformation("SystemEventWatcher: subscribing to SystemEvents (PowerModeChanged, SessionSwitch, SessionEnding)");
 
         _winPowerModeChanged = (sender, e) =>
         {
@@ -86,6 +89,27 @@ public sealed partial class SystemEventWatcher
             }
         };
         SystemEvents.SessionSwitch += _winSessionSwitch;
+
+        _winSessionEnding = (sender, e) =>
+        {
+            try
+            {
+                if (e.Reason == SessionEndReasons.SystemShutdown)
+                {
+                    _ = SafeRecordAsync(
+                        SessionEventTypes.PowerOff,
+                        "systemevents_session_ending",
+                        default);
+                }
+                // SessionEndReasons.Logoff is already handled by SessionSwitch
+                // (SessionLogoff), so we skip it here to avoid duplicate os_logout rows.
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "SystemEventWatcher: SessionEnding handler failed");
+            }
+        };
+        SystemEvents.SessionEnding += _winSessionEnding;
     }
 
     /// <summary>
@@ -103,6 +127,8 @@ public sealed partial class SystemEventWatcher
                 SystemEvents.PowerModeChanged -= _winPowerModeChanged;
             if (_winSessionSwitch != null)
                 SystemEvents.SessionSwitch -= _winSessionSwitch;
+            if (_winSessionEnding != null)
+                SystemEvents.SessionEnding -= _winSessionEnding;
         }
         catch (Exception ex)
         {
