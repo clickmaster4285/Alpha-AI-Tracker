@@ -647,5 +647,117 @@ FIX #7 — Group hardware devices by identity, show history in expandable rows
 
 
  ================================================================================
+   BUG #8 — device_hardware_info: Windows 11 shows as "Windows 10"
+   Date Found: 2026-09-05
+   Environment: Client — device_hardware_info table, os_name column
+   Affects: All Windows 11 machines
+ ================================================================================
+
+ SEVERITY: LOW-MEDIUM
+ AFFECTS: The os_name column in the device_hardware_info SQLite table always
+          reports "Microsoft Windows 10.0.xxxxx" even on Windows 11 machines.
+
+ DESCRIPTION:
+   On every Windows 11 machine, the device_hardware_info table stores
+   os_name = "Microsoft Windows 10.0.26100" (or similar build number)
+   instead of identifying the OS as Windows 11. The os_version column
+   correctly contains the build number (e.g., "10.0.26100"), but the
+   human-readable os_name never says "Windows 11".
+
+   Evidence from the live DB at
+   C:\Users\DEV-05\AppData\Local\AlphaAITracker\data:
+
+     os_name:    Microsoft Windows 10.0.26100
+     os_version: 10.0.26100
+
+   Build 26100 is Windows 11 24H2 — the data is technically correct
+   (it IS version 10.0) but misleading for anyone reading the os_name
+   field on the web dashboard or in reports.
+
+ ROOT CAUSE:
+   client/Services/LogCollectorService.cs:1292:
+
+     var osName = RuntimeInformation.OSDescription;
+
+   RuntimeInformation.OSDescription returns the value from the OS's own
+   version API (RtlGetVersion on Windows). Windows 11 internally reports
+   itself as NT 10.0 because Microsoft kept the major.minor version at
+   10.0 for backward compatibility. The only distinguishing factor is
+   the BUILD NUMBER:
+
+     Windows 10:  build < 22000  (e.g., 19045 = 22H2)
+     Windows 11:  build >= 22000 (e.g., 22621 = 22H2, 26100 = 24H2)
+
+   On Linux and macOS, RuntimeInformation.OSDescription returns the
+   correct OS name (e.g., "Ubuntu 22.04.3 LTS", "macOS 14.1"),
+   so those platforms are unaffected.
+
+ AFFECTED FILES:
+   - client/Services/LogCollectorService.cs:1292 (RuntimeInformation.OSDescription)
+
+
+ ================================================================================
+   RESOLUTION PLAN FOR BUG #8
+ ================================================================================
+
+ NOTE: No code changes made yet. This is the plan only.
+
+ FIX #8 — Detect Windows 11 from build number
+ ----------------------------------------------
+
+   WHERE: client/Services/LogCollectorService.cs:1292
+
+   WHAT: Replace the raw RuntimeInformation.OSDescription with a helper
+   method that detects Windows 11 by checking Environment.OSVersion.Version.Build:
+
+     private static string GetOsName()
+     {
+         if (OperatingSystem.IsWindows())
+         {
+             var build = Environment.OSVersion.Version.Build;
+             if (build >= 22000)
+                 return $"Microsoft Windows 11.0.{build}";
+             else
+                 return RuntimeInformation.OSDescription;
+         }
+         return RuntimeInformation.OSDescription;
+     }
+
+   On Windows, the method checks the build number:
+     - build >= 22000 → "Microsoft Windows 11.0.{build}"
+     - build < 22000  → falls back to RuntimeInformation.OSDescription
+       (which correctly says "Microsoft Windows 10.0.{build}")
+
+   On Linux/macOS, the method returns RuntimeInformation.OSDescription
+   unchanged (those platforms already report correctly).
+
+   The osVersion value (Environment.OSVersion.VersionString) stays
+   unchanged — it is used for fingerprinting and is correct as-is.
+
+   WHY: This is a single-line detection fix that correctly identifies
+   Windows 11 on every build (22000+, including future 25H2, 26H2,
+   etc.) without hardcoded product names. The build number is the only
+   reliable signal — the NT version string is identical for both
+   Windows 10 and 11.
+
+   NOTE: Existing rows in the DB are NOT updated (no migration needed).
+   Only new rows written after the fix will show the correct os_name.
+   If backfill is desired, a one-time UPDATE on the server or client
+   can rewrite rows where os_name LIKE '%10.0.22%' or higher.
+
+ DIAGNOSTIC COMMANDS:
+   # Verify what RuntimeInformation.OSDescription returns on this machine:
+   # (run in a C# script or check the DB)
+
+   sqlite3 "C:\Users\DEV-05\AppData\Local\AlphaAITracker\data\*.db" \
+     "SELECT os_name, os_version FROM device_hardware_info;"
+
+   # Expected: os_name says "Windows 10" but os_version build is >= 22000
+
+   # Check the actual build number:
+   # Environment.OSVersion.Version.Build should be >= 22000 on Windows 11
+
+
+ ================================================================================
    END OF BUG REPORT
 ================================================================================
