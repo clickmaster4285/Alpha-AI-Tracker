@@ -1094,7 +1094,6 @@ flowchart LR
 | **Soft delete**         | `deleted_at TIMESTAMPTZ` on all tables, filtered in queries                             |
 | **Migrations**          | Sequential numbered SQL files in`server/migrations/`                                    |
 | **Go module**           | `github.com/alpha-ai-tracker/server`                                                    |
-| **Git branch**          | Currently on`uienhanced` branch — no PR/branch convention visible              |
 | **Commit style**        | Descriptive lowercase messages: "now remove the exit btn on the tray on windows", "fixit" |
 | **Monorepo tooling**    | No shared tooling (no Turborepo, Nx, etc.). Each service has its own build system.        |
 | **Build parity**        | `dotnet run` is NOT a release test — every change must be verified from an installed build; new assets/config/scripts must be bundled by the `publish/*` scripts (see below) |

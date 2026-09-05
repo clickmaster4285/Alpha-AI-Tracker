@@ -1,0 +1,11 @@
+now i want to plan to build hours-insights/page.tsx
+on that i want first select the user and shown there total usage app/sites according to filters(today,yesterday,last 7day,last 30day, date rang) in graph view
+
+currently just build plan and save on @file:plan.md and how the gui look like
+before building plan read and analyze my postgreysql db data and then reserch in deep as profressional ui/ux
+
+DB_HOST=localhost
+DB_PORT=5432
+DB_USER=alpha_monitoring
+DB_PASSWORD=123456
+DB_NAME=alpha_ai_tracker
