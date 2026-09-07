@@ -1,11 +1,22 @@
-now i want to plan to build hours-insights/page.tsx
-on that i want first select the user and shown there total usage app/sites according to filters(today,yesterday,last 7day,last 30day, date rang) in graph view
+first analyze my @prompt.md @AGENTS.md files 
+and then analyze also @web/ and @server/ 
+and then analyze my last 2commit and last 3 synce changing, 
 
-currently just build plan and save on @file:plan.md and how the gui look like
-before building plan read and analyze my postgreysql db data and then reserch in deep as profressional ui/ux
 
+i don't want the ui/ux of `Hours Insights` page like that 
+now i wnat 
+
+1. on filters add one more filter where i select to view "from produtivity" and  "from application individually" shown,
+2.  on 'individually application' filter on the graph view shown according to application usage time|hour , most usage graph up accordingly ,
+
+issue: 
+1. currnetly the calculation time is totly wrong , tell me on the frontend `http://192.168.88.35:3000/hours-insights?preset=today&employeeId=76dcfd24-2241-45a3-a438-a1f86e24dcf2` on that why shown 19hour total time on today filter on this site '192.168.88.49' why??? compare with actual db data 
 DB_HOST=localhost
 DB_PORT=5432
 DB_USER=alpha_monitoring
 DB_PASSWORD=123456
 DB_NAME=alpha_ai_tracker
+
+
+make simple and beatifull gui / ui/ ux 
+make plan 
