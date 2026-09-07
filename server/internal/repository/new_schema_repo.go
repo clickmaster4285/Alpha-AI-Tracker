@@ -2106,8 +2106,7 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 			LEAST(
 				CASE 
 					WHEN s.ended_at IS NOT NULL THEN s.ended_at
-					WHEN s.status = 'ACTIVE' AND s.last_sync_at > NOW() - INTERVAL '10 minutes' THEN LEAST(NOW(), (SELECT to_ts FROM params))
-					ELSE COALESCE(s.last_activity_at, s.last_sync_at, s.started_at)
+					ELSE s.started_at
 				END,
 				(SELECT to_ts FROM params)
 			) AS eff_end,
@@ -2124,10 +2123,7 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 		SELECT
 			ai.domain,
 			GREATEST(ai.opened_at, (SELECT from_ts FROM params)) AS eff_start,
-			LEAST(
-				COALESCE(ai.closed_at, s.ended_at, s.last_sync_at, s.last_activity_at, ai.opened_at),
-				(SELECT to_ts FROM params)
-			) AS eff_end
+			CASE WHEN ai.closed_at IS NOT NULL THEN ai.closed_at ELSE ai.opened_at END AS eff_end
 		FROM app_items ai
 		LEFT JOIN app_sessions s ON s.id = ai.app_session_id
 		WHERE ai.employee_id = (SELECT emp_id FROM params)
