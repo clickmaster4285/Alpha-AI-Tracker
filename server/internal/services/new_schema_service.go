@@ -1123,6 +1123,26 @@ func (s *NewSchemaService) GetHoursInsights(ctx context.Context, params reposito
 		}
 	}
 
+	topApps := make([]dto.HoursInsightsAppMeta, len(result.TopApps))
+	for i, a := range result.TopApps {
+		topApps[i] = dto.HoursInsightsAppMeta{
+			Name:         a.Name,
+			TotalSeconds: a.TotalSeconds,
+			Color:        a.Color,
+			Category:     a.Category,
+			Type:         a.Type,
+			SessionCount: a.SessionCount,
+		}
+	}
+
+	appChart := make([]dto.HoursInsightsAppBucket, len(result.AppChart))
+	for i, ac := range result.AppChart {
+		appChart[i] = dto.HoursInsightsAppBucket{
+			Bucket: ac.Bucket,
+			Apps:   ac.Apps,
+		}
+	}
+
 	return &dto.HoursInsightsResponse{
 		Employee: dto.HoursInsightsEmployee{
 			EmployeeID: result.EmployeeID,
@@ -1155,6 +1175,8 @@ func (s *NewSchemaService) GetHoursInsights(ctx context.Context, params reposito
 			}
 			return chart
 		}(),
+		AppChart: appChart,
+		TopApps:  topApps,
 		TopItems: topItems,
 	}, nil
 }

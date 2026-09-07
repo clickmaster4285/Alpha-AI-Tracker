@@ -1,6 +1,6 @@
 first analyze my @prompt.md @AGENTS.md files 
 and then analyze also @web/ and @server/ 
-and then analyze my last 2commit and last 3 synce changing, 
+and then analyze my last 5commit, 
 
 
 i don't want the ui/ux of `Hours Insights` page like that 
@@ -17,6 +17,6 @@ DB_USER=alpha_monitoring
 DB_PASSWORD=123456
 DB_NAME=alpha_ai_tracker
 
+2. if any session/app has now close at then not that progress on the frontend view of  `Hours Insights` page
 
 make simple and beatifull gui / ui/ ux 
-make plan 

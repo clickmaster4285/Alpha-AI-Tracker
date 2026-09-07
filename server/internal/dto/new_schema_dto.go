@@ -468,17 +468,19 @@ type LocationSampleListResponse struct {
 // ────────────────────────────────
 
 type HoursInsightsResponse struct {
-	Employee HoursInsightsEmployee `json:"employee"`
-	Range    HoursInsightsRange    `json:"range"`
-	Summary  HoursInsightsSummary  `json:"summary"`
-	Chart    []HoursInsightsBucket `json:"chart"`
-	TopItems []HoursInsightsTopItem `json:"topItems"`
+	Employee HoursInsightsEmployee    `json:"employee"`
+	Range    HoursInsightsRange       `json:"range"`
+	Summary  HoursInsightsSummary     `json:"summary"`
+	Chart    []HoursInsightsBucket    `json:"chart"`
+	AppChart []HoursInsightsAppBucket `json:"appChart"`
+	TopApps  []HoursInsightsAppMeta   `json:"topApps"`
+	TopItems []HoursInsightsTopItem   `json:"topItems"`
 }
 
 type HoursInsightsEmployee struct {
-	EmployeeID   string `json:"employeeId"`
-	Name         string `json:"name"`
-	Department   string `json:"department"`
+	EmployeeID string `json:"employeeId"`
+	Name       string `json:"name"`
+	Department string `json:"department"`
 }
 
 type HoursInsightsRange struct {
@@ -498,19 +500,34 @@ type HoursInsightsSummary struct {
 }
 
 type HoursInsightsBucket struct {
-	Bucket        string  `json:"bucket"`
-	Productive    float64 `json:"productive"`
-	Unproductive  float64 `json:"unproductive"`
-	Neutral       float64 `json:"neutral"`
+	Bucket       string  `json:"bucket"`
+	Productive   float64 `json:"productive"`
+	Unproductive float64 `json:"unproductive"`
+	Neutral      float64 `json:"neutral"`
+}
+
+type HoursInsightsAppBucket struct {
+	Bucket string             `json:"bucket"`
+	Apps   map[string]float64 `json:"apps"`
+}
+
+type HoursInsightsAppMeta struct {
+	Name         string  `json:"name"`
+	TotalSeconds float64 `json:"totalSeconds"`
+	Color        string  `json:"color"`
+	Category     string  `json:"category"`
+	Type         string  `json:"type"`
+	SessionCount int     `json:"sessionCount"`
 }
 
 type HoursInsightsTopItem struct {
-	Name        string  `json:"name"`
-	Kind        string  `json:"kind"`
-	Category    string  `json:"category"`
-	Type        string  `json:"type"`
-	Color       string  `json:"color"`
+	Name         string  `json:"name"`
+	Kind         string  `json:"kind"`
+	Category     string  `json:"category"`
+	Type         string  `json:"type"`
+	Color        string  `json:"color"`
 	TotalSeconds float64 `json:"totalSeconds"`
-	FocusScore  float64 `json:"focusScore"`
-	IsBrowser   bool    `json:"isBrowser"`
+	FocusScore   float64 `json:"focusScore"`
+	IsBrowser    bool    `json:"isBrowser"`
 }
+

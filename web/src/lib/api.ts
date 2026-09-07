@@ -1197,11 +1197,27 @@ export interface HoursInsightsTopItem {
   isBrowser: boolean;
 }
 
+export interface HoursInsightsAppBucket {
+  bucket: string;
+  apps: Record<string, number>;
+}
+
+export interface HoursInsightsAppMeta {
+  name: string;
+  totalSeconds: number;
+  color: string;
+  category: string;
+  type: string;
+  sessionCount: number;
+}
+
 export interface HoursInsightsResponse {
   employee: HoursInsightsEmployee;
   range: HoursInsightsRange;
   summary: HoursInsightsSummary;
   chart: HoursInsightsChartBucket[];
+  appChart: HoursInsightsAppBucket[];
+  topApps: HoursInsightsAppMeta[];
   topItems: HoursInsightsTopItem[];
 }
 

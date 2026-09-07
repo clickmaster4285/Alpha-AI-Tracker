@@ -1881,6 +1881,20 @@ type HoursInsightsChartBucket struct {
 	Neutral      float64
 }
 
+type HoursInsightsAppBucket struct {
+	Bucket string
+	Apps   map[string]float64
+}
+
+type HoursInsightsAppMeta struct {
+	Name         string
+	TotalSeconds float64
+	Color        string
+	Category     string
+	Type         string
+	SessionCount int
+}
+
 type HoursInsightsTopItem struct {
 	Name         string
 	Kind         string
@@ -1901,8 +1915,11 @@ type HoursInsightsResult struct {
 	RangeLabel   string
 	Summary      HoursInsightsSummary
 	Chart        []HoursInsightsChartBucket
+	AppChart     []HoursInsightsAppBucket
+	TopApps      []HoursInsightsAppMeta
 	TopItems     []HoursInsightsTopItem
 }
+
 
 func (r *NewSchemaRepo) ListLocationSamples(ctx context.Context, params LocationSampleListParams) (*LocationSampleListResult, error) {
 	if params.Page < 1 {
@@ -1994,16 +2011,37 @@ func (r *NewSchemaRepo) ListLocationSamples(ctx context.Context, params Location
 }
 
 // GetHoursInsights returns aggregated usage data for the hours-insights page.
-// It computes summary stats, chart buckets, and a top-items list for a
-// single employee over the requested date range.
+// It computes summary stats, chart buckets, individual application chart buckets,
+// and a top-items list for a single employee over the requested date range.
 func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsightsParams) (*HoursInsightsResult, error) {
 	if params.EmployeeID == "" {
 		return nil, fmt.Errorf("employee_id is required")
 	}
 	if params.DateFrom.IsZero() {
-		params.DateFrom = time.Now().AddDate(0, 0, -30)
-	}
-	if params.DateTo.IsZero() {
+		switch params.Preset {
+		case "today":
+			now := time.Now()
+			params.DateFrom = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+			params.DateTo = time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 999999999, now.Location())
+		case "yesterday":
+			y := time.Now().AddDate(0, 0, -1)
+			params.DateFrom = time.Date(y.Year(), y.Month(), y.Day(), 0, 0, 0, 0, y.Location())
+			params.DateTo = time.Date(y.Year(), y.Month(), y.Day(), 23, 59, 59, 999999999, y.Location())
+		case "7d":
+			now := time.Now()
+			start := now.AddDate(0, 0, -6)
+			params.DateFrom = time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, start.Location())
+			params.DateTo = now
+		case "30d":
+			now := time.Now()
+			start := now.AddDate(0, 0, -29)
+			params.DateFrom = time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, start.Location())
+			params.DateTo = now
+		default:
+			params.DateFrom = time.Now().AddDate(0, 0, -30)
+			params.DateTo = time.Now()
+		}
+	} else if params.DateTo.IsZero() {
 		params.DateTo = time.Now()
 	}
 
@@ -2011,6 +2049,10 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 		EmployeeID: params.EmployeeID,
 		RangeFrom:  params.DateFrom,
 		RangeTo:    params.DateTo,
+		Chart:      []HoursInsightsChartBucket{},
+		AppChart:   []HoursInsightsAppBucket{},
+		TopApps:    []HoursInsightsAppMeta{},
+		TopItems:   []HoursInsightsTopItem{},
 	}
 
 	// 1) Employee info
@@ -2029,9 +2071,11 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 	// Determine bucket size for chart: hourly for ranges <= 3 days, daily otherwise.
 	bucketSize := "1 day"
 	bucketField := "day"
+	maxBucketSeconds := 86400.0
 	if params.DateTo.Sub(params.DateFrom) <= 72*time.Hour {
 		bucketSize = "1 hour"
 		bucketField = "hour"
+		maxBucketSeconds = 3600.0
 	}
 	bucketFormat := "HH24:00"
 	if bucketSize == "1 day" {
@@ -2039,6 +2083,11 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 	}
 
 	// 2) Summary + top items in one query using CTEs.
+	// Bounding rules:
+	// - app_sessions: if ended_at is set, use ended_at; if status is ACTIVE with recent sync, bound by NOW();
+	//   otherwise use COALESCE(last_activity_at, last_sync_at, started_at). Never run away.
+	// - app_items: bound by parent session (s.ended_at / s.last_sync_at) when closed_at is NULL.
+	//   item_type is restricted to 'browser_tab' to avoid double-counting navigation events.
 	summaryQuery := `
 	WITH params AS (
 		SELECT $1::varchar AS emp_id, $2::timestamptz AS from_ts, $3::timestamptz AS to_ts
@@ -2051,31 +2100,44 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 	),
 	app_usage AS (
 		SELECT
-			app_display_name,
-			installed_app_id,
-			GREATEST(started_at, (SELECT from_ts FROM params)) AS eff_start,
-			LEAST(COALESCE(ended_at, NOW()), (SELECT to_ts FROM params)) AS eff_end,
-			foreground_seconds,
-			background_seconds
-		FROM app_sessions
-		WHERE employee_id = (SELECT emp_id FROM params)
-			AND deleted_at IS NULL
-			AND started_at < (SELECT to_ts FROM params)
-			AND (ended_at IS NULL OR ended_at > (SELECT from_ts FROM params))
+			s.app_display_name,
+			s.installed_app_id,
+			GREATEST(s.started_at, (SELECT from_ts FROM params)) AS eff_start,
+			LEAST(
+				CASE 
+					WHEN s.ended_at IS NOT NULL THEN s.ended_at
+					WHEN s.status = 'ACTIVE' AND s.last_sync_at > NOW() - INTERVAL '10 minutes' THEN LEAST(NOW(), (SELECT to_ts FROM params))
+					ELSE COALESCE(s.last_activity_at, s.last_sync_at, s.started_at)
+				END,
+				(SELECT to_ts FROM params)
+			) AS eff_end,
+			s.foreground_seconds,
+			s.background_seconds
+		FROM app_sessions s
+		WHERE s.employee_id = (SELECT emp_id FROM params)
+			AND s.deleted_at IS NULL
+			AND s.started_at < (SELECT to_ts FROM params)
+			AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > (SELECT from_ts FROM params)
+			AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > s.started_at
 	),
 	site_usage AS (
 		SELECT
-			domain,
-			GREATEST(opened_at, (SELECT from_ts FROM params)) AS eff_start,
-			LEAST(COALESCE(closed_at, NOW()), (SELECT to_ts FROM params)) AS eff_end
-		FROM app_items
-		WHERE employee_id = (SELECT emp_id FROM params)
-			AND deleted_at IS NULL
-			AND item_type IN ('tab', 'browser_tab', 'browser_navigation')
-			AND domain IS NOT NULL
-			AND domain <> ''
-			AND opened_at < (SELECT to_ts FROM params)
-			AND (closed_at IS NULL OR closed_at > (SELECT from_ts FROM params))
+			ai.domain,
+			GREATEST(ai.opened_at, (SELECT from_ts FROM params)) AS eff_start,
+			LEAST(
+				COALESCE(ai.closed_at, s.ended_at, s.last_sync_at, s.last_activity_at, ai.opened_at),
+				(SELECT to_ts FROM params)
+			) AS eff_end
+		FROM app_items ai
+		LEFT JOIN app_sessions s ON s.id = ai.app_session_id
+		WHERE ai.employee_id = (SELECT emp_id FROM params)
+			AND ai.deleted_at IS NULL
+			AND ai.item_type = 'browser_tab'
+			AND ai.domain IS NOT NULL
+			AND ai.domain <> ''
+			AND ai.opened_at < (SELECT to_ts FROM params)
+			AND COALESCE(ai.closed_at, s.ended_at, s.last_sync_at, s.last_activity_at, ai.opened_at) > (SELECT from_ts FROM params)
+			AND COALESCE(ai.closed_at, s.ended_at, s.last_sync_at, s.last_activity_at, ai.opened_at) > ai.opened_at
 	),
 	app_cat AS (
 		SELECT DISTINCT ON (ia.id) ia.id,
@@ -2108,19 +2170,15 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 	site_summary AS (
 		SELECT
 			COALESCE(SUM(EXTRACT(EPOCH FROM (eff_end - eff_start))), 0) AS total_sec,
-			COUNT(DISTINCT su.domain) AS site_count,
-			COALESCE(SUM(CASE WHEN sc.type_name = 'Productive' THEN EXTRACT(EPOCH FROM (eff_end - eff_start)) ELSE 0 END), 0) AS productive_sec,
-			COALESCE(SUM(CASE WHEN sc.type_name = 'Unproductive' THEN EXTRACT(EPOCH FROM (eff_end - eff_start)) ELSE 0 END), 0) AS unproductive_sec,
-			COALESCE(SUM(CASE WHEN sc.type_name = 'Neutral' OR sc.type_name IS NULL THEN EXTRACT(EPOCH FROM (eff_end - eff_start)) ELSE 0 END), 0) AS neutral_sec
+			COUNT(DISTINCT su.domain) AS site_count
 		FROM site_usage su
-		LEFT JOIN site_cat sc ON sc.domain = su.domain
 	),
 	combined AS (
 		SELECT
-			(asu.total_sec + ssu.total_sec) AS total_seconds,
-			(asu.productive_sec + ssu.productive_sec) AS productive_seconds,
-			(asu.unproductive_sec + ssu.unproductive_sec) AS unproductive_seconds,
-			(asu.neutral_sec + ssu.neutral_sec) AS neutral_seconds,
+			CASE WHEN asu.total_sec > 0 THEN asu.total_sec ELSE ssu.total_sec END AS total_seconds,
+			asu.productive_sec AS productive_seconds,
+			asu.unproductive_sec AS unproductive_seconds,
+			asu.neutral_sec AS neutral_seconds,
 			asu.app_count,
 			ssu.site_count,
 			asu.fg_sec AS fg_sec,
@@ -2135,6 +2193,7 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 			COALESCE(ac.type_name, 'Neutral') AS type,
 			COALESCE(ac.type_color, '#6b7280') AS color,
 			SUM(EXTRACT(EPOCH FROM (au.eff_end - au.eff_start))) AS totalSeconds,
+			COUNT(*) AS session_count,
 			CASE WHEN SUM(au.foreground_seconds + au.background_seconds) > 0
 				THEN ROUND(SUM(au.foreground_seconds) / SUM(au.foreground_seconds + au.background_seconds) * 1000) / 10
 				ELSE 0 END AS focusScore,
@@ -2142,18 +2201,20 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 		FROM app_usage au
 		LEFT JOIN app_cat ac ON ac.id = au.installed_app_id
 		LEFT JOIN installed_applications ia ON ia.id = au.installed_app_id AND ia.deleted_at IS NULL
+		WHERE au.app_display_name <> '' AND au.app_display_name IS NOT NULL
 		GROUP BY au.app_display_name, ac.type_name, ac.type_color, ia.is_browser
 	),
-top_sites AS (
-	SELECT
-		su.domain AS name,
-		'site' AS kind,
-		COALESCE(sc.type_name, 'Neutral') AS category,
-		COALESCE(sc.type_name, 'Neutral') AS type,
-		COALESCE(sc.type_color, '#6b7280') AS color,
-		SUM(EXTRACT(EPOCH FROM (su.eff_end - su.eff_start))) AS totalSeconds,
-		(SELECT CASE WHEN c.fg_sec + c.bg_sec > 0 THEN ROUND(c.fg_sec / (c.fg_sec + c.bg_sec) * 1000) / 10 ELSE 0 END FROM combined c) AS focusScore,
-		FALSE AS isBrowser
+	top_sites AS (
+		SELECT
+			su.domain AS name,
+			'site' AS kind,
+			COALESCE(sc.type_name, 'Neutral') AS category,
+			COALESCE(sc.type_name, 'Neutral') AS type,
+			COALESCE(sc.type_color, '#6b7280') AS color,
+			SUM(EXTRACT(EPOCH FROM (su.eff_end - su.eff_start))) AS totalSeconds,
+			COUNT(*) AS session_count,
+			(SELECT CASE WHEN c.fg_sec + c.bg_sec > 0 THEN ROUND(c.fg_sec / (c.fg_sec + c.bg_sec) * 1000) / 10 ELSE 0 END FROM combined c) AS focusScore,
+			FALSE AS isBrowser
 		FROM site_usage su
 		LEFT JOIN site_cat sc ON sc.domain = su.domain
 		WHERE su.domain <> ''
@@ -2164,21 +2225,26 @@ top_sites AS (
 		(SELECT row_to_json(c) FROM combined c) AS summary,
 		COALESCE(
 			(SELECT json_agg(t ORDER BY t.totalSeconds DESC) FROM (
-				SELECT * FROM top_apps
+				SELECT name, kind, category, type, color, totalSeconds, focusScore, isBrowser FROM top_apps
 				UNION ALL
-				SELECT * FROM top_sites
+				SELECT name, kind, category, type, color, totalSeconds, focusScore, isBrowser FROM top_sites
 				LIMIT 20
 			) t),
 			'[]'::json
-		) AS top_items
+		) AS top_items,
+		COALESCE(
+			(SELECT json_agg(t ORDER BY t.totalSeconds DESC) FROM top_apps t),
+			'[]'::json
+		) AS raw_top_apps
 	`
 
 	var employeeJSON []byte
 	var summaryJSON []byte
 	var topItemsJSON []byte
+	var rawTopAppsJSON []byte
 
 	if err := r.pool.QueryRow(ctx, summaryQuery, params.EmployeeID, params.DateFrom, params.DateTo).Scan(
-		&employeeJSON, &summaryJSON, &topItemsJSON,
+		&employeeJSON, &summaryJSON, &topItemsJSON, &rawTopAppsJSON,
 	); err != nil {
 		return nil, fmt.Errorf("hours insights summary query: %w", err)
 	}
@@ -2221,24 +2287,68 @@ top_sites AS (
 	}
 	result.TopItems = topItems
 
-	// 3) Chart data — hourly or daily buckets depending on range length.
+	// Parse raw top apps
+	type RawAppItem struct {
+		Name         string  `json:"name"`
+		TotalSeconds float64 `json:"totalseconds"`
+		Category     string  `json:"category"`
+		Type         string  `json:"type"`
+		SessionCount int     `json:"session_count"`
+	}
+	var rawApps []RawAppItem
+	_ = json.Unmarshal(rawTopAppsJSON, &rawApps)
+
+	// Build TopApps with curated color palette
+	palette := []string{
+		"#3b82f6", // Blue
+		"#8b5cf6", // Purple
+		"#10b981", // Emerald
+		"#f59e0b", // Amber
+		"#06b6d4", // Cyan
+		"#ec4899", // Pink
+	}
+	topAppNamesMap := make(map[string]bool)
+	limitTop := len(rawApps)
+	if limitTop > 6 {
+		limitTop = 6
+	}
+	for i := 0; i < limitTop; i++ {
+		color := palette[i%len(palette)]
+		result.TopApps = append(result.TopApps, HoursInsightsAppMeta{
+			Name:         rawApps[i].Name,
+			TotalSeconds: rawApps[i].TotalSeconds,
+			Color:        color,
+			Category:     rawApps[i].Category,
+			Type:         rawApps[i].Type,
+			SessionCount: rawApps[i].SessionCount,
+		})
+		topAppNamesMap[rawApps[i].Name] = true
+	}
+
+	// 3) Chart data — Productivity buckets
 	chartQuery := `
 	WITH params AS (
 		SELECT $1::varchar AS emp_id, $2::timestamptz AS from_ts, $3::timestamptz AS to_ts
 	),
 	app_usage AS (
 		SELECT
-			app_display_name,
-			installed_app_id,
-			GREATEST(started_at, (SELECT from_ts FROM params)) AS eff_start,
-			LEAST(COALESCE(ended_at, NOW()), (SELECT to_ts FROM params)) AS eff_end,
-			foreground_seconds,
-			background_seconds
-		FROM app_sessions
-		WHERE employee_id = (SELECT emp_id FROM params)
-			AND deleted_at IS NULL
-			AND started_at < (SELECT to_ts FROM params)
-			AND (ended_at IS NULL OR ended_at > (SELECT from_ts FROM params))
+			s.app_display_name,
+			s.installed_app_id,
+			GREATEST(s.started_at, (SELECT from_ts FROM params)) AS eff_start,
+			LEAST(
+				CASE 
+					WHEN s.ended_at IS NOT NULL THEN s.ended_at
+					WHEN s.status = 'ACTIVE' AND s.last_sync_at > NOW() - INTERVAL '10 minutes' THEN LEAST(NOW(), (SELECT to_ts FROM params))
+					ELSE COALESCE(s.last_activity_at, s.last_sync_at, s.started_at)
+				END,
+				(SELECT to_ts FROM params)
+			) AS eff_end
+		FROM app_sessions s
+		WHERE s.employee_id = (SELECT emp_id FROM params)
+			AND s.deleted_at IS NULL
+			AND s.started_at < (SELECT to_ts FROM params)
+			AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > (SELECT from_ts FROM params)
+			AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > s.started_at
 	),
 	app_cat AS (
 		SELECT DISTINCT ON (ia.id) ia.id,
@@ -2257,9 +2367,9 @@ top_sites AS (
 	)
 	SELECT
 		to_char(b.bucket_start, $6) AS bucket,
-		COALESCE(SUM(CASE WHEN ac.type_name = 'Productive' THEN EXTRACT(EPOCH FROM (LEAST(au.eff_end, b.bucket_start + $5::interval) - GREATEST(au.eff_start, b.bucket_start))) ELSE 0 END), 0) AS productive,
-		COALESCE(SUM(CASE WHEN ac.type_name = 'Unproductive' THEN EXTRACT(EPOCH FROM (LEAST(au.eff_end, b.bucket_start + $5::interval) - GREATEST(au.eff_start, b.bucket_start))) ELSE 0 END), 0) AS unproductive,
-		COALESCE(SUM(CASE WHEN ac.type_name = 'Neutral' OR ac.type_name IS NULL THEN EXTRACT(EPOCH FROM (LEAST(au.eff_end, b.bucket_start + $5::interval) - GREATEST(au.eff_start, b.bucket_start))) ELSE 0 END), 0) AS neutral
+		COALESCE(SUM(CASE WHEN au.app_display_name IS NOT NULL AND ac.type_name = 'Productive' THEN EXTRACT(EPOCH FROM (LEAST(au.eff_end, b.bucket_start + $5::interval) - GREATEST(au.eff_start, b.bucket_start))) ELSE 0 END), 0) AS productive,
+		COALESCE(SUM(CASE WHEN au.app_display_name IS NOT NULL AND ac.type_name = 'Unproductive' THEN EXTRACT(EPOCH FROM (LEAST(au.eff_end, b.bucket_start + $5::interval) - GREATEST(au.eff_start, b.bucket_start))) ELSE 0 END), 0) AS unproductive,
+		COALESCE(SUM(CASE WHEN au.app_display_name IS NOT NULL AND (ac.type_name = 'Neutral' OR ac.type_name IS NULL) THEN EXTRACT(EPOCH FROM (LEAST(au.eff_end, b.bucket_start + $5::interval) - GREATEST(au.eff_start, b.bucket_start))) ELSE 0 END), 0) AS neutral
 	FROM buckets b
 	LEFT JOIN app_usage au ON au.eff_start < b.bucket_start + $5::interval AND au.eff_end > b.bucket_start
 	LEFT JOIN app_cat ac ON ac.id = au.installed_app_id
@@ -2276,15 +2386,106 @@ top_sites AS (
 	}
 	defer rows.Close()
 
+	bucketOrder := make([]string, 0)
 	for rows.Next() {
 		var b HoursInsightsChartBucket
 		if err := rows.Scan(&b.Bucket, &b.Productive, &b.Unproductive, &b.Neutral); err != nil {
 			return nil, fmt.Errorf("scan chart row: %w", err)
 		}
 		result.Chart = append(result.Chart, b)
+		bucketOrder = append(bucketOrder, b.Bucket)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+
+	// 4) Chart data — Individual application buckets
+	appChartQuery := `
+	WITH params AS (
+		SELECT $1::varchar AS emp_id, $2::timestamptz AS from_ts, $3::timestamptz AS to_ts
+	),
+	app_usage AS (
+		SELECT
+			s.app_display_name,
+			GREATEST(s.started_at, (SELECT from_ts FROM params)) AS eff_start,
+			LEAST(
+				CASE 
+					WHEN s.ended_at IS NOT NULL THEN s.ended_at
+					WHEN s.status = 'ACTIVE' AND s.last_sync_at > NOW() - INTERVAL '10 minutes' THEN LEAST(NOW(), (SELECT to_ts FROM params))
+					ELSE COALESCE(s.last_activity_at, s.last_sync_at, s.started_at)
+				END,
+				(SELECT to_ts FROM params)
+			) AS eff_end
+		FROM app_sessions s
+		WHERE s.employee_id = (SELECT emp_id FROM params)
+			AND s.deleted_at IS NULL
+			AND s.started_at < (SELECT to_ts FROM params)
+			AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > (SELECT from_ts FROM params)
+			AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > s.started_at
+	),
+	buckets AS (
+		SELECT generate_series(
+			date_trunc($4, (SELECT from_ts FROM params)),
+			date_trunc($4, (SELECT to_ts FROM params)),
+			$5::interval
+		) AS bucket_start
+	)
+	SELECT
+		to_char(b.bucket_start, $6) AS bucket,
+		au.app_display_name,
+		COALESCE(SUM(EXTRACT(EPOCH FROM (
+			LEAST(au.eff_end, b.bucket_start + $5::interval) -
+			GREATEST(au.eff_start, b.bucket_start)
+		))), 0) AS duration_sec
+	FROM buckets b
+	JOIN app_usage au ON au.eff_start < b.bucket_start + $5::interval AND au.eff_end > b.bucket_start
+	WHERE au.app_display_name <> '' AND au.app_display_name IS NOT NULL
+	GROUP BY b.bucket_start, au.app_display_name
+	ORDER BY b.bucket_start
+	`
+
+	appRows, err := r.pool.Query(ctx, appChartQuery,
+		params.EmployeeID, params.DateFrom, params.DateTo,
+		bucketField, bucketSize, bucketFormat,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("hours insights app chart query: %w", err)
+	}
+	defer appRows.Close()
+
+	appBucketMap := make(map[string]map[string]float64)
+	for appRows.Next() {
+		var bStr, appName string
+		var dur float64
+		if err := appRows.Scan(&bStr, &appName, &dur); err != nil {
+			return nil, fmt.Errorf("scan app chart row: %w", err)
+		}
+		if _, ok := appBucketMap[bStr]; !ok {
+			appBucketMap[bStr] = make(map[string]float64)
+		}
+		if dur > maxBucketSeconds {
+			dur = maxBucketSeconds
+		}
+		if topAppNamesMap[appName] {
+			appBucketMap[bStr][appName] += dur
+		} else {
+			appBucketMap[bStr]["Other"] += dur
+		}
+	}
+	if err := appRows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Populate AppChart in matching bucket order
+	for _, bStr := range bucketOrder {
+		apps := appBucketMap[bStr]
+		if apps == nil {
+			apps = make(map[string]float64)
+		}
+		result.AppChart = append(result.AppChart, HoursInsightsAppBucket{
+			Bucket: bStr,
+			Apps:   apps,
+		})
 	}
 
 	return result, nil
