@@ -13,9 +13,11 @@ TABLE OF CONTENTS
   4. Bug #4 — Cinnamon Autostart Reliability Gap
   5. Bug #5 — Shift Management: Soft-Deleted Shift Names Block Re-Creation
   6. Bug #6 — installed_applications: version and publisher always empty on Linux
-  7. Bug #7 — Peripherals Page: Duplicate Devices Shown (Connected + Disconnected)
-  8. How Each Fix Should Be Applied (No Code Changes Yet)
-  9. Diagnostic Commands for Linux Mint 22.2
+   7. Bug #7 — Peripherals Page: Duplicate Devices Shown (Connected + Disconnected)
+   8. Bug #8 — device_hardware_info: Windows 11 shows as "Windows 10"
+   9. Bug #9 — Orphan app-items silently lost: client marks all sent IDs as synced
+  10. How Each Fix Should Be Applied (No Code Changes Yet)
+  11. Diagnostic Commands for Linux Mint 22.2
 
 
 ================================================================================
@@ -759,5 +761,129 @@ FIX #7 — Group hardware devices by identity, show history in expandable rows
 
 
  ================================================================================
+   BUG #9 — Orphan app-items silently lost: client marks all sent IDs as synced
+   Date Found: 2026-09-08
+   Environment: Server + Client sync pipeline
+   Affects: All platforms
+ ================================================================================
+
+ SEVERITY: LOW-MEDIUM
+ AFFECTS: The app-items sync pipeline — when a race condition causes orphan
+          rows, the client marks them as synced even though the server dropped
+          them, so they are never re-sent.
+
+ DESCRIPTION:
+   The server's BulkInsertAppItems preflight check (new_schema_repo.go:525)
+   correctly drops orphan app_items whose parent app_sessions row doesn't exist
+   yet, preventing FK violations and 500 errors. However, the client's
+   SyncService.DrainTableAsync (SyncService.cs:608-613) does not read the
+   server's response body (which contains the actual synced count). It only
+   checks for a 2xx status code, then marks ALL sent IDs as is_synced=1 —
+   including the orphan rows the server dropped.
+
+   This means orphan rows are effectively lost: they are marked synced on the
+   client and will never be re-sent. The server code comment at
+   new_schema_repo.go:436-438 says "The dropped rows are re-sent on the
+   client's next sync" but the client code does not implement this.
+
+   The AGENTS.md changelog entry for this feature also states "Dropped rows
+   stay is_synced=0 in the client's local SQLite and re-send on the next
+   sync" — this is incorrect per the current code.
+
+ ROOT CAUSE:
+   Server-side (new_schema_repo.go:416-630):
+     BulkInsertAppItems runs filterOrphanAppItems() before each 500-row
+     INSERT. Orphans are removed from the batch. The returned "inserted"
+     count reflects only survivors. The response is:
+       {synced: <survivors>, message: "Synced X of Y entries"}
+
+   Client-side (SyncService.cs:564-635):
+     DrainTableAsync sends the batch via SendAsync(), which returns true on
+     any 2xx response (line 682: response.IsSuccessStatusCode). The client
+     then calls markSentFn(ids) with ALL IDs from the sent slice — it never
+     parses the response body to learn how many were actually inserted.
+
+   Result: if a batch of 100 items has 81 orphans, the server inserts 19 and
+   returns {synced: 19}, but the client marks all 100 as is_synced=1. The 81
+   orphan rows are silently lost.
+
+ PRACTICAL IMPACT: LOW
+   The race condition is narrow — it only affects app_items created in the
+   few seconds between the app-sessions and app-items sync calls. The
+   collection loop continuously creates new app_items with fresh GUIDs for
+   active sessions, so the logical activity data is eventually captured. The
+   specific orphaned rows (with their original GUIDs) are lost, but the data
+   they represent is re-created in subsequent collection cycles.
+
+ AFFECTED FILES:
+   - server/internal/repository/new_schema_repo.go:416-630 (BulkInsertAppItems + filterOrphanAppItems)
+   - server/internal/repository/new_schema_repo.go:436-438 (incorrect comment claiming re-sync)
+   - client/Services/SyncService.cs:608-613 (marks all IDs as synced without checking response)
+   - client/Services/SyncService.cs:682-688 (SendAsync only checks 2xx, ignores body)
+
+
+ ================================================================================
+   RESOLUTION PLAN FOR BUG #9
+ ================================================================================
+
+ NOTE: No code changes made yet. This is the plan only.
+
+ FIX #9 — Make client respect server's synced count for app-items
+ -----------------------------------------------------------------
+
+   OPTION A (Recommended) — Parse response body in app-items drain:
+
+     WHERE: client/Services/SyncService.cs:608-613
+
+     WHAT: After a successful POST to /api/v1/app-items/sync, read the
+     response body and parse the SyncBatchResponse JSON. Compare
+     response.synced against the number of IDs sent. If they differ, only
+     mark the first N IDs as synced (where N = response.synced), leaving
+     the rest as is_synced=0 for re-send on the next pass.
+
+     Implementation:
+       1. Change SendAsync to return (bool success, string? responseBody)
+          instead of just bool
+       2. After SendAsync returns true for app-items, parse the response:
+            var resp = JsonSerializer.Deserialize<SyncBatchResponse>(body);
+            if (resp != null && resp.Synced < ids.Count)
+            {
+                // Server dropped some — only mark the survivors
+                await markSentFn(ids.Take(resp.Synced).ToList(), ct);
+            }
+            else
+            {
+                await markSentFn(ids, ct);
+            }
+
+     WHY: This directly fixes the bug by making the client aware of how
+     many rows the server actually accepted. Rows the server dropped stay
+     as is_synced=0 and re-send on the next sync pass — exactly what the
+     server comment claims.
+
+     DRAWBACK: Requires parsing the response body for one endpoint. The
+     other 10 sync endpoints can stay as-is (they don't have orphan
+     preflight logic, so all sent rows are always inserted).
+
+
+   OPTION B — Server returns dropped IDs in response:
+
+     WHERE: server/internal/repository/new_schema_repo.go (filterOrphanAppItems)
+            and server/internal/dto/new_schema_dto.go (SyncBatchResponse)
+
+     WHAT: Extend SyncBatchResponse to include DroppedIDs []string. The
+     client can then remove those IDs from the markSent call.
+
+     DRAWBACK: Increases response size and couples the two sides more
+     tightly. Option A is simpler and self-contained on the client.
+
+
+   RECOMMENDED: Option A — it's a client-only fix, doesn't change the
+   server contract, and the response parsing is straightforward. The
+   SyncBatchResponse DTO is already defined; only the client needs to
+   deserialize it.
+
+
+ ================================================================================
    END OF BUG REPORT
-================================================================================
+ ================================================================================
