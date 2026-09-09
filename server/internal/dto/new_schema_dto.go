@@ -15,6 +15,13 @@ type SyncBatchRequest struct {
 type SyncBatchResponse struct {
 	Synced  int    `json:"synced"`
 	Message string `json:"message"`
+	// RejectedIds carries the client row ids the server REFUSED to store, present
+	// only when a partial acceptance occurred (omitempty keeps the other sync
+	// endpoints' wire format untouched). An absent field means "all rows
+	// accepted" — older clients ignore it, and a new client talking to an older
+	// server preserves the old mark-all behavior when the field is missing.
+	// Currently populated only by SyncAppItems (orphan app_session_id preflight).
+	RejectedIds []string `json:"rejectedIds,omitempty"`
 }
 
 // ────────────────────────────────

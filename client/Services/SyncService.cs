@@ -57,6 +57,31 @@ public class SyncService : BackgroundService
     private DateTime _lastAuthFailureAt = DateTime.MinValue;
     private static readonly TimeSpan AuthGiveUpWindow = TimeSpan.FromSeconds(30);
 
+    // ── Poison-row quarantine (in-memory only, app_items) ──
+    // Rows the server explicitly REFUSES (rejectedIds from the app-items sync
+    // response — their parent session was missing at insert time) stay is_synced=0
+    // and re-send next pass, where the parent has usually landed (sessions drain
+    // before items). A row refused QUARANTINE_RETRIES consecutive passes is
+    // genuinely unparentable (empty/GONE app_session_id) — retrying forever would
+    // grow the retry queue unboundedly. Quarantined rows are SKIPPED by the drain
+    // until the process restarts: the row stays is_synced=0 (a rejected row must
+    // never look synced), retention never deletes it (retention purges synced rows
+    // only), and the counter reset on restart gives self-heal a fresh chance.
+    private const int QuarantineRetries = 3;
+    private readonly Dictionary<string, int> _appItemRejectCounts = new();
+
+    private sealed class SyncBatchResponse
+    {
+        public int Synced { get; set; }
+        public string? Message { get; set; }
+        public List<string>? RejectedIds { get; set; }
+    }
+
+    private static readonly JsonSerializerOptions SyncResponseJsonOpts = new()
+    {
+        PropertyNameCaseInsensitive = true,
+    };
+
     /// <summary>
     /// Raised when SyncService has concluded that the stored credentials are no longer
     /// accepted by the server (both the device token AND the Bearer JWT rejected).
@@ -394,7 +419,9 @@ public class SyncService : BackgroundService
             },
             (ids, token) => _store.MarkAppItemsSentAsync(ids, token),
             e => e.Id,
-            sw, budget, ct));
+            sw, budget, ct,
+            filterIdsFn: QuarantinedAppItemIds,
+            onRejection: OnAppItemsRejected));
 
         // App status (key/value) — changed rows are re-sent every roundtrip, never deleted client-side.
         tasks.Add((sw, budget, ct) => DrainTableAsync<AppStatus>(
@@ -492,7 +519,8 @@ public class SyncService : BackgroundService
                         slice = slice.Take(slice.Count / 2).ToList();
                     }
 
-                    if (!await SendAsync(endpoint, json, ct))
+                    var (sentOk, _) = await SendAsync(endpoint, json, ct);
+                    if (!sentOk)
                         return true;
 
                     var ids = slice.SelectMany(a => a.SourceIds).Distinct().ToList();
@@ -560,6 +588,13 @@ public class SyncService : BackgroundService
     /// sends each slice, marks it sent, pauses politely, and repeats until the table is
     /// drained or the pass budget expires. Returns true if any send failed (triggers
     /// exponential backoff — the next pass resumes where the failed chunk left off).
+    ///
+    /// Optional hooks (used by the app-items drain):
+    ///  - <paramref name="filterIdsFn"/> returns ids to SKIP before sending (quarantined rows).
+    ///  - <paramref name="onRejection"/> is called when the server's response carries
+    ///    rejectedIds — only ACCEPTED rows are marked sent; refused rows stay is_synced=0
+    ///    and re-send on the next pass. A null/absent rejectedIds field (older server)
+    ///    preserves the mark-all behavior.
     /// </summary>
     private async Task<bool> DrainTableAsync<T>(
         string endpoint,
@@ -569,7 +604,9 @@ public class SyncService : BackgroundService
         Func<T, string?> idOf,
         Stopwatch passSw,
         TimeSpan passBudget,
-        CancellationToken ct)
+        CancellationToken ct,
+        Func<IReadOnlyList<string>>? filterIdsFn = null,
+        Action<IReadOnlyList<string>, IReadOnlyList<string>>? onRejection = null)
     {
         var synced = 0;
         try
@@ -581,6 +618,21 @@ public class SyncService : BackgroundService
 
                 var entries = await fetchFn(_config.SyncMaxRows, ct);
                 if (entries.Count == 0) break;
+
+                // Quarantine skip (app-items): rows the server keeps refusing never enter
+                // the payload. They stay is_synced=0, so every fetch re-returns them at the
+                // head — filtering here (not in SQL) keeps fresh rows behind them draining;
+                // when ONLY quarantined rows remain, break until the next pass.
+                if (filterIdsFn != null)
+                {
+                    var skip = filterIdsFn();
+                    if (skip.Count > 0)
+                    {
+                        var skipSet = new HashSet<string>(skip);
+                        entries = entries.Where(e => !skipSet.Contains(idOf(e) ?? "")).ToList();
+                        if (entries.Count == 0) break;
+                    }
+                }
 
                 var remaining = entries;
                 while (remaining.Count > 0)
@@ -605,13 +657,38 @@ public class SyncService : BackgroundService
                         slice = slice.Take(slice.Count / 2).ToList();
                     }
 
-                    if (!await SendAsync(endpoint, json, ct))
+                    var (ok, body) = await SendAsync(endpoint, json, ct);
+                    if (!ok)
                         return true; // failed — stop this table, back off, resume next pass
 
                     var ids = slice.Select(idOf).Where(id => !string.IsNullOrEmpty(id)).Cast<string>().ToList();
-                    if (ids.Count > 0)
+
+                    // Partial acceptance: the server may explicitly REFUSE rows (rejectedIds
+                    // — orphan app_session_id preflight). Mark only the accepted rows so the
+                    // refused ones stay is_synced=0 and re-send next pass (their parent
+                    // session lands in between — sessions drain before items). An absent or
+                    // unparseable rejectedIds field (older server, non-JSON body) keeps the
+                    // mark-all behavior — the upserts are idempotent either way.
+                    List<string>? rejectedIds = null;
+                    if (onRejection != null && ids.Count > 0 &&
+                        TryParseRejectedIds(body, out var parsed) &&
+                        (rejectedIds = parsed.Where(ids.Contains).ToList()).Count > 0)
+                    {
+                        var rejectedSet = new HashSet<string>(rejectedIds);
+                        var accepted = ids.Where(id => !rejectedSet.Contains(id)).ToList();
+                        if (accepted.Count > 0)
+                            await markSentFn(accepted, ct);
+                        synced += accepted.Count;
+                        onRejection(rejectedIds, accepted);
+                        _logger.LogWarning(
+                            "Server rejected {Rejected} of {Sent} rows for {Endpoint} (orphan preflight) — kept unsent for re-send next pass",
+                            rejectedIds.Count, ids.Count, endpoint);
+                    }
+                    else if (ids.Count > 0)
+                    {
                         await markSentFn(ids, ct);
-                    synced += ids.Count;
+                        synced += ids.Count;
+                    }
 
                     remaining = slice.Count < remaining.Count
                         ? remaining.Skip(slice.Count).ToList()
@@ -635,13 +712,67 @@ public class SyncService : BackgroundService
     }
 
     /// <summary>
+    /// Parses the sync response body for rejectedIds. Returns false when the field is
+    /// absent or the body is not the expected JSON — both mean "mark everything sent"
+    /// (older-server compatibility; idempotent upserts make that safe).
+    /// </summary>
+    private static bool TryParseRejectedIds(string? body, out List<string> rejectedIds)
+    {
+        rejectedIds = new List<string>();
+        if (string.IsNullOrEmpty(body)) return false;
+        try
+        {
+            var resp = JsonSerializer.Deserialize<SyncBatchResponse>(body, SyncResponseJsonOpts);
+            if (resp?.RejectedIds is { Count: > 0 })
+            {
+                rejectedIds = resp.RejectedIds;
+                return true;
+            }
+            return false;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Ids currently quarantined (refused ≥ QuarantineRetries consecutive passes).</summary>
+    private IReadOnlyList<string> QuarantinedAppItemIds()
+        => _appItemRejectCounts
+            .Where(kv => kv.Value >= QuarantineRetries)
+            .Select(kv => kv.Key)
+            .ToList();
+
+    /// <summary>
+    /// Quarantine bookkeeping for the app-items drain: refused ids advance their
+    /// consecutive-refusal counter (≥ threshold ⇒ skipped by future drains until
+    /// restart); accepted ids are FORGIVEN so a self-healed row starts fresh if it
+    /// is ever orphaned again.
+    /// </summary>
+    private void OnAppItemsRejected(IReadOnlyList<string> rejectedIds, IReadOnlyList<string> acceptedIds)
+    {
+        foreach (var id in acceptedIds)
+            _appItemRejectCounts.Remove(id);
+        foreach (var id in rejectedIds)
+        {
+            _appItemRejectCounts[id] = _appItemRejectCounts.GetValueOrDefault(id) + 1;
+            if (_appItemRejectCounts[id] == QuarantineRetries)
+                _logger.LogWarning(
+                    "app_item {Id} refused {Retries} consecutive passes — quarantined in-memory (row stays is_synced=0; retried after restart)",
+                    id, QuarantineRetries);
+        }
+    }
+
+    /// <summary>
     /// POSTs one serialized slice. Request bodies are gzip-compressed when enabled (tiny
     /// payloads are skipped — compression overhead isn't worth it below ~512 bytes).
     /// Per-request timeout is bound via a linked CTS (the shared HttpClient.Timeout is the
-    /// hard ceiling). 2xx = every row in this slice is durable server-side (idempotent
-    /// upserts by client GUID), so the rows can be marked sent.
+    /// hard ceiling). Returns (true, body) on 2xx — the body carries the server's
+    /// SyncBatchResponse (synced count + optional rejectedIds). 2xx = the rows in this
+    /// slice are durably handled server-side (idempotent upserts by client GUID), minus
+    /// any rows the server explicitly refused via rejectedIds.
     /// </summary>
-    private async Task<bool> SendAsync(string endpoint, byte[] json, CancellationToken ct)
+    private async Task<(bool Success, string? Body)> SendAsync(string endpoint, byte[] json, CancellationToken ct)
     {
         var serverUrl = _config.ServerUrl ?? "http://localhost:8080";
         try
@@ -685,7 +816,8 @@ public class SyncService : BackgroundService
                 // is still live on the server — clear the "auth looks dead" state if a
                 // previous 401 trip had set it.
                 _authLooksDead = false;
-                return true;
+                var body = await response.Content.ReadAsStringAsync(ct);
+                return (true, body);
             }
 
             if ((int)response.StatusCode == 401 || (int)response.StatusCode == 403)
@@ -695,26 +827,26 @@ public class SyncService : BackgroundService
             }
             else
             {
-                var body = await response.Content.ReadAsStringAsync(ct);
+                var errBody = await response.Content.ReadAsStringAsync(ct);
                 _logger.LogWarning("Sync failed for {Endpoint} (status {Status}): {Body}",
-                    endpoint, (int)response.StatusCode, body);
+                    endpoint, (int)response.StatusCode, errBody);
             }
-            return false;
+            return (false, null);
         }
         catch (HttpRequestException ex)
         {
             _logger.LogDebug(ex, "Sync failed for {Endpoint} (server unreachable)", endpoint);
-            return false;
+            return (false, null);
         }
         catch (TaskCanceledException)
         {
             _logger.LogDebug("Sync timed out for {Endpoint}", endpoint);
-            return false;
+            return (false, null);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to sync {Endpoint}", endpoint);
-            return false;
+            return (false, null);
         }
     }
 

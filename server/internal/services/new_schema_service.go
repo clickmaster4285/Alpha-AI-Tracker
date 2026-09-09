@@ -450,11 +450,18 @@ func (s *NewSchemaService) SyncAppItems(ctx context.Context, req *dto.SyncAppIte
 		})
 	}
 
-	inserted, err := s.repo.BulkInsertAppItems(ctx, entries)
+	inserted, rejectedIDs, err := s.repo.BulkInsertAppItems(ctx, entries)
 	if err != nil {
 		return nil, fmt.Errorf("bulk insert app_items: %w", err)
 	}
-	return &dto.SyncBatchResponse{Synced: inserted, Message: fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries))}, nil
+	// rejectedIDs is present only when the orphan preflight refused rows; the
+	// client leaves exactly those rows unsent so they re-send after their parent
+	// session lands (see SyncBatchResponse.RejectedIds).
+	return &dto.SyncBatchResponse{
+		Synced:      inserted,
+		Message:     fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries)),
+		RejectedIds: rejectedIDs,
+	}, nil
 }
 
 // ── List app_sessions (for web dashboard) ──

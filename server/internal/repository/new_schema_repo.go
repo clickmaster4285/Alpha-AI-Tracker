@@ -413,12 +413,17 @@ func (r *NewSchemaRepo) BulkInsertAppSessions(ctx context.Context, entries []mod
 // App Items (generic child of app_sessions)
 // ────────────────────────────────
 
-func (r *NewSchemaRepo) BulkInsertAppItems(ctx context.Context, entries []models.AppItem) (int, error) {
+// BulkInsertAppItems inserts app_items in 500-row batches after an orphan
+// preflight. Returns the number of inserted rows AND the ids of rows that were
+// refused (orphans — their app_session_id had no parent row at insert time) so
+// the sync response can tell the client exactly which rows to keep unsent.
+func (r *NewSchemaRepo) BulkInsertAppItems(ctx context.Context, entries []models.AppItem) (int, []string, error) {
 	if len(entries) == 0 {
-		return 0, nil
+		return 0, nil, nil
 	}
 	batchSize := 500
 	inserted := 0
+	rejectedIDs := make([]string, 0)
 	for i := 0; i < len(entries); i += batchSize {
 		end := i + batchSize
 		if end > len(entries) {
@@ -430,28 +435,30 @@ func (r *NewSchemaRepo) BulkInsertAppItems(ctx context.Context, entries []models
 		// app_sessions.id. The client sends sessions and items in separate
 		// HTTP calls — a retry, a second client process, or a network blip
 		// can land the items batch BEFORE the parent session row arrives,
-		// which used to 500 the whole batch and silently drop every row
-		// (the client marks them sent on the 2xx it would have wanted).
+		// which used to 500 the whole batch and silently drop every row.
 		// The fix: query which app_session_ids actually exist right now,
-		// drop the orphans from THIS batch, and proceed. The dropped rows
-		// are re-sent on the client's next sync (where the parent session
-		// is already in the DB). The orphan count is logged at WARN with
-		// the first 20 ids so the client-side root cause stays visible.
+		// drop the orphans from THIS batch, and proceed. The dropped row ids
+		// are returned to the caller and surfaced in the sync response as
+		// rejectedIds — the client leaves exactly those rows is_synced=0 so
+		// they re-send on the next pass (where the parent session is already
+		// in the DB). The orphan count is logged at WARN with the first 20
+		// ids so the client-side root cause stays visible.
 		//
 		// Why preflight (not ON CONFLICT DO NOTHING on the FK): Postgres
 		// checks FKs at row-insert time, not at ON CONFLICT time, so the
 		// preflight is the only way to make the rest of the batch succeed
 		// atomically without aborting the whole statement.
 		//
-		// Why log (not return error): the orphan rows are recoverable —
-		// the client's next sync will re-send them after the parent
-		// session lands. Returning an error here would make the client
+		// Why log + rejectedIds (not return error): the orphan rows are
+		// recoverable — the client's next sync will re-send them after the
+		// parent session lands. Returning an error here would make the client
 		// treat the entire batch as failed and stop sending until a
 		// restart, which is exactly the wrong failure mode.
-		orphanIDs, survivorIdx := r.filterOrphanAppItems(ctx, batch)
+		orphanIDs, orphanItemIDs, survivorIdx := r.filterOrphanAppItems(ctx, batch)
 		if len(orphanIDs) > 0 {
 			logOrphanAppItems(entries, orphanIDs)
 		}
+		rejectedIDs = append(rejectedIDs, orphanItemIDs...)
 		if len(survivorIdx) == 0 {
 			// entire batch was orphans — nothing to insert, but the
 			// request itself is well-formed, so report 0 inserted.
@@ -465,7 +472,7 @@ func (r *NewSchemaRepo) BulkInsertAppItems(ctx context.Context, entries []models
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
 				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
 				argIdx+10, argIdx+11, argIdx+12, argIdx+13, argIdx+14,
@@ -486,7 +493,7 @@ func (r *NewSchemaRepo) BulkInsertAppItems(ctx context.Context, entries []models
 				(id, employee_id, app_session_id, parent_item_id, item_type,
 				 title, identifier, url, domain, opened_at, closed_at,
 				 process_id, object_type, action, journey_id, sequence,
-				 previous_path, current_path, window_id, tab_id, metadata_json)
+				 previous_path, current_path, window_id, tab_id, metadata_json, synced_at)
 			VALUES %s
 			ON CONFLICT (id) DO UPDATE SET
 				title = EXCLUDED.title,
@@ -510,19 +517,20 @@ func (r *NewSchemaRepo) BulkInsertAppItems(ctx context.Context, entries []models
 
 		tag, err := r.pool.Exec(ctx, query, args...)
 		if err != nil {
-			return inserted, fmt.Errorf("bulk insert app_items: %w", err)
+			return inserted, rejectedIDs, fmt.Errorf("bulk insert app_items: %w", err)
 		}
 		inserted += int(tag.RowsAffected())
 	}
-	return inserted, nil
+	return inserted, rejectedIDs, nil
 }
 
 // filterOrphanAppItems returns the set of appSessionId values in `batch`
-// that are missing from app_sessions right now, plus the indices of the
-// batch rows that are NOT orphans (so the caller can re-slice). The
+// that are missing from app_sessions right now, the ids of the batch rows
+// that ARE orphans (surfaced to the client as rejectedIds), and the indices
+// of the batch rows that are NOT orphans (so the caller can re-slice). The
 // query is O(1) round-trips (one SELECT with ANY($1) over the distinct
 // ids in the batch, indexed lookup on app_sessions.id).
-func (r *NewSchemaRepo) filterOrphanAppItems(ctx context.Context, batch []models.AppItem) (orphanIDs []string, survivorIdx []int) {
+func (r *NewSchemaRepo) filterOrphanAppItems(ctx context.Context, batch []models.AppItem) (orphanIDs []string, orphanItemIDs []string, survivorIdx []int) {
 	seen := make(map[string]struct{}, len(batch))
 	distinct := make([]string, 0, len(batch))
 	for _, e := range batch {
@@ -543,20 +551,21 @@ func (r *NewSchemaRepo) filterOrphanAppItems(ctx context.Context, batch []models
 		for i, e := range batch {
 			if e.AppSessionID == "" {
 				orphanIDs = append(orphanIDs, "<empty>")
+				orphanItemIDs = append(orphanItemIDs, e.ID)
 				continue
 			}
 			survivorIdx = append(survivorIdx, i)
 		}
-		return orphanIDs, survivorIdx
+		return orphanIDs, orphanItemIDs, survivorIdx
 	}
 
 	rows, err := r.pool.Query(ctx, "SELECT id FROM app_sessions WHERE id = ANY($1)", distinct)
-	if err != nil {
-		// If the preflight itself fails, fail closed — return the full
-		// batch so the caller 500s. Better to alert than to silently
-		// drop data on a transient pg error.
-		return nil, nil
-	}
+		if err != nil {
+			// If the preflight itself fails, fail closed — return the full
+			// batch so the caller 500s. Better to alert than to silently
+			// drop data on a transient pg error.
+			return nil, nil, nil
+		}
 	defer rows.Close()
 	present := make(map[string]struct{}, len(distinct))
 	for rows.Next() {
@@ -575,6 +584,7 @@ func (r *NewSchemaRepo) filterOrphanAppItems(ctx context.Context, batch []models
 				orphanIDs = append(orphanIDs, "<empty>")
 				orphanSet["<empty>"] = struct{}{}
 			}
+			orphanItemIDs = append(orphanItemIDs, e.ID)
 			continue
 		}
 		if _, ok := present[e.AppSessionID]; !ok {
@@ -582,11 +592,12 @@ func (r *NewSchemaRepo) filterOrphanAppItems(ctx context.Context, batch []models
 				orphanIDs = append(orphanIDs, e.AppSessionID)
 				orphanSet[e.AppSessionID] = struct{}{}
 			}
+			orphanItemIDs = append(orphanItemIDs, e.ID)
 			continue
 		}
 		survivorIdx = append(survivorIdx, i)
 	}
-	return orphanIDs, survivorIdx
+	return orphanIDs, orphanItemIDs, survivorIdx
 }
 
 // survivorIdxOf returns the entries in `batch` at the indices in `idx`,
@@ -1371,7 +1382,7 @@ func (r *NewSchemaRepo) BulkUpsertHardwareDevices(ctx context.Context, entries [
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
 				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
 			))
@@ -1384,7 +1395,7 @@ func (r *NewSchemaRepo) BulkUpsertHardwareDevices(ctx context.Context, entries [
 
 		query := fmt.Sprintf(`
 			INSERT INTO hardware_devices
-				(id, employee_id, device_class, vendor, product, serial, bus_path, device_node, plugged_at, unplugged_at)
+				(id, employee_id, device_class, vendor, product, serial, bus_path, device_node, plugged_at, unplugged_at, synced_at)
 			VALUES %s
 			ON CONFLICT (id) DO UPDATE SET
 				unplugged_at = COALESCE(EXCLUDED.unplugged_at, hardware_devices.unplugged_at),
@@ -1422,7 +1433,7 @@ func (r *NewSchemaRepo) BulkUpsertPermissionStatus(ctx context.Context, entries 
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
 				argIdx+5, argIdx+6, argIdx+7, argIdx+8,
 			))
@@ -1435,7 +1446,7 @@ func (r *NewSchemaRepo) BulkUpsertPermissionStatus(ctx context.Context, entries 
 
 		query := fmt.Sprintf(`
 			INSERT INTO permission_status
-				(check_id, employee_id, session_id, session_type, platform, checked_at, method, works, details)
+				(check_id, employee_id, session_id, session_type, platform, checked_at, method, works, details, synced_at)
 			VALUES %s
 			ON CONFLICT (check_id) DO UPDATE SET
 				employee_id = EXCLUDED.employee_id,
@@ -1479,7 +1490,7 @@ func (r *NewSchemaRepo) BulkUpsertStorageDevices(ctx context.Context, entries []
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d)",
+				"($%d, $%d, $%d, $%d, $%d, $%d, NOW())",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4, argIdx+5,
 			))
 			args = append(args,
@@ -1490,7 +1501,7 @@ func (r *NewSchemaRepo) BulkUpsertStorageDevices(ctx context.Context, entries []
 
 		query := fmt.Sprintf(`
 			INSERT INTO storage_devices
-				(id, employee_id, device_hardware_id, device_type, model, capacity_mb)
+				(id, employee_id, device_hardware_id, device_type, model, capacity_mb, synced_at)
 			VALUES %s
 			ON CONFLICT (id) DO NOTHING
 		`, strings.Join(valueStrings, ", "))
@@ -1803,7 +1814,7 @@ func (r *NewSchemaRepo) BulkUpsertLocationSamples(ctx context.Context, entries [
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4, argIdx+5, argIdx+6, argIdx+7, argIdx+8,
 			))
 			args = append(args,
@@ -1815,7 +1826,7 @@ func (r *NewSchemaRepo) BulkUpsertLocationSamples(ctx context.Context, entries [
 
 		query := fmt.Sprintf(`
 			INSERT INTO location_samples
-				(id, employee_id, latitude, longitude, accuracy_m, altitude_m, source, address, captured_at)
+				(id, employee_id, latitude, longitude, accuracy_m, altitude_m, source, address, captured_at, synced_at)
 			VALUES %s
 			ON CONFLICT (id) DO UPDATE SET
 				latitude = EXCLUDED.latitude,
