@@ -1,6 +1,7 @@
 # Analysis & Implementation Plan — Bug #9 + server `synced_at` NULL
 
 > **Date:** 2026-09-09 · **Branch:** `timeattendance` · **Status:** ⏸️ DRAFT — awaiting user review/acceptance. **No code changed.**
+> **v3 (2026-09-09):** folded in external review — ① quarantine switched to **in-memory** (rows stay `is_synced=0`; a rejected row must never look synced), ② `synced_at` backfill **batched**, ③ explicit new-client↔old-server rule, ④ wording: `rejectedIds` *identifies* rejected rows, the quarantine *policy bounds* the retry queue.
 > **Mode:** Diagnose (complete) → Implement/build on acceptance.
 > **Prepared per `prompt.md` (instruction priority: user requirements → AGENTS.md rules → arch docs → prompt.md → code patterns).**
 
@@ -58,15 +59,22 @@ Wire compatibility, both directions:
 | Old server | unchanged | unchanged (field absent ⇒ mark all) |
 | New server | ignores unknown JSON field ⇒ old lossy behavior | precise mark-sent |
 
-### 2.2 Client: respect refusals; quarantine poison rows — no new schema columns
+**Explicit rule (new client ↔ old server):** when `rejectedIds` is absent from an otherwise-2xx response, the client marks **ALL** sent ids — with an old server the new client preserves the old (lossy) behavior by design. Bug #9 is fixed only after the server deploys; the rollout order in §6 enforces server-first.
 
-The v1 draft proposed a `sync_attempts` column with a 5-retry cap. **Dropped** per prompt.md rule 5 (smallest complete solution): a schema column, a store method signature change, and an extra write per send is machinery a *count-only* signal doesn't need. The explicit `rejectedIds` list already identifies exactly which rows are unwanted, so poisoning is solved directly:
+### 2.2 Client: respect refusals; bound the retry queue — no new schema columns
+
+The v1 draft proposed a `sync_attempts` column with a 5-retry cap. **Dropped** per prompt.md rule 5 (smallest complete solution): a schema column, a store method signature change, and an extra write per send is machinery a *count-only* signal doesn't need. The explicit `rejectedIds` list makes rejected rows *identifiable*; the quarantine policy below is what *bounds* the retry queue — two different jobs.
 
 - `SendAsync` → `Task<(bool Success, string? Body)>`. Call sites other than app-items ignore `Body` (behavior unchanged).
 - New client-side DTO + deserialization with `PropertyNameCaseInsensitive = true` (client payloads hand-camelCase anonymous objects; the response must be read case-insensitively).
 - In the app-items drain path only: after a 2xx with `rejectedIds` present, `markSentFn(sentIds EXCEPT rejectedIds)`. Refused rows stay `is_synced=0` and re-send next pass.
 - **Self-heal path (no retry logic needed):** because sessions drain before items in every pass, a normal orphan lands its parent by the next pass and is then accepted. The capped per-pass budget + existing backoff already bound the work.
-- **Poison quarantine:** a row refused by the server `QUARANTINE_RETRIES` (3) consecutive times is marked `is_synced=1` with `metadata`/`sync_note = 'server-rejected:<reason>'` (marker-only flag; no new columns — reuse the existing row-update paths). Rationale: if the server's own preflight says "this parent does not exist" across 3 passes spanning the guaranteed ≤60s cadence (user rule 2026-08-18), the row is genuinely unparentable (e.g. empty/GONE parent id) — retrying forever would grow the queue unboundedly at scale. The row remains in SQLite for diagnosis; nothing is deleted client-side. Server WARN log already caps id previews at 20/batch.
+- **Poison quarantine (in-memory only — revised per external review):** a row refused by the server `QUARANTINE_RETRIES` (3) consecutive passes is added to an **in-memory** quarantine structure in `SyncService` (`ConcurrentDictionary<string,int>` reject-counts → skip-set consulted by the app-items drain before building the payload). **The SQLite row stays `is_synced=0` — quarantine must never make a rejected row look successfully synced.** Consequences, accepted deliberately:
+  - `is_synced=0` keeps its honest meaning ("not delivered"); any future consumer of the flag (re-sync features, diagnostics) sees the truth.
+  - Counters reset on process restart: the first 3 passes after a restart re-attempt previously-quarantined rows (~≤3 min at the guaranteed ≤60s cadence, user rule 2026-08-18) and re-quarantine if still refused — which also gives self-heal a fresh chance (e.g. the parent session landed server-side while the client was down).
+  - Memory: entries exist only for genuinely refused rows (near-zero in practice); bounded by the orphan rate.
+  - Retention interplay (verified rule 2026-08-11): client retention purges only **synced** rows, so quarantined `is_synced=0` rows are never deleted — they persist in SQLite (tiny) as diagnostic evidence. Nothing is deleted client-side.
+  - Rationale: if the server's own preflight refuses a parent across 3 consecutive passes, the row is genuinely unparentable (e.g. empty/GONE `app_session_id`) — retrying forever would grow the queue unboundedly at scale. Server WARN log already caps id previews at 20/batch.
 
 ### 2.3 Implementation checklist — Bug #9
 
@@ -75,7 +83,7 @@ The v1 draft proposed a `sync_attempts` column with a 5-retry cap. **Dropped** p
 | 1 | `server/internal/dto/new_schema_dto.go` | `RejectedIds []string` (omitempty) on `SyncBatchResponse` |
 | 2 | `server/internal/repository/new_schema_repo.go` | Return refused item IDs from `BulkInsertAppItems`; fix stale comment (L427-432) |
 | 3 | `server/internal/services/new_schema_service.go` | Thread refused IDs into the response |
-| 4 | `client/Services/SyncService.cs` | `SendAsync` returns `(bool, string?)`; app-items drain parses `rejectedIds`, marks only accepted, WARN + debug counter; quarantine after 3 consecutive refusals |
+| 4 | `client/Services/SyncService.cs` | `SendAsync` returns `(bool, string?)`; app-items drain parses `rejectedIds`, marks only accepted; **in-memory** reject-counter + quarantine skip-list (rows stay `is_synced=0`); WARN + debug counter |
 | 5 | `AGENTS.md` | Changelog entry + correction of the incorrect 2026-09-04 claim |
 | 6 | Verify | Server: `go build`, `go vet`. Client: `dotnet build` 0 warnings/0 errors. Live: seed an item whose parent isn't sent yet → pass 1 refuses it (`rejectedIds` returned, row stays `is_synced=0`), pass 2 accepts after the parent lands. Poison: item with permanently-missing parent → quarantined after 3 refusals, never re-sent, logged. |
 
@@ -113,7 +121,7 @@ Per-table writer audit of `new_schema_repo.go`:
 |---|---|---|
 | 1 | `new_schema_repo.go` — `BulkInsertAppItems` | Add `synced_at` to the INSERT column list with inline `NOW()` in the VALUES template (no extra bind args; one clock evaluation per statement — O(1), no payload cost). ON CONFLICT clause already stamps `NOW()` — unchanged. |
 | 2 | `new_schema_repo.go` — hygiene (same principle, one-line each): `BulkUpsertHardwareDevices`, `BulkUpsertPermissionStatus`, `BulkUpsertStorageDevices`, `BulkUpsertLocationSamples` | Add `synced_at` to INSERT columns with `NOW()` so **every** sync writer stamps explicitly instead of leaning on DDL defaults. Keeps the "INSERT must stamp" invariant uniform for future writers. |
-| 3 | `server/migrations/033_synced_at_backfill.sql` (new, idempotent) | ① `UPDATE app_items SET synced_at = created_at WHERE synced_at IS NULL;` — `created_at` is the server's insert-time stamp: the honest best-known arrival time, no fabricated dates. ② Same defensive backfill for the six nullable tables in §3 (hardware/storage devices use `created_at`). ③ `ALTER TABLE app_items ALTER COLUMN synced_at SET DEFAULT now();` — protects every future writer. ④ `SET NOT NULL` on `app_items.synced_at` after the backfill (no other table produces NULLs today). |
+| 3 | `server/migrations/033_synced_at_backfill.sql` (new, idempotent) | ① **Batched** backfill in one `DO $$ … $$` block (a single statement — safe under any pgx exec mode): loop `UPDATE app_items SET synced_at = created_at WHERE ctid IN (SELECT ctid FROM app_items WHERE synced_at IS NULL LIMIT 10000)` + `GET DIAGNOSTICS … EXIT WHEN 0` — `created_at` is the server's insert-time stamp: the honest best-known arrival time, no fabricated dates. Same batched pattern, defensively, for the other nullable tables in §3. ② `ALTER TABLE app_items ALTER COLUMN synced_at SET DEFAULT now();` — protects every future writer. ③ `SET NOT NULL` on `app_items.synced_at` after the backfill (no other table produces NULLs today). **Honest transactionality note (verified `postgres.go:78-95`):** the runner wraps each migration file in ONE transaction, so batching bounds per-statement lock/memory pressure but the file still commits once — a single-tx backfill is not free. Mitigation for very large deployments: the backfill UPDATE is idempotent (`WHERE synced_at IS NULL`), so it can be pre-run in small batches via psql before the deploy window; the migration then finds 0 rows and completes instantly. |
 | 4 | Verify | `go build`, `go vet`; apply 033 on dev DB (idempotent re-run safe); `SELECT COUNT(*) FROM app_items WHERE synced_at IS NULL` → **0**; restart server → fresh rows arrive stamped. |
 
 Scale rationale: inline `NOW()` is per-statement, zero client change, zero payload growth; the migration is a one-time indexed backfill sized in the millions-of-rows range for `app_items` (acceptable online UPDATE; runs in the deploy window).
@@ -127,7 +135,7 @@ Scale rationale: inline `NOW()` is per-statement, zero client change, zero paylo
 | Server source build | `go build ./...` && `go vet ./...` | source build verified |
 | Client source build | `dotnet build` → 0 warnings / 0 errors (+ non-incremental watch if platform code touched — not expected) | source build verified |
 | Migration | apply 033 on dev DB; re-run for idempotency; NULL-count query → 0 | source build verified |
-| Sync behavior | dev server + dev client: orphan self-heal pass-1→pass-2; poison quarantine after 3 refusals; fresh `app_items` rows stamped | source build verified |
+| Sync behavior | dev server + dev client: orphan self-heal pass-1→pass-2; poison quarantined after 3 refusals (in-memory; re-attempted 3× after restart); fresh `app_items` rows stamped | source build verified |
 | Installer | `bash publish/build-installer.sh -b linux` (and win if available) | installer built |
 | Installed artifact | install the .deb on the Linux test machine, reproduce the orphan scenario from the installed binary | installed artifact verified *(requires user's machine/authorization — will be reported honestly if not possible from this environment)* |
 
