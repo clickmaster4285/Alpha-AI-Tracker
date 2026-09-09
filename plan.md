@@ -1,161 +1,153 @@
-# Analysis & Implementation Plan
+# Analysis & Implementation Plan — Bug #9 + server `synced_at` NULL
 
-> **Date:** 2026-09-09 · **Branch:** `timeattendance` · **Status:** ⏸️ AWAITING USER APPROVAL — do NOT implement until accepted
+> **Date:** 2026-09-09 · **Branch:** `timeattendance` · **Status:** ⏸️ DRAFT — awaiting user review/acceptance. **No code changed.**
+> **Mode:** Diagnose (complete) → Implement/build on acceptance.
+> **Prepared per `prompt.md` (instruction priority: user requirements → AGENTS.md rules → arch docs → prompt.md → code patterns).**
 
 ---
 
-## 1. Bug #9 — Orphan app-items silently lost: client marks all sent IDs as synced
+## 0. Scope
 
-### 1.1 Does the bug still exist? ✅ YES — verified in current code
+| Item | Verdict | Scope |
+|---|---|---|
+| **Bug #9** — orphan app-items marked synced though the server dropped them | ✅ Still exists (verified in current code) | Fix: server DTO + client mark-sent logic. No DB migration. |
+| **User-reported** — most server `synced_at` values are NULL | ✅ Confirmed — root-caused to `app_items` INSERT | Fix: one-line SQL change + idempotent migration 033 backfill. Server-only. |
 
-I analyzed the current source (not just the report) and confirmed every claim:
+Out of scope (explicitly, per "do not turn a narrow task into adjacent refactoring"):
+API growth cap (§7 known risk), web UI changes, other 10 sync endpoints (no orphan preflight there), client retention rules.
 
-**Server side — `server/internal/repository/new_schema_repo.go`:**
-- `BulkInsertAppItems` (line 416) runs `filterOrphanAppItems()` per 500-row batch before inserting.
-- Orphans (items whose `app_session_id` has no parent row in `app_sessions` yet) are **dropped from the batch**; only survivors are inserted.
-- Returns `{synced: <survivors>, message: "Synced X of Y entries"}` via `SyncBatchResponse` (new_schema_service.go:453-457).
-- The in-code comment (lines 427-432) claims "The dropped rows are re-sent on the client's next sync" — **this is false today** (that's the bug).
+---
 
-**Client side — `client/Services/SyncService.cs`:**
-- `DrainTableAsync` (line ~565) → `SendAsync` returns `bool` only, `response.IsSuccessStatusCode` is the only success check (line ~682). The response **body is never read**.
-- After a 2xx, it calls `markSentFn(ids)` with **ALL sent IDs** → `MarkAppItemsSentAsync` sets `is_synced=1` for every row in the slice.
-- Net effect: if a 100-row batch has 81 orphans, the server inserts 19 and returns `{synced: 19}` — but the client marks **all 100** as `is_synced=1`. The 81 orphans are **permanently lost** (they never re-send; orphaned app_items carry no reconstructable data on the client side).
+## 1. Bug #9 — evidence (current code, not the report)
 
-**Severity re-assessment:** the report says LOW-MEDIUM. I agree with LOW-MEDIUM but note the practical impact is worse than "data is re-created next cycle": orphaned `browser_tab` / journey items are *not* re-created — the client re-creates *new* rows with fresh GUIDs on later collection cycles, but the exact rows dropped are lost forever. Still recoverable-by-behavior, not recoverable-by-data.
+**Server — `server/internal/repository/new_schema_repo.go`**
+- `BulkInsertAppItems` (L416) runs `filterOrphanAppItems()` (L525) per 500-row batch: items whose `app_session_id` is absent from `app_sessions` are **removed from the batch**; only survivors insert. Rows with empty `appSessionId` are treated as orphans.
+- Returns survivor count only; `SyncAppItems` (`new_schema_service.go` L453-457) responds `SyncBatchResponse{Synced, Message}`. The in-code comment (L427-432) claims *"The dropped rows are re-sent on the client's next sync"* — **false today**; that is the bug.
 
-### 1.2 Why the current design is not scalable / production-ready
+**Client — `client/Services/SyncService.cs`**
+- `SendAsync` (L682) returns `bool` from `response.IsSuccessStatusCode` only — the **response body is never read**.
+- `DrainTableAsync` (L608-613) then calls `markSentFn(ids)` with **all** sent IDs → `MarkAppItemsSentAsync` sets `is_synced=1` for every row, including rows the server refused.
+- Net effect: 100-row batch with 81 orphans → server inserts 19, returns `{synced:19}` → client marks all 100 synced. **The 81 orphan rows are permanently lost** (orphaned journey/tab items are not re-created; later cycles create *new* rows, not the lost ones).
 
-1. **Silent data loss is invisible to operators.** Nothing surfaces "server dropped N rows" anywhere except a server WARN log that the client never reads.
-2. **The fix depends on positional semantics.** "Mark the first N ids as synced" (Option A in the report) is fragile: the server inserts survivors in batch order, but positional marking breaks the moment any endpoint reorders, dedups, or batch-splits differently.
-3. **No observability.** There is no counter/metric for dropped vs accepted rows; a widespread orphan problem would be undetectable.
-4. **Unbounded retry risk if handled naively.** If the client blindly re-sends unaccepted rows every pass, a *permanently* invalid row (e.g. empty `appSessionId`) would retry forever (poison row) and grow the queue.
+**Why orphans occur at all (drain-order fact, verified):** `BuildDrainPass` (SyncService.cs L191-215) drains **app-sessions before app-items** within each pass, so most children follow their parents. The orphan window is real but narrow: a session created locally *after* the session drain (or dropped by the session table's pass budget / a send failure) leaves its items parentless for exactly one pass.
 
-### 1.3 Scalable / production-ready fix (chosen design)
+---
 
-**Contract change (server):** make the acceptance result explicit and self-describing instead of positional.
+## 2. Fix design — Bug #9 (refined)
 
-- **Migration-free** — no schema change needed on the server.
-- Extend `SyncBatchResponse` DTO (`server/internal/dto/new_schema_dto.go`):
+### 2.1 Server: make acceptance explicit — `rejectedIds`, not counts
 
+The report's Option A ("mark the first N ids") is **rejected**: positional marking breaks the moment batching, dedup, or ordering changes. The report's Option B sketch (`droppedIds`) is adopted with clearer semantics:
+
+- `server/internal/dto/new_schema_dto.go` — extend:
   ```go
   type SyncBatchResponse struct {
       Synced      int      `json:"synced"`
       Message     string   `json:"message"`
-      AcceptedIds []string `json:"acceptedIds,omitempty"` // NEW — present when partial acceptance occurs
+      RejectedIds []string `json:"rejectedIds,omitempty"` // present only when the server refused rows
   }
   ```
+  **Why rejected- not accepted-side:** acceptance is the norm; the omitted field must mean "all accepted" so the other 11 endpoints and all existing clients are untouched on the wire, payloads stay small, and the field name states its intent ("these rows were refused; resend them"). `Synced` remains the authoritative count (covers `ON CONFLICT DO NOTHING` dedup, which is neither accepted-new nor rejected).
+- `new_schema_repo.go` — `BulkInsertAppItems` additionally returns refused item IDs (it already has `orphanIDs`; collect the item IDs mapped from those orphans). `new_schema_service.go` — thread them into `SyncBatchResponse.RejectedIds`. Handler unchanged.
+- **Fix the stale comment** at L427-432 to describe the actual contract (docs drift, prompt.md step 8).
+- **Correct the AGENTS.md changelog** entry that claims dropped rows "stay is_synced=0 and re-send" — true only after this fix; add a dated changelog line with the implementation.
 
-- In `BulkInsertAppItems` + `SyncAppItems` service path: return the **survivor row IDs** (not just a count) up to the handler. `filterOrphanAppItems` already computes `survivorIdx` — thread `[]models.AppItem` → return `(inserted, survivorIDs, err)`.
-- Keep `AcceptedIds` `omitempty` so the other 11 sync endpoints' responses are unchanged on the wire (they accept 100% of rows; no client change needed there).
-- Update the stale comment at new_schema_repo.go:436-438 to describe the new contract.
+Wire compatibility, both directions:
+| Server \ Client | Old client | New client |
+|---|---|---|
+| Old server | unchanged | unchanged (field absent ⇒ mark all) |
+| New server | ignores unknown JSON field ⇒ old lossy behavior | precise mark-sent |
 
-**Client (SyncService):** stop marking rows the server didn't accept.
+### 2.2 Client: respect refusals; quarantine poison rows — no new schema columns
 
-- `SendAsync` returns `(bool success, string? body)` instead of `bool` (single call-site pattern; all 11 endpoints unaffected — they ignore the body).
-- New per-endpoint post-send hook in `DrainTableAsync`: for `app-items` only, parse `SyncBatchResponse`. If `acceptedIds` is present and shorter than the sent ids:
-  - mark ONLY `acceptedIds` as sent (`MarkAppItemsSentAsync(acceptedIds)`),
-  - log a WARN with dropped count (mirrors server log),
-  - count dropped rows in a new `_droppedRows` diagnostic counter.
-- **Poison-row guard (scalability):** cap re-send attempts. Add `attempt_count` (default 0) + `sync_attempts` columns... actually simpler: a new client SQLite column `sync_attempts INTEGER NOT NULL DEFAULT 0` on `app_items` (idempotent `MigrateSql` ALTER, matching the existing idempotent-ALTER convention), incremented on every send that comes back without acceptance; when `sync_attempts >= 5`, the row is flagged `is_synced=1` + a `sync_note` marker so it stops being retried and shows up in a diagnostic query. This prevents a permanently-broken row from growing the unbounded retry queue forever (production concern at 50k+ backlogs).
-- **Backoff-free by design:** unaccepted rows stay `is_synced=0`, so they re-send on the next drain pass — no new scheduling machinery needed; the existing per-pass budget and backoff already bound the work.
+The v1 draft proposed a `sync_attempts` column with a 5-retry cap. **Dropped** per prompt.md rule 5 (smallest complete solution): a schema column, a store method signature change, and an extra write per send is machinery a *count-only* signal doesn't need. The explicit `rejectedIds` list already identifies exactly which rows are unwanted, so poisoning is solved directly:
 
-**Why this is scalable:**
-- Explicit ID list = order-independent, works with any batching/dedup strategy.
-- `omitempty` keeps wire format backward-compatible; old clients ignore the extra field; new client + old server = old behavior (no regression).
-- Poison-row cap bounds worst-case retry growth (O(1) per row instead of unbounded).
-- One WARN log per affected batch (already capped at 20 ids server-side) + a client counter = observable without new metrics infra.
+- `SendAsync` → `Task<(bool Success, string? Body)>`. Call sites other than app-items ignore `Body` (behavior unchanged).
+- New client-side DTO + deserialization with `PropertyNameCaseInsensitive = true` (client payloads hand-camelCase anonymous objects; the response must be read case-insensitively).
+- In the app-items drain path only: after a 2xx with `rejectedIds` present, `markSentFn(sentIds EXCEPT rejectedIds)`. Refused rows stay `is_synced=0` and re-send next pass.
+- **Self-heal path (no retry logic needed):** because sessions drain before items in every pass, a normal orphan lands its parent by the next pass and is then accepted. The capped per-pass budget + existing backoff already bound the work.
+- **Poison quarantine:** a row refused by the server `QUARANTINE_RETRIES` (3) consecutive times is marked `is_synced=1` with `metadata`/`sync_note = 'server-rejected:<reason>'` (marker-only flag; no new columns — reuse the existing row-update paths). Rationale: if the server's own preflight says "this parent does not exist" across 3 passes spanning the guaranteed ≤60s cadence (user rule 2026-08-18), the row is genuinely unparentable (e.g. empty/GONE parent id) — retrying forever would grow the queue unboundedly at scale. The row remains in SQLite for diagnosis; nothing is deleted client-side. Server WARN log already caps id previews at 20/batch.
 
-### 1.4 Implementation checklist (Bug #9)
+### 2.3 Implementation checklist — Bug #9
 
 | # | File | Change |
-|---|------|--------|
-| 1 | `server/internal/dto/new_schema_dto.go` | Add `AcceptedIds []string` (omitempty) to `SyncBatchResponse` |
-| 2 | `server/internal/repository/new_schema_repo.go` | `BulkInsertAppItems` returns `(int, []string, error)` — survivor IDs; fix stale comment |
-| 3 | `server/internal/services/new_schema_service.go` | `SyncAppItems` threads survivor IDs into `SyncBatchResponse.AcceptedIds` |
-| 4 | `client/Services/SyncService.cs` | `SendAsync` → returns `(bool, string?)`; app-items drain parses response, marks only accepted IDs, WARN + counter |
-| 5 | `client/Storage/SqliteLogStore.cs` + `Core/Abstractions/ILogStore.cs` | Add `sync_attempts` column (idempotent ALTER) + `MarkAppItemsPartiallySentAsync(accepted, attempted)` updating both |
-| 6 | `client/Storage/DatabaseSchema.cs` | `sync_attempts` in schema + idempotent MigrateSql |
-| 7 | Verification | `go build`/`go vet`; `dotnet build` 0/0; live sync test: seed an orphan app_item, confirm it re-sends after parent lands, and confirm a poison row stops after 5 attempts |
+|---|---|---|
+| 1 | `server/internal/dto/new_schema_dto.go` | `RejectedIds []string` (omitempty) on `SyncBatchResponse` |
+| 2 | `server/internal/repository/new_schema_repo.go` | Return refused item IDs from `BulkInsertAppItems`; fix stale comment (L427-432) |
+| 3 | `server/internal/services/new_schema_service.go` | Thread refused IDs into the response |
+| 4 | `client/Services/SyncService.cs` | `SendAsync` returns `(bool, string?)`; app-items drain parses `rejectedIds`, marks only accepted, WARN + debug counter; quarantine after 3 consecutive refusals |
+| 5 | `AGENTS.md` | Changelog entry + correction of the incorrect 2026-09-04 claim |
+| 6 | Verify | Server: `go build`, `go vet`. Client: `dotnet build` 0 warnings/0 errors. Live: seed an item whose parent isn't sent yet → pass 1 refuses it (`rejectedIds` returned, row stays `is_synced=0`), pass 2 accepts after the parent lands. Poison: item with permanently-missing parent → quarantined after 3 refusals, never re-sent, logged. |
 
-**Installer-Parity note (client change):** item 4-6 compile into `client.dll` — no new assets. But per the Installer-Parity Rule, the client change is NOT "done" until verified from an installed build. No `config.enc` re-bake needed (no new env knobs).
+Installer-Parity: client changes compile into `client.dll` — no new assets, **no `config.enc` re-bake** (no new env vars). Not "done" until ship-tested from an installed build (§5).
 
 ---
 
-## 2. Server bug (found by user) — most `synced_at` values are NULL
+## 3. Server bug — `synced_at` NULL: root cause (verified)
 
-### 2.1 Root cause — verified in code
+Per-table writer audit of `new_schema_repo.go`:
 
-`synced_at` semantics are inconsistent per table because each `BulkInsert*` writes it differently. Concretely:
-
-| Table | Migration DDL | INSERT statement | Result |
+| Table | DDL | INSERT stamps `synced_at`? | Result |
 |---|---|---|---|
-| `device_hardware_info` | 006: nullable | `..., collected_at, synced_at)` VALUES `..., e.CollectedAt, time.Now()` — explicit | ✅ SET |
-| `installed_applications` | 006: nullable | explicit `time.Now()` | ✅ SET |
-| `installed_packages` | 009: nullable | explicit `time.Now()` | ✅ SET |
-| `network_info` | 006: nullable | explicit `time.Now()` | ✅ SET |
-| `session_events` | 006: nullable | explicit `time.Now()` | ✅ SET |
-| `app_sessions` | 006: nullable | explicit `now` | ✅ SET |
-| **`app_items`** | **008: nullable, no default** | **INSERT column list omits `synced_at` entirely — only the ON CONFLICT UPDATE path sets `synced_at = NOW()`** | ❌ **NULL on first insert** |
-| **`hardware_devices`** | 017: `NOT NULL DEFAULT now()` | **INSERT omits `synced_at`** — only the ON CONFLICT UPDATE sets it | ✅ by DDL default (ok) |
-| `permission_status` | 017: NOT NULL DEFAULT now() | INSERT omits it | ✅ by DDL default |
-| **`storage_devices`** | 017: `NOT NULL DEFAULT now()` | INSERT omits it | ✅ by DDL default |
-| `location_samples` | 029: NOT NULL DEFAULT now() | INSERT omits it | ✅ by DDDL default |
-| `app_status` | no synced_at column | n/a | n/a |
+| device_hardware_info (006) | nullable | ✅ explicit `time.Now()` | OK |
+| installed_applications (006) | nullable | ✅ explicit | OK |
+| installed_packages (009) | nullable | ✅ explicit | OK |
+| network_info (006) | nullable | ✅ explicit | OK |
+| session_events (006) | nullable | ✅ explicit (upsert also stamps) | OK |
+| app_sessions (006/020/031) | nullable | ✅ explicit (+ `last_sync_at`) | OK |
+| **app_items (008)** | **nullable, NO default** | ❌ **column omitted from INSERT — stamped only on the ON CONFLICT re-sync path** | **NULL on every first insert** |
+| hardware_devices (017) | NOT NULL DEFAULT now() | ❌ omitted, but DDL default covers INSERT | OK |
+| permission_status (017) | NOT NULL DEFAULT now() | ❌ omitted, DDL default | OK |
+| storage_devices (017) | NOT NULL DEFAULT now() | ❌ omitted, DDL default | OK |
+| location_samples (029) | NOT NULL DEFAULT now() | ❌ omitted, DDL default | OK |
 
-So the bulk of NULLs come from **`app_items`** — the highest-volume table in the system (every browser tab / journey item). `hardware_devices` is fine *only* because migration 017 added a DEFAULT; `app_items` (migration 008) has no default, so **every first insert lands with `synced_at = NULL`** and only re-synced rows (conflict path) get a timestamp. That matches the user's observation "most of the data synced_at are null" — `app_items` dominates row counts.
+**Conclusion:** the NULLs the user sees are overwhelmingly **`app_items`** — the highest-volume table in the system (every tab/journey item). Migration 008 gave it no default and the writer omits the column, so only re-synced (conflict-path) rows get a timestamp. Historical rows predating later ALTERs may also be NULL on other tables (defensive backfill covers them).
 
-Secondary contributors:
-- Rows inserted **before** a later ALTER added the column/default keep their NULL (historical rows).
-- **Rows that fail the orphan preflight** never reach any INSERT, so they have no server row at all (related to Bug #9 — fixing #9 reduces orphan churn but those rows were never stored, so this is not a NULL source; noted for completeness).
+**Why it matters:** `synced_at` is the ingest-freshness/incremental-export column; NULL breaks freshness queries and any ETL watermark. `app_sessions` lifecycle logic is unaffected (it uses `last_sync_at`, stamped explicitly).
 
-### 2.2 Why this matters for production
+---
 
-1. **`session_lifecycle_sweep` and staleness logic.** `app_sessions` computes staleness from `last_sync_at` (031 backfill used `COALESCE(synced_at, started_at)`) — `app_sessions` is fine, but anything reading `app_items.synced_at` for freshness/lag metrics gets NULL → undefined behavior for dashboards/monitoring built on it.
-2. **Ops/monitoring.** "How fresh is the ingest?" queries can't distinguish "never synced" from "synced but timestamp missing".
-3. **Retention/audit.** `synced_at` is the natural filter for incremental exports/ETL; NULL rows break incremental consumers.
-
-### 2.3 Fix design — make the server always stamp `synced_at` on INSERT
-
-**Principle (production rule):** a table that records "when the server received this row" must never store NULL. Stamp at INSERT; the ON CONFLICT path refreshes it.
+## 4. Fix design — `synced_at` (server-only, smallest complete)
 
 | # | File | Change |
-|---|------|--------|
-| 1 | `server/internal/repository/new_schema_repo.go` — `BulkInsertAppItems` | Add `synced_at` to the INSERT column list, `NOW()` as value (one extra arg per row — or cheaper: since all rows in a batch get the same value, keep it as a single constant `$N` arg per batch or just inline `NOW()` in the VALUES template — inline `NOW()` is simplest and avoids arg-count churn). ON CONFLICT clause stays `synced_at = NOW()`. |
-| 2 | `server/internal/repository/new_schema_repo.go` — `BulkUpsertHardwareDevices` | (Optional hygiene) add `synced_at` to INSERT column list + value `NOW()` so it doesn't rely on the DDL default (keeps all writers consistent). |
-| 3 | `server/migrations/033_synced_at_not_null.sql` | **Data repair + constraint**: ① backfill `UPDATE app_items SET synced_at = created_at WHERE synced_at IS NULL` (created_at is set on insert server-side, the best known arrival time); ② `UPDATE hardware_devices SET synced_at = created_at WHERE synced_at IS NULL` (historical pre-017 rows); ③ same for `installed_applications`, `installed_packages`, `network_info`, `session_events`, `app_sessions`, `device_hardware_info` (defensive: any historical NULLs); ④ `ALTER TABLE app_items ALTER COLUMN synced_at SET DEFAULT now();` ⑤ Optionally `SET NOT NULL` where the backfill guarantees no NULLs — apply `NOT NULL` only to `app_items` (the only table that produces NULLs today); others already have defaults. |
-| 4 | Verification | `go build`/`go vet` clean; migration applies cleanly on dev DB; spot-check `SELECT COUNT(*) FROM app_items WHERE synced_at IS NULL` → 0; restart server → new app_items rows arrive with `synced_at` stamped. |
+|---|---|---|
+| 1 | `new_schema_repo.go` — `BulkInsertAppItems` | Add `synced_at` to the INSERT column list with inline `NOW()` in the VALUES template (no extra bind args; one clock evaluation per statement — O(1), no payload cost). ON CONFLICT clause already stamps `NOW()` — unchanged. |
+| 2 | `new_schema_repo.go` — hygiene (same principle, one-line each): `BulkUpsertHardwareDevices`, `BulkUpsertPermissionStatus`, `BulkUpsertStorageDevices`, `BulkUpsertLocationSamples` | Add `synced_at` to INSERT columns with `NOW()` so **every** sync writer stamps explicitly instead of leaning on DDL defaults. Keeps the "INSERT must stamp" invariant uniform for future writers. |
+| 3 | `server/migrations/033_synced_at_backfill.sql` (new, idempotent) | ① `UPDATE app_items SET synced_at = created_at WHERE synced_at IS NULL;` — `created_at` is the server's insert-time stamp: the honest best-known arrival time, no fabricated dates. ② Same defensive backfill for the six nullable tables in §3 (hardware/storage devices use `created_at`). ③ `ALTER TABLE app_items ALTER COLUMN synced_at SET DEFAULT now();` — protects every future writer. ④ `SET NOT NULL` on `app_items.synced_at` after the backfill (no other table produces NULLs today). |
+| 4 | Verify | `go build`, `go vet`; apply 033 on dev DB (idempotent re-run safe); `SELECT COUNT(*) FROM app_items WHERE synced_at IS NULL` → **0**; restart server → fresh rows arrive stamped. |
 
-**Why this is scalable:** stamping `NOW()` inline in SQL is O(1) per statement (server clock, one evaluation per statement), no extra payload bytes from the client, no client change required, and the migration is a one-time indexed backfill. Adding the DDL DEFAULT protects against every future INSERT path that forgets the column.
-
-**Data-loss safety:** the backfill uses `created_at` — never fabricated "now" for historical rows, so audit data stays honest ("arrival time as best-known").
-
-### 2.4 Explicitly NOT in scope (to keep the change surgical)
-
-- Backfilling `synced_at` on tables that already default it (no NULLs exist there in practice — the migration includes a defensive backfill anyway).
-- Any web UI changes (web already types `syncedAt?` as optional — `web/src/lib/api.ts`).
-- No client change for the synced_at fix (server-only).
+Scale rationale: inline `NOW()` is per-statement, zero client change, zero payload growth; the migration is a one-time indexed backfill sized in the millions-of-rows range for `app_items` (acceptable online UPDATE; runs in the deploy window).
 
 ---
 
-## 3. Verification plan (both fixes)
+## 5. Verification matrix (per prompt.md — claims only what is run)
 
-1. **Server:** `go build` + `go vet` clean.
-2. **Client:** `dotnet build` → 0 warnings, 0 errors.
-3. **Migration:** apply 033 on the dev DB; confirm row counts of backfilled rows; re-run idempotently (safe).
-4. **End-to-end (sync pipeline):** with server + client dev builds running:
-   - Create an app_item whose parent session is not yet synced (simulate orphan) → confirm the first pass drops it server-side, client leaves it `is_synced=0` with `sync_attempts=1`, and after the parent session syncs, the item lands and is marked sent.
-   - Poison test: manually set an app_item's `app_session_id` to a nonexistent GUID → confirm it stops retrying after 5 attempts.
-   - Confirm fresh `app_items` inserts now carry non-NULL `synced_at`.
-5. **Installer parity (client change only):** rebuild installer + verify from installed build per the Installer-Parity Rule (no `config.enc` re-bake needed — no new env vars).
+| Check | Command | Tier reached |
+|---|---|---|
+| Server source build | `go build ./...` && `go vet ./...` | source build verified |
+| Client source build | `dotnet build` → 0 warnings / 0 errors (+ non-incremental watch if platform code touched — not expected) | source build verified |
+| Migration | apply 033 on dev DB; re-run for idempotency; NULL-count query → 0 | source build verified |
+| Sync behavior | dev server + dev client: orphan self-heal pass-1→pass-2; poison quarantine after 3 refusals; fresh `app_items` rows stamped | source build verified |
+| Installer | `bash publish/build-installer.sh -b linux` (and win if available) | installer built |
+| Installed artifact | install the .deb on the Linux test machine, reproduce the orphan scenario from the installed binary | installed artifact verified *(requires user's machine/authorization — will be reported honestly if not possible from this environment)* |
 
----
-
-## 4. Rollout order (safe deploy sequence)
-
-1. **Deploy server first** (DTO field is additive; old clients unaffected).
-2. **Ship client in next installer build** (Installer-Parity Rule).
-3. **Run migration 033** on production DB during the server deploy window (idempotent, online backfill).
+Cross-service contract check: `rejectedIds` present in Go DTO + parsed by client deserializer; serialized contract verified with a live round-trip (curl one app-items sync with a deliberately orphaned entry).
 
 ---
 
-*Plan saved. No code has been changed — awaiting user review and acceptance before implementation begins.*
+## 6. Rollout order
+
+1. **Server first** (additive DTO field + writer stamps + migration 033 in the same deploy window). Old clients unaffected.
+2. **Client in the next installer build** (Installer-Parity Rule; no config re-bake).
+3. No web deploy required.
+
+## 7. Risks & honest unknowns
+
+- **Old clients + new server:** orphans keep being lost for machines that never update — unchanged behavior, no regression; the server WARN log remains the visibility source until clients update.
+- **`SET NOT NULL` on `app_items.synced_at`:** any unknown writer that inserts without the column would now fail loudly instead of silently storing NULL — intentional fail-fast; the DDL default covers plain INSERTs, and all known writers are updated in this change.
+- **Installer ship-test** requires the Linux test machine; if unavailable from this environment it will be reported as a blocker, not claimed done.
+- Quarantine threshold (3 consecutive refusals) is configurable-in-code constant; no new env knob (avoid `config.enc` re-bake). Revisit only if real-world false-positives appear.
+
+---
+
+*Awaiting acceptance. On approval: implement in checklist order (§2.3, §4), verify per §5, update AGENTS.md changelog, and report with the three-tier verification status.*
