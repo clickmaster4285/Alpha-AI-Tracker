@@ -20,6 +20,17 @@ type NewSchemaRepo struct {
 	pool *pgxpool.Pool
 }
 
+// sessionStatusForInsert keeps the persisted lifecycle coherent when a session
+// reaches the server for the first time after it has already closed. The
+// conflict path below handles later re-syncs; this helper covers INSERTs, for
+// which PostgreSQL would otherwise apply the column default of ACTIVE.
+func sessionStatusForInsert(endedAt *time.Time) string {
+	if endedAt != nil {
+		return "CLOSED"
+	}
+	return "ACTIVE"
+}
+
 func NewNewSchemaRepo(pool *pgxpool.Pool) *NewSchemaRepo {
 	return &NewSchemaRepo{pool: pool}
 }
@@ -309,17 +320,17 @@ func (r *NewSchemaRepo) BulkInsertAppSessions(ctx context.Context, entries []mod
 		}
 		batch := entries[i:end]
 		valueStrings := make([]string, 0, len(batch))
-		args := make([]interface{}, 0, len(batch)*21)
+		args := make([]interface{}, 0, len(batch)*22)
 		argIdx := 1
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
 				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
 				argIdx+10, argIdx+11, argIdx+12, argIdx+13, argIdx+14,
 				argIdx+15, argIdx+16, argIdx+17, argIdx+18, argIdx+19,
-				argIdx+20,
+				argIdx+20, argIdx+21,
 			))
 			now := time.Now()
 			// Default last_activity_at to started_at when client omits it
@@ -337,8 +348,9 @@ func (r *NewSchemaRepo) BulkInsertAppSessions(ctx context.Context, entries []mod
 				now,
 				lastActivity,
 				now, // last_sync_at = NOW() — server records the moment this row arrived
+				sessionStatusForInsert(e.EndedAt),
 			)
-			argIdx += 21
+			argIdx += 22
 		}
 
 		// Upsert semantics for the 4-state lifecycle (2026-09-02 + OFFLINE 2026-09-02):
@@ -358,7 +370,7 @@ func (r *NewSchemaRepo) BulkInsertAppSessions(ctx context.Context, entries []mod
 				 ended_at, machine_id, session_id, platform, process_id, parent_process_id,
 				 installed_app_id, installed_package_id, grouped_by, cgroup_scope, context_label,
 				 foreground_seconds, background_seconds,
-				 synced_at, last_activity_at, last_sync_at)
+				 synced_at, last_activity_at, last_sync_at, status)
 			VALUES %s
 			ON CONFLICT (id) DO UPDATE SET
 				parent_process_id = COALESCE(EXCLUDED.parent_process_id, app_sessions.parent_process_id),

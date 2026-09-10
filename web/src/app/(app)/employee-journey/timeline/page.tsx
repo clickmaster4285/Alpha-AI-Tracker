@@ -6,6 +6,7 @@ import { useInfiniteQuery } from '@tanstack/react-query';
 import EmployeePage from '@/components/employees/EmployeePage';
 import EmptyState from '@/components/employees/EmptyState';
 import FocusTime from '@/components/journey/FocusTime';
+import ActivityFilters, { type ActivityFilter } from '@/components/journey/ActivityFilters';
 import { appSessionsApi } from '@/lib/api';
 import { formatDateTime, formatDuration, formatRelative } from '@/lib/format';
 import SessionStatusBadge, { sessionStatus } from '@/components/sessions/SessionStatusBadge';
@@ -20,13 +21,23 @@ export default function EmployeeJourneyTimeline() {
         subtitle="Chronological view of every app session the employee ran."
         icon={Route}
       >
-        {({ employee }) => <TimelineBody employeeId={employee.employeeId} />}
+        {({ employee, filter, setFilter }) => (
+          <TimelineBody employeeId={employee.employeeId} filter={filter} setFilter={setFilter} />
+        )}
       </EmployeePage>
     </Suspense>
   );
 }
 
-function TimelineBody({ employeeId }: { employeeId: string }) {
+function TimelineBody({
+  employeeId,
+  filter,
+  setFilter,
+}: {
+  employeeId: string;
+  filter: ActivityFilter;
+  setFilter: (next: ActivityFilter) => void;
+}) {
   // Server-side pagination with infinite scroll (same pattern as the old
   // employee detail Activity tab).
   const {
@@ -38,8 +49,17 @@ function TimelineBody({ employeeId }: { employeeId: string }) {
     fetchNextPage,
     hasNextPage,
   } = useInfiniteQuery({
-    queryKey: ['app-sessions', { employeeId, perPage: PER_PAGE }],
-    queryFn: ({ pageParam }) => appSessionsApi.list({ employeeId, page: pageParam as number, perPage: PER_PAGE }),
+    // Include every server-side filter in the key so changing a preset starts
+    // at page 1 instead of appending results from the previous date range.
+    queryKey: ['app-sessions', { employeeId, perPage: PER_PAGE, ...filter }],
+    queryFn: ({ pageParam }) => appSessionsApi.list({
+      employeeId,
+      page: pageParam as number,
+      perPage: PER_PAGE,
+      search: filter.search || undefined,
+      dateFrom: filter.dateFrom,
+      dateTo: filter.dateTo,
+    }),
     initialPageParam: 1,
     getNextPageParam: (last) => (last.page < last.totalPages ? last.page + 1 : undefined),
   });
@@ -64,25 +84,6 @@ function TimelineBody({ employeeId }: { employeeId: string }) {
     return () => observer.disconnect();
   }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <Loader2 className="w-6 h-6 animate-spin text-primary" />
-      </div>
-    );
-  }
-  if (isError) {
-    return (
-      <div className="flex flex-col items-center justify-center py-12 gap-3 text-center">
-        <p className="text-sm text-destructive font-medium">Failed to load activity</p>
-        <p className="text-xs text-muted-foreground">{(error as Error)?.message || 'Unknown error'}</p>
-      </div>
-    );
-  }
-  if (sessions.length === 0) {
-    return <EmptyState icon={Activity} text="No app activity synced yet" />;
-  }
-
   return (
     <div className="bg-card rounded-xl border border-border shadow-card overflow-hidden">
       <div className="px-4 py-3 border-b border-border flex items-center justify-between">
@@ -92,6 +93,24 @@ function TimelineBody({ employeeId }: { employeeId: string }) {
         </div>
         <span className="text-xs text-muted-foreground">{total.toLocaleString()} session{total === 1 ? '' : 's'}</span>
       </div>
+      <div className="px-4 py-3 border-b border-border">
+        <ActivityFilters value={filter} onChange={setFilter} loading={isLoading || isFetchingNextPage} />
+      </div>
+      {isLoading ? (
+        <div className="flex items-center justify-center py-12">
+          <Loader2 className="w-6 h-6 animate-spin text-primary" />
+        </div>
+      ) : isError ? (
+        <div className="flex flex-col items-center justify-center py-12 gap-3 text-center">
+          <p className="text-sm text-destructive font-medium">Failed to load activity</p>
+          <p className="text-xs text-muted-foreground">{(error as Error)?.message || 'Unknown error'}</p>
+        </div>
+      ) : sessions.length === 0 ? (
+        <EmptyState
+          icon={Activity}
+          text={filter.search || filter.preset !== 'all' ? 'No app activity matches the current filters' : 'No app activity synced yet'}
+        />
+      ) : <>
       <div className="overflow-x-auto">
         <table className="w-full min-w-[980px]">
           <thead>
@@ -168,6 +187,7 @@ function TimelineBody({ employeeId }: { employeeId: string }) {
           Scroll for more
         </div>
       )}
+      </>}
     </div>
   );
 }
