@@ -22,6 +22,12 @@ type SyncBatchResponse struct {
 	// server preserves the old mark-all behavior when the field is missing.
 	// Currently populated only by SyncAppItems (orphan app_session_id preflight).
 	RejectedIds []string `json:"rejectedIds,omitempty"`
+	// MissingSessionIds carries the distinct app_session_id values the server
+	// could NOT find during the orphan preflight. The client uses this list to
+	// reset those sessions to is_synced=0 so they are re-sent on the next pass,
+	// breaking the permanent orphan deadlock (Bug #9 follow-up).
+	// Currently populated only by SyncAppItems.
+	MissingSessionIds []string `json:"missingSessionIds,omitempty"`
 }
 
 // ────────────────────────────────

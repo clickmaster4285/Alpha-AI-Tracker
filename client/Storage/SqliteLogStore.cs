@@ -1899,6 +1899,31 @@ public class SqliteLogStore : ILogStore, IDisposable
     }
 
     /// <summary>
+    /// Reset specific sessions to is_synced=0 so they are re-sent on the next sync pass.
+    /// Called when the server reports missing session IDs during the orphan preflight
+    /// (Bug #9 follow-up — breaks the permanent orphan deadlock).
+    /// </summary>
+    public async Task MarkAppSessionsUnsyncedByIdsAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        if (_connection == null || ids.Count == 0) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            foreach (var id in ids)
+            {
+                await using var cmd = _connection.CreateCommand();
+                cmd.CommandText = "UPDATE app_sessions SET is_synced = 0 WHERE id = $id AND is_synced = 1";
+                cmd.Parameters.AddWithValue("$id", id);
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    /// <summary>
     /// Persist accumulated foreground/background focus durations for open sessions and
     /// re-queue each row (is_synced = 0) so SyncService re-sends it and the server learns
     /// the growing totals. One UPDATE per row in a single transaction.

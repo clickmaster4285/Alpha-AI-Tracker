@@ -75,6 +75,8 @@ public class SyncService : BackgroundService
         public int Synced { get; set; }
         public string? Message { get; set; }
         public List<string>? RejectedIds { get; set; }
+        /// <summary>Parent session IDs the server does NOT have — the client must re-queue them.</summary>
+        public List<string>? MissingSessionIds { get; set; }
     }
 
     private static readonly JsonSerializerOptions SyncResponseJsonOpts = new()
@@ -421,7 +423,8 @@ public class SyncService : BackgroundService
             e => e.Id,
             sw, budget, ct,
             filterIdsFn: QuarantinedAppItemIds,
-            onRejection: OnAppItemsRejected));
+            onRejection: OnAppItemsRejected,
+            onMissingSessions: missing => _ = ResetSessionsForRequeueAsync(missing)));
 
         // App status (key/value) — changed rows are re-sent every roundtrip, never deleted client-side.
         tasks.Add((sw, budget, ct) => DrainTableAsync<AppStatus>(
@@ -606,7 +609,8 @@ public class SyncService : BackgroundService
         TimeSpan passBudget,
         CancellationToken ct,
         Func<IReadOnlyList<string>>? filterIdsFn = null,
-        Action<IReadOnlyList<string>, IReadOnlyList<string>>? onRejection = null)
+        Action<IReadOnlyList<string>, IReadOnlyList<string>>? onRejection = null,
+        Action<IReadOnlyList<string>>? onMissingSessions = null)
     {
         var synced = 0;
         try
@@ -679,10 +683,34 @@ public class SyncService : BackgroundService
                         if (accepted.Count > 0)
                             await markSentFn(accepted, ct);
                         synced += accepted.Count;
+
+                        // Bug #9 follow-up: parse missing session IDs BEFORE calling
+                        // onRejection so OnAppItemsRejected can skip quarantine for
+                        // items whose parent is being re-queued.
+                        List<string>? missingSessions = null;
+                        if (onMissingSessions != null &&
+                            TryParseMissingSessionIds(body, out var missing) &&
+                            missing.Count > 0)
+                        {
+                            missingSessions = missing;
+                            _lastMissingSessionIds = missing;
+                        }
+                        else
+                        {
+                            _lastMissingSessionIds = new List<string>();
+                        }
+
                         onRejection(rejectedIds, accepted);
                         _logger.LogWarning(
                             "Server rejected {Rejected} of {Sent} rows for {Endpoint} (orphan preflight) — kept unsent for re-send next pass",
                             rejectedIds.Count, ids.Count, endpoint);
+
+                        // Fire the missing-sessions callback after rejection handling
+                        // so the client resets parent sessions for re-queue.
+                        if (missingSessions != null)
+                        {
+                            onMissingSessions!(missingSessions);
+                        }
                     }
                     else if (ids.Count > 0)
                     {
@@ -736,6 +764,26 @@ public class SyncService : BackgroundService
         }
     }
 
+    private static bool TryParseMissingSessionIds(string? body, out List<string> missingSessionIds)
+    {
+        missingSessionIds = new List<string>();
+        if (string.IsNullOrEmpty(body)) return false;
+        try
+        {
+            var resp = JsonSerializer.Deserialize<SyncBatchResponse>(body, SyncResponseJsonOpts);
+            if (resp?.MissingSessionIds is { Count: > 0 })
+            {
+                missingSessionIds = resp.MissingSessionIds;
+                return true;
+            }
+            return false;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
     /// <summary>Ids currently quarantined (refused ≥ QuarantineRetries consecutive passes).</summary>
     private IReadOnlyList<string> QuarantinedAppItemIds()
         => _appItemRejectCounts
@@ -747,7 +795,9 @@ public class SyncService : BackgroundService
     /// Quarantine bookkeeping for the app-items drain: refused ids advance their
     /// consecutive-refusal counter (≥ threshold ⇒ skipped by future drains until
     /// restart); accepted ids are FORGIVEN so a self-healed row starts fresh if it
-    /// is ever orphaned again.
+    /// is ever orphaned again. Items whose parent session is being re-queued (the
+    /// server reported missingSessionIds) are NOT counted toward quarantine — the
+    /// refusal is transient and will resolve on the next pass.
     /// </summary>
     private void OnAppItemsRejected(IReadOnlyList<string> rejectedIds, IReadOnlyList<string> acceptedIds)
     {
@@ -755,11 +805,46 @@ public class SyncService : BackgroundService
             _appItemRejectCounts.Remove(id);
         foreach (var id in rejectedIds)
         {
+            // Skip quarantine for items whose parent session is being re-queued —
+            // the refusal is expected and transient (Bug #9 follow-up).
+            if (_lastMissingSessionIds.Count > 0)
+            {
+                _appItemRejectCounts.Remove(id);
+                continue;
+            }
             _appItemRejectCounts[id] = _appItemRejectCounts.GetValueOrDefault(id) + 1;
             if (_appItemRejectCounts[id] == QuarantineRetries)
                 _logger.LogWarning(
                     "app_item {Id} refused {Retries} consecutive passes — quarantined in-memory (row stays is_synced=0; retried after restart)",
                     id, QuarantineRetries);
+        }
+    }
+
+    /// <summary>
+    /// Tracks the most recently reported missing session IDs so that OnAppItemsRejected
+    /// can skip quarantine for items whose parent is being re-queued.
+    /// </summary>
+    private List<string> _lastMissingSessionIds = new();
+
+    /// <summary>
+    /// Reset specific sessions to is_synced=0 so they are re-sent on the next sync pass.
+    /// Called when the server reports missing session IDs during the orphan preflight
+    /// (Bug #9 follow-up — breaks the permanent orphan deadlock).
+    /// </summary>
+    private async Task ResetSessionsForRequeueAsync(IReadOnlyList<string> missingSessionIds)
+    {
+        if (missingSessionIds.Count == 0) return;
+        _lastMissingSessionIds = missingSessionIds.ToList();
+        try
+        {
+            await _store.MarkAppSessionsUnsyncedByIdsAsync(missingSessionIds, CancellationToken.None);
+            _logger.LogWarning(
+                "Server reported {Count} missing session IDs — resetting to is_synced=0 for re-queue (deadlock fix)",
+                missingSessionIds.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to reset missing sessions for re-queue");
         }
     }
 

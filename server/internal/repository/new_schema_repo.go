@@ -414,16 +414,18 @@ func (r *NewSchemaRepo) BulkInsertAppSessions(ctx context.Context, entries []mod
 // ────────────────────────────────
 
 // BulkInsertAppItems inserts app_items in 500-row batches after an orphan
-// preflight. Returns the number of inserted rows AND the ids of rows that were
-// refused (orphans — their app_session_id had no parent row at insert time) so
-// the sync response can tell the client exactly which rows to keep unsent.
-func (r *NewSchemaRepo) BulkInsertAppItems(ctx context.Context, entries []models.AppItem) (int, []string, error) {
+// preflight. Returns the number of inserted rows, the ids of rows that were
+// refused (orphans — their app_session_id had no parent row at insert time),
+// AND the distinct missing parent session IDs (so the client can re-queue
+// them, breaking the permanent orphan deadlock).
+func (r *NewSchemaRepo) BulkInsertAppItems(ctx context.Context, entries []models.AppItem) (int, []string, []string, error) {
 	if len(entries) == 0 {
-		return 0, nil, nil
+		return 0, nil, nil, nil
 	}
 	batchSize := 500
 	inserted := 0
 	rejectedIDs := make([]string, 0)
+	missingSessionIDs := make([]string, 0)
 	for i := 0; i < len(entries); i += batchSize {
 		end := i + batchSize
 		if end > len(entries) {
@@ -457,6 +459,11 @@ func (r *NewSchemaRepo) BulkInsertAppItems(ctx context.Context, entries []models
 		orphanIDs, orphanItemIDs, survivorIdx := r.filterOrphanAppItems(ctx, batch)
 		if len(orphanIDs) > 0 {
 			logOrphanAppItems(entries, orphanIDs)
+			for _, sid := range orphanIDs {
+				if sid != "<empty>" {
+					missingSessionIDs = append(missingSessionIDs, sid)
+				}
+			}
 		}
 		rejectedIDs = append(rejectedIDs, orphanItemIDs...)
 		if len(survivorIdx) == 0 {
@@ -517,11 +524,11 @@ func (r *NewSchemaRepo) BulkInsertAppItems(ctx context.Context, entries []models
 
 		tag, err := r.pool.Exec(ctx, query, args...)
 		if err != nil {
-			return inserted, rejectedIDs, fmt.Errorf("bulk insert app_items: %w", err)
+			return inserted, rejectedIDs, missingSessionIDs, fmt.Errorf("bulk insert app_items: %w", err)
 		}
 		inserted += int(tag.RowsAffected())
 	}
-	return inserted, rejectedIDs, nil
+	return inserted, rejectedIDs, missingSessionIDs, nil
 }
 
 // filterOrphanAppItems returns the set of appSessionId values in `batch`

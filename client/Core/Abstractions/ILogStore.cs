@@ -154,6 +154,13 @@ public interface ILogStore
     Task<IReadOnlyList<AppSession>> GetUnsentAppSessionsAsync(int limit, CancellationToken ct);
     Task MarkAppSessionsSentAsync(IReadOnlyList<string> ids, CancellationToken ct);
 
+    /// <summary>
+    /// Reset specific sessions to is_synced=0 so they are re-sent on the next sync pass.
+    /// Called when the server reports missing session IDs during the orphan preflight
+    /// (Bug #9 follow-up — breaks the permanent orphan deadlock).
+    /// </summary>
+    Task MarkAppSessionsUnsyncedByIdsAsync(IReadOnlyList<string> ids, CancellationToken ct);
+
     // ── Generic App Items (child of app_sessions) ──
 
     Task StoreAppItemsAsync(IReadOnlyList<AppItem> entries, CancellationToken ct);

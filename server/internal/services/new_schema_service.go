@@ -450,17 +450,21 @@ func (s *NewSchemaService) SyncAppItems(ctx context.Context, req *dto.SyncAppIte
 		})
 	}
 
-	inserted, rejectedIDs, err := s.repo.BulkInsertAppItems(ctx, entries)
+	inserted, rejectedIDs, missingSessionIDs, err := s.repo.BulkInsertAppItems(ctx, entries)
 	if err != nil {
 		return nil, fmt.Errorf("bulk insert app_items: %w", err)
 	}
 	// rejectedIDs is present only when the orphan preflight refused rows; the
 	// client leaves exactly those rows unsent so they re-send after their parent
 	// session lands (see SyncBatchResponse.RejectedIds).
+	// missingSessionIDs tells the client which parent sessions the server does
+	// NOT have — the client resets those to is_synced=0 so they re-send,
+	// breaking the permanent orphan deadlock (Bug #9 follow-up).
 	return &dto.SyncBatchResponse{
-		Synced:      inserted,
-		Message:     fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries)),
-		RejectedIds: rejectedIDs,
+		Synced:             inserted,
+		Message:            fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries)),
+		RejectedIds:        rejectedIDs,
+		MissingSessionIds:  missingSessionIDs,
 	}, nil
 }
 
