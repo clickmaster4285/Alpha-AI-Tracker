@@ -461,12 +461,6 @@ func (s *NewSchemaService) SyncAppItems(ctx context.Context, req *dto.SyncAppIte
 	// missingSessionIDs tells the client which parent sessions the server does
 	// NOT have — the client resets those to is_synced=0 so they re-send,
 	// breaking the permanent orphan deadlock (Bug #9 follow-up).
-	
-	// Debug logging to verify missingSessionIds are being returned
-	if len(missingSessionIDs) > 0 {
-		log.Printf("[sync] Returning %d missing session IDs to client for orphan fix", len(missingSessionIDs))
-	}
-	
 	return &dto.SyncBatchResponse{
 		Synced:             inserted,
 		Message:            fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries)),

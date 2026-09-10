@@ -1874,11 +1874,16 @@ public class SqliteLogStore : ILogStore, IDisposable
             // re-sync is a late foreground/background flush where
             // last_activity_at is still moving past ended_at, so we keep
             // those (rare; focus flush now respects ended_at too).
+            // 
+            // Bug #9 follow-up: also return sessions that were recently
+            // reset to is_synced=0 for orphan recovery. For orphaned sessions,
+            // we skip the zombie check to ensure they get re-sent even if
+            // they're old and closed. This breaks the permanent orphan deadlock.
             var cmd = _connection.CreateCommand();
             cmd.CommandText = @"
                 SELECT * FROM app_sessions
                  WHERE is_synced = 0
-                   AND (ended_at IS NULL OR last_activity_at > ended_at)
+                   AND (ended_at IS NULL OR last_activity_at > ended_at OR (synced_at IS NULL AND ended_at IS NOT NULL))
                  ORDER BY started_at ASC
                  LIMIT $limit";
             cmd.Parameters.AddWithValue("$limit", limit);
@@ -1912,7 +1917,7 @@ public class SqliteLogStore : ILogStore, IDisposable
             foreach (var id in ids)
             {
                 await using var cmd = _connection.CreateCommand();
-                cmd.CommandText = "UPDATE app_sessions SET is_synced = 0 WHERE id = $id AND is_synced = 1";
+                cmd.CommandText = "UPDATE app_sessions SET is_synced = 0, synced_at = NULL WHERE id = $id AND is_synced = 1";
                 cmd.Parameters.AddWithValue("$id", id);
                 await cmd.ExecuteNonQueryAsync(ct);
             }
