@@ -1,0 +1,15 @@
+1. audit all these page (
+    1. /employee-journey/timeline?preset=7d&employeeId=c1f1d4c3-04ba-4002-972f-a43b41f97863
+    2. /employee-journey/apps?preset=today&employeeId=c1f1d4c3-04ba-4002-972f-a43b41f97863
+    3. /employee-journey/web?preset=today&employeeId=c1f1d4c3-04ba-4002-972f-a43b41f97863
+) check in deep every point, every single dot with why here, can this word|status here working good or not etc...
+2. on that page "employee-journey/apps" i seen something confusing|wrong. for example on google chrom i seen 12+ sessions and 5+ status "running" but on the app status is "closed" why????
+3. on that page "employee-journey/apps" why on apps row the "First Opened and Last Closed" column exit whats the purpose , i think this is better colomn "Sessions,	Duration,Last Active,Status", what do you think about that
+4. on that page "employee-journey/apps" i close the app "microsoft edge" but on the web show still shown the status running ???
+5. first analyze the page "/timesheets?preset=custom&from=2026-08-29&to=2026-09-11&employeeId=c1f1d4c3-04ba-4002-972f-a43b41f97863" on that you can clearly seen the user pc is turn off at "Sep 10, 06:08 PM" but on that page with same user "/employee-journey/apps?preset=7d&employeeId=c1f1d4c3-04ba-4002-972f-a43b41f97863"  i clearly seen the session(google chrome) "Sep 10, 05:50 PM" and previouse time still running show the status why and also same as on session(alpha ai tracker) "Sep 10, 05:49 PM" and previouse time still status: running???? but the pc is off on 10sep and now 11 sep 
+
+
+check on your self in deep and also analyze my db(postgrey and sqlite) also and also read my .env
+
+auth_token:zNLr-ggPPUk0GvuTMx54F-HTw-tI2UP97lU6YfSxdtJoKJ_DJDdLvFqfPkdKMH9g5o5UL5Z-CBDeYSeqwzxflNJX9bWXu3rPwWahbO8dC6nLCG3buGZegG_iSpLYd77sggFTuGmZ03jDXeVIkWCi4kcSx9o1k_Ndll2izbQl6pbP__Ew2KcJqwTXWaOaC2zgVVo1uBRihLWSC17I9cKqbew8XT_Pj182n9MZO9ubl6-1k8UpzYIKPgIV_t9_NMNCGVoaWPWjA_dL5NFTq-eOa2aVYvxtxzMyFwC_Z1v74TL40XL_DlfPRm7udJ5LWMUVBuYg8YtTJBLWNJtrXTcjSrrwC9OKK10PZcUWtMCs2QA6CyQIkAUkWnhUiC-2tUthjZT6re331-pTtkIHvz5K6oy3n1CjT_ZP-tRZca3MZoU7U8IMptsGij7AqLICfNnl
+
