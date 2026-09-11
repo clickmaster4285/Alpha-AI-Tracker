@@ -812,11 +812,12 @@ type AppSessionUsageRow struct {
 }
 
 type AppSessionUsageListResult struct {
-	Rows      []AppSessionUsageRow
-	Total     int
-	Page      int
-	PerPage   int
-	TotalPages int
+	Rows               []AppSessionUsageRow
+	Total              int
+	Page               int
+	PerPage            int
+	TotalPages         int
+	TotalDurationSeconds float64
 }
 
 func (r *NewSchemaRepo) AggregateAppSessionsUsage(ctx context.Context, params AppSessionUsageListParams) (*AppSessionUsageListResult, error) {
@@ -891,19 +892,24 @@ func (r *NewSchemaRepo) AggregateAppSessionsUsage(ctx context.Context, params Ap
 	//      is final. Using COALESCE picks the most-recent truthful moment
 	//      regardless of status — same shape the web page uses for the
 	//      STALE/CLOSED case in sessionDurationSeconds.)
-	//   - totalDurationSeconds = SUM of (COALESCE(ended, last_sync, started) - started_at)
-	//     NOTE: this is the SUM-OF-DURATIONS shape. The page intentionally
-	//     displays max(lastClosed) - min(firstOpened) for the "Duration"
-	//     column so multi-tab sessions never inflate the per-app total.
-	//     The SUM is provided for backwards-compat and for the
-	//     "Active Time" tile that sums across all apps.
+	//   - totalDurationSeconds = MAX(end_or_now) - MIN(started_at) per group
+	//     (range, not sum — so a window with 3 tabs × 10 min renders as
+	//     10 min, not 30 min; for ACTIVE sessions the "end" is NOW() so
+	//     a running window's range grows in real time).
 	query := fmt.Sprintf(`
 		SELECT app_display_name,
 		       COALESCE(process_name, '') AS process_name,
 		       COUNT(*) AS session_count,
 		       MIN(started_at) AS first_opened_at,
 		       MAX(COALESCE(ended_at, last_sync_at, started_at)) AS last_closed_at,
-		       COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(ended_at, last_sync_at, started_at) - started_at))), 0) AS total_duration_seconds,
+		       COALESCE(EXTRACT(EPOCH FROM (
+		           MAX(
+		               CASE
+		                   WHEN status = 'ACTIVE' AND ended_at IS NULL THEN NOW()
+		                   ELSE COALESCE(ended_at, last_sync_at, started_at)
+		               END
+		           ) - MIN(started_at)
+		       )), 0) AS total_duration_seconds,
 		       BOOL_OR(status = 'ACTIVE' AND ended_at IS NULL) AS has_open_session,
 		       MAX(COALESCE(last_activity_at, last_sync_at, ended_at, started_at)) AS last_active_at
 		FROM app_sessions %s
@@ -937,12 +943,35 @@ func (r *NewSchemaRepo) AggregateAppSessionsUsage(ctx context.Context, params Ap
 		usage = append(usage, u)
 	}
 
+	// Global total duration across ALL matching sessions: MIN(started_at)
+	// to MAX(end_or_now), where end_or_now uses NOW() for any still-running
+	// ACTIVE session so the header "Total session time" tile reflects the
+	// real wall-clock span (not the sum of per-app spans, which double-counts
+	// concurrent usage).
+	baseArgs := args[:len(args)-2]
+	var globalTotalDuration float64
+	totalQuery := fmt.Sprintf(`
+		SELECT COALESCE(EXTRACT(EPOCH FROM (
+		    MAX(
+		        CASE
+		            WHEN status = 'ACTIVE' AND ended_at IS NULL THEN NOW()
+		            ELSE COALESCE(ended_at, last_sync_at, started_at)
+		        END
+		    ) - MIN(started_at)
+		)), 0)
+		FROM app_sessions %s
+	`, whereClause)
+	if err := r.pool.QueryRow(ctx, totalQuery, baseArgs...).Scan(&globalTotalDuration); err != nil {
+		return nil, fmt.Errorf("compute total app sessions duration: %w", err)
+	}
+
 	return &AppSessionUsageListResult{
-		Rows:       usage,
-		Total:      total,
-		Page:       params.Page,
-		PerPage:    params.PerPage,
-		TotalPages: totalPages,
+		Rows:                usage,
+		Total:               total,
+		Page:                params.Page,
+		PerPage:             params.PerPage,
+		TotalPages:          totalPages,
+		TotalDurationSeconds: globalTotalDuration,
 	}, nil
 }
 

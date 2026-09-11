@@ -624,6 +624,7 @@ export interface AppUsageListResponse {
   page: number;
   perPage: number;
   totalPages: number;
+  totalDurationSeconds: number;
 }
 
 export const appSessionsApi = {

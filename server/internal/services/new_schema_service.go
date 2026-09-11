@@ -538,11 +538,12 @@ func (s *NewSchemaService) ListAppSessionsUsage(ctx context.Context, params repo
 	}
 
 	return &dto.AppUsageListResponse{
-		Data:       rows,
-		Total:      result.Total,
-		Page:       result.Page,
-		PerPage:    result.PerPage,
-		TotalPages: result.TotalPages,
+		Data:                rows,
+		Total:               result.Total,
+		Page:                result.Page,
+		PerPage:             result.PerPage,
+		TotalPages:          result.TotalPages,
+		TotalDurationSeconds: result.TotalDurationSeconds,
 	}, nil
 }
 

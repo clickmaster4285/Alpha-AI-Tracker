@@ -282,11 +282,12 @@ type AppUsageRow struct {
 }
 
 type AppUsageListResponse struct {
-	Data       []AppUsageRow `json:"data"`
-	Total      int           `json:"total"`
-	Page       int           `json:"page"`
-	PerPage    int           `json:"perPage"`
-	TotalPages int           `json:"totalPages"`
+	Data                []AppUsageRow `json:"data"`
+	Total               int           `json:"total"`
+	Page                int           `json:"page"`
+	PerPage             int           `json:"perPage"`
+	TotalPages          int           `json:"totalPages"`
+	TotalDurationSeconds float64      `json:"totalDurationSeconds"`
 }
 
 // ────────────────────────────────

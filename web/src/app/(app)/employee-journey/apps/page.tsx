@@ -89,10 +89,6 @@ function AppUsageBody({
 
   const usage: AppUsageRow[] = useMemo(() => {
     const rows = query.data?.data ?? [];
-    // I-11 (plan 2.5): collapse Edge's WebView2 host process into its parent
-    // so `msedge` + `msedgewebview2` form one aggregate row, then recompute
-    // each group's Duration as (max lastClosed − min firstOpened) so multi-tab
-    // windows never inflate the per-app total (2026-09-04).
     const grouped = new Map<string, AppUsageRow>();
     for (const r of rows) {
       const proc = usageProcessName(r.processName);
@@ -102,26 +98,10 @@ function AppUsageBody({
       grouped.set(key, existing ? mergeUsage(existing, merged) : merged);
     }
     return Array.from(grouped.values())
-      .map(r => {
-        const first = new Date(r.firstOpenedAt).getTime();
-        const last = new Date(r.lastClosedAt).getTime();
-        const openRangeSeconds = Math.max(0, (last - first) / 1000);
-        return { ...r, totalDurationSeconds: openRangeSeconds };
-      })
       .sort((a, b) => b.totalDurationSeconds - a.totalDurationSeconds);
   }, [query.data]);
 
-  const totalDuration = useMemo(() => {
-    if (usage.length === 0) return 0;
-    const firstOpened = Math.min(...usage.map(u => new Date(u.firstOpenedAt).getTime()));
-    const hasRunning = usage.some(u => u.hasOpenSession);
-    const now = Date.now();
-    const lastClosed = Math.max(...usage.map(u => {
-      const ts = new Date(u.lastClosedAt).getTime();
-      return hasRunning ? Math.max(ts, now) : ts;
-    }));
-    return Math.max(0, (lastClosed - firstOpened) / 1000);
-  }, [usage]);
+  const totalDuration = query.data?.totalDurationSeconds ?? 0;
   const totalSessions = usage.reduce((n, u) => n + u.sessionCount, 0);
   const runningCount = usage.filter(u => u.hasOpenSession).length;
   const filtered = filter.search !== '' || filter.preset !== 'all';
