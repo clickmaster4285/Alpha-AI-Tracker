@@ -196,8 +196,25 @@ func (s *SessionLifecycleSweep) RunOnce(ctx context.Context) {
 		return
 	}
 
-	if offlineTag.RowsAffected() > 0 || staleTag.RowsAffected() > 0 || closeTag.RowsAffected() > 0 {
-		log.Printf("[session-lifecycle] sweep in %v: %d ACTIVE→OFFLINE, %d OFFLINE→STALE, %d STALE→CLOSED",
-			time.Since(start), offlineTag.RowsAffected(), staleTag.RowsAffected(), closeTag.RowsAffected())
+	// 4. Per-row Stagnation Sweep. A row whose own last_sync is >= CLOSE_AFTER old
+	// is never coming back, even if another row on the same machine is still active.
+	// This prevents rows from being stranded in OFFLINE/STALE indefinitely.
+	stagnationTag, err := s.pool.Exec(ctx, `
+		UPDATE app_sessions
+		   SET status   = 'CLOSED',
+		       ended_at = COALESCE(last_activity_at, last_sync_at, started_at)
+		 WHERE deleted_at IS NULL
+		   AND ended_at IS NULL
+		   AND status IN ('OFFLINE','STALE')
+		   AND last_sync_at < NOW() - make_interval(secs => $1)
+	`, int64(s.closeAfter.Seconds()))
+	if err != nil {
+		log.Printf("[session-lifecycle] Stagnation Sweep error: %v", err)
+		return
+	}
+
+	if offlineTag.RowsAffected() > 0 || staleTag.RowsAffected() > 0 || closeTag.RowsAffected() > 0 || stagnationTag.RowsAffected() > 0 {
+		log.Printf("[session-lifecycle] sweep in %v: %d ACTIVE→OFFLINE, %d OFFLINE→STALE, %d STALE→CLOSED, %d STAGNANT→CLOSED",
+			time.Since(start), offlineTag.RowsAffected(), staleTag.RowsAffected(), closeTag.RowsAffected(), stagnationTag.RowsAffected())
 	}
 }

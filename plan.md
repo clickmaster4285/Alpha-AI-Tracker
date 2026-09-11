@@ -1,90 +1,96 @@
-# Implementation Plan — Fix Employee-Journey "Running" Bugs & Apps-Page UX
+# Implementation Plan — Fix Employee-Journey "Running" Bugs & Apps-Page UX (Improved Scalability)
 
-**Go/next.js/build gates:** keep `go build`/`go vet`, `npx tsc --noEmit`, `next build`, `dotnet build` (0/0) green after every phase. Deploy order matters (server first, then web, then client installer).
-
----
-
-## Phase 0 — Data repair (live DB, run once, idempotent)
-
-Backfill the stranded rows so the UI stops lying immediately. Matches the existing migration-034 pattern (status=CLOSED where ended_at not null) extended to long-stale end-less rows:
-
-```sql
--- Freeze sessions that stopped being synced before the close window
-UPDATE app_sessions
-   SET status   = 'CLOSED',
-       ended_at = COALESCE(last_activity_at, last_sync_at, started_at)
- WHERE ended_at IS NULL
-   AND status IN ('OFFLINE','STALE')
-   AND last_sync_at < NOW() - make_interval(hours => 24);
-```
-- Run once (as a migration **035** and/or a psql one-liner) for the current 50 rows.
-- **Do NOT** `DELETE` — keep them as CLOSED for history; retention already purges closed rows per `RETENTION_DAYS=168`.
+**Build gates:** after each phase run `go build && go vet`, `npx tsc --noEmit`, `next build`, `dotnet build` (0 warnings).
 
 ---
 
-## Phase 1 — Server (defense in depth, no client needed)
-
-### 1.1 `AggregateAppSessionsUsage.has_open_session` must respect lifecycle state
-`server/internal/repository/new_schema_repo.go`:
-```sql
--- OLD: BOOL_OR(ended_at IS NULL)  -> OFFLINE/STALE rows falsely count as open
--- NEW:
-BOOL_OR(status = 'ACTIVE' AND ended_at IS NULL) AS has_open_session
-```
-Also add `MAX(COALESCE(last_activity_at, last_sync_at, ended_at, started_at)) AS last_active_at` to the SELECT + `AppSessionUsageRow` so the web can show **Last Active** (I-04) from one endpoint.
-
-### 1.2 Companion per-row stagnation sweep (fix I-02 at the source)
-`server/internal/jobs/session_lifecycle_sweep.go` — add a step **after** the per-machine steps:
-```
-UPDATE app_sessions
-   SET status='CLOSED', ended_at=COALESCE(last_activity_at, last_sync_at, started_at)
- WHERE ended_at IS NULL
-   AND status IN ('OFFLINE','STALE')
-   AND last_sync_at < NOW() - make_interval(hours => closeAfterHours);
-```
-Rationale: a row whose own last_sync is `>= CLOSE_AFTER` old is never coming back, even if another row on the machine is still active. This prevents the 50-row strangulation permanently.
-
-### 1.3 (Consistency) `ListAppSessionsForApp` / `ListAppSessions` already project `status/lastActivityAt/lastSyncAt` — verify DTO mapper sets them (it does per service mapper; add a regression assertion).
+## Phase 0 — Data Repair (Scalable Migration)
+- [ ] **Create migration `035_fix_stranded_sessions.sql`** (already present) that:
+  ```sql
+  UPDATE app_sessions
+     SET status = 'CLOSED',
+         ended_at = COALESCE(last_activity_at, last_sync_at, started_at)
+   WHERE ended_at IS NULL
+     AND status IN ('OFFLINE','STALE')
+     AND last_sync_at < NOW() - make_interval(hours => 24);
+  ```
+- [ ] **Run migration on all environments** using the standard `goose`/`sql-migrate` pipeline to guarantee consistency.
+- [ ] **Verification:** query `SELECT COUNT(*) FROM app_sessions WHERE status='OFFLINE' AND ended_at IS NULL;` – must be 0.
 
 ---
 
-## Phase 2 — Web `/employee-journey/apps` (your Q3 + Q2/Q4 rendering)
-
-`web/src/app/(app)/employee-journey/apps/page.tsx`:
-1. **Status/Last Closed honesty (I-01, I-03):**
-   - Aggregate row: render `SessionStatusBadge` from a new derived status — `ACTIVE` if `hasOpenSession` (now ACTIVE-only), otherwise if no session in range is ACTIVE show "Closed". Never print the literal "Running" in the Last Closed cell.
-   - Expanded row "Closed" cell: replace `s.endedAt ? … : Running` with the timeline's `endIso` logic (CLOSED→endedAt, STALE/OFFLINE→lastSyncAt, ACTIVE→now + "Running" only when ACTIVE).
-2. **Column redesign (I-04):** `Application | Sessions | Duration | Last Active | Status` — drop "First Opened"/"Last Closed" from the aggregate (or keep just "Last Active"). Wire Last Active to the new `lastActiveAt` field from 1.1.
-3. **Tiles (I-09):** rename "Open Now" → "With open sessions" OR recompute from ACTIVE-only count; disambiguate "Active Time" (sum) vs row "Duration" (range) by re-labelling the tile "Total session time" or the column "Active range".
-4. **Title column (I-07):** rename header to "Context" (it renders `contextLabel`) or re-render an actual title.
-
----
-
-## Phase 3 — Web timeline + web (small)
-
-`web/src/app/(app)/employee-journey/timeline/page.tsx`:
-- Fix `py-px` → `py-0.5` (I-05).
-- Closed column: show `lastSyncAt` for STALE/OFFLINE instead of `'—'` (I-06), consistent with Duration.
-
-`web/src/app/(app)/employee-journey/web/page.tsx`:
-- `visitDurationSeconds`: for `closedAt == null`, use `now − openedAt` (or the session `lastSyncAt`) so open tabs contribute duration (I-08).
-
----
-
-## Phase 4 — Client (installer-gated; root-cause fix)
-
-1. **Finalize open sessions on shutdown** — on the Windows `power_off` path (`SystemEventWatcher` `SessionEnding`, 2026-09-05) and within `ShutdownSentinel`, call the existing `CloseSessionsAndAppItemsAsync()` so every open session gets `ended_at` before the OS kills the process. (Linux SIGTERM path already does this; Windows is the gap. Ships only in a new installer build.)
-2. **Boot reconcile re-sync** — verify `ReconcileStaleSessionsOnBootAsync` re-queues the closed rows (`is_synced=0`) so the server upsert finalizes them (I-02 fix point 2).
-3. Re-bake `config.enc` if any env knob changes (none required for this fix).
+## Phase 1 — Server Defensive State Machine
+- **1.1** Update `AggregateAppSessionsUsage` (`server/internal/repository/new_schema_repo.go`):
+  ```go
+  BOOL_OR(status = 'ACTIVE' AND ended_at IS NULL) AS has_open_session
+  ```
+- **1.2** Add projection `last_active_at`:
+  ```go
+  MAX(COALESCE(last_activity_at, last_sync_at, ended_at, started_at)) AS last_active_at
+  ```
+- **1.3** Extend `AppSessionUsageRow` struct with `LastActiveAt time.Time` and ensure JSON DTO includes it.
+- **1.4** Implement **per‑row stagnation sweep** in `session_lifecycle_sweep.go` after the machine‑level sweep:
+  ```go
+  UPDATE app_sessions
+     SET status='CLOSED', ended_at=COALESCE(last_activity_at, last_sync_at, started_at)
+   WHERE ended_at IS NULL
+     AND status IN ('OFFLINE','STALE')
+     AND last_sync_at < NOW() - make_interval(hours => $1);
+  ```
+- **1.5** Add unit test `TestAggregateHasOpenSession` covering ACTIVE vs OFFLINE rows.
+- **1.6** Consistency check: ensure DTO mapping in `ListAppSessionsForApp` respects new fields.
 
 ---
 
-## Phase 5 — Docs & verification
+## Phase 2 — Web `/employee-journey/apps` UX & Accuracy
+- **2.1** Status & Last Closed rendering:
+  - Aggregate row: use `SessionStatusBadge` based on `status` (only ACTIVE shows green "Running").
+  - Expanded row "Closed" column: replace literal "Running" with the same helper used on the timeline (`endIso`).
+- **2.2** Column redesign (I‑04):
+  - Headers → `Application | Sessions | Duration | Last Active | Status`.
+  - Wire `Last Active` to the new `last_active_at` field.
+- **2.3** Tile redesign (I‑09):
+  - Rename "Open Now" → "With open sessions" (compute from ACTIVE rows).
+  - Rename "Active Time" → "Total session time" (sum of `totalDurationSeconds`).
+- **2.4** Title column (I‑07): rename header to "Context" and keep rendering `s.contextLabel`.
+- **2.5** Edge grouping (I‑11): add a client‑side map that normalises `process_name` values `msedge` and `msedgewebview2` to a single display name.
+- **2.6** Apply visual polish per design guidelines (gradient header, subtle hover effects, modern font).
 
-1. Update `AGENTS.md` / `server/ARCHITECTURE.md` changelogs: "apps page `hasOpenSession` is ACTIVE-only", "per-row stagnation sweep", "apps columns = Sessions/Duration/Last Active/Status".
-2. Verify:
-   - `go build` && `go vet` clean
-   - `npx tsc --noEmit` clean && `next build` passes
-   - `dotnet build` 0 warnings / 0 errors
-   - Live: re-run the audit probe → EMP-10002's 71 sessions should now read **CLOSED 59 / ACTIVE 12**, Chrome/Edge/Unity no longer "Running"
-   - Installer: `bash publish/build-installer.sh -b linux` for the client change (per Installer-Parity Rule).
+---
+
+## Phase 3 — Timeline & Web Fixes
+- **3.1** Fix Tailwind typo `py-px` → `py-0.5` in `timeline/page.tsx`.
+- **3.2** Closed column: show `lastSyncAt` for STALE/OFFLINE rows instead of an em‑dash.
+- **3.3** Web page durations (I‑08): for open tabs use `now - openedAt` (or `lastSyncAt`).
+- **3.4** Add micro‑animation on row hover (fade‑in background, scale‑up badge).
+
+---
+
+## Phase 4 — Client Root‑Cause Fixes (Installer‑Gated)
+- **4.1** Windows shutdown (`SystemEventWatcher` → `SessionEnding`) – ensure `CloseSessionsAndAppItemsAsync()` is called to stamp `ended_at`.
+- **4.2** Boot reconciliation – verify `ReconcileStaleSessionsOnBootAsync` re‑queues rows with `is_synced=0` after adding `ended_at`.
+- **4.3** Add defensive logging around the shutdown path (log when `ended_at` is written).
+- **4.4** Build installer (`bash publish/build-installer.sh -b windows`) and run a smoke test that powers off the VM and checks the DB for closed rows.
+
+---
+
+## Phase 5 — Documentation & Verification
+- **5.1** Update `AGENTS.md` & `server/ARCHITECTURE.md` with change summary.
+- **5.2** Run full verification suite:
+  - Server: `go build && go vet`
+  - Web: `npx tsc --noEmit && next build`
+  - Client: `dotnet build`
+- **5.3** Live DB audit – re‑run the audit CLI and assert:
+  - No OFFLINE rows with `ended_at IS NULL`
+  - `has_open_session` matches only ACTIVE rows.
+- **5.4** Publish a short release note for the ops team.
+
+---
+
+## Phase 6 — Monitoring (Post‑deployment Safety Net)
+- **6.1** Add Grafana alert: `SELECT COUNT(*) FROM app_sessions WHERE status='OFFLINE' AND ended_at IS NULL` > 0 → fire.
+- **6.2** Schedule a nightly job (`cron '0 2 * * *'`) that runs the per‑row sweep with a 48‑hour window as a safety fallback.
+
+---
+
+**All phases are checklist‑driven; once every box is ticked the next phase may commence.**

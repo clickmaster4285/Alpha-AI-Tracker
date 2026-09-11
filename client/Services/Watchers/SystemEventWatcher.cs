@@ -211,4 +211,61 @@ public sealed partial class SystemEventWatcher : BackgroundService
             _logger.LogDebug(ex, "SystemEventWatcher: failed to touch ta_last_known_os_event_at watermark");
         }
     }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Shutdown session finalizer: called from SessionEnding (Windows) and from
+    // PrepareForShutdown (Linux). Closes every open session so ended_at is
+    // stamped in SQLite before the process exits. The next boot's sync drain
+    // picks them up (UpdateAppSessionEndedSql resets is_synced = 0).
+    // ════════════════════════════════════════════════════════════════════════
+
+    internal void PersistPowerOffAndCloseSessionsSynchronously(string source)
+    {
+        try
+        {
+            // The OS is about to terminate the process. Do not fire-and-forget
+            // these writes: the callback must not return until SQLite has the
+            // power_off event and the close transaction.
+            SafeRecordAsync(SessionEventTypes.PowerOff, source, default)
+                .GetAwaiter()
+                .GetResult();
+            CloseAllOpenSessionsOnShutdownAsync()
+                .GetAwaiter()
+                .GetResult();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "SystemEventWatcher: synchronous shutdown finalizer failed");
+        }
+    }
+
+    internal async Task CloseAllOpenSessionsOnShutdownAsync()
+    {
+        try
+        {
+            var openRecords = await _store.GetAllOpenSessionRecordsAsync(default);
+            if (openRecords.Count == 0)
+            {
+                _logger.LogDebug("SystemEventWatcher: no open sessions to close on shutdown");
+                return;
+            }
+
+            var now = DateTime.UtcNow;
+            var closeSessions = openRecords.Select(r => new AppSession
+            {
+                Id = r.AppSessionId,
+                ProcessName = string.Empty, // unused by CloseSessionsAndAppItemsAsync
+                EndedAt = now,
+            }).ToList();
+
+            await _store.CloseSessionsAndAppItemsAsync(closeSessions, now, default);
+            _logger.LogInformation(
+                "SystemEventWatcher: closed {Count} open session(s) on shutdown (ended_at={At})",
+                closeSessions.Count, now.ToString("O"));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "SystemEventWatcher: CloseAllOpenSessionsOnShutdownAsync failed");
+        }
+    }
 }

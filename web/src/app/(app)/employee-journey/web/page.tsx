@@ -65,7 +65,11 @@ function groupKeyOf(item: AppItem): { key: string; isSearch: boolean; engine?: s
 }
 
 function visitDurationSeconds(item: AppItem): number {
-  if (!item.closedAt) return 0;
+  // Tab still open: use now so it contributes real time to its group's duration,
+  // consistent with the 3-state sessionDurationSeconds logic on the apps/timeline pages.
+  if (!item.closedAt) {
+    return Math.max(0, (Date.now() - new Date(item.openedAt).getTime()) / 1000);
+  }
   return Math.max(0, (new Date(item.closedAt).getTime() - new Date(item.openedAt).getTime()) / 1000);
 }
 

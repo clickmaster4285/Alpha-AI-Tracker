@@ -277,6 +277,8 @@ type AppUsageRow struct {
 	FirstOpenedAt        time.Time `json:"firstOpenedAt"`
 	LastClosedAt         time.Time `json:"lastClosedAt"`
 	TotalDurationSeconds float64   `json:"totalDurationSeconds"`
+	HasOpenSession       bool      `json:"hasOpenSession"`
+	LastActiveAt         time.Time `json:"lastActiveAt"`
 }
 
 type AppUsageListResponse struct {

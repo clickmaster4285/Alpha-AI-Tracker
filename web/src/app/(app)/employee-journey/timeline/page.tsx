@@ -85,7 +85,7 @@ function TimelineBody({
   }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   return (
-    <div className="bg-card rounded-xl border border-border shadow-card overflow-hidden">
+    <div className="bg-card rounded-xl border border-border shadow-card overflow-hidden animate-fade-in">
       <div className="px-4 py-3 border-b border-border flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Activity className="w-4 h-4 text-primary" />
@@ -148,7 +148,7 @@ function TimelineBody({
                           {s.appDisplayName && s.appDisplayName !== s.processName && (
                             <span className="text-xs text-muted-foreground font-mono">{s.processName}</span>
                           )}
-                          <span className="px-1.5 py-px rounded text-[10px] font-mono bg-primary/10 text-primary capitalize">{s.platform || '—'}</span>
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-primary/10 text-primary capitalize">{s.platform || '—'}</span>
                           {s.contextLabel && <span className="text-xs text-muted-foreground truncate max-w-[140px]">· {s.contextLabel}</span>}
                         </div>
                       </div>
@@ -159,7 +159,11 @@ function TimelineBody({
                   </td>
                   <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">{formatDateTime(s.startedAt)}</td>
                   <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">
-                    {s.endedAt ? formatDateTime(s.endedAt) : '—'}
+                    {s.endedAt
+                      ? formatDateTime(s.endedAt)
+                      : (status === 'STALE' || status === 'OFFLINE') && s.lastSyncAt
+                      ? formatDateTime(s.lastSyncAt)
+                      : '—'}
                   </td>
                   <td className="px-4 py-3 text-sm text-foreground font-medium whitespace-nowrap">
                     {formatDuration(s.startedAt, endIso)}

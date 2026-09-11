@@ -96,10 +96,7 @@ public sealed partial class SystemEventWatcher
             {
                 if (e.Reason == SessionEndReasons.SystemShutdown)
                 {
-                    _ = SafeRecordAsync(
-                        SessionEventTypes.PowerOff,
-                        "systemevents_session_ending",
-                        default);
+                    PersistPowerOffAndCloseSessionsSynchronously("systemevents_session_ending");
                 }
                 // SessionEndReasons.Logoff is already handled by SessionSwitch
                 // (SessionLogoff), so we skip it here to avoid duplicate os_logout rows.

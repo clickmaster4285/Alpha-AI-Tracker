@@ -12,6 +12,31 @@ import SessionStatusBadge, { sessionStatus } from '@/components/sessions/Session
 
 const SESSIONS_PER_PAGE = 20;
 
+// I-11 (plan 2.5): fold embedded WebView2 host processes into their parent
+// browser group so Windows Edge renders as ONE aggregate row instead of
+// `msedge` (browser) + `msedgewebview2` (embedded webviews). These are
+// structural OS process names, not a product-name list — only the exact
+// WebView2 alias is normalised to its parent binary.
+function usageProcessName(processName: string): string {
+  return processName === 'msedgewebview2' ? 'msedge' : processName;
+}
+
+// Merge two aggregate rows that share a normalised `(appDisplayName, processName)`
+// key. Session counts / durations sum; time range picks the earliest-open and
+// latest-close; lastActiveAt is the max; hasOpenSession is an OR (any merged group
+// still running keeps the aggregate live).
+function mergeUsage(a: AppUsageRow, b: AppUsageRow): AppUsageRow {
+  return {
+    ...a,
+    sessionCount: a.sessionCount + b.sessionCount,
+    totalDurationSeconds: a.totalDurationSeconds + b.totalDurationSeconds,
+    firstOpenedAt: a.firstOpenedAt < b.firstOpenedAt ? a.firstOpenedAt : b.firstOpenedAt,
+    lastClosedAt: a.lastClosedAt > b.lastClosedAt ? a.lastClosedAt : b.lastClosedAt,
+    lastActiveAt: a.lastActiveAt > b.lastActiveAt ? a.lastActiveAt : b.lastActiveAt,
+    hasOpenSession: a.hasOpenSession || b.hasOpenSession,
+  };
+}
+
 export default function EmployeeJourneyApps() {
   return (
     <Suspense fallback={<div className="flex items-center justify-center min-h-[400px]"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>}>
@@ -64,12 +89,26 @@ function AppUsageBody({
 
   const usage: AppUsageRow[] = useMemo(() => {
     const rows = query.data?.data ?? [];
-    return rows.map(r => {
-      const first = new Date(r.firstOpenedAt).getTime();
-      const last = new Date(r.lastClosedAt).getTime();
-      const openRangeSeconds = Math.max(0, (last - first) / 1000);
-      return { ...r, totalDurationSeconds: openRangeSeconds };
-    }).sort((a, b) => b.totalDurationSeconds - a.totalDurationSeconds);
+    // I-11 (plan 2.5): collapse Edge's WebView2 host process into its parent
+    // so `msedge` + `msedgewebview2` form one aggregate row, then recompute
+    // each group's Duration as (max lastClosed − min firstOpened) so multi-tab
+    // windows never inflate the per-app total (2026-09-04).
+    const grouped = new Map<string, AppUsageRow>();
+    for (const r of rows) {
+      const proc = usageProcessName(r.processName);
+      const key = `${r.appDisplayName}|${proc}`;
+      const merged = { ...r, processName: proc };
+      const existing = grouped.get(key);
+      grouped.set(key, existing ? mergeUsage(existing, merged) : merged);
+    }
+    return Array.from(grouped.values())
+      .map(r => {
+        const first = new Date(r.firstOpenedAt).getTime();
+        const last = new Date(r.lastClosedAt).getTime();
+        const openRangeSeconds = Math.max(0, (last - first) / 1000);
+        return { ...r, totalDurationSeconds: openRangeSeconds };
+      })
+      .sort((a, b) => b.totalDurationSeconds - a.totalDurationSeconds);
   }, [query.data]);
 
   const totalDuration = usage.reduce((n, u) => n + u.totalDurationSeconds, 0);
@@ -87,7 +126,8 @@ function AppUsageBody({
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 animate-fade-in">
+      <div className="h-1.5 w-full bg-gradient-to-r from-primary via-violet-500 to-cyan-500" />
       <ActivityFilters value={filter} onChange={setFilter} loading={isFiltering} />
 
       {query.isLoading ? (
@@ -110,15 +150,15 @@ function AppUsageBody({
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <UsageTile icon={AppWindow} label="Applications" value={usage.length} accent="bg-primary/10 text-primary" />
         <UsageTile icon={Layers} label="Sessions" value={totalSessions} accent="bg-info/15 text-info" />
-        <UsageTile icon={Timer} label="Active Time" value={formatSeconds(totalDuration)} accent="bg-success/15 text-success" />
-        <UsageTile icon={Activity} label="Open Now" value={runningCount} accent="bg-warning/15 text-warning" />
+        <UsageTile icon={Timer} label="Total session time" value={formatSeconds(totalDuration)} accent="bg-success/15 text-success" />
+        <UsageTile icon={Activity} label="With open sessions" value={runningCount} accent="bg-warning/15 text-warning" />
       </div>
 
       <div className="bg-card rounded-xl border border-border shadow-card overflow-x-auto">
         <table className="w-full min-w-[760px]">
           <thead>
             <tr className="border-b border-border">
-              {['Application', 'Sessions', 'Duration', 'Status', 'First Opened', 'Last Closed'].map(h => (
+              {['Application', 'Sessions', 'Duration', 'Last Active', 'Status'].map(h => (
                 <th key={h} className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground whitespace-nowrap">{h}</th>
               ))}
             </tr>
@@ -157,26 +197,9 @@ function AppUsageBody({
                     </td>
                     <td className="px-4 py-3 text-sm text-foreground font-medium">{u.sessionCount}</td>
                     <td className="px-4 py-3 text-sm text-success font-medium whitespace-nowrap">{formatSeconds(u.totalDurationSeconds)}</td>
+                    <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">{formatDateTime(u.lastActiveAt)}</td>
                     <td className="px-4 py-3 whitespace-nowrap">
-                      {u.hasOpenSession ? (
-                        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-success/15 text-success">
-                          <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse-soft" />
-                          Running
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-muted text-muted-foreground">
-                          <CheckCircle2 className="w-3 h-3" />
-                          Closed
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">{formatDateTime(u.firstOpenedAt)}</td>
-                    <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">
-                      {u.hasOpenSession ? (
-                        <span className="text-warning font-medium">Running</span>
-                      ) : (
-                        formatDateTime(u.lastClosedAt)
-                      )}
+                      <SessionStatusBadge status={u.hasOpenSession ? 'ACTIVE' : 'CLOSED'} />
                     </td>
                   </tr>
                   {isOpen && (
@@ -268,7 +291,7 @@ function ExpandedSessions({
         <table className="w-full">
           <thead>
             <tr className="border-b border-border">
-              {['Opened', 'Closed', 'Duration', 'Process', 'Title', 'Foreground', 'Background', 'Status'].map(h => (
+              {['Opened', 'Closed', 'Duration', 'Process', 'Context', 'Foreground', 'Background', 'Status'].map(h => (
                 <th key={h} className="text-left px-3 py-2 text-xs font-semibold text-muted-foreground whitespace-nowrap">{h}</th>
               ))}
             </tr>
@@ -282,7 +305,11 @@ function ExpandedSessions({
                 <tr key={s.id} className="border-b border-border last:border-0">
                   <td className="px-3 py-2.5 text-sm text-foreground whitespace-nowrap">{formatDateTime(s.startedAt)}</td>
                   <td className="px-3 py-2.5 text-sm text-muted-foreground whitespace-nowrap">
-                    {s.endedAt ? formatDateTime(s.endedAt) : <span className="text-warning font-medium">Running</span>}
+                    {s.endedAt
+                      ? formatDateTime(s.endedAt)
+                      : (s.status === 'STALE' || s.status === 'OFFLINE') && s.lastSyncAt
+                      ? formatDateTime(s.lastSyncAt)
+                      : <span className="text-warning font-medium">Running</span>}
                   </td>
                   <td className="px-3 py-2.5 text-sm text-foreground font-medium whitespace-nowrap">{formatSeconds(dur)}</td>
                   <td className="px-3 py-2.5 text-xs text-muted-foreground font-mono whitespace-nowrap">{s.processName || '—'}</td>

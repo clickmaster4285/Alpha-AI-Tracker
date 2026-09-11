@@ -1866,24 +1866,14 @@ public class SqliteLogStore : ILogStore, IDisposable
         await _connectionGate.WaitAsync(ct);
         try
         {
-            // Zombie-prevention (2026-09-02): skip closed sessions.
-            // A row with `ended_at IS NOT NULL` is already a clean close
-            // — the upsert finalizes it on the next push, and re-sending
-            // it on every focus-flush was the source of the 26h "Stale"
-            // chrome session. The legitimate case for a closed row to
-            // re-sync is a late foreground/background flush where
-            // last_activity_at is still moving past ended_at, so we keep
-            // those (rare; focus flush now respects ended_at too).
-            // 
-            // Bug #9 follow-up: also return sessions that were recently
-            // reset to is_synced=0 for orphan recovery. For orphaned sessions,
-            // we skip the zombie check to ensure they get re-sent even if
-            // they're old and closed. This breaks the permanent orphan deadlock.
+            // is_synced is the sole queue marker. A previously synced session
+            // can become unsynced when it is closed, so it must be returned
+            // even when ended_at and synced_at are both populated. Filtering
+            // closed rows here strands the final close update permanently.
             var cmd = _connection.CreateCommand();
             cmd.CommandText = @"
                 SELECT * FROM app_sessions
                  WHERE is_synced = 0
-                   AND (ended_at IS NULL OR last_activity_at > ended_at OR (synced_at IS NULL AND ended_at IS NOT NULL))
                  ORDER BY started_at ASC
                  LIMIT $limit";
             cmd.Parameters.AddWithValue("$limit", limit);

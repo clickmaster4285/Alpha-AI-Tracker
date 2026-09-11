@@ -629,7 +629,8 @@ internal static class DatabaseSchema
             foreground_seconds = COALESCE($foreground_seconds, foreground_seconds),
             background_seconds = COALESCE($background_seconds, background_seconds),
             -- Re-sync on close: a session synced as OPEN must tell the server it ended.
-            is_synced = 0
+            is_synced = 0,
+            synced_at = NULL
         WHERE id = $id
     ";
 

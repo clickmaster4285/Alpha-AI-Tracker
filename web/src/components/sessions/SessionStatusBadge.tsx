@@ -57,7 +57,7 @@ export default function SessionStatusBadge({
 }) {
   if (status === 'ACTIVE') {
     return (
-      <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-success/15 text-success ${className}`}>
+      <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-success/15 text-success transition-transform duration-200 hover:scale-105 ${className}`}>
         <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse-soft" />
         <Activity className="w-3 h-3" />
         Running
@@ -67,7 +67,7 @@ export default function SessionStatusBadge({
   if (status === 'OFFLINE') {
     return (
       <span
-        className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-orange-500/15 text-orange-600 dark:text-orange-400 ${className}`}
+        className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-orange-500/15 text-orange-600 dark:text-orange-400 transition-transform duration-200 hover:scale-105 ${className}`}
         title={staleSinceLabel ? `Tracker last synced ${staleSinceLabel} — machine unreachable, session may still be running` : 'Machine unreachable — last sync is older than the offline threshold'}
       >
         <span className="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse-soft" />
@@ -79,7 +79,7 @@ export default function SessionStatusBadge({
   if (status === 'STALE') {
     return (
       <span
-        className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-warning/15 text-warning ${className}`}
+        className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-warning/15 text-warning transition-transform duration-200 hover:scale-105 ${className}`}
         title={staleSinceLabel ? `Tracker last synced ${staleSinceLabel} — may still be running offline` : undefined}
       >
         <span className="w-1.5 h-1.5 rounded-full bg-warning" />
@@ -89,7 +89,7 @@ export default function SessionStatusBadge({
     );
   }
   return (
-    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-muted text-muted-foreground ${className}`}>
+    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-muted text-muted-foreground transition-transform duration-200 hover:scale-105 ${className}`}>
       <CheckCircle2 className="w-3 h-3" />
       Closed
     </span>

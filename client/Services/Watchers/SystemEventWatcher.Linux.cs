@@ -108,12 +108,9 @@ public sealed partial class SystemEventWatcher
                     try
                     {
                         // The bus and process can disappear immediately after
-                        // this callback, so complete the recorder's bounded
-                        // SQLite write synchronously.
-                        SafeRecordAsync(
-                            SessionEventTypes.PowerOff,
-                            "login1_prepare_shutdown",
-                            default).GetAwaiter().GetResult();
+                        // this callback, so complete the recorder and session
+                        // close transaction synchronously.
+                        PersistPowerOffAndCloseSessionsSynchronously("login1_prepare_shutdown");
                     }
                     catch (Exception ex)
                     {

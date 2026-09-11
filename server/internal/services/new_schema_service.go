@@ -532,6 +532,8 @@ func (s *NewSchemaService) ListAppSessionsUsage(ctx context.Context, params repo
 			FirstOpenedAt:        r.FirstOpenedAt,
 			LastClosedAt:         r.LastClosedAt,
 			TotalDurationSeconds: r.TotalDurationSeconds,
+			HasOpenSession:       r.HasOpenSession,
+			LastActiveAt:         r.LastActiveAt,
 		}
 	}
 
