@@ -801,12 +801,13 @@ type AppSessionUsageListParams struct {
 }
 
 type AppSessionUsageRow struct {
-	AppDisplayName     string
-	ProcessName        string
-	SessionCount       int
-	FirstOpenedAt      time.Time
-	LastClosedAt       time.Time
+	AppDisplayName       string
+	ProcessName          string
+	SessionCount         int
+	FirstOpenedAt        time.Time
+	LastClosedAt         time.Time
 	TotalDurationSeconds float64
+	HasOpenSession       bool
 }
 
 type AppSessionUsageListResult struct {
@@ -901,7 +902,8 @@ func (r *NewSchemaRepo) AggregateAppSessionsUsage(ctx context.Context, params Ap
 		       COUNT(*) AS session_count,
 		       MIN(started_at) AS first_opened_at,
 		       MAX(COALESCE(ended_at, last_sync_at, started_at)) AS last_closed_at,
-		       COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(ended_at, last_sync_at, started_at) - started_at))), 0) AS total_duration_seconds
+		       COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(ended_at, last_sync_at, started_at) - started_at))), 0) AS total_duration_seconds,
+		       BOOL_OR(ended_at IS NULL) AS has_open_session
 		FROM app_sessions %s
 		GROUP BY app_display_name, process_name
 		ORDER BY total_duration_seconds DESC
@@ -925,6 +927,7 @@ func (r *NewSchemaRepo) AggregateAppSessionsUsage(ctx context.Context, params Ap
 			&u.FirstOpenedAt,
 			&u.LastClosedAt,
 			&u.TotalDurationSeconds,
+			&u.HasOpenSession,
 		); err != nil {
 			return nil, fmt.Errorf("scan app_sessions usage row: %w", err)
 		}

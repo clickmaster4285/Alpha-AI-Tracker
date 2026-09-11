@@ -131,6 +131,9 @@ public class LogCollectorService : BackgroundService
         "gvfsd-trash",
         // 🟡 Phase 0b: GNOME search provider daemon (not the Settings GUI)
         "gnome-control-center-search-provider",
+        // Embedded WebView2 runtime host — not a user-facing application
+        // (spawned by WhatsApp, Teams, VS Code, etc. as a child process).
+        "msedgewebview2",
     };
 
     /// <summary>

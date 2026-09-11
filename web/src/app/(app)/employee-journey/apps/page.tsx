@@ -1,13 +1,14 @@
 'use client';
 
 import { Fragment, Suspense, useEffect, useMemo, useState } from 'react';
-import { AppWindow, Timer, Layers, Activity, Loader2, ChevronRight, ChevronDown } from 'lucide-react';
+import { AppWindow, Timer, Layers, Activity, Loader2, ChevronRight, ChevronDown, CheckCircle2 } from 'lucide-react';
 import { keepPreviousData, useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import EmployeePage from '@/components/employees/EmployeePage';
 import EmptyState from '@/components/employees/EmptyState';
 import ActivityFilters, { type ActivityFilter } from '@/components/journey/ActivityFilters';
 import { appSessionsApi, type AppSession, type AppUsageRow } from '@/lib/api';
 import { formatDateTime, formatSeconds } from '@/lib/format';
+import SessionStatusBadge, { sessionStatus } from '@/components/sessions/SessionStatusBadge';
 
 const SESSIONS_PER_PAGE = 20;
 
@@ -73,9 +74,7 @@ function AppUsageBody({
 
   const totalDuration = usage.reduce((n, u) => n + u.totalDurationSeconds, 0);
   const totalSessions = usage.reduce((n, u) => n + u.sessionCount, 0);
-  const runningCount = usage.filter(u =>
-    new Date(u.lastClosedAt).getTime() > Date.now() - 60_000
-  ).length;
+  const runningCount = usage.filter(u => u.hasOpenSession).length;
   const filtered = filter.search !== '' || filter.preset !== 'all';
 
   const toggle = (key: string) => {
@@ -119,7 +118,7 @@ function AppUsageBody({
         <table className="w-full min-w-[760px]">
           <thead>
             <tr className="border-b border-border">
-              {['Application', 'Sessions', 'Duration', 'First Opened', 'Last Closed'].map(h => (
+              {['Application', 'Sessions', 'Duration', 'Status', 'First Opened', 'Last Closed'].map(h => (
                 <th key={h} className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground whitespace-nowrap">{h}</th>
               ))}
             </tr>
@@ -158,12 +157,31 @@ function AppUsageBody({
                     </td>
                     <td className="px-4 py-3 text-sm text-foreground font-medium">{u.sessionCount}</td>
                     <td className="px-4 py-3 text-sm text-success font-medium whitespace-nowrap">{formatSeconds(u.totalDurationSeconds)}</td>
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      {u.hasOpenSession ? (
+                        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-success/15 text-success">
+                          <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse-soft" />
+                          Running
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-muted text-muted-foreground">
+                          <CheckCircle2 className="w-3 h-3" />
+                          Closed
+                        </span>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">{formatDateTime(u.firstOpenedAt)}</td>
-                    <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">{formatDateTime(u.lastClosedAt)}</td>
+                    <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">
+                      {u.hasOpenSession ? (
+                        <span className="text-warning font-medium">Running</span>
+                      ) : (
+                        formatDateTime(u.lastClosedAt)
+                      )}
+                    </td>
                   </tr>
                   {isOpen && (
                     <tr className="border-b border-border bg-muted/20">
-                      <td colSpan={5} className="px-0 py-0">
+                      <td colSpan={6} className="px-0 py-0">
                         <ExpandedSessions
                           appDisplayName={u.appDisplayName}
                           processName={u.processName}
@@ -250,7 +268,7 @@ function ExpandedSessions({
         <table className="w-full">
           <thead>
             <tr className="border-b border-border">
-              {['Opened', 'Closed', 'Duration', 'Process', 'Title', 'Foreground', 'Background'].map(h => (
+              {['Opened', 'Closed', 'Duration', 'Process', 'Title', 'Foreground', 'Background', 'Status'].map(h => (
                 <th key={h} className="text-left px-3 py-2 text-xs font-semibold text-muted-foreground whitespace-nowrap">{h}</th>
               ))}
             </tr>
@@ -273,6 +291,9 @@ function ExpandedSessions({
                   </td>
                   <td className="px-3 py-2.5 text-sm text-success font-medium whitespace-nowrap">{formatSeconds(fg)}</td>
                   <td className="px-3 py-2.5 text-sm text-muted-foreground font-medium whitespace-nowrap">{formatSeconds(bg)}</td>
+                  <td className="px-3 py-2.5 whitespace-nowrap">
+                    <SessionStatusBadge status={sessionStatus(s)} />
+                  </td>
                 </tr>
               );
             })}

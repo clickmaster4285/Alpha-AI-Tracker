@@ -614,6 +614,7 @@ export interface AppUsageRow {
   firstOpenedAt: string;
   lastClosedAt: string;
   totalDurationSeconds: number;
+  hasOpenSession: boolean;
 }
 
 export interface AppUsageListResponse {
