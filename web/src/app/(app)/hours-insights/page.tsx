@@ -38,7 +38,7 @@ export default function HoursInsightsPage() {
         bodySchema={{
           view: { parse: (raw: string) => (raw === 'applications' ? 'applications' : 'productivity') },
         }}
-        bodyInitial={{ view: 'productivity' }}
+        bodyInitial={{ view: 'applications' }}
       >
         {({ employee, filter, setFilter, body, setBody }) => (
           <HoursInsightsBody
@@ -148,6 +148,19 @@ function HoursInsightsBody({
 
         {/* View Mode Toggle */}
         <div className="flex items-center gap-1 self-start sm:self-center p-1 bg-muted/70 rounded-xl border border-border/80 flex-shrink-0">
+           <button
+            type="button"
+            onClick={() => setViewMode('applications')}
+            className={cn(
+              "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200",
+              viewMode === 'applications'
+                ? "bg-card text-foreground shadow-sm border border-border/60"
+                : "text-muted-foreground hover:text-foreground"
+            )}
+          >
+            <Layers className="w-3.5 h-3.5 text-blue-500" />
+            <span>From Application Individually</span>
+          </button>
           <button
             type="button"
             onClick={() => setViewMode('productivity')}
@@ -161,19 +174,7 @@ function HoursInsightsBody({
             <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
             <span>From Productivity</span>
           </button>
-          <button
-            type="button"
-            onClick={() => setViewMode('applications')}
-            className={cn(
-              "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-200",
-              viewMode === 'applications'
-                ? "bg-card text-foreground shadow-sm border border-border/60"
-                : "text-muted-foreground hover:text-foreground"
-            )}
-          >
-            <Layers className="w-3.5 h-3.5 text-blue-500" />
-            <span>From Application Individually</span>
-          </button>
+         
         </div>
       </div>
 
