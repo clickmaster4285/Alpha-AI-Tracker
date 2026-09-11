@@ -4,18 +4,20 @@ import { Suspense, useEffect, useMemo, useState } from 'react';
 import {
   AppWindow, Globe, Timer, Activity, Loader2,
   Monitor, ShieldCheck, Layers, Sparkles,
-  BarChart3, CheckCircle2, AlertCircle, HelpCircle,
+  BarChart3, CheckCircle2, AlertCircle, HelpCircle, PieChart as PieChartIcon,
+  Radar, LineChart as LineChartIcon,
 } from 'lucide-react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import {
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Legend, Tooltip,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, ResponsiveContainer,
+  Legend, Tooltip, PieChart, Pie, Cell, LineChart, Line,
 } from 'recharts';
 import EmployeePage from '@/components/employees/EmployeePage';
 import EmptyState from '@/components/employees/EmptyState';
 import ActivityFilters, { type ActivityFilter } from '@/components/journey/ActivityFilters';
 import { hoursInsightsApi } from '@/lib/api';
 import { formatSeconds } from '@/lib/format';
-import { ChartContainer, ChartTooltipContent, ChartLegendContent } from '@/components/ui/chart';
+import { ChartContainer } from '@/components/ui/chart';
 import { cn } from '@/lib/utils';
 
 const PRODUCTIVE_COLOR = '#10b981';
@@ -37,8 +39,9 @@ export default function HoursInsightsPage() {
         icon={Clock}
         bodySchema={{
           view: { parse: (raw: string) => (raw === 'applications' ? 'applications' : 'productivity') },
+          chart: { parse: (raw: string) => (['histogram', 'pie', 'nightingale', 'line'].includes(raw) ? raw : 'histogram') },
         }}
-        bodyInitial={{ view: 'applications' }}
+        bodyInitial={{ view: 'applications', chart: 'histogram' }}
       >
         {({ employee, filter, setFilter, body, setBody }) => (
           <HoursInsightsBody
@@ -47,6 +50,8 @@ export default function HoursInsightsPage() {
             setFilter={setFilter}
             viewMode={(body.view as 'productivity' | 'applications') || 'productivity'}
             setViewMode={(next) => setBody({ view: next })}
+            chartType={(body.chart as ChartType) || 'histogram'}
+            setChartType={(next) => setBody({ chart: next })}
           />
         )}
       </EmployeePage>
@@ -60,12 +65,16 @@ function HoursInsightsBody({
   setFilter,
   viewMode,
   setViewMode,
+  chartType,
+  setChartType,
 }: {
   employeeId: string;
   filter: ActivityFilter;
   setFilter: (next: ActivityFilter) => void;
   viewMode: 'productivity' | 'applications';
   setViewMode: (next: 'productivity' | 'applications') => void;
+  chartType: ChartType;
+  setChartType: (next: ChartType) => void;
 }) {
   const [isFiltering, setIsFiltering] = useState(false);
 
@@ -282,131 +291,17 @@ function HoursInsightsBody({
                 </p>
               </div>
 
-              {viewMode === 'productivity' && (
-                <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                  <span className="flex items-center gap-1.5">
-                    <span className="w-2.5 h-2.5 rounded-full bg-[#10b981]" />
-                    Productive
-                  </span>
-                  <span className="flex items-center gap-1.5">
-                    <span className="w-2.5 h-2.5 rounded-full bg-[#64748b]" />
-                    Neutral
-                  </span>
-                  <span className="flex items-center gap-1.5">
-                    <span className="w-2.5 h-2.5 rounded-full bg-[#ef4444]" />
-                    Unproductive
-                  </span>
-                </div>
-              )}
             </div>
-
-            {viewMode === 'productivity' ? (
-              <ChartContainer config={productivityChartConfig} className="aspect-[2.2/1] w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={productivityChart} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.6} />
-                    <XAxis
-                      dataKey="bucket"
-                      stroke="var(--color-muted-foreground)"
-                      fontSize={11}
-                      tickLine={false}
-                      axisLine={false}
-                    />
-                    <YAxis
-                      stroke="var(--color-muted-foreground)"
-                      fontSize={11}
-                      tickLine={false}
-                      axisLine={false}
-                      tickFormatter={(v: number) => formatSeconds(v)}
-                      width={65}
-                    />
-                    <Tooltip
-                      content={
-                        <ChartTooltipContent
-                          formatter={(value: number, name: string) => [
-                            formatSeconds(value),
-                            productivityChartConfig[name as keyof typeof productivityChartConfig]?.label || name,
-                          ]}
-                        />
-                      }
-                    />
-                    <Legend content={<ChartLegendContent />} />
-                    <Area
-                      type="monotone"
-                      dataKey="unproductive"
-                      stackId="1"
-                      stroke={UNPRODUCTIVE_COLOR}
-                      fill={UNPRODUCTIVE_COLOR}
-                      fillOpacity={0.8}
-                    />
-                    <Area
-                      type="monotone"
-                      dataKey="neutral"
-                      stackId="1"
-                      stroke={NEUTRAL_COLOR}
-                      fill={NEUTRAL_COLOR}
-                      fillOpacity={0.8}
-                    />
-                    <Area
-                      type="monotone"
-                      dataKey="productive"
-                      stackId="1"
-                      stroke={PRODUCTIVE_COLOR}
-                      fill={PRODUCTIVE_COLOR}
-                      fillOpacity={0.8}
-                    />
-                  </AreaChart>
-                </ResponsiveContainer>
-              </ChartContainer>
-            ) : (
-              <ChartContainer config={appChartConfig} className="aspect-[2.2/1] w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={appChartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.6} />
-                    <XAxis
-                      dataKey="bucket"
-                      stroke="var(--color-muted-foreground)"
-                      fontSize={11}
-                      tickLine={false}
-                      axisLine={false}
-                    />
-                    <YAxis
-                      stroke="var(--color-muted-foreground)"
-                      fontSize={11}
-                      tickLine={false}
-                      axisLine={false}
-                      tickFormatter={(v: number) => formatSeconds(v)}
-                      width={65}
-                    />
-                    <Tooltip
-                      content={
-                        <ChartTooltipContent
-                          formatter={(value: number, name: string) => [
-                            formatSeconds(value),
-                            appChartConfig[name]?.label || name,
-                          ]}
-                        />
-                      }
-                    />
-                    <Legend content={<ChartLegendContent />} />
-                    {appKeysSorted.map((key) => {
-                      const color = appChartConfig[key]?.color || '#94a3b8';
-                      return (
-                        <Area
-                          key={key}
-                          type="monotone"
-                          dataKey={key}
-                          stackId="1"
-                          stroke={color}
-                          fill={color}
-                          fillOpacity={0.75}
-                        />
-                      );
-                    })}
-                  </AreaChart>
-                </ResponsiveContainer>
-              </ChartContainer>
-            )}
+            <ChartSelector value={chartType} onChange={setChartType} />
+            <HoursChart
+              chartType={chartType}
+              viewMode={viewMode}
+              productivityData={productivityChart}
+              appData={appChartData}
+              appKeys={appKeysSorted}
+              appConfig={appChartConfig}
+              totalDuration={totalDuration}
+            />
           </div>
 
           {/* Breakdown Section */}
@@ -545,6 +440,168 @@ function HoursInsightsBody({
         </>
       )}
     </div>
+  );
+}
+
+type ChartType = 'histogram' | 'pie' | 'nightingale' | 'line';
+
+const chartOptions: Array<{ value: ChartType; label: string; icon: React.ElementType }> = [
+  { value: 'histogram', label: 'Histogram', icon: BarChart3 },
+  { value: 'pie', label: 'Pie', icon: PieChartIcon },
+  { value: 'nightingale', label: 'Nightingale', icon: Radar },
+  { value: 'line', label: 'Line', icon: LineChartIcon },
+];
+
+function ChartSelector({ value, onChange }: { value: ChartType; onChange: (next: ChartType) => void }) {
+  return (
+    <div className="flex items-center gap-1 p-1 mb-4 overflow-x-auto bg-muted/60 border border-border/80 rounded-xl w-fit max-w-full">
+      {chartOptions.map(({ value: option, label, icon: Icon }) => (
+        <button
+          key={option}
+          type="button"
+          onClick={() => onChange(option)}
+          aria-pressed={value === option}
+          className={cn(
+            'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all',
+            value === option
+              ? 'bg-card text-foreground shadow-sm border border-border/60'
+              : 'text-muted-foreground hover:text-foreground',
+          )}
+        >
+          <Icon className="w-3.5 h-3.5" />
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function HoursChart({
+  chartType,
+  viewMode,
+  productivityData,
+  appData,
+  appKeys,
+  appConfig,
+  totalDuration,
+}: {
+  chartType: ChartType;
+  viewMode: 'productivity' | 'applications';
+  productivityData: Array<{ bucket: string; productive: number; neutral: number; unproductive: number }>;
+  appData: Array<Record<string, string | number>>;
+  appKeys: string[];
+  appConfig: Record<string, { label: string; color: string }>;
+  totalDuration: number;
+}) {
+  const isProductivity = viewMode === 'productivity';
+  const pieData = isProductivity
+    ? [
+        { name: 'Productive', value: productivityData.reduce((sum, row) => sum + row.productive, 0), color: PRODUCTIVE_COLOR },
+        { name: 'Neutral', value: productivityData.reduce((sum, row) => sum + row.neutral, 0), color: NEUTRAL_COLOR },
+        { name: 'Unproductive', value: productivityData.reduce((sum, row) => sum + row.unproductive, 0), color: UNPRODUCTIVE_COLOR },
+      ]
+    : appKeys
+        .map((key) => ({
+          name: appConfig[key]?.label || key,
+          value: appData.reduce((sum, row) => sum + Number(row[key] || 0), 0),
+          color: appConfig[key]?.color || '#94a3b8',
+        }))
+        .filter((item) => item.value > 0)
+        .slice(0, 8);
+
+  const histogramData = isProductivity
+    ? productivityData.map((row) => ({ bucket: row.bucket, total: row.productive + row.neutral + row.unproductive }))
+    : appData.map((row) => ({
+        bucket: String(row.bucket),
+        total: appKeys.reduce((sum, key) => sum + Number(row[key] || 0), 0),
+      }));
+
+  const lineKeys = isProductivity ? ['productive', 'neutral', 'unproductive'] : appKeys;
+  const lineConfig = isProductivity
+    ? productivityChartConfig
+    : appConfig;
+
+  const formatValue = (value: number) => formatSeconds(Number(value));
+  const chartHeight = 'h-[340px] sm:h-[380px]';
+
+  return (
+    <ChartContainer config={lineConfig} className={`${chartHeight} w-full`}>
+      <ResponsiveContainer width="100%" height="100%">
+        {chartType === 'histogram' ? (
+          <BarChart data={histogramData} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.6} />
+            <XAxis dataKey="bucket" tickLine={false} axisLine={false} fontSize={11} />
+            <YAxis tickLine={false} axisLine={false} fontSize={11} width={65} tickFormatter={formatValue} />
+            <Tooltip formatter={(value: number) => [formatValue(value), 'Usage']} />
+            <Bar dataKey="total" name="Usage" fill={isProductivity ? PRODUCTIVE_COLOR : '#3b82f6'} radius={[5, 5, 0, 0]} />
+          </BarChart>
+        ) : chartType === 'pie' || chartType === 'nightingale' ? (
+          <PieChart>
+            {chartType === 'pie' ? (
+              <Pie
+                data={pieData}
+                dataKey="value"
+                nameKey="name"
+                cx="50%"
+                cy="50%"
+                innerRadius={72}
+                outerRadius={122}
+                paddingAngle={3}
+                label={({ name, value }) => `${name} ${Math.round((value / Math.max(totalDuration, 1)) * 100)}%`}
+              >
+                {pieData.map((entry) => <Cell key={entry.name} fill={entry.color} />)}
+              </Pie>
+            ) : (
+              pieData.map((entry, index) => {
+                const total = pieData.reduce((sum, item) => sum + item.value, 0);
+                const previous = pieData.slice(0, index).reduce((sum, item) => sum + item.value, 0);
+                const startAngle = 90 - (previous / Math.max(total, 1)) * 360;
+                const endAngle = startAngle - (entry.value / Math.max(total, 1)) * 360;
+                return (
+                  <Pie
+                    key={entry.name}
+                    data={[entry]}
+                    dataKey="value"
+                    nameKey="name"
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={18}
+                    outerRadius={72 + index * 12}
+                    startAngle={startAngle}
+                    endAngle={endAngle}
+                    paddingAngle={2}
+                  >
+                    <Cell fill={entry.color} />
+                  </Pie>
+                );
+              })
+            )}
+            <Tooltip formatter={(value: number, name: string) => [formatValue(value), name]} />
+            <Legend />
+          </PieChart>
+        ) : (
+          <LineChart data={isProductivity ? productivityData : appData} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.6} />
+            <XAxis dataKey="bucket" tickLine={false} axisLine={false} fontSize={11} />
+            <YAxis tickLine={false} axisLine={false} fontSize={11} width={65} tickFormatter={formatValue} />
+            <Tooltip formatter={(value: number, name: string) => [formatValue(value), lineConfig[name]?.label || name]} />
+            <Legend />
+            {lineKeys.map((key) => (
+              <Line
+                key={key}
+                type="monotone"
+                dataKey={key}
+                name={lineConfig[key]?.label || key}
+                stroke={lineConfig[key]?.color || '#94a3b8'}
+                strokeWidth={2}
+                dot={{ r: 2 }}
+                activeDot={{ r: 5 }}
+              />
+            ))}
+          </LineChart>
+        )}
+      </ResponsiveContainer>
+    </ChartContainer>
   );
 }
 
