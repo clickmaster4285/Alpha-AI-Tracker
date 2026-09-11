@@ -298,6 +298,7 @@ function HoursInsightsBody({
               viewMode={viewMode}
               productivityData={productivityChart}
               appData={appChartData}
+              appTotals={topApps}
               appKeys={appKeysSorted}
               appConfig={appChartConfig}
               totalDuration={totalDuration}
@@ -481,6 +482,7 @@ function HoursChart({
   viewMode,
   productivityData,
   appData,
+  appTotals,
   appKeys,
   appConfig,
   totalDuration,
@@ -489,6 +491,7 @@ function HoursChart({
   viewMode: 'productivity' | 'applications';
   productivityData: Array<{ bucket: string; productive: number; neutral: number; unproductive: number }>;
   appData: Array<Record<string, string | number>>;
+  appTotals: Array<{ name: string; totalSeconds: number; color: string }>;
   appKeys: string[];
   appConfig: Record<string, { label: string; color: string }>;
   totalDuration: number;
@@ -500,14 +503,17 @@ function HoursChart({
         { name: 'Neutral', value: productivityData.reduce((sum, row) => sum + row.neutral, 0), color: NEUTRAL_COLOR },
         { name: 'Unproductive', value: productivityData.reduce((sum, row) => sum + row.unproductive, 0), color: UNPRODUCTIVE_COLOR },
       ]
-    : appKeys
-        .map((key) => ({
-          name: appConfig[key]?.label || key,
-          value: appData.reduce((sum, row) => sum + Number(row[key] || 0), 0),
-          color: appConfig[key]?.color || '#94a3b8',
-        }))
-        .filter((item) => item.value > 0)
-        .slice(0, 8);
+    : (() => {
+        const topAppSeconds = appTotals.reduce((sum, app) => sum + app.totalSeconds, 0);
+        const otherSeconds = Math.max(totalDuration - topAppSeconds, 0);
+        const items = appTotals
+          .map((app) => ({ name: app.name, value: app.totalSeconds, color: app.color }))
+          .filter((item) => item.value > 0);
+        if (otherSeconds > 0) {
+          items.push({ name: 'Other', value: otherSeconds, color: '#94a3b8' });
+        }
+        return items;
+      })();
 
   const histogramData = isProductivity
     ? productivityData.map((row) => ({ bucket: row.bucket, total: row.productive + row.neutral + row.unproductive }))
