@@ -111,7 +111,17 @@ function AppUsageBody({
       .sort((a, b) => b.totalDurationSeconds - a.totalDurationSeconds);
   }, [query.data]);
 
-  const totalDuration = usage.reduce((n, u) => n + u.totalDurationSeconds, 0);
+  const totalDuration = useMemo(() => {
+    if (usage.length === 0) return 0;
+    const firstOpened = Math.min(...usage.map(u => new Date(u.firstOpenedAt).getTime()));
+    const hasRunning = usage.some(u => u.hasOpenSession);
+    const now = Date.now();
+    const lastClosed = Math.max(...usage.map(u => {
+      const ts = new Date(u.lastClosedAt).getTime();
+      return hasRunning ? Math.max(ts, now) : ts;
+    }));
+    return Math.max(0, (lastClosed - firstOpened) / 1000);
+  }, [usage]);
   const totalSessions = usage.reduce((n, u) => n + u.sessionCount, 0);
   const runningCount = usage.filter(u => u.hasOpenSession).length;
   const filtered = filter.search !== '' || filter.preset !== 'all';
