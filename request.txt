@@ -1,7 +1,8 @@
 this is my v1.0.0 on github releases
 
-and now i want to release direct v1.1.5 
+and now i release v1.1.5 
 
 can you send me "Release notes" 
 
 check my git commit on all after the commit: 6ceb916a0e60b14678c23e4f12a18f18d67497b7
+and deduct all the issue resolved and new featured added
