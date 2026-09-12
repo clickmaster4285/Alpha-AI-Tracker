@@ -579,12 +579,12 @@ func (r *NewSchemaRepo) filterOrphanAppItems(ctx context.Context, batch []models
 	}
 
 	rows, err := r.pool.Query(ctx, "SELECT id FROM app_sessions WHERE id = ANY($1)", distinct)
-		if err != nil {
-			// If the preflight itself fails, fail closed — return the full
-			// batch so the caller 500s. Better to alert than to silently
-			// drop data on a transient pg error.
-			return nil, nil, nil
-		}
+	if err != nil {
+		// If the preflight itself fails, fail closed — return the full
+		// batch so the caller 500s. Better to alert than to silently
+		// drop data on a transient pg error.
+		return nil, nil, nil
+	}
 	defer rows.Close()
 	present := make(map[string]struct{}, len(distinct))
 	for rows.Next() {
@@ -712,12 +712,18 @@ func (r *NewSchemaRepo) ListAppSessions(ctx context.Context, params AppSessionLi
 		argIdx++
 	}
 	if !params.DateFrom.IsZero() {
-		conditions = append(conditions, fmt.Sprintf("started_at >= $%d", argIdx))
+		conditions = append(conditions, fmt.Sprintf(
+			`COALESCE(
+				CASE WHEN status = 'ACTIVE' AND ended_at IS NULL THEN NOW() END,
+				ended_at, last_sync_at, last_activity_at, started_at
+			) > $%d`,
+			argIdx,
+		))
 		args = append(args, params.DateFrom)
 		argIdx++
 	}
 	if !params.DateTo.IsZero() {
-		conditions = append(conditions, fmt.Sprintf("started_at <= $%d", argIdx))
+		conditions = append(conditions, fmt.Sprintf("started_at < $%d", argIdx))
 		args = append(args, params.DateTo)
 		argIdx++
 	}
@@ -735,7 +741,6 @@ func (r *NewSchemaRepo) ListAppSessions(ctx context.Context, params AppSessionLi
 
 	offset := (params.Page - 1) * params.PerPage
 	totalPages := (total + params.PerPage - 1) / params.PerPage
-
 	query := fmt.Sprintf(`
 		SELECT id, employee_id, process_name, app_display_name, started_at, ended_at,
 		       machine_id, session_id, platform, process_id, parent_process_id,
@@ -783,12 +788,10 @@ func (r *NewSchemaRepo) ListAppSessions(ctx context.Context, params AppSessionLi
 // ────────────────────────────────
 //
 // The web "App Usage" page needs per-application totals, not the raw
-// session list. Summing (endedAt - startedAt) per row inflates the
-// total when one window opens multiple tabs (each tab was historically
-// a separate row in the client's data; we still defensively use
-// MIN/MAX here so the math is right even before any client-side
-// dedupe lands). Returns one row per (appDisplayName, processName)
-// with: sessionCount, firstOpenedAt, lastClosedAt, totalDurationSeconds.
+// session list. Duration is the sum of each session's effective duration,
+// so separate sessions do not include the inactive gap between them.
+// Returns one row per (appDisplayName, processName) with:
+// sessionCount, firstOpenedAt, lastClosedAt, totalDurationSeconds.
 
 type AppSessionUsageListParams struct {
 	EmployeeID string
@@ -812,11 +815,13 @@ type AppSessionUsageRow struct {
 }
 
 type AppSessionUsageListResult struct {
-	Rows               []AppSessionUsageRow
-	Total              int
-	Page               int
-	PerPage            int
-	TotalPages         int
+	Rows                 []AppSessionUsageRow
+	Total                int
+	TotalSessionCount    int
+	OpenSessionCount     int
+	Page                 int
+	PerPage              int
+	TotalPages           int
 	TotalDurationSeconds float64
 }
 
@@ -852,12 +857,18 @@ func (r *NewSchemaRepo) AggregateAppSessionsUsage(ctx context.Context, params Ap
 		argIdx++
 	}
 	if !params.DateFrom.IsZero() {
-		conditions = append(conditions, fmt.Sprintf("started_at >= $%d", argIdx))
+		conditions = append(conditions, fmt.Sprintf(
+			`COALESCE(
+				CASE WHEN status = 'ACTIVE' AND ended_at IS NULL THEN NOW() END,
+				ended_at, last_sync_at, last_activity_at, started_at
+			) > $%d`,
+			argIdx,
+		))
 		args = append(args, params.DateFrom)
 		argIdx++
 	}
 	if !params.DateTo.IsZero() {
-		conditions = append(conditions, fmt.Sprintf("started_at <= $%d", argIdx))
+		conditions = append(conditions, fmt.Sprintf("started_at < $%d", argIdx))
 		args = append(args, params.DateTo)
 		argIdx++
 	}
@@ -882,6 +893,18 @@ func (r *NewSchemaRepo) AggregateAppSessionsUsage(ctx context.Context, params Ap
 
 	offset := (params.Page - 1) * params.PerPage
 	totalPages := (total + params.PerPage - 1) / params.PerPage
+	rangeFrom := params.DateFrom
+	rangeTo := params.DateTo
+	if rangeFrom.IsZero() {
+		rangeFrom = time.Unix(0, 0).UTC()
+	}
+	if rangeTo.IsZero() {
+		rangeTo = time.Now()
+	}
+	durationToIdx := argIdx
+	durationFromIdx := argIdx + 1
+	queryArgs := append(append([]interface{}{}, args...), rangeTo, rangeFrom)
+	argIdx += 2
 
 	// Per-app aggregate:
 	//   - sessionCount        = COUNT(*)
@@ -892,34 +915,81 @@ func (r *NewSchemaRepo) AggregateAppSessionsUsage(ctx context.Context, params Ap
 	//      is final. Using COALESCE picks the most-recent truthful moment
 	//      regardless of status — same shape the web page uses for the
 	//      STALE/CLOSED case in sessionDurationSeconds.)
-	//   - totalDurationSeconds = MAX(end_or_now) - MIN(started_at) per group
-	//     (range, not sum — so a window with 3 tabs × 10 min renders as
-	//     10 min, not 30 min; for ACTIVE sessions the "end" is NOW() so
-	//     a running window's range grows in real time).
+	//   - totalDurationSeconds = SUM(each session's effective duration) per
+	//     group. Separate sessions must not include the idle gap between them:
+	//     09:00-11:00 plus 16:00-18:00 is 4 hours, not 9 hours.
+	//     The date range is clipped server-side and ACTIVE sessions end at NOW().
 	query := fmt.Sprintf(`
-		SELECT app_display_name,
-		       COALESCE(process_name, '') AS process_name,
-		       COUNT(*) AS session_count,
-		       MIN(started_at) AS first_opened_at,
-		       MAX(COALESCE(ended_at, last_sync_at, started_at)) AS last_closed_at,
-		       COALESCE(EXTRACT(EPOCH FROM (
-		           MAX(
-		               CASE
-		                   WHEN status = 'ACTIVE' AND ended_at IS NULL THEN NOW()
-		                   ELSE COALESCE(ended_at, last_sync_at, started_at)
-		               END
-		           ) - MIN(started_at)
-		       )), 0) AS total_duration_seconds,
-		       BOOL_OR(status = 'ACTIVE' AND ended_at IS NULL) AS has_open_session,
-		       MAX(COALESCE(last_activity_at, last_sync_at, ended_at, started_at)) AS last_active_at
-		FROM app_sessions %s
-		GROUP BY app_display_name, process_name
+		WITH effective_sessions AS (
+			SELECT app_display_name, COALESCE(process_name, '') AS process_name,
+			       status, ended_at, last_activity_at, last_sync_at, started_at,
+			       GREATEST(started_at, $%d) AS eff_start,
+			       LEAST(
+			           CASE
+			               WHEN status = 'ACTIVE' AND ended_at IS NULL
+			               	AND last_sync_at > NOW() - INTERVAL '10 minutes' THEN NOW()
+			               ELSE COALESCE(ended_at, last_sync_at, last_activity_at, started_at)
+			           END,
+			           $%d
+			       ) AS eff_end
+			FROM app_sessions %s
+		),
+		valid_sessions AS (
+			SELECT * FROM effective_sessions WHERE eff_end > eff_start
+		),
+		session_meta AS (
+			SELECT app_display_name, process_name, COUNT(*) AS session_count,
+			       MIN(started_at) AS first_opened_at,
+			       MAX(eff_end) AS last_closed_at,
+			       BOOL_OR(status = 'ACTIVE' AND ended_at IS NULL) AS has_open_session,
+			       MAX(COALESCE(last_activity_at, last_sync_at, ended_at, started_at)) AS last_active_at
+			FROM valid_sessions
+			GROUP BY app_display_name, process_name
+		),
+		ordered AS (
+			SELECT v.*,
+			       MAX(eff_end) OVER (
+			           PARTITION BY app_display_name, process_name
+			           ORDER BY eff_start, eff_end
+			           ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+			       ) AS prior_max_end
+			FROM valid_sessions v
+		),
+		marked AS (
+			SELECT o.*,
+			       CASE WHEN prior_max_end IS NULL OR eff_start > prior_max_end
+			            THEN 1 ELSE 0 END AS new_island
+			FROM ordered o
+		),
+		islands AS (
+			SELECT m.*,
+			       SUM(new_island) OVER (
+			           PARTITION BY app_display_name, process_name
+			           ORDER BY eff_start, eff_end
+			           ROWS UNBOUNDED PRECEDING
+			       ) AS island_id
+			FROM marked m
+		),
+		merged AS (
+			SELECT app_display_name, process_name, island_id,
+			       MIN(eff_start) AS eff_start, MAX(eff_end) AS eff_end
+			FROM islands
+			GROUP BY app_display_name, process_name, island_id
+		)
+		SELECT m.app_display_name, m.process_name,
+		       sm.session_count, sm.first_opened_at, sm.last_closed_at,
+		       COALESCE(SUM(EXTRACT(EPOCH FROM (m.eff_end - m.eff_start))), 0) AS total_duration_seconds,
+		       sm.has_open_session, sm.last_active_at
+		FROM merged m
+		JOIN session_meta sm USING (app_display_name, process_name)
+		GROUP BY m.app_display_name, m.process_name, sm.session_count,
+		         sm.first_opened_at, sm.last_closed_at, sm.has_open_session, sm.last_active_at
 		ORDER BY total_duration_seconds DESC
 		LIMIT $%d OFFSET $%d
-	`, whereClause, argIdx, argIdx+1)
-	args = append(args, params.PerPage, offset)
+	`, durationFromIdx, durationToIdx, whereClause, argIdx, argIdx+1)
+	queryArgs = append(append([]interface{}{}, args...), rangeTo, rangeFrom, params.PerPage, offset)
 
-	rows, err := r.pool.Query(ctx, query, args...)
+	rows, err := r.pool.Query(ctx, query, queryArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("aggregate app_sessions usage: %w", err)
 	}
@@ -943,34 +1013,68 @@ func (r *NewSchemaRepo) AggregateAppSessionsUsage(ctx context.Context, params Ap
 		usage = append(usage, u)
 	}
 
-	// Global total duration across ALL matching sessions: MIN(started_at)
-	// to MAX(end_or_now), where end_or_now uses NOW() for any still-running
-	// ACTIVE session so the header "Total session time" tile reflects the
-	// real wall-clock span (not the sum of per-app spans, which double-counts
-	// concurrent usage).
-	baseArgs := args[:len(args)-2]
+	// Global total duration across ALL matching sessions is the sum of each
+	// session's effective duration. This deliberately excludes idle gaps and
+	// keeps the header metric consistent with every application row.
+	totalArgs := append(append([]interface{}{}, args...), rangeTo, rangeFrom)
 	var globalTotalDuration float64
 	totalQuery := fmt.Sprintf(`
-		SELECT COALESCE(EXTRACT(EPOCH FROM (
-		    MAX(
-		        CASE
-		            WHEN status = 'ACTIVE' AND ended_at IS NULL THEN NOW()
-		            ELSE COALESCE(ended_at, last_sync_at, started_at)
-		        END
-		    ) - MIN(started_at)
-		)), 0)
-		FROM app_sessions %s
-	`, whereClause)
-	if err := r.pool.QueryRow(ctx, totalQuery, baseArgs...).Scan(&globalTotalDuration); err != nil {
+		WITH effective_sessions AS (
+			SELECT app_display_name, status, ended_at, last_sync_at, last_activity_at, started_at,
+			       GREATEST(started_at, $%d) AS eff_start,
+			       LEAST(CASE WHEN status = 'ACTIVE' AND ended_at IS NULL THEN NOW()
+			                 ELSE COALESCE(ended_at, last_sync_at, last_activity_at, started_at)
+			           END, $%d) AS eff_end
+			FROM app_sessions %s
+		),
+		valid_sessions AS (
+			SELECT * FROM effective_sessions WHERE eff_end > eff_start
+		),
+		ordered AS (
+			SELECT v.*, MAX(eff_end) OVER (
+				ORDER BY eff_start, eff_end
+				ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+			) AS prior_max_end
+			FROM valid_sessions v
+		),
+		marked AS (
+			SELECT o.*, CASE WHEN prior_max_end IS NULL OR eff_start > prior_max_end THEN 1 ELSE 0 END AS new_island
+			FROM ordered o
+		),
+		islands AS (
+			SELECT m.*, SUM(new_island) OVER (
+				ORDER BY eff_start, eff_end
+				ROWS UNBOUNDED PRECEDING
+			) AS island_id
+			FROM marked m
+		),
+		merged AS (
+			SELECT island_id, MIN(eff_start) AS eff_start, MAX(eff_end) AS eff_end
+			FROM islands
+			GROUP BY island_id
+		)
+		SELECT COALESCE(SUM(EXTRACT(EPOCH FROM (eff_end - eff_start))), 0),
+		       (SELECT COUNT(*) FROM valid_sessions),
+		       (SELECT COUNT(*) FROM valid_sessions WHERE status = 'ACTIVE' AND ended_at IS NULL)
+		FROM merged
+	`, durationFromIdx, durationToIdx, whereClause)
+	var totalSessionCount, openSessionCount int
+	if err := r.pool.QueryRow(ctx, totalQuery, totalArgs...).Scan(
+		&globalTotalDuration,
+		&totalSessionCount,
+		&openSessionCount,
+	); err != nil {
 		return nil, fmt.Errorf("compute total app sessions duration: %w", err)
 	}
 
 	return &AppSessionUsageListResult{
-		Rows:                usage,
-		Total:               total,
-		Page:                params.Page,
-		PerPage:             params.PerPage,
-		TotalPages:          totalPages,
+		Rows:                 usage,
+		Total:                total,
+		TotalSessionCount:    totalSessionCount,
+		OpenSessionCount:     openSessionCount,
+		Page:                 params.Page,
+		PerPage:              params.PerPage,
+		TotalPages:           totalPages,
 		TotalDurationSeconds: globalTotalDuration,
 	}, nil
 }
@@ -1985,7 +2089,6 @@ type HoursInsightsResult struct {
 	TopItems     []HoursInsightsTopItem
 }
 
-
 func (r *NewSchemaRepo) ListLocationSamples(ctx context.Context, params LocationSampleListParams) (*LocationSampleListResult, error) {
 	if params.Page < 1 {
 		params.Page = 1
@@ -2163,15 +2266,16 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 		LEFT JOIN departments d ON d.id = e.department_id AND d.deleted_at IS NULL
 		WHERE e.employee_id = (SELECT emp_id FROM params) AND e.deleted_at IS NULL
 	),
-	app_usage AS (
+	raw_app_usage AS (
 		SELECT
 			s.app_display_name,
 			s.installed_app_id,
 			GREATEST(s.started_at, (SELECT from_ts FROM params)) AS eff_start,
 			LEAST(
-				CASE 
-					WHEN s.ended_at IS NOT NULL THEN s.ended_at
-					ELSE s.started_at
+				CASE
+					WHEN s.status = 'ACTIVE' AND s.ended_at IS NULL
+						AND s.last_sync_at > NOW() - INTERVAL '10 minutes' THEN NOW()
+					ELSE COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at)
 				END,
 				(SELECT to_ts FROM params)
 			) AS eff_end,
@@ -2181,8 +2285,56 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 		WHERE s.employee_id = (SELECT emp_id FROM params)
 			AND s.deleted_at IS NULL
 			AND s.started_at < (SELECT to_ts FROM params)
-			AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > (SELECT from_ts FROM params)
-			AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > s.started_at
+			AND (
+				CASE
+					WHEN s.status = 'ACTIVE' AND s.ended_at IS NULL
+						AND s.last_sync_at > NOW() - INTERVAL '10 minutes' THEN NOW()
+					ELSE COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at)
+				END
+			) > (SELECT from_ts FROM params)
+			AND (
+				CASE
+					WHEN s.status = 'ACTIVE' AND s.ended_at IS NULL THEN NOW()
+					ELSE COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at)
+				END
+			) > s.started_at
+	),
+	ordered_app_usage AS (
+		SELECT au.*,
+		       MAX(eff_end) OVER (
+		           PARTITION BY app_display_name
+		           ORDER BY eff_start, eff_end
+		           ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+		       ) AS prior_max_end
+		FROM raw_app_usage au
+	),
+	marked_app_usage AS (
+		SELECT o.*,
+		       CASE WHEN prior_max_end IS NULL OR eff_start > prior_max_end
+		            THEN 1 ELSE 0 END AS new_island
+		FROM ordered_app_usage o
+	),
+	islands_app_usage AS (
+		SELECT m.*,
+		       SUM(new_island) OVER (
+		           PARTITION BY app_display_name
+		           ORDER BY eff_start, eff_end
+		           ROWS UNBOUNDED PRECEDING
+		       ) AS island_id
+		FROM marked_app_usage m
+	),
+	app_usage AS (
+		SELECT app_display_name,
+		       MIN(installed_app_id) AS installed_app_id,
+		       MIN(eff_start) AS eff_start,
+		       MAX(eff_end) AS eff_end
+		FROM islands_app_usage
+		GROUP BY app_display_name, island_id
+	),
+	app_counts AS (
+		SELECT app_display_name, COUNT(*) AS session_count
+		FROM raw_app_usage
+		GROUP BY app_display_name
 	),
 	site_usage AS (
 		SELECT
@@ -2218,13 +2370,13 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 	),
 	app_summary AS (
 		SELECT
-			COALESCE(SUM(EXTRACT(EPOCH FROM (eff_end - eff_start))), 0) AS total_sec,
-			COALESCE(SUM(CASE WHEN ac.type_name = 'Productive' THEN EXTRACT(EPOCH FROM (eff_end - eff_start)) ELSE 0 END), 0) AS productive_sec,
-			COALESCE(SUM(CASE WHEN ac.type_name = 'Unproductive' THEN EXTRACT(EPOCH FROM (eff_end - eff_start)) ELSE 0 END), 0) AS unproductive_sec,
-			COALESCE(SUM(CASE WHEN ac.type_name = 'Neutral' OR ac.type_name IS NULL THEN EXTRACT(EPOCH FROM (eff_end - eff_start)) ELSE 0 END), 0) AS neutral_sec,
+			COALESCE(SUM(GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start)))), 0) AS total_sec,
+			COALESCE(SUM(CASE WHEN ac.type_name = 'Productive' THEN GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start))) ELSE 0 END), 0) AS productive_sec,
+			COALESCE(SUM(CASE WHEN ac.type_name = 'Unproductive' THEN GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start))) ELSE 0 END), 0) AS unproductive_sec,
+			COALESCE(SUM(CASE WHEN ac.type_name = 'Neutral' OR ac.type_name IS NULL THEN GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start))) ELSE 0 END), 0) AS neutral_sec,
 			COUNT(DISTINCT app_display_name) AS app_count,
-			COALESCE(SUM(foreground_seconds), 0) AS fg_sec,
-			COALESCE(SUM(background_seconds), 0) AS bg_sec
+			COALESCE((SELECT SUM(foreground_seconds) FROM raw_app_usage), 0) AS fg_sec,
+			COALESCE((SELECT SUM(background_seconds) FROM raw_app_usage), 0) AS bg_sec
 		FROM app_usage au
 		LEFT JOIN app_cat ac ON ac.id = au.installed_app_id
 	),
@@ -2253,17 +2405,16 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 			COALESCE(ac.type_name, 'Neutral') AS category,
 			COALESCE(ac.type_name, 'Neutral') AS type,
 			COALESCE(ac.type_color, '#6b7280') AS color,
-			SUM(EXTRACT(EPOCH FROM (au.eff_end - au.eff_start))) AS totalSeconds,
-			COUNT(*) AS session_count,
-			CASE WHEN SUM(au.foreground_seconds + au.background_seconds) > 0
-				THEN ROUND(SUM(au.foreground_seconds) / SUM(au.foreground_seconds + au.background_seconds) * 1000) / 10
-				ELSE 0 END AS focusScore,
+			SUM(GREATEST(0, EXTRACT(EPOCH FROM (au.eff_end - au.eff_start)))) AS totalSeconds,
+			MAX(cnt.session_count) AS session_count,
+			0 AS focusScore,
 			COALESCE(ia.is_browser, FALSE) AS isBrowser
 		FROM app_usage au
 		LEFT JOIN app_cat ac ON ac.id = au.installed_app_id
 		LEFT JOIN installed_applications ia ON ia.id = au.installed_app_id AND ia.deleted_at IS NULL
+		LEFT JOIN app_counts cnt ON cnt.app_display_name = au.app_display_name
 		WHERE au.app_display_name <> '' AND au.app_display_name IS NOT NULL
-		GROUP BY au.app_display_name, ac.type_name, ac.type_color, ia.is_browser
+		GROUP BY au.app_display_name, cnt.session_count, ac.type_name, ac.type_color, ia.is_browser
 	),
 	top_sites AS (
 		SELECT
@@ -2338,7 +2489,7 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 	fg := parseFloat(summaryMap["fg_sec"])
 	bg := parseFloat(summaryMap["bg_sec"])
 	if fg+bg > 0 {
-		result.Summary.FocusScore = math.Round(fg / (fg + bg) * 1000) / 10
+		result.Summary.FocusScore = math.Round(fg/(fg+bg)*1000) / 10
 	}
 
 	// Parse top items JSON
@@ -2426,16 +2577,22 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 			$5::interval
 		) AS bucket_start
 	)
-	SELECT
-		to_char(b.bucket_start, $6) AS bucket,
-		COALESCE(SUM(CASE WHEN au.app_display_name IS NOT NULL AND ac.type_name = 'Productive' THEN EXTRACT(EPOCH FROM (LEAST(au.eff_end, b.bucket_start + $5::interval) - GREATEST(au.eff_start, b.bucket_start))) ELSE 0 END), 0) AS productive,
-		COALESCE(SUM(CASE WHEN au.app_display_name IS NOT NULL AND ac.type_name = 'Unproductive' THEN EXTRACT(EPOCH FROM (LEAST(au.eff_end, b.bucket_start + $5::interval) - GREATEST(au.eff_start, b.bucket_start))) ELSE 0 END), 0) AS unproductive,
-		COALESCE(SUM(CASE WHEN au.app_display_name IS NOT NULL AND (ac.type_name = 'Neutral' OR ac.type_name IS NULL) THEN EXTRACT(EPOCH FROM (LEAST(au.eff_end, b.bucket_start + $5::interval) - GREATEST(au.eff_start, b.bucket_start))) ELSE 0 END), 0) AS neutral
-	FROM buckets b
-	LEFT JOIN app_usage au ON au.eff_start < b.bucket_start + $5::interval AND au.eff_end > b.bucket_start
-	LEFT JOIN app_cat ac ON ac.id = au.installed_app_id
-	GROUP BY b.bucket_start
-	ORDER BY b.bucket_start
+	,raw_buckets AS (
+		SELECT b.bucket_start,
+			COALESCE(SUM(CASE WHEN ac.type_name = 'Productive' THEN EXTRACT(EPOCH FROM (LEAST(au.eff_end, b.bucket_start + $5::interval) - GREATEST(au.eff_start, b.bucket_start))) ELSE 0 END), 0) AS productive,
+			COALESCE(SUM(CASE WHEN ac.type_name = 'Unproductive' THEN EXTRACT(EPOCH FROM (LEAST(au.eff_end, b.bucket_start + $5::interval) - GREATEST(au.eff_start, b.bucket_start))) ELSE 0 END), 0) AS unproductive,
+			COALESCE(SUM(CASE WHEN ac.type_name = 'Neutral' OR ac.type_name IS NULL THEN EXTRACT(EPOCH FROM (LEAST(au.eff_end, b.bucket_start + $5::interval) - GREATEST(au.eff_start, b.bucket_start))) ELSE 0 END), 0) AS neutral
+		FROM buckets b
+		LEFT JOIN app_usage au ON au.eff_start < b.bucket_start + $5::interval AND au.eff_end > b.bucket_start
+		LEFT JOIN app_cat ac ON ac.id = au.installed_app_id
+		GROUP BY b.bucket_start
+	)
+	SELECT to_char(bucket_start, $6) AS bucket,
+		productive * LEAST(1.0, EXTRACT(EPOCH FROM $5::interval) / NULLIF(productive + unproductive + neutral, 0)) AS productive,
+		unproductive * LEAST(1.0, EXTRACT(EPOCH FROM $5::interval) / NULLIF(productive + unproductive + neutral, 0)) AS unproductive,
+		neutral * LEAST(1.0, EXTRACT(EPOCH FROM $5::interval) / NULLIF(productive + unproductive + neutral, 0)) AS neutral
+	FROM raw_buckets
+	ORDER BY bucket_start
 	`
 
 	rows, err := r.pool.Query(ctx, chartQuery,
@@ -2465,7 +2622,7 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 	WITH params AS (
 		SELECT $1::varchar AS emp_id, $2::timestamptz AS from_ts, $3::timestamptz AS to_ts
 	),
-	app_usage AS (
+	raw_app_usage AS (
 		SELECT
 			s.app_display_name,
 			GREATEST(s.started_at, (SELECT from_ts FROM params)) AS eff_start,
@@ -2483,6 +2640,38 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 			AND s.started_at < (SELECT to_ts FROM params)
 			AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > (SELECT from_ts FROM params)
 			AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > s.started_at
+	),
+	ordered AS (
+		SELECT au.*,
+		       MAX(eff_end) OVER (
+		           PARTITION BY app_display_name
+		           ORDER BY eff_start, eff_end
+		           ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+		       ) AS prior_max_end
+		FROM raw_app_usage au
+	),
+	marked AS (
+		SELECT o.*,
+		       CASE WHEN prior_max_end IS NULL OR eff_start > prior_max_end
+		            THEN 1 ELSE 0 END AS new_island
+		FROM ordered o
+	),
+	islands AS (
+		SELECT m.*,
+		       SUM(new_island) OVER (
+		           PARTITION BY app_display_name
+		           ORDER BY eff_start, eff_end
+		           ROWS UNBOUNDED PRECEDING
+		       ) AS island_id
+		FROM marked m
+	),
+	app_usage AS (
+		SELECT app_display_name, island_id,
+		       MIN(eff_start) AS eff_start,
+		       MAX(eff_end) AS eff_end
+		FROM islands
+		WHERE eff_end > eff_start
+		GROUP BY app_display_name, island_id
 	),
 	buckets AS (
 		SELECT generate_series(
@@ -2535,6 +2724,21 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 	}
 	if err := appRows.Err(); err != nil {
 		return nil, err
+	}
+	// Concurrent applications share the same employee time. Keep each bucket
+	// bounded to its actual length before returning chart data.
+	for bucket, apps := range appBucketMap {
+		var total float64
+		for _, seconds := range apps {
+			total += seconds
+		}
+		if total > maxBucketSeconds {
+			scale := maxBucketSeconds / total
+			for app, seconds := range apps {
+				apps[app] = seconds * scale
+			}
+			appBucketMap[bucket] = apps
+		}
 	}
 
 	// Populate AppChart in matching bucket order

@@ -231,7 +231,7 @@ type AppSessionEntry struct {
 	// Optional — client populates on heartbeat so the server sweeper
 	// can distinguish "activity within last X min" from "just the
 	// session record survived". Server defaults to started_at on INSERT.
-	LastActivityAt     *string `json:"lastActivityAt,omitempty"`
+	LastActivityAt *string `json:"lastActivityAt,omitempty"`
 }
 
 type SyncAppSessionsRequest struct {
@@ -282,12 +282,14 @@ type AppUsageRow struct {
 }
 
 type AppUsageListResponse struct {
-	Data                []AppUsageRow `json:"data"`
-	Total               int           `json:"total"`
-	Page                int           `json:"page"`
-	PerPage             int           `json:"perPage"`
-	TotalPages          int           `json:"totalPages"`
-	TotalDurationSeconds float64      `json:"totalDurationSeconds"`
+	Data                 []AppUsageRow `json:"data"`
+	Total                int           `json:"total"`
+	Page                 int           `json:"page"`
+	PerPage              int           `json:"perPage"`
+	TotalPages           int           `json:"totalPages"`
+	TotalDurationSeconds float64       `json:"totalDurationSeconds"`
+	TotalSessionCount    int           `json:"totalSessionCount"`
+	OpenSessionCount     int           `json:"openSessionCount"`
 }
 
 // ────────────────────────────────
@@ -546,4 +548,3 @@ type HoursInsightsTopItem struct {
 	FocusScore   float64 `json:"focusScore"`
 	IsBrowser    bool    `json:"isBrowser"`
 }
-

@@ -22,9 +22,8 @@ function usageProcessName(processName: string): string {
 }
 
 // Merge two aggregate rows that share a normalised `(appDisplayName, processName)`
-// key. Session counts / durations sum; time range picks the earliest-open and
-// latest-close; lastActiveAt is the max; hasOpenSession is an OR (any merged group
-// still running keeps the aggregate live).
+// key. Duration is already calculated by the server; this only combines the
+// two structural process aliases used for embedded WebView2 rows.
 function mergeUsage(a: AppUsageRow, b: AppUsageRow): AppUsageRow {
   return {
     ...a,
@@ -102,8 +101,8 @@ function AppUsageBody({
   }, [query.data]);
 
   const totalDuration = query.data?.totalDurationSeconds ?? 0;
-  const totalSessions = usage.reduce((n, u) => n + u.sessionCount, 0);
-  const runningCount = usage.filter(u => u.hasOpenSession).length;
+  const totalSessions = query.data?.totalSessionCount ?? 0;
+  const runningCount = query.data?.openSessionCount ?? 0;
   const filtered = filter.search !== '' || filter.preset !== 'all';
 
   const toggle = (key: string) => {

@@ -625,6 +625,8 @@ export interface AppUsageListResponse {
   perPage: number;
   totalPages: number;
   totalDurationSeconds: number;
+  totalSessionCount: number;
+  openSessionCount: number;
 }
 
 export const appSessionsApi = {
@@ -635,10 +637,9 @@ export const appSessionsApi = {
     request<AppSessionListResponse>('/app-sessions', { params: params as Record<string, string | number | undefined> }),
   /**
    * Per-app aggregate for the "App Usage" page. The page renders
-   * `lastClosedAt - firstOpenedAt` for the Duration cell (NOT
-   * totalDurationSeconds) so multi-tab windows never inflate the
-   * per-app total. totalDurationSeconds is the sum of per-session
-   * durations, kept for the "Active Time" tile that sums across apps.
+   * the server-calculated `totalDurationSeconds` for the Duration cell.
+   * It is the sum of each effective session duration, so inactive gaps
+   * between separate sessions are not counted.
    */
   usage: (params?: {
     page?: number; perPage?: number; employeeId?: string; search?: string; platform?: string;

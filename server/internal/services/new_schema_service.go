@@ -461,10 +461,10 @@ func (s *NewSchemaService) SyncAppItems(ctx context.Context, req *dto.SyncAppIte
 	// NOT have — the client resets those to is_synced=0 so they re-send,
 	// breaking the permanent orphan deadlock (Bug #9 follow-up).
 	return &dto.SyncBatchResponse{
-		Synced:             inserted,
-		Message:            fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries)),
-		RejectedIds:        rejectedIDs,
-		MissingSessionIds:  missingSessionIDs,
+		Synced:            inserted,
+		Message:           fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries)),
+		RejectedIds:       rejectedIDs,
+		MissingSessionIds: missingSessionIDs,
 	}, nil
 }
 
@@ -500,9 +500,9 @@ func (s *NewSchemaService) ListAppSessions(ctx context.Context, params repositor
 			CgroupScope:        s.CgroupScope,
 			ContextLabel:       s.ContextLabel,
 			SyncedAt:           s.SyncedAt,
-			Status:         status,
-			LastActivityAt: s.LastActivityAt,
-			LastSyncAt:     s.LastSyncAt,
+			Status:             status,
+			LastActivityAt:     s.LastActivityAt,
+			LastSyncAt:         s.LastSyncAt,
 		}
 	}
 
@@ -538,12 +538,14 @@ func (s *NewSchemaService) ListAppSessionsUsage(ctx context.Context, params repo
 	}
 
 	return &dto.AppUsageListResponse{
-		Data:                rows,
-		Total:               result.Total,
-		Page:                result.Page,
-		PerPage:             result.PerPage,
-		TotalPages:          result.TotalPages,
+		Data:                 rows,
+		Total:                result.Total,
+		Page:                 result.Page,
+		PerPage:              result.PerPage,
+		TotalPages:           result.TotalPages,
 		TotalDurationSeconds: result.TotalDurationSeconds,
+		TotalSessionCount:    result.TotalSessionCount,
+		OpenSessionCount:     result.OpenSessionCount,
 	}, nil
 }
 
