@@ -152,7 +152,7 @@ function HoursInsightsBody({
       {/* Top Filter Bar: Activity Filters + View Mode Segmented Control */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 bg-card p-3 rounded-xl border border-border shadow-card">
         <div className="flex-1">
-          <ActivityFilters value={filter} onChange={setFilter} loading={isFiltering} />
+           <ActivityFilters value={filter} onChange={setFilter} loading={isFiltering} singleDay />
         </div>
 
         {/* View Mode Toggle */}
