@@ -58,8 +58,8 @@ function UsersListInner() {
   // debounced `search` so the input box stays responsive while we wait out
   // the 400 ms debounce before the URL (and the React Query key) catches up.
   const [filters, setFilters] = useUrlQueryState(
-    { search: {}, department: {} },
-    { search: '', department: '' },
+    { search: {}, department: {}, status: {} },
+    { search: '', department: '', status: '' },
     { debounceMs: 0, history: 'replace' },
   );
   const [searchInput, setSearchInput] = useState(filters.search);
@@ -104,12 +104,13 @@ function UsersListInner() {
     fetchNextPage,
     hasNextPage,
   } = useInfiniteQuery({
-    queryKey: ['employees', { search: filters.search, department: filters.department, perPage: PER_PAGE }],
+    queryKey: ['employees', { search: filters.search, department: filters.department, status: filters.status, perPage: PER_PAGE }],
     queryFn: ({ pageParam }) => employeesApi.list({
       page: pageParam as number,
       perPage: PER_PAGE,
       search: filters.search || undefined,
       department: filters.department || undefined,
+      status: filters.status || undefined,
     }),
     initialPageParam: 1,
     getNextPageParam: (last) => (last.page < last.totalPages ? last.page + 1 : undefined),
@@ -447,6 +448,15 @@ function UsersListInner() {
             <option value="">All Departments</option>
             {departments.map(d => <option key={d.id} value={d.name}>{d.name}</option>)}
           </select>
+          <select
+            value={filters.status}
+            onChange={e => setFilters({ status: e.target.value })}
+            className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground"
+          >
+            <option value="">All Statuses</option>
+            <option value="tracked">Tracked</option>
+            <option value="untracked">Untracked</option>
+          </select>
           <input
             ref={fileInputRef}
             type="file"
@@ -488,7 +498,7 @@ function UsersListInner() {
         <table className="w-full min-w-[700px]">
           <thead>
             <tr className="border-b border-border">
-              {['Name', 'Employee ID', 'Email', 'Department', 'Shift', 'Status', 'Action'].map(h => (
+              {['Name', 'Employee ID', 'Email', 'Department', 'Shift', 'Version', 'Status', 'Action'].map(h => (
                 <th key={h} className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground">{h}</th>
               ))}
             </tr>
@@ -496,7 +506,7 @@ function UsersListInner() {
           <tbody>
             {employees.length === 0 ? (
               <tr>
-                <td colSpan={7} className="text-center py-12 text-muted-foreground text-sm">
+                <td colSpan={8} className="text-center py-12 text-muted-foreground text-sm">
                   No employees found
                 </td>
               </tr>
@@ -529,6 +539,9 @@ function UsersListInner() {
                   <td className="px-4 py-3 text-sm text-foreground">{emp.department}</td>
                   <td className="px-4 py-3 text-sm text-foreground">
                     {emp.shift || <span className="text-muted-foreground/50 italic">Unassigned</span>}
+                  </td>
+                  <td className="px-4 py-3 text-sm font-mono text-foreground">
+                    {emp.clientVersion || <span className="text-muted-foreground/50 italic">Unknown</span>}
                   </td>
                   <td className="px-4 py-3">
                     <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${

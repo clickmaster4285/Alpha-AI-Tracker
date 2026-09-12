@@ -62,6 +62,7 @@ type EmployeeResponse struct {
 	TrackingEnabled bool        `json:"trackingEnabled"`
 	TrackingStatus  string      `json:"trackingStatus"`
 	IsOnline        bool        `json:"isOnline"`
+	ClientVersion   string      `json:"clientVersion"`
 	Avatar          string      `json:"avatar"`
 	AvatarColor     string      `json:"avatarColor"`
 	HasUserLogin    bool        `json:"hasUserLogin"`

@@ -1,24 +1,13 @@
-now i want on that page @web/src/app/(app)/hours-insights/page.tsx 
+i want 
 
-category is not a neutral | productive | unproductive,
-on server postgrey i save :
-monitoring_categories: the user create manually like "dev | marketing team | desiner etc.."
-moitorying_types: productive | unproductive | neutral
+on @web/src/app/(app)/employees/page.tsx i want
 
-and attach with installed_applications and monitoring_sites table as columne "type_id" and "category_id" 
+1. add one more filter status
+2. add one more column called "version" from table "employee_devices" column "client_version" 
 
-on "From Application Individually": on section "Individual Applications Usage Breakdown" 
-on column
-category:user manually create:  if not assigned then shown "-",
-status: replate to category type=== productive | unprodutive | neutral,
-
-
-on "From Productivity": on section "Productivity Time Distribution"
-on column
-category:user manually create:  if not assigned then shown "-",
-category type: productive | unprodutive | neutral,
-
-
-shown 
-
-check also /configuration/categories page types tab
+check also my db
+DB_HOST=localhost
+DB_PORT=5432
+DB_USER=alpha_monitoring
+DB_PASSWORD=123456
+DB_NAME=alpha_ai_tracker

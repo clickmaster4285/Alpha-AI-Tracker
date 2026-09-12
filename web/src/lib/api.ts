@@ -267,6 +267,7 @@ export interface Employee {
   trackingEnabled: boolean;
   trackingStatus: string;
   isOnline: boolean;
+  clientVersion?: string;
   avatar: string;
   avatarColor: string;
   /** True when a row in the users table exists for this employee's employee_id.

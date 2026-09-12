@@ -95,6 +95,9 @@ func (r *EmployeeRepo) List(ctx context.Context, params EmployeeListParams) (*Em
 		       e.tracking_enabled, e.tracking_status, e.is_online,
 		           COALESCE(e.avatar, '') AS avatar, COALESCE(e.avatar_color, '') AS avatar_color,
 		       e.created_at, e.updated_at, e.deleted_at,
+		       COALESCE((SELECT ed.client_version FROM employee_devices ed
+		                 WHERE ed.employee_id = e.employee_id AND ed.revoked_at IS NULL
+		                 ORDER BY ed.last_seen_at DESC LIMIT 1), '') AS client_version,
 		       EXISTS(SELECT 1 FROM users u
 		              WHERE u.employee_id = e.employee_id
 		                AND u.deleted_at IS NULL) AS has_user_login
@@ -122,6 +125,7 @@ func (r *EmployeeRepo) List(ctx context.Context, params EmployeeListParams) (*Em
 			&e.TrackingEnabled, &e.TrackingStatus, &e.IsOnline,
 			&e.Avatar, &e.AvatarColor,
 			&e.CreatedAt, &e.UpdatedAt, &e.DeletedAt,
+			&e.ClientVersion,
 			&e.HasUserLogin,
 		); err != nil {
 			return nil, fmt.Errorf("scan employee row: %w", err)
@@ -155,6 +159,9 @@ func (r *EmployeeRepo) GetByID(ctx context.Context, id string) (*models.Employee
 		       e.tracking_enabled, e.tracking_status, e.is_online,
 		           COALESCE(e.avatar, '') AS avatar, COALESCE(e.avatar_color, '') AS avatar_color,
 		       e.created_at, e.updated_at, e.deleted_at,
+		       COALESCE((SELECT ed.client_version FROM employee_devices ed
+		                 WHERE ed.employee_id = e.employee_id AND ed.revoked_at IS NULL
+		                 ORDER BY ed.last_seen_at DESC LIMIT 1), '') AS client_version,
 		       EXISTS(SELECT 1 FROM users u
 		              WHERE u.employee_id = e.employee_id
 		                AND u.deleted_at IS NULL) AS has_user_login
@@ -174,6 +181,9 @@ func (r *EmployeeRepo) GetByEmployeeID(ctx context.Context, employeeID string) (
 		       e.tracking_enabled, e.tracking_status, e.is_online,
 		           COALESCE(e.avatar, '') AS avatar, COALESCE(e.avatar_color, '') AS avatar_color,
 		       e.created_at, e.updated_at, e.deleted_at,
+		       COALESCE((SELECT ed.client_version FROM employee_devices ed
+		                 WHERE ed.employee_id = e.employee_id AND ed.revoked_at IS NULL
+		                 ORDER BY ed.last_seen_at DESC LIMIT 1), '') AS client_version,
 		       EXISTS(SELECT 1 FROM users u
 		              WHERE u.employee_id = e.employee_id
 		                AND u.deleted_at IS NULL) AS has_user_login
@@ -193,6 +203,9 @@ func (r *EmployeeRepo) GetByEmail(ctx context.Context, email string) (*models.Em
 		       e.tracking_enabled, e.tracking_status, e.is_online,
 		           COALESCE(e.avatar, '') AS avatar, COALESCE(e.avatar_color, '') AS avatar_color,
 		       e.created_at, e.updated_at, e.deleted_at,
+		       COALESCE((SELECT ed.client_version FROM employee_devices ed
+		                 WHERE ed.employee_id = e.employee_id AND ed.revoked_at IS NULL
+		                 ORDER BY ed.last_seen_at DESC LIMIT 1), '') AS client_version,
 		       EXISTS(SELECT 1 FROM users u
 		              WHERE u.employee_id = e.employee_id
 		                AND u.deleted_at IS NULL) AS has_user_login
@@ -222,6 +235,9 @@ func (r *EmployeeRepo) Create(ctx context.Context, e *models.Employee) (*models.
 		          tracking_enabled, tracking_status, is_online,
 		          COALESCE(avatar, '') AS avatar, COALESCE(avatar_color, '') AS avatar_color,
 		          created_at, updated_at, deleted_at,
+		          COALESCE((SELECT ed.client_version FROM employee_devices ed
+		                    WHERE ed.employee_id = employees.employee_id AND ed.revoked_at IS NULL
+		                    ORDER BY ed.last_seen_at DESC LIMIT 1), '') AS client_version,
 		          EXISTS(SELECT 1 FROM users u
 		                 WHERE u.employee_id = employees.employee_id
 		                   AND u.deleted_at IS NULL) AS has_user_login
@@ -253,6 +269,9 @@ func (r *EmployeeRepo) ListAll(ctx context.Context) ([]models.Employee, error) {
 		       e.tracking_enabled, e.tracking_status, e.is_online,
 		           COALESCE(e.avatar, '') AS avatar, COALESCE(e.avatar_color, '') AS avatar_color,
 		       e.created_at, e.updated_at, e.deleted_at,
+		       COALESCE((SELECT ed.client_version FROM employee_devices ed
+		                 WHERE ed.employee_id = e.employee_id AND ed.revoked_at IS NULL
+		                 ORDER BY ed.last_seen_at DESC LIMIT 1), '') AS client_version,
 		       EXISTS(SELECT 1 FROM users u
 		              WHERE u.employee_id = e.employee_id
 		                AND u.deleted_at IS NULL) AS has_user_login
@@ -277,6 +296,7 @@ func (r *EmployeeRepo) ListAll(ctx context.Context) ([]models.Employee, error) {
 			&e.TrackingEnabled, &e.TrackingStatus, &e.IsOnline,
 			&e.Avatar, &e.AvatarColor,
 			&e.CreatedAt, &e.UpdatedAt, &e.DeletedAt,
+			&e.ClientVersion,
 			&e.HasUserLogin,
 		); err != nil {
 			return nil, fmt.Errorf("scan employee row: %w", err)

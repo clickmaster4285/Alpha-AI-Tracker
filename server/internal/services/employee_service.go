@@ -333,6 +333,7 @@ func employeeToResponse(e *models.Employee) dto.EmployeeResponse {
 		TrackingEnabled: e.TrackingEnabled,
 		TrackingStatus:  e.TrackingStatus,
 		IsOnline:        e.IsOnline,
+		ClientVersion:   e.ClientVersion,
 		Avatar:          e.Avatar,
 		AvatarColor:     e.AvatarColor,
 		HasUserLogin:    e.HasUserLogin,

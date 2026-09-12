@@ -19,6 +19,7 @@ type Employee struct {
 	TrackingEnabled bool      `json:"trackingEnabled" db:"tracking_enabled"`
 	TrackingStatus  string    `json:"trackingStatus" db:"tracking_status"`
 	IsOnline        bool      `json:"isOnline" db:"is_online"`
+	ClientVersion   string    `json:"clientVersion" db:"client_version"`
 	Avatar          string    `json:"avatar" db:"avatar"`
 	AvatarColor     string    `json:"avatarColor" db:"avatar_color"`
 	CreatedAt       time.Time    `json:"createdAt" db:"created_at"`
