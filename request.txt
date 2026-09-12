@@ -1,13 +1,7 @@
-i want 
+this is my v1.0.0 on github releases
 
-on @web/src/app/(app)/employees/page.tsx i want
+and now i want to release direct v1.1.5 
 
-1. add one more filter status
-2. add one more column called "version" from table "employee_devices" column "client_version" 
+can you send me "Release notes" 
 
-check also my db
-DB_HOST=localhost
-DB_PORT=5432
-DB_USER=alpha_monitoring
-DB_PASSWORD=123456
-DB_NAME=alpha_ai_tracker
+check my git commit on all after the commit: 6ceb916a0e60b14678c23e4f12a18f18d67497b7
