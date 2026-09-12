@@ -44,6 +44,15 @@ public class LogCollectorService : BackgroundService
     private readonly IInstalledAppDetector _appDetector;
     private readonly IPackageDetector _packageDetector;
     private readonly IBrowserRegistry _browserRegistry;
+    /// <summary>
+    /// Time and Attendance (Phase 1, finalplan section 2.5): all session_events writes
+    /// go through this recorder. It owns dedup + idempotency + hard 2s shutdown timeout.
+    /// The previous direct call to <c>RecordSessionEventAsync("login", ...)</c> is replaced
+    /// with <c>_eventRecorder.RecordAsync(SessionEventTypes.TrackerLogin)</c>.
+    /// </summary>
+    private readonly IEventRecorder _eventRecorder;
+    private readonly ScheduleCacheService _scheduleCache;
+    private readonly AttendanceAggregator _attendanceAggregator;
     private int _cycleCount;
     private string? _currentEmployeeId;
     private string? _currentEmployeeName;
@@ -122,6 +131,9 @@ public class LogCollectorService : BackgroundService
         "gvfsd-trash",
         // 🟡 Phase 0b: GNOME search provider daemon (not the Settings GUI)
         "gnome-control-center-search-provider",
+        // Embedded WebView2 runtime host — not a user-facing application
+        // (spawned by WhatsApp, Teams, VS Code, etc. as a child process).
+        "msedgewebview2",
     };
 
     /// <summary>
@@ -156,7 +168,10 @@ public class LogCollectorService : BackgroundService
         HttpClient httpClient,
         IInstalledAppDetector appDetector,
         IPackageDetector packageDetector,
-        IBrowserRegistry browserRegistry)
+        IBrowserRegistry browserRegistry,
+        IEventRecorder eventRecorder,
+        ScheduleCacheService scheduleCache,
+        AttendanceAggregator attendanceAggregator)
     {
         _config = config;
         _collector = collector;
@@ -166,6 +181,9 @@ public class LogCollectorService : BackgroundService
         _appDetector = appDetector;
         _packageDetector = packageDetector;
         _browserRegistry = browserRegistry;
+        _eventRecorder = eventRecorder;
+        _scheduleCache = scheduleCache;
+        _attendanceAggregator = attendanceAggregator;
     }
 
     public void StartTracking()
@@ -180,7 +198,20 @@ public class LogCollectorService : BackgroundService
         // Record login session event — only if the last persisted event isn't already an open login.
         // StartTracking() is called both at session restore AND on every explicit login, so without
         // this guard a relaunch writes a duplicate "login" row while the previous one is never closed.
-        _ = RecordSessionEventAsync("login", stoppingToken: default);
+        //
+        // Time and Attendance Phase 1 (finalplan section 2.1 / BUG-2 fix): the literal "login"
+        // is replaced with the SessionEventTypes.TrackerLogin constant so the vocabulary
+        // lives in ONE place (R5). The IEventRecorder handles dedup + idempotency; we don't
+        // need the old "skip if last event has the same type" check here.
+        _ = _eventRecorder.RecordAsync(SessionEventTypes.TrackerLogin);
+
+        // Power-on (finalplan section 2.1): capture the boot explicitly instead of inferring
+        // it on the next launch via ReconcileStaleSessionsOnBootAsync. The crash-recovery
+        // path stays as a defense-in-depth fallback for machines that were powered off
+        // abruptly (no graceful shutdown -> no power_off row).
+        _ = _eventRecorder.RecordAsync(SessionEventTypes.PowerOn);
+        _scheduleCache.RequestImmediatePull();
+        _attendanceAggregator.RequestImmediateAggregation();
 
         if (OperatingSystem.IsWindows())
         {
@@ -496,6 +527,11 @@ public class LogCollectorService : BackgroundService
                         GroupedBy = string.IsNullOrEmpty(scope) ? "pid" : "cgroup",
                         CgroupScope = scope,
                         ContextLabel = SessionLabelResolver.Resolve(baseProcessName, log.ProcessId, _browserRegistry),
+                        // Initial activity stamp = start time. The store + the
+                        // focus-flush UPDATE both refresh this on every cycle
+                        // while the session is open, so the server sweeper
+                        // can tell a live tracker from an offline one.
+                        LastActivityAt = log.Timestamp,
                     };
                     newSessions.Add(session);
                     currentKeys[key] = session.Id;
@@ -2211,19 +2247,34 @@ public class LogCollectorService : BackgroundService
             if (OperatingSystem.IsLinux())
             {
                 sessionType = Environment.GetEnvironmentVariable("XDG_SESSION_TYPE") ?? "unknown";
-                var perms = client.Platform.Linux.ProcessCollector.GetPermissionStatus();
+                var perms = new Dictionary<string, bool>(client.Platform.Linux.ProcessCollector.GetPermissionStatus());
+                if (_config.LocationEnabled)
+                {
+                    foreach (var kv in LocationPermission.GetPermissionStatus(_httpClient))
+                        perms[kv.Key] = kv.Value;
+                }
                 await _store.SetPermissionStatusAsync(perms, sessionType, ct);
             }
             else if (OperatingSystem.IsWindows())
             {
                 sessionType = "windows";
-                var perms = client.Platform.Windows.ProcessCollector.GetPermissionStatus();
+                var perms = new Dictionary<string, bool>(client.Platform.Windows.ProcessCollector.GetPermissionStatus());
+                if (_config.LocationEnabled)
+                {
+                    foreach (var kv in LocationPermission.GetPermissionStatus(_httpClient))
+                        perms[kv.Key] = kv.Value;
+                }
                 await _store.SetPermissionStatusAsync(perms, sessionType, ct);
             }
             else if (OperatingSystem.IsMacOS())
             {
                 sessionType = "macos";
-                var perms = client.Platform.MacOS.ProcessCollector.GetPermissionStatus();
+                var perms = new Dictionary<string, bool>(client.Platform.MacOS.ProcessCollector.GetPermissionStatus());
+                if (_config.LocationEnabled)
+                {
+                    foreach (var kv in LocationPermission.GetPermissionStatus(_httpClient))
+                        perms[kv.Key] = kv.Value;
+                }
                 await _store.SetPermissionStatusAsync(perms, sessionType, ct);
             }
         }

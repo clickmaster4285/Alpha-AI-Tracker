@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Runtime.InteropServices;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using client.Configuration;
@@ -177,12 +178,13 @@ public partial class MainViewModel : ViewModelBase
 
     // ─── Permission Step Flow ───
 
-    public enum PermissionStep { None, AutoStart, BackgroundRunning, Dependencies, OtherPermissions }
+    public enum PermissionStep { None, AutoStart, BackgroundRunning, Dependencies, Location, OtherPermissions }
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsAutoStartStep))]
     [NotifyPropertyChangedFor(nameof(IsBackgroundStep))]
     [NotifyPropertyChangedFor(nameof(IsDependencyStep))]
+    [NotifyPropertyChangedFor(nameof(IsLocationStep))]
     [NotifyPropertyChangedFor(nameof(IsPermissionStep))]
     [NotifyPropertyChangedFor(nameof(IsProfile))]
     [NotifyPropertyChangedFor(nameof(RequiresPermissionAction))]
@@ -194,16 +196,30 @@ public partial class MainViewModel : ViewModelBase
     [NotifyPropertyChangedFor(nameof(SetupProgressPercent))]
     private PermissionStep _currentPermissionStep = PermissionStep.None;
 
-    public int CurrentPermissionStepNumber => CurrentPermissionStep switch
+    public int CurrentPermissionStepNumber
     {
-        PermissionStep.AutoStart => 1,
-        PermissionStep.BackgroundRunning => 2,
-        PermissionStep.Dependencies => 3,
-        PermissionStep.OtherPermissions => OperatingSystem.IsLinux() ? 4 : 3,
-        _ => 0
-    };
+        get
+        {
+            var i = 0;
+            foreach (var step in ActivePermissionSteps())
+            {
+                i++;
+                if (step == CurrentPermissionStep) return i;
+            }
+            return 0;
+        }
+    }
 
-    public int TotalPermissionSteps => OperatingSystem.IsLinux() ? 4 : 3;
+    public int TotalPermissionSteps => ActivePermissionSteps().Count();
+
+    private IEnumerable<PermissionStep> ActivePermissionSteps()
+    {
+        yield return PermissionStep.AutoStart;
+        yield return PermissionStep.BackgroundRunning;
+        if (OperatingSystem.IsLinux()) yield return PermissionStep.Dependencies;
+        if (_config.LocationEnabled) yield return PermissionStep.Location;
+        yield return PermissionStep.OtherPermissions;
+    }
 
     /// <summary>Wizard progress 0–100, for the stepper track on the setup page.</summary>
     public double SetupProgressPercent => TotalPermissionSteps == 0
@@ -213,6 +229,7 @@ public partial class MainViewModel : ViewModelBase
     public bool IsAutoStartStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.AutoStart;
     public bool IsBackgroundStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.BackgroundRunning;
     public bool IsDependencyStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.Dependencies;
+    public bool IsLocationStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.Location;
     public bool IsPermissionStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.OtherPermissions;
     public bool IsProfile => IsLoggedIn && CurrentPermissionStep == PermissionStep.None;
     public bool RequiresPermissionAction => IsLoggedIn && CurrentPermissionStep != PermissionStep.None;
@@ -222,6 +239,7 @@ public partial class MainViewModel : ViewModelBase
         PermissionStep.AutoStart => "Enable Auto-Start",
         PermissionStep.BackgroundRunning => "Enable Background Guard",
         PermissionStep.Dependencies => "Install Required Dependencies",
+        PermissionStep.Location => "Enable Location Access",
         PermissionStep.OtherPermissions => GetPlatformPermissionTitle(),
         _ => string.Empty
     };
@@ -231,6 +249,7 @@ public partial class MainViewModel : ViewModelBase
         PermissionStep.AutoStart => "Auto-start ensures tracking resumes automatically after a reboot or system restart.",
         PermissionStep.BackgroundRunning => "The background guard keeps the service alive even when the window is closed.",
         PermissionStep.Dependencies => "The following dependencies are missing and must be installed to grant permissions.",
+        PermissionStep.Location => GetLocationPermissionDescription(),
         PermissionStep.OtherPermissions => GetPlatformPermissionDescription(),
         _ => string.Empty
     };
@@ -239,6 +258,7 @@ public partial class MainViewModel : ViewModelBase
     {
         PermissionStep.AutoStart => "Enable Auto-Start",
         PermissionStep.BackgroundRunning => "Enable Background Guard",
+        PermissionStep.Location => "Open Location Settings",
         PermissionStep.OtherPermissions => GetPlatformPermissionButtonText(),
         _ => string.Empty
     };
@@ -454,7 +474,15 @@ public partial class MainViewModel : ViewModelBase
             }
         }
 
-        // Check other permissions (Step 3 or 4)
+        if (_config.LocationEnabled)
+        {
+            var locOk = await LocationPermission.CheckGrantedAsync(_httpClient, CancellationToken.None);
+            if (!locOk)
+                return PermissionStep.Location;
+            await _store.SetStatusAsync("perm_location", "true", CancellationToken.None);
+        }
+
+        // Check other permissions (final step)
         var otherOk = !HasMissingPermissions();
         if (!otherOk)
             return PermissionStep.OtherPermissions;
@@ -488,7 +516,29 @@ public partial class MainViewModel : ViewModelBase
         if (!IsCommandAvailable("loginctl")) missing.Add("systemd");
         if (!IsCommandAvailable("gsettings")) missing.Add("libglib2.0-bin");
         if (!IsCommandAvailable("setcap")) missing.Add("libcap2-bin");
+        if (_config.LocationEnabled && !IsLinuxPackageInstalled("geoclue-2.0"))
+            missing.Add("geoclue-2.0");
         return missing;
+    }
+
+    private static bool IsLinuxPackageInstalled(string package)
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "dpkg",
+                Arguments = $"-s {package}",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var proc = System.Diagnostics.Process.Start(psi);
+            proc?.WaitForExit(3000);
+            return proc?.ExitCode == 0;
+        }
+        catch { return false; }
     }
 
     private static bool IsCommandAvailable(string command)
@@ -714,7 +764,20 @@ public partial class MainViewModel : ViewModelBase
         try
         {
             var serverUrl = _config.ServerUrl ?? "http://localhost:8080";
-            var payload = new { employeeId = EmployeeId.Trim(), secretKey = SecretKey.Trim() };
+            // Include machineId/platform/clientVersion so the server binds the device
+            // record to THIS specific machine (its persisted .machine-id), not the
+            // "default-<employeeId>" fallback. Without it, every login rotates the
+            // device record under the same synthetic key, and any other live client
+            // (or a manual curl re-login) can revoke the token this client just got
+            // back — the next sync then 401s with a token whose server row is gone.
+            var payload = new
+            {
+                employeeId = EmployeeId.Trim(),
+                secretKey = SecretKey.Trim(),
+                machineId = _config.ClientId,
+                platform = RuntimeInformation.OSDescription,
+                clientVersion = AppInfo.Version,
+            };
             var json = JsonSerializer.Serialize(payload);
             var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
 
@@ -828,6 +891,9 @@ public partial class MainViewModel : ViewModelBase
                     break;
                 case PermissionStep.Dependencies:
                     await InstallDependenciesAsync();
+                    break;
+                case PermissionStep.Location:
+                    await GrantLocationPermissionAsync();
                     break;
                 case PermissionStep.OtherPermissions:
                     await GrantOtherPermissionsAsync();
@@ -1020,6 +1086,69 @@ public partial class MainViewModel : ViewModelBase
         {
             try { if (File.Exists(tmpScript)) File.Delete(tmpScript); } catch { }
         }
+    }
+
+    private async Task GrantLocationPermissionAsync()
+    {
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "ms-settings:privacy-location",
+                    UseShellExecute = true,
+                });
+                StepStatusText = "Enable location for this device in Windows Settings, then return here.";
+            }
+            else if (OperatingSystem.IsLinux())
+            {
+                // GeoClue2 + polkit: open GNOME privacy panel when available
+                var opened = false;
+                try
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = "xdg-open",
+                        Arguments = "gnome-control-center privacy",
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                    });
+                    opened = true;
+                }
+                catch { /* fall through to text instructions */ }
+
+                StepStatusText = opened
+                    ? "Enable Location Services in Settings → Privacy → Location. GeoClue2 (geoclue-2.0) must be installed."
+                    : "Install geoclue-2.0 and enable Location Services in your desktop privacy settings.";
+            }
+            else if (OperatingSystem.IsMacOS())
+            {
+                System.Diagnostics.Process.Start("open", "x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices");
+                StepStatusText = "Enable Location Services for Alpha AI Tracker in System Settings → Privacy.";
+            }
+
+            await Task.Delay(3000);
+            var granted = await LocationPermission.CheckGrantedAsync(_httpClient, CancellationToken.None);
+            StepStatusText = granted
+                ? "Location access confirmed (GPS, WiFi, or IP fallback)."
+                : "Location not detected yet. Grant OS permission or ensure network is available for IP fallback.";
+        }
+        catch (Exception ex)
+        {
+            StepStatusText = $"Location check failed: {ex.Message}";
+        }
+    }
+
+    private static string GetLocationPermissionDescription()
+    {
+        if (OperatingSystem.IsWindows())
+            return "Allow Windows location access so the tracker can record GPS or network-based fixes for the admin dashboard.";
+        if (OperatingSystem.IsLinux())
+            return "Install GeoClue2 (geoclue-2.0) and grant location permission via your desktop privacy settings. Without GPS, IP-based location is used.";
+        if (OperatingSystem.IsMacOS())
+            return "Enable Location Services for this app in System Settings → Privacy & Security.";
+        return "Grant location permission so the tracker can report position to the server.";
     }
 
     private void GrantWindowsPermissions()

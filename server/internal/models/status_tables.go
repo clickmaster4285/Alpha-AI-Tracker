@@ -57,3 +57,19 @@ type StorageDevice struct {
 	SyncedAt         *time.Time `json:"syncedAt,omitempty" db:"synced_at"`
 	CreatedAt        time.Time  `json:"createdAt" db:"created_at"`
 }
+
+// LocationSample — GPS / WiFi / IP location fix from the desktop client.
+type LocationSample struct {
+	ID           string     `json:"id" db:"id"`
+	EmployeeID   string     `json:"employeeId" db:"employee_id"`
+	EmployeeName string     `json:"employeeName,omitempty" db:"-"`
+	Latitude     float64    `json:"latitude" db:"latitude"`
+	Longitude  float64    `json:"longitude" db:"longitude"`
+	AccuracyM  *float64   `json:"accuracyM,omitempty" db:"accuracy_m"`
+	AltitudeM  *float64   `json:"altitudeM,omitempty" db:"altitude_m"`
+	Source     string     `json:"source" db:"source"`
+	Address    *string    `json:"address,omitempty" db:"address"`
+	CapturedAt time.Time  `json:"capturedAt" db:"captured_at"`
+	SyncedAt   *time.Time `json:"syncedAt,omitempty" db:"synced_at"`
+	CreatedAt  time.Time  `json:"createdAt" db:"created_at"`
+}

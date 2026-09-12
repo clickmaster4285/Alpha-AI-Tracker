@@ -2,15 +2,29 @@
 
 # Build the server binary
 build:
+ifeq ($(OS),Windows_NT)
+	go build -o bin/alpha-ai-server.exe ./cmd/server
+else
 	go build -o bin/alpha-ai-server ./cmd/server
+endif
+
+ifeq ($(OS),Windows_NT)
+SERVER_BIN := ./bin/alpha-ai-server.exe
+else
+SERVER_BIN := ./bin/alpha-ai-server
+endif
 
 # Run the server
 run: build
-	./bin/alpha-ai-server
+	$(SERVER_BIN)
 
 # Run with hot-reload (requires air: go install github.com/air-verse/air@latest)
 dev:
-	air --build.cmd "go build -o bin/alpha-ai-server ./cmd/server" --build.bin "./bin/alpha-ai-server"
+ifeq ($(OS),Windows_NT)
+	air --build.cmd "go build -o bin/alpha-ai-server.exe ./cmd/server" --build.bin "$(SERVER_BIN)"
+else
+	air --build.cmd "go build -o bin/alpha-ai-server ./cmd/server" --build.bin "$(SERVER_BIN)"
+endif
 
 # Clean build artifacts
 clean:

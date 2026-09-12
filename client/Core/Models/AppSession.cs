@@ -58,6 +58,15 @@ public class AppSession
     /// Accumulated seconds this session ran while another window had the focus.
     /// </summary>
     public double? BackgroundSeconds { get; set; }
+
+    /// <summary>
+    /// Last client-side activity on this session (heartbeat, foreground focus
+    /// change, app_item add/close). Sent to the server on every sync so the
+    /// server-side lifecycle sweeper can distinguish "client alive but offline"
+    /// (STALE → recovers when sync resumes) from "PC truly gone" (CLOSED after
+    /// SESSION_CLOSE_AFTER_HOURS).
+    /// </summary>
+    public DateTime? LastActivityAt { get; set; }
 }
 
 /// <summary>

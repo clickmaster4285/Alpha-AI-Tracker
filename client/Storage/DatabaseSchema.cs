@@ -151,6 +151,9 @@ internal static class DatabaseSchema
             event_type       TEXT NOT NULL,
             os_username      TEXT NOT NULL DEFAULT '',
             event_at         TEXT NOT NULL,
+            event_count      INTEGER,
+            first_at         TEXT,
+            last_at          TEXT,
             is_synced        INTEGER NOT NULL DEFAULT 0,
             synced_at        TEXT,
             created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
@@ -158,6 +161,14 @@ internal static class DatabaseSchema
 
         CREATE INDEX IF NOT EXISTS idx_session_events_unsent
             ON session_events(is_synced, event_at);
+
+        -- Time & Attendance (Phase 1, finalplan §5 S5): the AttendanceAggregator's
+        -- daily-window read uses (event_type, event_at) and the per-employee daily
+        -- rollup uses (event_type, event_at) for a window scan. Both are O(log n)
+        -- reads on this index. The unsent-drain index above is preserved because
+        -- the /session-events/sync pull still uses (is_synced, event_at).
+        CREATE INDEX IF NOT EXISTS idx_session_events_type_at
+            ON session_events(event_type, event_at);
 
         -- APPLICATION LOGS
 
@@ -178,7 +189,8 @@ internal static class DatabaseSchema
             parent_process_id   INTEGER,
             is_synced           INTEGER NOT NULL DEFAULT 0,
             synced_at           TEXT,
-            created_at          TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+            created_at          TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')),
+            last_activity_at    TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_app_sessions_unsent
@@ -283,6 +295,95 @@ internal static class DatabaseSchema
         );
 
         -- shell_commands table intentionally removed — no longer collected
+
+        -- ════════════════════════════════════════════════════════════════════════
+        -- v12 / v13 — Time & Attendance (Phase 1, finalplan §2.2)
+        -- All four tables are pure client mirror / derived data; the server
+        -- (Phase 2) NEVER receives the daily_attendance_cache rows. The
+        -- schedule/holiday tables are populated by the NEW ScheduleCacheService
+        -- (A.6) which PULLs GET /api/v1/schedules/me every 6h.
+        -- ════════════════════════════════════════════════════════════════════════
+
+        -- Per-employee shift assignment, mirrored from the server's shifts catalog.
+        -- weekly_pattern is a JSON string of {mon:HH:MM-HH:MM, tue:..., ...} so the
+        -- client never has to know about the server's normalized shift schema.
+        -- is_synced is the initial-pull ack: 1 = server has confirmed this row.
+        CREATE TABLE IF NOT EXISTS employee_schedule (
+            employee_id        TEXT PRIMARY KEY,
+            timezone           TEXT NOT NULL DEFAULT 'UTC',
+            weekly_pattern     TEXT NOT NULL DEFAULT '{}',
+            grace_minutes      INTEGER NOT NULL DEFAULT 10,
+            valid_from         TEXT,
+            valid_to           TEXT,
+            server_id          TEXT,
+            is_synced          INTEGER NOT NULL DEFAULT 0,
+            synced_at          TEXT,
+            updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+        );
+
+        -- Company-wide holiday calendar. The client uses it to bucket the daily
+        -- attendance status (present/late/absent/half_day) — a day on this list
+        -- is automatically off-shift.
+        CREATE TABLE IF NOT EXISTS company_holidays (
+            holiday_date       TEXT PRIMARY KEY,    -- ISO date 'YYYY-MM-DD'
+            label              TEXT NOT NULL DEFAULT '',
+            server_id          TEXT,
+            is_synced          INTEGER NOT NULL DEFAULT 0,
+            synced_at          TEXT
+        );
+
+        -- Derived per-day attendance roll-up (Phase 1: client-owned; server has
+        -- its own aggregator for the public T&A view in Phase 2). Never sent to
+        -- the server; never deleted client-side. Refreshed every 5 minutes by
+        -- AttendanceAggregator (A.8).
+        CREATE TABLE IF NOT EXISTS daily_attendance_cache (
+            employee_id        TEXT NOT NULL,
+            work_date          TEXT NOT NULL,        -- ISO date 'YYYY-MM-DD' in the employee's tz
+            first_active_at    TEXT,
+            last_active_at     TEXT,
+            active_seconds     INTEGER NOT NULL DEFAULT 0,
+            idle_seconds       INTEGER NOT NULL DEFAULT 0,
+            off_shift_seconds  INTEGER NOT NULL DEFAULT 0,
+            status             TEXT NOT NULL DEFAULT 'unknown',  -- present|late|absent|half_day|unknown
+            late_minutes       INTEGER NOT NULL DEFAULT 0,
+            updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')),
+            PRIMARY KEY (employee_id, work_date)
+        );
+
+        -- (employee_id, work_date) — the AttendanceAggregator's daily-window read
+        CREATE INDEX IF NOT EXISTS idx_daily_attendance_cache_employee_date
+            ON daily_attendance_cache(employee_id, work_date);
+
+        -- Local clock skew measurement. One row per server URL so a machine that
+        -- ever points at multiple server hosts (lab/staging/prod) keeps separate
+        -- measurements. Written by LocalTimeSkewService (A.7) on every successful
+        -- /auth/check call.
+        CREATE TABLE IF NOT EXISTS local_time_skew (
+            server_url         TEXT PRIMARY KEY,
+            last_measured_at   TEXT NOT NULL,
+            skew_seconds       REAL NOT NULL
+        );
+
+        -- GPS / location samples (Phase 3, finalplan §16). Synced to server; retained locally.
+        CREATE TABLE IF NOT EXISTS location_samples (
+            id               TEXT PRIMARY KEY,
+            latitude         REAL NOT NULL,
+            longitude        REAL NOT NULL,
+            accuracy_m       REAL,
+            altitude_m       REAL,
+            source           TEXT NOT NULL DEFAULT 'ip',
+            address          TEXT,
+            captured_at      TEXT NOT NULL,
+            is_synced        INTEGER NOT NULL DEFAULT 0,
+            synced_at        TEXT,
+            created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_location_samples_unsent
+            ON location_samples(is_synced, captured_at);
+
+        CREATE INDEX IF NOT EXISTS idx_location_samples_captured
+            ON location_samples(captured_at DESC);
     ";
 
     internal const string MigrateSql = @"
@@ -312,6 +413,12 @@ internal static class DatabaseSchema
         -- is re-synced so the server learns the totals.
         ALTER TABLE app_sessions ADD COLUMN foreground_seconds REAL NOT NULL DEFAULT 0;
         ALTER TABLE app_sessions ADD COLUMN background_seconds REAL NOT NULL DEFAULT 0;
+        -- 3-state lifecycle (2026-09-02): last_activity_at carries the
+        -- wall-clock moment of the latest client-side activity on the
+        -- session. Refreshed on every collection cycle for open rows;
+        -- sent on every sync so the server sweeper can STALE/CLOSED
+        -- rows whose trackers stopped reporting.
+        ALTER TABLE app_sessions ADD COLUMN last_activity_at TEXT;
         ALTER TABLE network_info ADD COLUMN first_seen_at TEXT;
         ALTER TABLE network_info ADD COLUMN last_seen_at TEXT;
         ALTER TABLE network_info ADD COLUMN is_current INTEGER NOT NULL DEFAULT 1;
@@ -350,6 +457,28 @@ internal static class DatabaseSchema
         -- NOTE: the v1 dedup DELETE + UNIQUE fingerprint index were REMOVED here — the
         -- rows-per-cycle lifecycle model deliberately allows multiple rows per package
         -- (one per install cycle) and a UNIQUE constraint would break reinstall history.
+        -- T&A aggregate metadata on session_events (A.9/A.10): used by old_data_dropped
+        -- sentinel rows. Normal OS events leave these NULL (aggregation happens at sync).
+        ALTER TABLE session_events ADD COLUMN event_count INTEGER;
+        ALTER TABLE session_events ADD COLUMN first_at TEXT;
+        ALTER TABLE session_events ADD COLUMN last_at TEXT;
+        CREATE TABLE IF NOT EXISTS location_samples (
+            id               TEXT PRIMARY KEY,
+            latitude         REAL NOT NULL,
+            longitude        REAL NOT NULL,
+            accuracy_m       REAL,
+            altitude_m       REAL,
+            source           TEXT NOT NULL DEFAULT 'ip',
+            address          TEXT,
+            captured_at      TEXT NOT NULL,
+            is_synced        INTEGER NOT NULL DEFAULT 0,
+            synced_at        TEXT,
+            created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_location_samples_unsent
+            ON location_samples(is_synced, captured_at);
+        CREATE INDEX IF NOT EXISTS idx_location_samples_captured
+            ON location_samples(captured_at DESC);
     ";
 
     // PHASE 1: INSERT STATEMENTS
@@ -441,13 +570,26 @@ internal static class DatabaseSchema
 
     internal const string InsertSessionEventSql = @"
         INSERT INTO session_events
-            (id, event_type, os_username, event_at)
+            (id, event_type, os_username, event_at, event_count, first_at, last_at)
         VALUES
-            ($id, $event_type, $os_username, $event_at)
+            ($id, $event_type, $os_username, $event_at, $event_count, $first_at, $last_at)
     ";
 
     internal const string MarkSessionEventsSentSql = @"
         UPDATE session_events
+        SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')
+        WHERE id IN ({0})
+    ";
+
+    internal const string InsertLocationSampleSql = @"
+        INSERT INTO location_samples
+            (id, latitude, longitude, accuracy_m, altitude_m, source, address, captured_at)
+        VALUES
+            ($id, $latitude, $longitude, $accuracy_m, $altitude_m, $source, $address, $captured_at)
+    ";
+
+    internal const string MarkLocationSamplesSentSql = @"
+        UPDATE location_samples
         SET is_synced = 1, synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')
         WHERE id IN ({0})
     ";
@@ -459,15 +601,20 @@ internal static class DatabaseSchema
             (id, process_name, app_display_name, started_at, ended_at,
              machine_id, employee_id, employee_name, session_id, platform,
              installed_app_id, installed_package_id, process_id, parent_process_id,
-             grouped_by, cgroup_scope, context_label, foreground_seconds, background_seconds)
+             grouped_by, cgroup_scope, context_label, foreground_seconds, background_seconds,
+             last_activity_at)
         VALUES
             ($id, $process_name, $app_display_name, $started_at, $ended_at,
              $machine_id, $employee_id, $employee_name, $session_id, $platform,
              $installed_app_id, $installed_package_id, $process_id, $parent_process_id,
-             $grouped_by, $cgroup_scope, $context_label, $foreground_seconds, $background_seconds)
+             $grouped_by, $cgroup_scope, $context_label, $foreground_seconds, $background_seconds,
+             $last_activity_at)
         ON CONFLICT(id) DO UPDATE SET
             ended_at = COALESCE(excluded.ended_at, app_sessions.ended_at),
             parent_process_id = COALESCE(excluded.parent_process_id, app_sessions.parent_process_id),
+            -- Refresh last_activity_at on every conflict (the row exists, the
+            -- collector re-stored it, the user is still active).
+            last_activity_at = COALESCE(excluded.last_activity_at, app_sessions.last_activity_at),
             -- Any re-stored (updated) row must re-sync so the server learns the change
             -- even when the row was already synced (user rule 2026-08-12).
             is_synced = 0
@@ -476,12 +623,14 @@ internal static class DatabaseSchema
     internal const string UpdateAppSessionEndedSql = @"
         UPDATE app_sessions
         SET ended_at = $ended_at,
+            last_activity_at = $ended_at,
             -- Final focus durations ride along on close when known; NULL keeps the
             -- last flushed value (sessions closed by paths that don't track focus).
             foreground_seconds = COALESCE($foreground_seconds, foreground_seconds),
             background_seconds = COALESCE($background_seconds, background_seconds),
             -- Re-sync on close: a session synced as OPEN must tell the server it ended.
-            is_synced = 0
+            is_synced = 0,
+            synced_at = NULL
         WHERE id = $id
     ";
 
@@ -498,7 +647,22 @@ internal static class DatabaseSchema
         UPDATE app_sessions
         SET foreground_seconds = COALESCE(foreground_seconds, 0) + $foreground_seconds,
             background_seconds = COALESCE(background_seconds, 0) + $background_seconds,
-            is_synced = 0
+            -- Touch last_activity_at on focus changes (the user just moved
+            -- the focus; the server sweeper should know the tracker is alive).
+            -- ZOMBIE-PREVENTION (2026-09-02): only do this for an open session.
+            -- A closed session (`ended_at IS NOT NULL`) must not be re-queued
+            -- or re-stamped with a fresh activity timestamp — that was the
+            -- source of the 26h Stale chrome session bug. Focus updates
+            -- arriving after close are still accumulated (the final flush
+            -- happens via a dedicated close path, not the focus loop).
+            last_activity_at = CASE
+                WHEN ended_at IS NULL THEN strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')
+                ELSE last_activity_at
+            END,
+            is_synced = CASE
+                WHEN ended_at IS NULL THEN 0
+                ELSE is_synced
+            END
         WHERE id = $id
     ";
 

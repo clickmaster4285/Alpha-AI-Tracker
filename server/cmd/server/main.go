@@ -9,7 +9,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/labstack/echo/v4"
 	"github.com/alpha-ai-tracker/server/internal/config"
 	"github.com/alpha-ai-tracker/server/internal/database"
 	"github.com/alpha-ai-tracker/server/internal/handlers"
@@ -18,6 +17,7 @@ import (
 	"github.com/alpha-ai-tracker/server/internal/repository"
 	"github.com/alpha-ai-tracker/server/internal/router"
 	"github.com/alpha-ai-tracker/server/internal/services"
+	"github.com/labstack/echo/v4"
 )
 
 func main() {
@@ -74,15 +74,19 @@ func main() {
 	rbacRepo := repository.NewRBACRepo(pool)
 	refreshTokenRepo := repository.NewRefreshTokenRepo(pool)
 	shiftRepo := repository.NewShiftRepo(pool)
+	timeAttendanceRepo := repository.NewTimeAttendanceRepo(pool)
 
 	authService := services.NewAuthService(userRepo, rbacRepo, refreshTokenRepo, cfg.JWT, cfg.Admin)
 	userService := services.NewUserService(userRepo, rbacRepo, employeeRepo)
 	employeeService := services.NewEmployeeService(employeeRepo, shiftRepo, redisClient)
 	departmentService := services.NewDepartmentService(departmentRepo, employeeRepo)
-	newSchemaService := services.NewNewSchemaService(newSchemaRepo, employeeRepo)
+	geofenceRepo := repository.NewGeofenceRepo(pool)
+	geofenceService := services.NewGeofenceService(geofenceRepo)
+	newSchemaService := services.NewNewSchemaService(newSchemaRepo, employeeRepo, geofenceService)
 	monitoringService := services.NewMonitoringService(monitoringRepo)
 	rbacService := services.NewRBACService(rbacRepo)
-	shiftService := services.NewShiftService(shiftRepo)
+	shiftService := services.NewShiftService(shiftRepo, cfg.DefaultShiftTimezone)
+	timeAttendanceService := services.NewTimeAttendanceService(timeAttendanceRepo)
 
 	// Cast Redis client to interface
 	var redisInterface services.RedisClientInterface
@@ -98,6 +102,8 @@ func main() {
 	monitoringHandler := handlers.NewMonitoringHandler(monitoringService)
 	rbacHandler := handlers.NewRBACHandler(rbacService)
 	shiftHandler := handlers.NewShiftHandler(shiftService)
+	timeAttendanceHandler := handlers.NewTimeAttendanceHandler(timeAttendanceService)
+	geofenceHandler := handlers.NewGeofenceHandler(geofenceService)
 
 	// ────────────────
 	// Seed RBAC catalog (modules, submodules, system role) — idempotent
@@ -114,6 +120,14 @@ func main() {
 		log.Fatalf("[server] failed to ensure company admin: %v", err)
 	}
 
+	shiftTzUpdated, err := shiftService.ApplyDefaultTimezone(ctx)
+	if err != nil {
+		log.Fatalf("[server] failed to apply default shift timezone: %v", err)
+	}
+	if shiftTzUpdated > 0 {
+		log.Printf("[server] applied DEFAULT_SHIFT_TIMEZONE to %d shift(s) still on UTC", shiftTzUpdated)
+	}
+
 	// ────────────────
 	// Background jobs
 	// ────────────────
@@ -126,6 +140,9 @@ func main() {
 	retentionWorker := jobs.NewRetentionWorker(pool)
 	go retentionWorker.Start(sweepCtx)
 
+	sessionLifecycleSweep := jobs.NewSessionLifecycleSweep(pool)
+	go sessionLifecycleSweep.Start(sweepCtx)
+
 	// ────────────────
 	// Setup Echo
 	// ────────────────
@@ -133,7 +150,7 @@ func main() {
 	e.HideBanner = true
 	e.HidePort = true
 
-	router.Setup(e, cfg, authService, deviceRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler, rbacHandler, shiftHandler)
+	router.Setup(e, cfg, authService, deviceRepo, userRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler, rbacHandler, shiftHandler, timeAttendanceHandler, geofenceHandler)
 
 	// ────────────────
 	// Graceful Shutdown

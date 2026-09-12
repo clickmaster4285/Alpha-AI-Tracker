@@ -13,22 +13,45 @@ public class SqliteLogStore : ILogStore, IDisposable
     private SqliteConnection? _connection;
 
     /// <summary>
-    /// Concurrency gate protecting the single shared SqliteConnection.
-    /// SemaphoreSlim(1,1) = exclusive access. NOT reentrant — see private
+    /// Read-only connection (Time and Attendance, Phase 1, finalplan R8 + section 2.8).
+    /// Background readers (AttendanceAggregator, future read-heavy services) use this
+    /// connection so they never serialize with the gated write connection that
+    /// LogCollectorService and SyncService hold during the collection cycle. WAL mode
+    /// (enabled in InitializeAsync below) is the prerequisite - readers and writers can
+    /// proceed concurrently only when the journal mode is WAL.
+    /// </summary>
+    private SqliteConnection? _readConnection;
+    private readonly SemaphoreSlim _readConnectionGate = new(1, 1);
+
+    /// <summary>
+    /// Concurrency gate protecting the single shared WRITE SqliteConnection.
+    /// SemaphoreSlim(1,1) = exclusive access. NOT reentrant - see private
     /// ungated helpers (SetStatusCoreAsync, GetEmployeeInfoCoreAsync) that
     /// composite methods call instead of the public gated versions.
+    /// The READ connection above is NOT gated by this; it has its own gate which
+    /// is essentially a no-op (a single reader at a time) but reserves the
+    /// connection so two readers don't share its commands concurrently.
     /// </summary>
     private readonly SemaphoreSlim _connectionGate = new(1, 1);
+    private readonly SemaphoreSlim _initializationGate = new(1, 1);
+    private bool _initialized;
 
     public SqliteLogStore(string dbPath, string? encryptionKey = null)
     {
         _dbPath = dbPath;
+        // Cache=Shared is the WAL-friendly connection string: the same .db file
+        // can be opened by the read connection without re-opening the file.
         var cs = $"Data Source={dbPath};Mode=ReadWriteCreate;Cache=Shared";
         _connectionString = cs;
     }
 
     public async Task InitializeAsync(CancellationToken ct)
     {
+        await _initializationGate.WaitAsync(ct);
+        try
+        {
+        if (_initialized) return;
+
         var dir = Path.GetDirectoryName(_dbPath);
         if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
         {
@@ -47,6 +70,29 @@ public class SqliteLogStore : ILogStore, IDisposable
             busyCmd.CommandText = "PRAGMA busy_timeout = 5000;";
             await busyCmd.ExecuteNonQueryAsync(ct);
 
+            // ── WAL mode (Time and Attendance, finalplan R8 + section 2.8) ──
+            // MUST be set BEFORE opening the read-only connection. The read
+            // connection inherits the journal mode of the database file, so if WAL
+            // were enabled AFTER the read connection opened, that connection would
+            // see a legacy rollback journal and readers would still block writers.
+            // PRAGMA journal_mode = WAL is idempotent and persistent across
+            // connections - setting it on every boot is the safe pattern.
+            using (var walCmd = _connection.CreateCommand())
+            {
+                walCmd.CommandText = "PRAGMA journal_mode = WAL;";
+                await walCmd.ExecuteNonQueryAsync(ct);
+            }
+            // synchronous=NORMAL pairs with WAL: durability is bounded by the
+            // checkpoint interval, not every write. Faster than the default FULL
+            // while still surviving a power loss without DB corruption (only the
+            // most recent uncheckpointed transaction can be lost, acceptable for
+            // telemetry).
+            using (var syncCmd = _connection.CreateCommand())
+            {
+                syncCmd.CommandText = "PRAGMA synchronous = NORMAL;";
+                await syncCmd.ExecuteNonQueryAsync(ct);
+            }
+
             var cmd = _connection.CreateCommand();
             cmd.CommandText = DatabaseSchema.CreateTableSql;
             await cmd.ExecuteNonQueryAsync(ct);
@@ -57,6 +103,52 @@ public class SqliteLogStore : ILogStore, IDisposable
         {
             _connectionGate.Release();
         }
+
+        // Open the read-only connection AFTER WAL is enabled (see comment above).
+        // Mode=ReadOnly ensures this connection physically CANNOT write; any
+        // accidental write call throws, eliminating an entire class of bugs where
+        // a reader silently mutates the DB.
+        await _readConnectionGate.WaitAsync(ct);
+        try
+        {
+            _readConnection = new SqliteConnection($"Data Source={_dbPath};Mode=ReadOnly;Cache=Shared");
+            await _readConnection.OpenAsync(ct);
+            using var rBusy = _readConnection.CreateCommand();
+            rBusy.CommandText = "PRAGMA busy_timeout = 5000;";
+            await rBusy.ExecuteNonQueryAsync(ct);
+        }
+        finally
+        {
+            _readConnectionGate.Release();
+        }
+        _initialized = true;
+        }
+        finally
+        {
+            _initializationGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Time and Attendance (finalplan R8, section 2.8): acquire the read connection
+    /// for callers that are read-only (AttendanceAggregator, future analytics, tests).
+    /// The callback receives a live SqliteConnection in ReadOnly mode; it is the
+    /// callback's responsibility to create + execute + dispose commands quickly. The
+    /// connection gate ensures only one reader runs at a time so two concurrent
+    /// SELECTs never share an in-flight DataReader.
+    /// </summary>
+    internal async Task<T> WithReadConnectionAsync<T>(Func<SqliteConnection, Task<T>> action, CancellationToken ct)
+    {
+        if (_readConnection == null) throw new InvalidOperationException("SqliteLogStore not initialized");
+        await _readConnectionGate.WaitAsync(ct);
+        try
+        {
+            return await action(_readConnection);
+        }
+        finally
+        {
+            _readConnectionGate.Release();
+        }
     }
 
     private async Task RunMigrationsAsync(CancellationToken ct)
@@ -65,7 +157,7 @@ public class SqliteLogStore : ILogStore, IDisposable
 
         foreach (var statement in DatabaseSchema.MigrateSql.Split(';', StringSplitOptions.RemoveEmptyEntries))
         {
-            var sql = statement.Trim();
+            var sql = StripSqlLineComments(statement).Trim();
             if (string.IsNullOrEmpty(sql)) continue;
             try
             {
@@ -98,6 +190,23 @@ public class SqliteLogStore : ILogStore, IDisposable
             CREATE INDEX IF NOT EXISTS idx_app_items_unsent ON app_items(is_synced, opened_at);
         ";
         await indexCmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// Removes -- line comments before executing a migration fragment. MigrateSql is split on
+    /// ';' and a semicolon inside a comment would otherwise produce a bogus statement
+    /// (e.g. "normal OS events..." after "sentinel rows; normal...").
+    /// </summary>
+    private static string StripSqlLineComments(string sql)
+    {
+        var kept = new List<string>();
+        foreach (var line in sql.Split('\n'))
+        {
+            var trimmed = line.TrimStart();
+            if (trimmed.StartsWith("--", StringComparison.Ordinal)) continue;
+            kept.Add(line);
+        }
+        return string.Join('\n', kept);
     }
 
     /// <summary>
@@ -1247,6 +1356,9 @@ public class SqliteLogStore : ILogStore, IDisposable
             var pType = cmd.Parameters.Add("$event_type", SqliteType.Text);
             var pUser = cmd.Parameters.Add("$os_username", SqliteType.Text);
             var pEventAt = cmd.Parameters.Add("$event_at", SqliteType.Text);
+            var pCount = cmd.Parameters.Add("$event_count", SqliteType.Integer);
+            var pFirstAt = cmd.Parameters.Add("$first_at", SqliteType.Text);
+            var pLastAt = cmd.Parameters.Add("$last_at", SqliteType.Text);
 
             await using var tx = await _connection.BeginTransactionAsync(ct);
             ((DbCommand)cmd).Transaction = tx;
@@ -1256,6 +1368,9 @@ public class SqliteLogStore : ILogStore, IDisposable
                 pType.Value = e.EventType;
                 pUser.Value = e.OsUsername;
                 pEventAt.Value = e.EventAt.ToString("O");
+                pCount.Value = e.EventCount.HasValue ? e.EventCount.Value : DBNull.Value;
+                pFirstAt.Value = e.FirstAt.HasValue ? e.FirstAt.Value.ToString("O") : DBNull.Value;
+                pLastAt.Value = e.LastAt.HasValue ? e.LastAt.Value.ToString("O") : DBNull.Value;
                 await cmd.ExecuteNonQueryAsync(ct);
             }
             await tx.CommitAsync(ct);
@@ -1291,6 +1406,95 @@ public class SqliteLogStore : ILogStore, IDisposable
         await MarkSentCoreAsync("session_events", "id", ids, ct);
     }
 
+    public async Task<int> CountUnsentSessionEventsAsync(CancellationToken ct)
+    {
+        if (_connection == null) return 0;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM session_events WHERE is_synced = 0";
+            var result = await cmd.ExecuteScalarAsync(ct);
+            return Convert.ToInt32(result);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task<int> RollupExcessUnsentSessionEventsAsync(int maxRows, CancellationToken ct)
+    {
+        if (_connection == null || maxRows < 1) return 0;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var countCmd = _connection.CreateCommand();
+            countCmd.CommandText = "SELECT COUNT(*) FROM session_events WHERE is_synced = 0";
+            var unsynced = Convert.ToInt32(await countCmd.ExecuteScalarAsync(ct));
+            if (unsynced <= maxRows) return 0;
+
+            var excess = unsynced - maxRows;
+            var fetchCmd = _connection.CreateCommand();
+            fetchCmd.CommandText = @"SELECT * FROM session_events
+                WHERE is_synced = 0
+                ORDER BY event_at ASC
+                LIMIT $limit";
+            fetchCmd.Parameters.AddWithValue("$limit", excess);
+
+            var toRoll = new List<SessionEvent>();
+            await using (var reader = await fetchCmd.ExecuteReaderAsync(ct))
+            {
+                while (await reader.ReadAsync(ct))
+                    toRoll.Add(MapSessionEventReader(reader));
+            }
+
+            if (toRoll.Count == 0) return 0;
+
+            var firstAt = toRoll.Min(e => e.EventAt);
+            var lastAt = toRoll.Max(e => e.EventAt);
+            var sentinel = new SessionEvent
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                EventType = SessionEventTypes.OldDataDropped,
+                OsUsername = toRoll[0].OsUsername,
+                EventAt = firstAt,
+                EventCount = toRoll.Count,
+                FirstAt = firstAt,
+                LastAt = lastAt,
+            };
+
+            await using var tx = await _connection.BeginTransactionAsync(ct);
+
+            var deleteCmd = _connection.CreateCommand();
+            ((DbCommand)deleteCmd).Transaction = tx;
+            deleteCmd.CommandText = $"DELETE FROM session_events WHERE id IN ({string.Join(",", toRoll.Select((_, i) => $"$id{i}"))})";
+            for (var i = 0; i < toRoll.Count; i++)
+                deleteCmd.Parameters.AddWithValue($"$id{i}", toRoll[i].Id);
+            await deleteCmd.ExecuteNonQueryAsync(ct);
+
+            var insertCmd = _connection.CreateCommand();
+            ((DbCommand)insertCmd).Transaction = tx;
+            insertCmd.CommandText = DatabaseSchema.InsertSessionEventSql;
+            insertCmd.Parameters.AddWithValue("$id", sentinel.Id);
+            insertCmd.Parameters.AddWithValue("$event_type", sentinel.EventType);
+            insertCmd.Parameters.AddWithValue("$os_username", sentinel.OsUsername);
+            insertCmd.Parameters.AddWithValue("$event_at", sentinel.EventAt.ToString("O"));
+            insertCmd.Parameters.AddWithValue("$event_count", sentinel.EventCount!.Value);
+            insertCmd.Parameters.AddWithValue("$first_at", sentinel.FirstAt!.Value.ToString("O"));
+            insertCmd.Parameters.AddWithValue("$last_at", sentinel.LastAt!.Value.ToString("O"));
+            await insertCmd.ExecuteNonQueryAsync(ct);
+
+            await tx.CommitAsync(ct);
+
+            return toRoll.Count;
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
     public async Task<SessionEvent?> GetLastSessionEventAsync(CancellationToken ct)
     {
         if (_connection == null) return null;
@@ -1307,6 +1511,256 @@ public class SqliteLogStore : ILogStore, IDisposable
         {
             _connectionGate.Release();
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Time and Attendance CRUD (Phase 1, finalplan section 2.2)
+    // Schedule + holidays are PURE MIRROR data from the server (ScheduleCacheService
+    // pulls them every 6h in A.6). daily_attendance_cache + local_time_skew are
+    // CLIENT-OWNED: written by AttendanceAggregator (A.8) and LocalTimeSkewService
+    // (A.7) respectively. None of these are sent to the server in Phase 1.
+    // ════════════════════════════════════════════════════════════════════════
+
+    public async Task UpsertEmployeeScheduleAsync(
+        string employeeId, string timezone, string weeklyPatternJson,
+        int graceMinutes, string? validFrom, string? validTo, string? serverId,
+        CancellationToken ct)
+    {
+        if (_connection == null) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+                INSERT INTO employee_schedule
+                    (employee_id, timezone, weekly_pattern, grace_minutes,
+                     valid_from, valid_to, server_id, is_synced, synced_at, updated_at)
+                VALUES
+                    ($eid, $tz, $pattern, $grace, $vfrom, $vto, $sid, 1,
+                     strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'),
+                     strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+                ON CONFLICT(employee_id) DO UPDATE SET
+                    timezone = excluded.timezone,
+                    weekly_pattern = excluded.weekly_pattern,
+                    grace_minutes = excluded.grace_minutes,
+                    valid_from = excluded.valid_from,
+                    valid_to = excluded.valid_to,
+                    server_id = excluded.server_id,
+                    is_synced = 1,
+                    synced_at = excluded.synced_at,
+                    updated_at = excluded.updated_at
+            ";
+            cmd.Parameters.AddWithValue("$eid", employeeId);
+            cmd.Parameters.AddWithValue("$tz", timezone);
+            cmd.Parameters.AddWithValue("$pattern", weeklyPatternJson);
+            cmd.Parameters.AddWithValue("$grace", graceMinutes);
+            cmd.Parameters.AddWithValue("$vfrom", (object?)validFrom ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$vto", (object?)validTo ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$sid", (object?)serverId ?? DBNull.Value);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task<IReadOnlyList<(string EmployeeId, string Timezone, string WeeklyPattern, int GraceMinutes)>>
+        ListEmployeeSchedulesAsync(CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<(string, string, string, int)>();
+        // Use the READ connection - this is a pure read, doesn't need to serialize
+        // with writers. The reader callback owns its own DataReader lifetime.
+        return await WithReadConnectionAsync(async conn =>
+        {
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT employee_id, timezone, weekly_pattern, grace_minutes FROM employee_schedule";
+            var results = new List<(string, string, string, int)>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                results.Add((
+                    reader.GetString(0),
+                    reader.GetString(1),
+                    reader.GetString(2),
+                    reader.GetInt32(3)));
+            }
+            return (IReadOnlyList<(string, string, string, int)>)results;
+        }, ct);
+    }
+
+    public async Task UpsertCompanyHolidayAsync(string date, string label, string? serverId, CancellationToken ct)
+    {
+        if (_connection == null) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+                INSERT INTO company_holidays
+                    (holiday_date, label, server_id, is_synced, synced_at)
+                VALUES
+                    ($date, $label, $sid, 1, strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+                ON CONFLICT(holiday_date) DO UPDATE SET
+                    label = excluded.label,
+                    server_id = excluded.server_id,
+                    is_synced = 1,
+                    synced_at = excluded.synced_at
+            ";
+            cmd.Parameters.AddWithValue("$date", date);
+            cmd.Parameters.AddWithValue("$label", label);
+            cmd.Parameters.AddWithValue("$sid", (object?)serverId ?? DBNull.Value);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task<IReadOnlyList<(string Date, string Label)>> ListCompanyHolidaysAsync(CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<(string, string)>();
+        return await WithReadConnectionAsync(async conn =>
+        {
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT holiday_date, label FROM company_holidays";
+            var results = new List<(string, string)>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                results.Add((reader.GetString(0), reader.GetString(1)));
+            }
+            return (IReadOnlyList<(string, string)>)results;
+        }, ct);
+    }
+
+    public async Task UpsertDailyAttendanceAsync(
+        string employeeId, string workDate, DateTime? firstActiveAt, DateTime? lastActiveAt,
+        int activeSeconds, int idleSeconds, int offShiftSeconds, string status, int lateMinutes,
+        CancellationToken ct)
+    {
+        if (_connection == null) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+                INSERT INTO daily_attendance_cache
+                    (employee_id, work_date, first_active_at, last_active_at,
+                     active_seconds, idle_seconds, off_shift_seconds, status, late_minutes, updated_at)
+                VALUES
+                    ($eid, $date, $fa, $la, $a, $i, $o, $st, $lm,
+                     strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+                ON CONFLICT(employee_id, work_date) DO UPDATE SET
+                    first_active_at = COALESCE(NULLIF(excluded.first_active_at, ''), daily_attendance_cache.first_active_at),
+                    last_active_at = excluded.last_active_at,
+                    active_seconds = excluded.active_seconds,
+                    idle_seconds = excluded.idle_seconds,
+                    off_shift_seconds = excluded.off_shift_seconds,
+                    status = excluded.status,
+                    late_minutes = excluded.late_minutes,
+                    updated_at = excluded.updated_at
+            ";
+            cmd.Parameters.AddWithValue("$eid", employeeId);
+            cmd.Parameters.AddWithValue("$date", workDate);
+            cmd.Parameters.AddWithValue("$fa", firstActiveAt?.ToString("O") ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("$la", lastActiveAt?.ToString("O") ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("$a", activeSeconds);
+            cmd.Parameters.AddWithValue("$i", idleSeconds);
+            cmd.Parameters.AddWithValue("$o", offShiftSeconds);
+            cmd.Parameters.AddWithValue("$st", status);
+            cmd.Parameters.AddWithValue("$lm", lateMinutes);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task<(int ActiveSeconds, int IdleSeconds, int OffShiftSeconds, DateTime? FirstActiveAt)?>
+        GetDailyAttendanceAsync(string employeeId, string workDate, CancellationToken ct)
+    {
+        if (_connection == null) return null;
+        return await WithReadConnectionAsync(async conn =>
+        {
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = @"SELECT active_seconds, idle_seconds, off_shift_seconds, first_active_at
+                                FROM daily_attendance_cache
+                                WHERE employee_id = $eid AND work_date = $date";
+            cmd.Parameters.AddWithValue("$eid", employeeId);
+            cmd.Parameters.AddWithValue("$date", workDate);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct)) return null;
+            DateTime? fa = reader.IsDBNull(3) ? null : reader.GetDateTime(3);
+            return ((int, int, int, DateTime?)?)(
+                reader.GetInt32(0), reader.GetInt32(1), reader.GetInt32(2), fa);
+        }, ct);
+    }
+
+    public async Task UpsertTimeSkewAsync(string serverUrl, DateTime measuredAt, double skewSeconds, CancellationToken ct)
+    {
+        if (_connection == null) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+                INSERT INTO local_time_skew (server_url, last_measured_at, skew_seconds)
+                VALUES ($url, $at, $skew)
+                ON CONFLICT(server_url) DO UPDATE SET
+                    last_measured_at = excluded.last_measured_at,
+                    skew_seconds = excluded.skew_seconds
+            ";
+            cmd.Parameters.AddWithValue("$url", serverUrl);
+            cmd.Parameters.AddWithValue("$at", measuredAt.ToString("O"));
+            cmd.Parameters.AddWithValue("$skew", skewSeconds);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task<(DateTime MeasuredAt, double SkewSeconds)?> GetLatestTimeSkewAsync(string serverUrl, CancellationToken ct)
+    {
+        if (_connection == null) return null;
+        return await WithReadConnectionAsync(async conn =>
+        {
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT last_measured_at, skew_seconds FROM local_time_skew WHERE server_url = $url";
+            cmd.Parameters.AddWithValue("$url", serverUrl);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct)) return null;
+            var at = DateTime.Parse(reader.GetString(0), null, System.Globalization.DateTimeStyles.RoundtripKind);
+            return ((DateTime, double)?)(at, reader.GetDouble(1));
+        }, ct);
+    }
+
+    /// <summary>
+    /// Time and Attendance (finalplan section 2.5 + section 5 S1): read session_events
+    /// in a [from, to) window. Used by AttendanceAggregator (A.8) for the daily
+    /// window read. Uses the read-only connection - non-blocking with writers.
+    /// </summary>
+    public async Task<IReadOnlyList<SessionEvent>> GetSessionEventsInRangeAsync(
+        DateTime fromUtc, DateTime toUtc, CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<SessionEvent>();
+        return await WithReadConnectionAsync(async conn =>
+        {
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = @"SELECT * FROM session_events
+                                WHERE event_at >= $from AND event_at < $to
+                                ORDER BY event_at ASC";
+            cmd.Parameters.AddWithValue("$from", fromUtc.ToString("O"));
+            cmd.Parameters.AddWithValue("$to", toUtc.ToString("O"));
+            var results = new List<SessionEvent>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct)) results.Add(MapSessionEventReader(reader));
+            return (IReadOnlyList<SessionEvent>)results;
+        }, ct);
     }
 
     // ────────────────────────────────────────
@@ -1370,6 +1824,7 @@ public class SqliteLogStore : ILogStore, IDisposable
                 var pContextLabel = cmd.Parameters.Add("$context_label", SqliteType.Text);
                 var pFg = cmd.Parameters.Add("$foreground_seconds", SqliteType.Real);
                 var pBg = cmd.Parameters.Add("$background_seconds", SqliteType.Real);
+                var pLastActivity = cmd.Parameters.Add("$last_activity_at", SqliteType.Text);
 
                 foreach (var e in newSessions)
                 {
@@ -1392,6 +1847,7 @@ public class SqliteLogStore : ILogStore, IDisposable
                     pContextLabel.Value = (object?)e.ContextLabel ?? DBNull.Value;
                     pFg.Value = e.ForegroundSeconds ?? 0;
                     pBg.Value = e.BackgroundSeconds ?? 0;
+                    pLastActivity.Value = e.LastActivityAt?.ToString("O") ?? (object)DBNull.Value;
                     await cmd.ExecuteNonQueryAsync(ct);
                 }
             }
@@ -1410,8 +1866,16 @@ public class SqliteLogStore : ILogStore, IDisposable
         await _connectionGate.WaitAsync(ct);
         try
         {
+            // is_synced is the sole queue marker. A previously synced session
+            // can become unsynced when it is closed, so it must be returned
+            // even when ended_at and synced_at are both populated. Filtering
+            // closed rows here strands the final close update permanently.
             var cmd = _connection.CreateCommand();
-            cmd.CommandText = "SELECT * FROM app_sessions WHERE is_synced = 0 ORDER BY started_at ASC LIMIT $limit";
+            cmd.CommandText = @"
+                SELECT * FROM app_sessions
+                 WHERE is_synced = 0
+                 ORDER BY started_at ASC
+                 LIMIT $limit";
             cmd.Parameters.AddWithValue("$limit", limit);
             var results = new List<AppSession>();
             await using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -1427,6 +1891,31 @@ public class SqliteLogStore : ILogStore, IDisposable
     public async Task MarkAppSessionsSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
         await MarkSentCoreAsync("app_sessions", "id", ids, ct);
+    }
+
+    /// <summary>
+    /// Reset specific sessions to is_synced=0 so they are re-sent on the next sync pass.
+    /// Called when the server reports missing session IDs during the orphan preflight
+    /// (Bug #9 follow-up — breaks the permanent orphan deadlock).
+    /// </summary>
+    public async Task MarkAppSessionsUnsyncedByIdsAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        if (_connection == null || ids.Count == 0) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            foreach (var id in ids)
+            {
+                await using var cmd = _connection.CreateCommand();
+                cmd.CommandText = "UPDATE app_sessions SET is_synced = 0, synced_at = NULL WHERE id = $id AND is_synced = 1";
+                cmd.Parameters.AddWithValue("$id", id);
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
     }
 
     /// <summary>
@@ -2093,6 +2582,78 @@ public class SqliteLogStore : ILogStore, IDisposable
     }
 
     // ────────────────────────────────────────
+    // Location samples (Phase 3 GPS — synced; never deleted client-side)
+    // ────────────────────────────────────────
+
+    public async Task StoreLocationSamplesAsync(IReadOnlyList<LocationSample> entries, CancellationToken ct)
+    {
+        if (_connection == null || entries.Count == 0) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = DatabaseSchema.InsertLocationSampleSql;
+            var pId = cmd.Parameters.Add("$id", SqliteType.Text);
+            var pLat = cmd.Parameters.Add("$latitude", SqliteType.Real);
+            var pLon = cmd.Parameters.Add("$longitude", SqliteType.Real);
+            var pAcc = cmd.Parameters.Add("$accuracy_m", SqliteType.Real);
+            var pAlt = cmd.Parameters.Add("$altitude_m", SqliteType.Real);
+            var pSrc = cmd.Parameters.Add("$source", SqliteType.Text);
+            var pAddr = cmd.Parameters.Add("$address", SqliteType.Text);
+            var pCap = cmd.Parameters.Add("$captured_at", SqliteType.Text);
+
+            foreach (var e in entries)
+            {
+                pId.Value = e.Id;
+                pLat.Value = e.Latitude;
+                pLon.Value = e.Longitude;
+                pAcc.Value = e.AccuracyM.HasValue ? e.AccuracyM.Value : DBNull.Value;
+                pAlt.Value = e.AltitudeM.HasValue ? e.AltitudeM.Value : DBNull.Value;
+                pSrc.Value = e.Source;
+                pAddr.Value = string.IsNullOrWhiteSpace(e.Address) ? DBNull.Value : e.Address;
+                pCap.Value = e.CapturedAt.ToString("O");
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task<IReadOnlyList<LocationSample>> GetUnsentLocationSamplesAsync(int limit, CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<LocationSample>();
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+                SELECT id, latitude, longitude, accuracy_m, altitude_m, source, address,
+                       captured_at, is_synced, synced_at, created_at
+                FROM location_samples
+                WHERE is_synced = 0
+                ORDER BY captured_at ASC
+                LIMIT $limit";
+            cmd.Parameters.AddWithValue("$limit", limit);
+            var results = new List<LocationSample>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+                results.Add(MapLocationSampleReader(reader));
+            return results;
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task MarkLocationSamplesSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        await MarkSentCoreAsync("location_samples", "id", ids, ct);
+    }
+
+    // ────────────────────────────────────────
     // Sync: app_status + permission_status (sent to server; never deleted client-side)
     // ────────────────────────────────────────
 
@@ -2207,12 +2768,22 @@ public class SqliteLogStore : ILogStore, IDisposable
 
             var appsCmd = _connection.CreateCommand();
             ((DbCommand)appsCmd).Transaction = tx;
-            appsCmd.CommandText = "DELETE FROM installed_applications WHERE is_installed = 0 AND is_synced = 1";
+            appsCmd.CommandText = @"
+                DELETE FROM installed_applications
+                WHERE is_installed = 0 AND is_synced = 1
+                  AND NOT EXISTS (
+                      SELECT 1 FROM app_sessions
+                      WHERE app_sessions.installed_app_id = installed_applications.id)";
             var appsDeleted = await appsCmd.ExecuteNonQueryAsync(ct);
 
             var pkgsCmd = _connection.CreateCommand();
             ((DbCommand)pkgsCmd).Transaction = tx;
-            pkgsCmd.CommandText = "DELETE FROM installed_packages WHERE is_installed = 0 AND is_synced = 1";
+            pkgsCmd.CommandText = @"
+                DELETE FROM installed_packages
+                WHERE is_installed = 0 AND is_synced = 1
+                  AND NOT EXISTS (
+                      SELECT 1 FROM app_sessions
+                      WHERE app_sessions.installed_package_id = installed_packages.id)";
             var pkgsDeleted = await pkgsCmd.ExecuteNonQueryAsync(ct);
 
             var netCmd = _connection.CreateCommand();
@@ -2569,6 +3140,24 @@ public class SqliteLogStore : ILogStore, IDisposable
         };
     }
 
+    private static LocationSample MapLocationSampleReader(SqliteDataReader r)
+    {
+        return new LocationSample
+        {
+            Id = r.GetString(r.GetOrdinal("id")),
+            Latitude = r.GetDouble(r.GetOrdinal("latitude")),
+            Longitude = r.GetDouble(r.GetOrdinal("longitude")),
+            AccuracyM = r.IsDBNull(r.GetOrdinal("accuracy_m")) ? null : r.GetDouble(r.GetOrdinal("accuracy_m")),
+            AltitudeM = r.IsDBNull(r.GetOrdinal("altitude_m")) ? null : r.GetDouble(r.GetOrdinal("altitude_m")),
+            Source = r.GetString(r.GetOrdinal("source")),
+            Address = r.IsDBNull(r.GetOrdinal("address")) ? null : r.GetString(r.GetOrdinal("address")),
+            CapturedAt = DateTime.Parse(r.GetString(r.GetOrdinal("captured_at"))),
+            IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
+            SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
+            CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),
+        };
+    }
+
     private static SessionEvent MapSessionEventReader(SqliteDataReader r)
     {
         return new SessionEvent
@@ -2576,7 +3165,18 @@ public class SqliteLogStore : ILogStore, IDisposable
             Id = r.GetString(r.GetOrdinal("id")),
             EventType = r.GetString(r.GetOrdinal("event_type")),
             OsUsername = r.GetString(r.GetOrdinal("os_username")),
-            EventAt = DateTime.Parse(r.GetString(r.GetOrdinal("event_at"))),
+            // Legacy rows may carry a local offset while current writers use Z.
+            // Normalize at the storage boundary so arithmetic never subtracts
+            // wall-clock ticks from UTC ticks and silently shifts durations.
+            EventAt = DateTimeOffset
+                .Parse(
+                    r.GetString(r.GetOrdinal("event_at")),
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.RoundtripKind)
+                .UtcDateTime,
+            EventCount = TryGetInt(r, "event_count"),
+            FirstAt = TryGetDateTime(r, "first_at"),
+            LastAt = TryGetDateTime(r, "last_at"),
             IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
             SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
             CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),
@@ -2606,6 +3206,9 @@ public class SqliteLogStore : ILogStore, IDisposable
             ContextLabel = TryGetString(r, "context_label"),
             ForegroundSeconds = TryGetDouble(r, "foreground_seconds"),
             BackgroundSeconds = TryGetDouble(r, "background_seconds"),
+            LastActivityAt = r.IsDBNull(r.GetOrdinal("last_activity_at"))
+                ? null
+                : DateTime.Parse(r.GetString(r.GetOrdinal("last_activity_at"))),
             IsSynced = r.GetInt32(r.GetOrdinal("is_synced")) == 1,
             SyncedAt = r.IsDBNull(r.GetOrdinal("synced_at")) ? null : r.GetString(r.GetOrdinal("synced_at")),
             CreatedAt = r.IsDBNull(r.GetOrdinal("created_at")) ? string.Empty : r.GetString(r.GetOrdinal("created_at")),
@@ -2726,6 +3329,23 @@ public class SqliteLogStore : ILogStore, IDisposable
         {
             var ordinal = r.GetOrdinal(column);
             return r.IsDBNull(ordinal) ? (double?)null : r.GetDouble(ordinal);
+        }
+        catch (IndexOutOfRangeException)
+        {
+            return null;
+        }
+    }
+
+    private static DateTime? TryGetDateTime(SqliteDataReader r, string column)
+    {
+        try
+        {
+            var ordinal = r.GetOrdinal(column);
+            if (r.IsDBNull(ordinal)) return null;
+            return DateTimeOffset.Parse(
+                r.GetString(ordinal),
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.RoundtripKind).UtcDateTime;
         }
         catch (IndexOutOfRangeException)
         {

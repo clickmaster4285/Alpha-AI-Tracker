@@ -4,9 +4,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/labstack/echo/v4"
 	"github.com/alpha-ai-tracker/server/internal/dto"
 	"github.com/alpha-ai-tracker/server/internal/services"
+	"github.com/labstack/echo/v4"
 )
 
 const (
@@ -41,7 +41,7 @@ func JWTAuth(authService *services.AuthService) echo.MiddlewareFunc {
 			}
 
 			claims, err := authService.ValidateToken(tokenString)
-			if err != nil {
+			if err != nil || claims.Issuer != "alpha-ai-tracker" {
 				return c.JSON(http.StatusUnauthorized, dto.APIError{
 					Code:    http.StatusUnauthorized,
 					Message: "Invalid or expired token",
@@ -77,7 +77,7 @@ func OptionalAuth(authService *services.AuthService) echo.MiddlewareFunc {
 
 			if tokenString != "" {
 				claims, err := authService.ValidateToken(tokenString)
-				if err == nil {
+				if err == nil && claims.Issuer == "alpha-ai-tracker" {
 					c.Set("user_id", claims.UserID)
 				}
 			}

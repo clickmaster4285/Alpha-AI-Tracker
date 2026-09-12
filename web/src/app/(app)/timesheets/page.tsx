@@ -1,85 +1,291 @@
 'use client';
 
-import { useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
-import { Clock, Check, X, Download, FileText } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { Textarea } from '@/components/ui/textarea';
+import { Clock, Loader2 } from 'lucide-react';
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import EmployeeSelector from '@/components/EmployeeSelector';
+import EmptyState from '@/components/employees/EmptyState';
+import ActivityFilters from '@/components/journey/ActivityFilters';
+import {
+  attendanceApi,
+  employeesApi,
+  type AttendanceRecord,
+  type AttendanceStatus,
+  type Employee,
+} from '@/lib/api';
+import { formatDateTimeInZone, formatSeconds } from '@/lib/format';
+import { useUrlActivityFilter } from '@/hooks/use-url-activity-filter';
 
-const timesheetData = [
-  { id: '1', employee: 'Yashodhan Kalia', date: '2026-03-10', clockIn: '09:02 AM', clockOut: '06:15 PM', totalHours: '9h 13m', productive: '7h 45m', breakTime: '1h 28m', overtime: '1h 13m', status: 'pending', note: '' },
-  { id: '2', employee: 'Stuti Srivastava', date: '2026-03-10', clockIn: '09:15 AM', clockOut: '05:45 PM', totalHours: '8h 30m', productive: '6h 50m', breakTime: '1h 40m', overtime: '0h 30m', status: 'approved', note: '' },
-  { id: '3', employee: 'Rakesh Pathania', date: '2026-03-10', clockIn: '08:45 AM', clockOut: '06:30 PM', totalHours: '9h 45m', productive: '8h 10m', breakTime: '1h 35m', overtime: '1h 45m', status: 'approved', note: '' },
-  { id: '4', employee: 'Kamal Dhami', date: '2026-03-10', clockIn: '10:05 AM', clockOut: '05:00 PM', totalHours: '6h 55m', productive: '5h 20m', breakTime: '1h 35m', overtime: '0h 0m', status: 'rejected', note: 'Incomplete hours' },
-  { id: '5', employee: 'Arush Sharma', date: '2026-03-10', clockIn: '09:00 AM', clockOut: '06:00 PM', totalHours: '9h 00m', productive: '7h 30m', breakTime: '1h 30m', overtime: '1h 00m', status: 'pending', note: '' },
-];
+const PER_PAGE = 31;
 
-const statusColors: Record<string, string> = {
-  pending: 'bg-warning/15 text-warning',
-  approved: 'bg-success/15 text-success',
-  rejected: 'bg-destructive/15 text-destructive',
+const STATUS_LABEL: Record<AttendanceStatus, string> = {
+  present: 'Present',
+  late: 'Late',
+  absent: 'Absent',
+  half_day: 'Half Day',
+  off_shift: 'Off Shift',
+  unknown: 'Unknown',
 };
 
-export default function TimesheetsPage() {
-  const [sheets, setSheets] = useState(timesheetData);
-  const [rejectDialog, setRejectDialog] = useState<string | null>(null);
-  const [rejectReason, setRejectReason] = useState('');
+const statusColors: Record<AttendanceStatus, string> = {
+  present: 'bg-success/15 text-success',
+  late: 'bg-warning/15 text-warning',
+  absent: 'bg-destructive/15 text-destructive',
+  half_day: 'bg-warning/15 text-warning',
+  off_shift: 'bg-info/15 text-info',
+  unknown: 'bg-muted text-muted-foreground',
+};
 
-  const approve = (id: string) => setSheets(sheets.map(s => s.id === id ? { ...s, status: 'approved' } : s));
-  const reject = (id: string) => {
-    setSheets(sheets.map(s => s.id === id ? { ...s, status: 'rejected', note: rejectReason } : s));
-    setRejectDialog(null);
-    setRejectReason('');
+/**
+ * Convert an ISO timestamp (from `ActivityFilter.dateFrom`/`dateTo`) to the
+ * `YYYY-MM-DD` form the server's `GET /attendance/range` expects.
+ */
+function isoToYmd(iso: string | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+export default function TimesheetsPage() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center min-h-[400px]"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>}>
+      <TimesheetsPageInner />
+    </Suspense>
+  );
+}
+
+function TimesheetsPageInner() {
+  // Single underlying URL state for BOTH the activity filter and the
+  // employee picker — one `useUrlQueryState` instance, one diff ref, no
+  // race between sibling hooks writing disjoint URL keys.
+  const { filter, setFilter, extra: employeeUrl, setExtra: setEmployeeUrl } =
+    useUrlActivityFilter(
+      { employeeId: {} },
+      { employeeId: '' },
+    );
+
+  // One-time default = "Last 14 days" when no preset/from/to is in the URL.
+  // Mirrors the prior `daysAgo(13) → today` window without flooding the
+  // address bar on first load.
+  const [didApplyDefault, setDidApplyDefault] = useState(false);
+  useEffect(() => {
+    if (didApplyDefault) return;
+    const url = new URL(window.location.href);
+    const hasPreset = url.searchParams.has('preset');
+    const hasFrom = url.searchParams.has('from');
+    const hasTo = url.searchParams.has('to');
+    if (!hasPreset && !hasFrom && !hasTo) {
+      // Default: Last 14 days (today + 13 days back)
+      const today = new Date();
+      const start = new Date();
+      start.setDate(start.getDate() - 13);
+      setFilter({
+        search: filter.search,
+        preset: 'custom',
+        dateFrom: new Date(start.getFullYear(), start.getMonth(), start.getDate(), 0, 0, 0).toISOString(),
+        dateTo: new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59).toISOString(),
+      });
+    }
+    setDidApplyDefault(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const [employee, setEmployee] = useState<Employee | null>(null);
+
+  // Server expects YYYY-MM-DD; ActivityFilter stores ISO. Convert at the call
+  // site (memoized so the query key only changes when the date really changed).
+  const from = useMemo(() => isoToYmd(filter.dateFrom), [filter.dateFrom]);
+  const to = useMemo(() => isoToYmd(filter.dateTo), [filter.dateTo]);
+
+  const { data: employeesData } = useQuery({
+    queryKey: ['employees', 'selector'],
+    queryFn: () => employeesApi.list({ page: 1, perPage: 100 }),
+  });
+
+  // Resolve the URL-selected employee UUID → Employee object once the list
+  // arrives. The selector's onChange below pushes the new id back into the URL.
+  useEffect(() => {
+    if (!employeeUrl.employeeId || !employeesData) {
+      setEmployee(prev => (prev && prev.id === employeeUrl.employeeId ? prev : null));
+      return;
+    }
+    const match = employeesData.data.find(e => e.id === employeeUrl.employeeId);
+    setEmployee(prev => (prev?.id === match?.id ? prev : (match ?? null)));
+  }, [employeeUrl.employeeId, employeesData]);
+
+  const handleSelectEmployee = (emp: Employee | null) => {
+    setEmployee(emp);
+    setEmployeeUrl({ employeeId: emp?.id ?? '' });
   };
 
   return (
     <div className="space-y-4 animate-fade-in">
-      <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center justify-between">
-        <div className="flex gap-3">
-          <input type="date" defaultValue="2026-03-10" className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground" />
-          <Select defaultValue="all">
-            <SelectTrigger className="w-40"><SelectValue placeholder="Status" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All Status</SelectItem>
-              <SelectItem value="pending">Pending</SelectItem>
-              <SelectItem value="approved">Approved</SelectItem>
-              <SelectItem value="rejected">Rejected</SelectItem>
-            </SelectContent>
-          </Select>
+      <div className="flex md:flex-row flex-col justify-between gap-4">
+        <div className="flex flex-col gap-4">
+          {/* Server-side filters: search + date (preset/custom range). Mounted
+          above the table so the search input never loses focus on
+          loading/error/empty states. Same component as /employee-journey/apps
+          and the other journey pages. */}
+          <ActivityFilters value={filter} onChange={setFilter} />
+
         </div>
-        <Button variant="outline" size="sm" className="gap-1"><Download className="w-4 h-4" /> Export</Button>
+
+        <div className="flex flex-col xl:flex-row gap-3">
+          <EmployeeSelector
+            value={employee?.id ?? ''}
+            onChange={handleSelectEmployee}
+            placeholder="Select employee…"
+            className="w-full lg:w-80"
+          />
+        </div>
+      </div>
+
+      
+      {!employee ? (
+        <EmptyState icon={Clock} text="Select an employee to view their timesheet history." />
+      ) : (
+        <TimesheetBody
+          employee={employee}
+          from={from}
+          to={to}
+          search={filter.search}
+        />
+      )}
+    </div>
+  );
+}
+
+function TimesheetBody({
+  employee,
+  from,
+  to,
+  search,
+}: {
+  employee: Employee;
+  from: string;
+  to: string;
+  search: string;
+}) {
+  const {
+    data,
+    isLoading,
+    isError,
+    error,
+    isFetchingNextPage,
+    fetchNextPage,
+    hasNextPage,
+  } = useInfiniteQuery({
+    queryKey: ['attendance', 'range', employee.employeeId, from, to, search, PER_PAGE],
+    queryFn: ({ pageParam }) =>
+      attendanceApi.range({
+        employeeId: employee.employeeId,
+        from,
+        to,
+        page: pageParam as number,
+        perPage: PER_PAGE,
+      }),
+    initialPageParam: 1,
+    getNextPageParam: last => (last.page < last.totalPages ? last.page + 1 : undefined),
+  });
+
+  const rows = useMemo(
+    () => data?.pages.flatMap(p => p.data) ?? [],
+    [data],
+  );
+  const total = data?.pages[0]?.total ?? 0;
+
+  const totals = useMemo(() => rows.reduce(
+    (acc, row) => ({
+      active: acc.active + row.activeSeconds,
+      idle: acc.idle + row.idleSeconds,
+      offShift: acc.offShift + row.offShiftSeconds,
+    }),
+    { active: 0, idle: 0, offShift: 0 },
+  ), [rows]);
+
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      entries => {
+        if (entries[0]?.isIntersecting && hasNextPage && !isFetchingNextPage) {
+          fetchNextPage();
+        }
+      },
+      { rootMargin: '300px' },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-16">
+        <Loader2 className="w-6 h-6 animate-spin text-primary" />
+      </div>
+    );
+  }
+
+  if (isError) {
+    return (
+      <div className="text-center py-12">
+        <p className="text-destructive font-medium">Failed to load timesheets</p>
+        <p className="text-sm text-muted-foreground mt-1">{(error as Error).message}</p>
+      </div>
+    );
+  }
+
+  if (rows.length === 0) {
+    return <EmptyState icon={Clock} text="No attendance rows in this date range." />;
+  }
+
+  return (
+    <>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        {[
+          { label: 'Total Active', value: formatSeconds(totals.active), color: 'text-success' },
+          { label: 'Total Idle / Locked', value: formatSeconds(totals.idle), color: 'text-muted-foreground' },
+          { label: 'Total Off Shift', value: formatSeconds(totals.offShift), color: 'text-info' },
+        ].map(tile => (
+          <div key={tile.label} className="bg-card rounded-xl border border-border p-4">
+            <p className={`text-xl font-display font-bold ${tile.color}`}>{tile.value}</p>
+            <p className="text-xs text-muted-foreground mt-1">{tile.label}</p>
+          </div>
+        ))}
       </div>
 
       <div className="bg-card rounded-xl border border-border overflow-x-auto">
-        <table className="w-full min-w-[900px]">
+        <table className="w-full min-w-[960px]">
           <thead>
             <tr className="border-b border-border">
-              {['Employee', 'Date', 'Clock In', 'Clock Out', 'Total', 'Productive', 'Break', 'Overtime', 'Status', 'Actions'].map(h => (
+              {['Date', 'Clock In', 'Clock Out', 'Active', 'Idle', 'Off Shift', 'Status'].map(h => (
                 <th key={h} className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground">{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {sheets.map((s, i) => (
-              <motion.tr key={s.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: i * 0.03 }} className="border-b border-border last:border-0 hover:bg-muted/30">
-                <td className="px-4 py-3 text-sm font-medium text-foreground">{s.employee}</td>
-                <td className="px-4 py-3 text-sm text-muted-foreground">{s.date}</td>
-                <td className="px-4 py-3 text-sm text-foreground">{s.clockIn}</td>
-                <td className="px-4 py-3 text-sm text-foreground">{s.clockOut}</td>
-                <td className="px-4 py-3 text-sm font-semibold text-foreground">{s.totalHours}</td>
-                <td className="px-4 py-3 text-sm text-success">{s.productive}</td>
-                <td className="px-4 py-3 text-sm text-muted-foreground">{s.breakTime}</td>
-                <td className="px-4 py-3 text-sm text-warning">{s.overtime}</td>
-                <td className="px-4 py-3"><span className={`px-2.5 py-1 rounded-full text-xs font-medium capitalize ${statusColors[s.status]}`}>{s.status}</span></td>
+            {rows.map((row: AttendanceRecord, i) => (
+              <motion.tr
+                key={`${row.employeeId}-${row.workDate}`}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: i * 0.02 }}
+                className="border-b border-border last:border-0 hover:bg-muted/30"
+              >
+                <td className="px-4 py-3 text-sm text-muted-foreground">{row.workDate}</td>
+                <td className="px-4 py-3 text-sm text-foreground">{formatDateTimeInZone(row.firstActiveAt, row.timezone)}</td>
+                <td className="px-4 py-3 text-sm text-foreground">{formatDateTimeInZone(row.lastActiveAt, row.timezone)}</td>
+                <td className="px-4 py-3 text-sm text-success font-medium">{formatSeconds(row.activeSeconds)}</td>
+                <td className="px-4 py-3 text-sm text-muted-foreground">{formatSeconds(row.idleSeconds)}</td>
+                <td className="px-4 py-3 text-sm text-info">{formatSeconds(row.offShiftSeconds)}</td>
                 <td className="px-4 py-3">
-                  {s.status === 'pending' && (
-                    <div className="flex gap-1">
-                      <button onClick={() => approve(s.id)} className="p-1.5 rounded hover:bg-success/10 text-success"><Check className="w-4 h-4" /></button>
-                      <button onClick={() => setRejectDialog(s.id)} className="p-1.5 rounded hover:bg-destructive/10 text-destructive"><X className="w-4 h-4" /></button>
-                    </div>
-                  )}
+                  <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${statusColors[row.status]}`}>
+                    {STATUS_LABEL[row.status]}
+                  </span>
                 </td>
               </motion.tr>
             ))}
@@ -87,15 +293,21 @@ export default function TimesheetsPage() {
         </table>
       </div>
 
-      <Dialog open={!!rejectDialog} onOpenChange={() => setRejectDialog(null)}>
-        <DialogContent className="bg-card">
-          <DialogHeader><DialogTitle className="font-display">Reject Timesheet</DialogTitle></DialogHeader>
-          <div className="space-y-3 mt-2">
-            <Textarea value={rejectReason} onChange={e => setRejectReason(e.target.value)} placeholder="Reason for rejection (required)" rows={3} />
-            <Button onClick={() => rejectDialog && reject(rejectDialog)} className="w-full gradient-primary text-primary-foreground" disabled={!rejectReason}>Reject</Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-    </div>
+      {hasNextPage ? (
+        <div ref={sentinelRef} className="h-12 flex items-center justify-center text-xs text-muted-foreground">
+          {isFetchingNextPage ? (
+            <span className="flex items-center gap-2">
+              <Loader2 className="w-4 h-4 animate-spin" /> Loading more…
+            </span>
+          ) : (
+            'Scroll for more'
+          )}
+        </div>
+      ) : (
+        <p className="text-sm text-muted-foreground text-center">
+          Showing all {total.toLocaleString()} day{total === 1 ? '' : 's'} for {employee.name}
+        </p>
+      )}
+    </>
   );
 }

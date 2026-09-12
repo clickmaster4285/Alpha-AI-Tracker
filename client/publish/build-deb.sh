@@ -92,6 +92,18 @@ if command -v apt-get >/dev/null 2>&1; then
   apt-get install -y xdotool 2>/dev/null || true
 fi
 
+# GeoClue2 for GPS location (Phase 3 — optional, only when ALPHA_LOCATION_ENABLED=true)
+# After install: enable Location Services in Settings → Privacy → Location.
+# Polkit may prompt when the tracker first queries GeoClue2; allow for your user session.
+if command -v apt-get >/dev/null 2>&1; then
+  apt-get install -y geoclue-2.0 2>/dev/null || true
+fi
+echo ""
+echo "Location tracking (optional): set ALPHA_LOCATION_ENABLED=true in config."
+echo "  Requires GeoClue2 + desktop location permission (Settings → Privacy → Location)."
+echo "  Without GPS permission the client falls back to IP-based approximate location."
+echo ""
+
 # Update desktop database
 if [ -x /usr/bin/update-desktop-database ]; then
   update-desktop-database 2>/dev/null || true

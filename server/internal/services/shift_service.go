@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/alpha-ai-tracker/server/internal/models"
 	"github.com/alpha-ai-tracker/server/internal/repository"
@@ -16,12 +17,27 @@ type ShiftListQuery = repository.ShiftListParams
 
 // ShiftService is the business-logic layer for the shift catalog.
 type ShiftService struct {
-	repo *repository.ShiftRepo
+	repo                 *repository.ShiftRepo
+	defaultShiftTimezone string
 }
 
 // NewShiftService creates a new ShiftService.
-func NewShiftService(repo *repository.ShiftRepo) *ShiftService {
-	return &ShiftService{repo: repo}
+func NewShiftService(repo *repository.ShiftRepo, defaultShiftTimezone string) *ShiftService {
+	return &ShiftService{
+		repo:                 repo,
+		defaultShiftTimezone: strings.TrimSpace(defaultShiftTimezone),
+	}
+}
+
+// ApplyDefaultTimezone migrates legacy UTC shift rows to the configured default.
+func (s *ShiftService) ApplyDefaultTimezone(ctx context.Context) (int64, error) {
+	if s.defaultShiftTimezone == "" {
+		return 0, nil
+	}
+	if _, err := time.LoadLocation(s.defaultShiftTimezone); err != nil {
+		return 0, fmt.Errorf("invalid DEFAULT_SHIFT_TIMEZONE %q: %w", s.defaultShiftTimezone, err)
+	}
+	return s.repo.ApplyDefaultTimezone(ctx, s.defaultShiftTimezone)
 }
 
 // List returns a paginated, searchable list of shifts.
@@ -41,7 +57,7 @@ func (s *ShiftService) ListAll(ctx context.Context) ([]models.Shift, error) {
 // Create adds a new shift. Name uniqueness is enforced by the DB UNIQUE
 // constraint; we pre-validate trimmed input to return a friendly 400.
 func (s *ShiftService) Create(ctx context.Context, req *ShiftInput) (*models.Shift, error) {
-	if err := validateShiftInput(req); err != nil {
+	if err := s.validateShiftInput(req); err != nil {
 		return nil, err
 	}
 	shift := &models.Shift{
@@ -49,6 +65,7 @@ func (s *ShiftService) Create(ctx context.Context, req *ShiftInput) (*models.Shi
 		StartTime:     req.StartTime,
 		EndTime:       req.EndTime,
 		WorkingDays:   strings.TrimSpace(req.WorkingDays),
+		Timezone:      normalizedTimezone(req.Timezone, s.defaultShiftTimezone),
 		GraceMinutes:  req.GraceMinutes,
 		OvertimeHours: req.OvertimeHours,
 		Description:   req.Description,
@@ -62,7 +79,7 @@ func (s *ShiftService) Create(ctx context.Context, req *ShiftInput) (*models.Shi
 
 // Update modifies an existing shift.
 func (s *ShiftService) Update(ctx context.Context, id int, req *ShiftInput) (*models.Shift, error) {
-	if err := validateShiftInput(req); err != nil {
+	if err := s.validateShiftInput(req); err != nil {
 		return nil, err
 	}
 	existing, err := s.repo.GetByID(ctx, id)
@@ -77,6 +94,7 @@ func (s *ShiftService) Update(ctx context.Context, id int, req *ShiftInput) (*mo
 		StartTime:     req.StartTime,
 		EndTime:       req.EndTime,
 		WorkingDays:   strings.TrimSpace(req.WorkingDays),
+		Timezone:      normalizedTimezone(req.Timezone, existing.Timezone),
 		GraceMinutes:  req.GraceMinutes,
 		OvertimeHours: req.OvertimeHours,
 		Description:   req.Description,
@@ -112,7 +130,7 @@ func (s *ShiftService) Delete(ctx context.Context, id int) error {
 // is a comma-separated weekday short-name list (Mon,Tue,Wed,Thu,Fri,Sat,Sun);
 // an empty string is accepted (the service stores it as-is; the web renders
 // a "no days" chip strip).
-func validateShiftInput(req *ShiftInput) error {
+func (s *ShiftService) validateShiftInput(req *ShiftInput) error {
 	if req == nil {
 		return fmt.Errorf("shift payload is required")
 	}
@@ -128,7 +146,22 @@ func validateShiftInput(req *ShiftInput) error {
 	if req.OvertimeHours < 0 || req.OvertimeHours > 24 {
 		return fmt.Errorf("overtime hours must be between 0 and 24")
 	}
+	timezone := normalizedTimezone(req.Timezone, s.defaultShiftTimezone)
+	if _, err := time.LoadLocation(timezone); err != nil {
+		return fmt.Errorf("timezone must be a valid IANA timezone")
+	}
 	return nil
+}
+
+func normalizedTimezone(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value != "" {
+		return value
+	}
+	if strings.TrimSpace(fallback) != "" {
+		return fallback
+	}
+	return "UTC"
 }
 
 // ShiftInput is the writable shape of a shift (used for create + update).
@@ -138,6 +171,7 @@ type ShiftInput struct {
 	StartTime     string `json:"startTime"`
 	EndTime       string `json:"endTime"`
 	WorkingDays   string `json:"workingDays"`
+	Timezone      string `json:"timezone"`
 	GraceMinutes  int    `json:"graceMinutes"`
 	OvertimeHours int    `json:"overtimeHours"`
 	Description   string `json:"description"`

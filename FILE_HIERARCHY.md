@@ -4,7 +4,7 @@ Annotated node tree for the whole monorepo. Every directory that holds source is
 
 **How to read it:** ⭐ marks an entry point or a single-source-of-truth file — start there. 🔒 marks a file with a rule attached; changing it without reading the rule breaks something in the field. Generated / vendored trees are marked and should never be edited by hand.
 
-*Last audited: 2026-08-25. Companion docs: [AGENTS.md](./AGENTS.md) (rules + completion state), [WORKFLOW.md](./WORKFLOW.md) (how work moves through the tree), [client/ARCHITECTURE.md](./client/ARCHITECTURE.md), [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md), [server/ARCHITECTURE.md](./server/ARCHITECTURE.md), [web/ARCHITECTURE.md](./web/ARCHITECTURE.md).*
+*Last audited: 2026-09-04. Companion docs: [AGENTS.md](./AGENTS.md) (rules + completion state), [WORKFLOW.md](./WORKFLOW.md) (how work moves through the tree), [client/ARCHITECTURE.md](./client/ARCHITECTURE.md), [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md), [server/ARCHITECTURE.md](./server/ARCHITECTURE.md), [web/ARCHITECTURE.md](./web/ARCHITECTURE.md).*
 
 ---
 
@@ -14,6 +14,7 @@ Annotated node tree for the whole monorepo. Every directory that holds source is
 Alpha-AI-TrackerV2.0/
 ├── AGENTS.md              ⭐ repo constitution — rules, contracts, completion state. Read first.
 ├── FILE_HIERARCHY.md         this file
+├── TESTING.md                live test playbooks for endpoints that need a running server (curl + expected responses)
 ├── WORKFLOW.md               dev loop, rebrand, add-a-page, release pipeline
 ├── client/                   .NET 10 / Avalonia desktop agent (the tracked machine)
 ├── server/                   Go API + Postgres + Redis (the collector of record)
@@ -159,7 +160,9 @@ server/
 │   │   ├── department_handler.go
 │   │   ├── monitoring_handler.go    types/categories/apps/websites classification
 │   │   ├── rbac_handler.go          GET /modules + roles CRUD
-│   │   └── new_schema_handler.go    the client-ingest surface (sessions, apps, packages, hardware)
+│   │   └── new_schema_handler.go    the client-ingest surface (sessions, apps, packages, hardware) +
+│   │                                 ListAppSessions + ListAppSessionsUsage (per-app aggregate for /employee-journey/apps) +
+│   │                                 ListAppSessionsForApp (per-app paginated list, fired on chevron expand)
 │   │
 │   ├── services/                business rules — the only layer allowed to orchestrate repos
 │   │   ├── auth_service.go · user_service.go · employee_service.go
@@ -176,8 +179,9 @@ server/
 │   ├── dto/                     wire shapes: user_dto · employee_dto · new_schema_dto · rbac_dto
 │   └── jobs/                    staleness_sweep.go (stale catalog links)
 │                                · retention_sweep.go (hourly data purge, RETENTION_DAYS)
+│                                · session_lifecycle_sweep.go (1-min ACTIVE→STALE→CLOSED sweep, SESSION_STALE_AFTER_MINUTES / SESSION_CLOSE_AFTER_HOURS)
 │
-├── migrations/               ⭐ 25 sequential SQL files, 001_init → 026_refresh_tokens.
+├── migrations/               ⭐ 33 sequential SQL files, 001_init → 032_app_sessions_usage_index (composite index for /app-sessions/usage).
 │                                Append-only: never edit a migration that has been applied.
 └── bin/                      ⚠️ build output
 ```
@@ -225,7 +229,8 @@ web/
     │   │                          collapsible sections) · TopBar · ProtectedRoute
     │   ├── EmployeeSelector.tsx   searchable employee picker (shared query with EmployeePage)
     │   ├── employees/             EmployeePage shell · InventoryTable · EmptyState · DeviceClassIcon
-    │   ├── journey/               FocusTime (foreground/background stacked bar)
+    │   ├── journey/               FocusTime (foreground/background stacked bar) · ActivityFilters (search + date presets)
+    │   ├── sessions/              SessionStatusBadge (3-state app_sessions lifecycle: ACTIVE / STALE / CLOSED)
     │   ├── NavLink.tsx · providers.tsx
     │   └── ui/                    ~50 shadcn primitives — generated; regenerate rather than hand-edit
     │

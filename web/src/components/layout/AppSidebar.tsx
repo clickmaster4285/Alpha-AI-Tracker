@@ -104,6 +104,11 @@ const navSections: NavSection[] = [
             path: "/shifts",
             module: "shifts",
           },
+          {
+            label: "Company Holidays",
+            path: "/holidays",
+            module: "shifts",
+          },
         ],
       },
 

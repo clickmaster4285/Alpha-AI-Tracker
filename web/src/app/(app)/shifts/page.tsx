@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Plus, Edit2, Trash2, Loader2, Search } from 'lucide-react';
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
@@ -9,14 +9,24 @@ import { shiftsApi, type Shift, type CreateShiftPayload } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { useUrlQueryState } from '@/hooks/use-url-query-state';
 
 const ALL_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const;
+
+function browserTimezone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  } catch {
+    return 'UTC';
+  }
+}
 
 const DEFAULT_FORM: CreateShiftPayload = {
   name: '',
   startTime: '09:00',
   endTime: '17:00',
   workingDays: 'Mon,Tue,Wed,Thu,Fri',
+  timezone: 'UTC',
   graceMinutes: 5,
   overtimeHours: 8,
   description: '',
@@ -25,13 +35,30 @@ const DEFAULT_FORM: CreateShiftPayload = {
 const PER_PAGE = 12;
 
 export default function ShiftManagement() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center min-h-[400px]"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>}>
+      <ShiftManagementInner />
+    </Suspense>
+  );
+}
+
+function ShiftManagementInner() {
   const queryClient = useQueryClient();
-  const [searchInput, setSearchInput] = useState('');
-  const [search, setSearch] = useState('');
+  // URL-synced search (debounced locally so the input stays responsive).
+  const [filters, setFilters] = useUrlQueryState(
+    { search: {} },
+    { search: '' },
+  );
+  const [searchInput, setSearchInput] = useState(filters.search);
   useEffect(() => {
-    const t = setTimeout(() => setSearch(searchInput), 400);
+    const t = setTimeout(() => {
+      if (searchInput !== filters.search) setFilters({ search: searchInput });
+    }, 400);
     return () => clearTimeout(t);
-  }, [searchInput]);
+  }, [searchInput, filters.search, setFilters]);
+  useEffect(() => {
+    setSearchInput(filters.search);
+  }, [filters.search]);
 
   const [showDialog, setShowDialog] = useState(false);
   const [editing, setEditing] = useState<Shift | null>(null);
@@ -46,12 +73,12 @@ export default function ShiftManagement() {
     fetchNextPage,
     hasNextPage,
   } = useInfiniteQuery({
-    queryKey: ['shifts', { search, perPage: PER_PAGE }],
+    queryKey: ['shifts', { search: filters.search, perPage: PER_PAGE }],
     queryFn: ({ pageParam }) =>
       shiftsApi.list({
         page: pageParam as number,
         perPage: PER_PAGE,
-        search: search || undefined,
+        search: filters.search || undefined,
       }),
     initialPageParam: 1,
     getNextPageParam: (last) =>
@@ -129,7 +156,7 @@ export default function ShiftManagement() {
   // ── Form helpers ──
   const openNew = () => {
     setEditing(null);
-    setForm(DEFAULT_FORM);
+    setForm({ ...DEFAULT_FORM, timezone: browserTimezone() });
     setShowDialog(true);
   };
 
@@ -140,6 +167,7 @@ export default function ShiftManagement() {
       startTime: s.startTime,
       endTime: s.endTime,
       workingDays: s.workingDays,
+      timezone: s.timezone || 'UTC',
       graceMinutes: s.graceMinutes,
       overtimeHours: s.overtimeHours,
       description: s.description,
@@ -163,6 +191,7 @@ export default function ShiftManagement() {
   const validate = (): string | null => {
     if (!form.name.trim()) return 'Shift name is required';
     if (!form.startTime || !form.endTime) return 'Start and end time are required';
+    if (!form.timezone.trim()) return 'IANA timezone is required';
     if (form.graceMinutes < 0 || form.graceMinutes > 120) return 'Grace minutes must be 0–120';
     if (form.overtimeHours < 0 || form.overtimeHours > 24) return 'Overtime hours must be 0–24';
     return null;
@@ -297,6 +326,10 @@ export default function ShiftManagement() {
                   <span className="text-foreground">{shift.graceMinutes} min</span>
                 </div>
                 <div className="flex justify-between">
+                  <span className="text-muted-foreground">Timezone</span>
+                  <span className="text-foreground">{shift.timezone || 'UTC'}</span>
+                </div>
+                <div className="flex justify-between">
                   <span className="text-muted-foreground">Overtime After</span>
                   <span className="text-foreground">{shift.overtimeHours}h</span>
                 </div>
@@ -423,6 +456,14 @@ export default function ShiftManagement() {
                   onChange={e => setForm({ ...form, overtimeHours: Number(e.target.value) })}
                 />
               </div>
+            </div>
+            <div>
+              <label className="text-sm font-semibold text-foreground mb-1 block">IANA Timezone</label>
+              <Input
+                value={form.timezone}
+                onChange={e => setForm({ ...form, timezone: e.target.value })}
+                placeholder="e.g. Asia/Karachi"
+              />
             </div>
             <div>
               <label className="text-sm font-semibold text-foreground mb-1 block">Description</label>

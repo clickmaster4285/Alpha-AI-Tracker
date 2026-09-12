@@ -1,7 +1,8 @@
 'use client';
 
+import { Suspense } from 'react';
 import { motion } from 'framer-motion';
-import { Usb } from 'lucide-react';
+import { Usb, Loader2 } from 'lucide-react';
 import EmployeePage from '@/components/employees/EmployeePage';
 import EmptyState from '@/components/employees/EmptyState';
 import DeviceClassIcon from '@/components/employees/DeviceClassIcon';
@@ -9,8 +10,9 @@ import { formatDateShort } from '@/lib/format';
 
 export default function DeviceSpecsPeripherals() {
   return (
-    <EmployeePage
-      title="Peripherals"
+    <Suspense fallback={<div className="flex items-center justify-center min-h-[400px]"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>}>
+      <EmployeePage
+        title="Peripherals"
       subtitle="USB and hot-plugged devices connected to the employee's machine."
       icon={Usb}
       fetchDetail
@@ -71,5 +73,6 @@ export default function DeviceSpecsPeripherals() {
         );
       }}
     </EmployeePage>
+    </Suspense>
   );
 }

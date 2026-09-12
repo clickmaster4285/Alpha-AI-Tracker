@@ -16,6 +16,7 @@ func Setup(
 	cfg *config.Config,
 	authService *services.AuthService,
 	deviceRepo *repository.DeviceRepo,
+	userRepo *repository.UserRepo,
 	authHandler *handlers.AuthHandler,
 	userHandler *handlers.UserHandler,
 	employeeHandler *handlers.EmployeeHandler,
@@ -24,6 +25,8 @@ func Setup(
 	monitoringHandler *handlers.MonitoringHandler,
 	rbacHandler *handlers.RBACHandler,
 	shiftHandler *handlers.ShiftHandler,
+	timeAttendanceHandler *handlers.TimeAttendanceHandler,
+	geofenceHandler *handlers.GeofenceHandler,
 ) {
 	// ─────────────────────────────
 	// Global Middleware
@@ -55,6 +58,7 @@ func Setup(
 			"timestamp": c.RealIP(),
 		})
 	})
+	e.GET("/api/v1/server-time", timeAttendanceHandler.ServerTime)
 
 	// ─────────────────────────────
 	// Public Routes (no auth required)
@@ -69,7 +73,7 @@ func Setup(
 	// ─────────────────────────────
 	syncGroup := e.Group("/api/v1")
 	if deviceRepo != nil {
-		syncGroup.Use(appMiddleware.DeviceAuth(deviceRepo, authService))
+		syncGroup.Use(appMiddleware.DeviceAuth(deviceRepo, userRepo, authService))
 	}
 
 	// Phase 1 sync endpoints
@@ -88,6 +92,8 @@ func Setup(
 	syncGroup.POST("/hardware-devices/sync", newSchemaHandler.SyncHardwareDevices)
 	syncGroup.POST("/permission-status/sync", newSchemaHandler.SyncPermissionStatus)
 	syncGroup.POST("/storage-devices/sync", newSchemaHandler.SyncStorageDevices)
+	syncGroup.POST("/location-samples/sync", newSchemaHandler.SyncLocationSamples)
+	syncGroup.GET("/schedules/me", timeAttendanceHandler.GetMySchedule)
 
 	// ─────────────────────────────
 	// Semi-Protected Routes (optional auth)
@@ -133,10 +139,25 @@ func Setup(
 	protected.POST("/devices/:id/revoke", authHandler.RevokeDevice)
 
 	// App Sessions listing (protected — web admin access)
+	protected.GET("/app-sessions/usage/sessions", newSchemaHandler.ListAppSessionsForApp)
+	protected.GET("/app-sessions/usage", newSchemaHandler.ListAppSessionsUsage)
 	protected.GET("/app-sessions", newSchemaHandler.ListAppSessions)
+
+	// Hours Insights
+	protected.GET("/hours-insights", newSchemaHandler.GetHoursInsights)
 
 	// App Items listing (protected — web admin access)
 	protected.GET("/app-items", newSchemaHandler.ListAppItems)
+
+	// Location samples (Phase 3 GPS — web admin access)
+	protected.GET("/location-samples", newSchemaHandler.ListLocationSamples)
+
+	// Geofence zones (Phase 3 GPS B.8)
+	geofence := protected.Group("/geofence-zones")
+	geofence.GET("", geofenceHandler.ListZones)
+	geofence.POST("", geofenceHandler.CreateZone)
+	geofence.PUT("/:id", geofenceHandler.UpdateZone)
+	geofence.DELETE("/:id", geofenceHandler.DeleteZone)
 
 	// Departments
 	depts := protected.Group("/departments")
@@ -178,4 +199,13 @@ func Setup(
 	shifts.POST("", shiftHandler.CreateShift)
 	shifts.PUT("/:id", shiftHandler.UpdateShift)
 	shifts.DELETE("/:id", shiftHandler.DeleteShift)
+
+	holidays := protected.Group("/holidays")
+	holidays.GET("", timeAttendanceHandler.ListHolidays)
+	holidays.POST("", timeAttendanceHandler.CreateHoliday)
+	holidays.PUT("/:id", timeAttendanceHandler.UpdateHoliday)
+	holidays.DELETE("/:id", timeAttendanceHandler.DeleteHoliday)
+
+	protected.GET("/attendance/today", timeAttendanceHandler.GetToday)
+	protected.GET("/attendance/range", timeAttendanceHandler.GetRange)
 }

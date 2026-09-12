@@ -1,8 +1,20 @@
 # Web Architecture — Alpha AI Tracker Dashboard
 
-> **Last audited:** 2026-08-22
+> **Last audited:** 2026-09-05 (search-query grouping + expandable groups on Web Activity)
 > **Changelog:**
-> 2026-08-22: **Sidebar parent menus stay open when navigating to child pages.**
+> - 2026-09-05: **Web Activity (`/employee-journey/web`) groups search-engine queries and shows expandable dropdown arrows.**
+>   Searches on Google, Bing, Yahoo, and DuckDuckGo are now parsed from `url` query params (`q`/`p`) and grouped by query text instead of being flattened under the domain. In the default "Visited Sites" view, search rows show a `Search` icon + engine badge (`Google`/`Bing`/`Yahoo`/`DuckDuckGo`) and are expandable with a chevron arrow, just like domain groups. In the active-search "Matching Pages" view, results are grouped by search query with the same expand/collapse behavior instead of a flat table. Non-search URLs continue to group by domain as before. The grouping is client-side only and reuses the existing infinite-scroll data; no server change. Verified: `npx tsc --noEmit` clean, `next build` passes (`/employee-journey/web` 4.8 kB).
+> - 2026-09-04: **`/employee-journey/apps` switched to `GET /app-sessions/usage` — chrome multi-tab duration is correct end-to-end.** A chrome window with 3 tabs × 10 min used to render as "30 min" because the page summed per-row `endedAt - startedAt` across every `app_sessions` row with the same `appDisplayName`, and the client occasionally opened a separate `app_sessions` per tab when the a11y reader's per-tab `WindowKey` slipped past the title-only collapse rule. Three layers: (1) **server `GET /app-sessions/usage`** (migration 032) — one row per `(appDisplayName, processName)` with `firstOpenedAt`, `lastClosedAt`, `sessionCount`, `totalDurationSeconds`; (2) **web defense in depth** — the page's `useMemo` now recomputes `totalDurationSeconds = lastClosedAt - firstOpenedAt` regardless of what the server returns, so a future regression on the server side can't reintroduce the sum; (3) **client `ResolveWindowKey`** (separate changelog entry) — exact-URL match + fresh-key recency collapse so a11y-driven per-tab `WindowKey`s fold into the FRESHEST same-PID tracked window. The web switched from a 5×100 raw-row `useQueries` fan-out (silent 500-row truncation bug — sessions past the boundary were silently dropped from the duration total) to a single `appSessionsApi.usage` call. The page now shows "First Opened" and "Last Closed" columns so the open range is visible directly. New `AppUsageRow` + `AppUsageListResponse` types in `lib/api.ts`; the legacy "Sessions / Duration / Last Active / Status" columns are replaced with "Sessions / Duration / First Opened / Last Closed" (the 3-state status badge is no longer per-app because every per-app row in the aggregate is a single (app, appSession-set) tuple — the open/close times tell the same story). Result: chrome 3 tabs × 10 min renders as **Duration: 10m, Sessions: 3**; chrome where tab1 stays open 9:00→9:12 with the others at 9:00→9:10 renders as **Duration: 12m, Sessions: 3**. Verified: `npx tsc --noEmit` clean, `next build` passes (`/employee-journey/apps` 2.89 kB). Cross-service contract kept in sync: server `new_schema_dto.AppUsageRow` + handler `ListAppSessionsUsage` + route `GET /app-sessions/usage` (registered BEFORE `/app-sessions`); client `ResolveWindowKey` collapse rules in `client/ARCHITECTURE.md`.
+> - 2026-09-02: **3-state session status badge across journey + logs pages.**
+>   New shared `components/sessions/SessionStatusBadge.tsx` renders ACTIVE (green pulse + "Running"), STALE (amber dot + "Stale · last sync X ago"), and CLOSED (muted) from the server-projected `AppSession.status` field. The accompanying `sessionStatus()` and `isSessionLive()` helpers fall back to the legacy `endedAt ? CLOSED : ACTIVE` rule for pre-031 rows so older backends still render correctly. The 3-state duration end is now used everywhere a session duration is computed: CLOSED → `endedAt` (frozen), STALE → `lastSyncAt` (don't pretend it's still growing), ACTIVE → `now`. New helper `formatRelative(iso)` in `lib/format.ts` produces the "3m ago / 2h ago / 1d ago" labels the STALE badge needs. `AppSession` in `lib/api.ts` gained `status`, `lastActivityAt`, `lastSyncAt`. Pages wired: `employee-journey/timeline`, `employee-journey/apps` (parent row "Status" + per-session expanded row), `logs/comprehensive` (3-state-aware `formatDuration` IIFE).
+> - 2026-09-01: **Attendance/timesheets display aligned with server shift timezone.**
+>   `/attendance` and `/timesheets` format `firstActiveAt`/`lastActiveAt` with
+>   `formatDateTimeInZone(iso, record.timezone)` so the table matches late/present math (not
+>   browser-local `toLocaleString` alone). `AttendanceRecord` carries optional `timezone` from
+>   the API. `/shifts` new-shift dialog defaults timezone to
+>   `Intl.DateTimeFormat().resolvedOptions().timeZone` instead of hardcoded `UTC`. Server must
+>   set `DEFAULT_SHIFT_TIMEZONE` or per-shift IANA zones — see `server/ARCHITECTURE.md`.
+> - 2026-08-22: **Sidebar parent menus stay open when navigating to child pages.**
 >   `AppSidebar` now auto-expands any parent section whose `children` array contains the current
 >   `pathname`, so the menu stays open when the user opens a child page.
 > 2026-08-22: **Configuration pages UI/UX redesign + manual website creation.**
@@ -158,7 +170,9 @@ web/
     │   │   ├── InventoryTable.tsx  EmptyState.tsx  DeviceClassIcon.tsx
     │   ├── journey/
     │   │   ├── ActivityFilters.tsx  Shared search + date presets + custom range filter bar
-    │   │   └── FocusTime.tsx    #   Foreground/background stacked bar
+    │   │   ├── FocusTime.tsx    #   Foreground/background stacked bar
+    │   ├── sessions/            # Session status badge (3-state app_sessions lifecycle)
+    │   │   └── SessionStatusBadge.tsx  # ACTIVE / STALE / CLOSED pill — server-projected status with legacy endedAt fallback
     │   ├── ui/                  # ~45 shadcn/ui component files (button, card, dialog, table, chart, etc.)
     │   │   ├── button.tsx       #  (all are standard shadcn/ui, no customization)
     │   │   ├── card.tsx
@@ -198,7 +212,7 @@ web/
             │   ├── apps/        #   App usage — real API, duration aggregation, expandable session groups
             │   ├── web/         #   Web activity — real API, domain-grouped, browser badges, search flat view
             │   ├── screenshots/ #   Placeholder — client collects none
-            │   └── location/    #   Placeholder — client collects none
+            │   └── location/    #   Coming Soon shell (live UI: LocationTrailLive.tsx; see locationUi.ts)
             ├── device-specs/    # Per-employee machine picture (detail API)
             │   ├── page.tsx     #   Hardware overview
             │   ├── software/    #   Installed software (apps/packages tabs + search)
@@ -220,10 +234,10 @@ web/
             ├── emails/             # Emails & Alerts (mock data)
             ├── kpis/               # KPIs & KRAs (mock data)
             ├── roles/              # Roles (mock data)
-            ├── shifts/             # Shift management (mock data)
-            ├── timesheets/         # Timesheets (mock data)
-            ├── attendance/         # Attendance log (mock data)
-            ├── gps-location/       # GPS & Location (mock data)
+            ├── shifts/             # Shift management (live API)
+            ├── timesheets/         # Per-employee attendance range (live API)
+            ├── attendance/         # Daily attendance log (live API)
+            ├── gps-location/       # Coming Soon shell (live UI: GpsLocationLive.tsx; see locationUi.ts)
             ├── hours-insights/     # Hours insights (mock data)
             ├── productivity-scoring/  # Score card (mock data)
             ├── goals/              # Goals & OKRs (mock data)
@@ -337,10 +351,10 @@ in the `updateMutation`).
 | `/employees` | Employee list (hides the "Login Credential" dropdown item when `emp.hasUserLogin` is true; `updateMutation` propagates name/email to the linked user via `usersApi.update` when the server's `UPDATE…RETURNING` reports `hasUserLogin`) | Server | ✅ |
 | `/employees/activity` | Activity status | Honest empty state (no endpoint) | ❌ |
 | `/employee-journey/timeline` | Session timeline | Server (`GET /app-sessions`, infinite scroll) | ✅ |
-| `/employee-journey/apps` | App usage | Server (aggregated `GET /app-sessions`) | ✅ |
+| `/employee-journey/apps` | App usage | Server (`GET /app-sessions/usage` per-app aggregate + `GET /app-sessions/usage/sessions` per-app paginated list, fired on chevron expand since 2026-09-04) | ✅ |
 | `/employee-journey/web` | Web activity | Server (`GET /app-items?itemType=browser_tab`) | ✅ |
 | `/employee-journey/screenshots` | Screenshots | Placeholder — client collects none | ❌ |
-| `/employee-journey/location` | Location trail | Placeholder — client collects none | ❌ |
+| `/employee-journey/location` | Location trail | Coming Soon (`LOCATION_UI_ENABLED=false`; live code in `LocationTrailLive.tsx`) | ⏸ |
 | `/device-specs` | Hardware overview | Server (`GET /employees/:id/detail`) | ✅ |
 | `/device-specs/software` | Installed software | Server (detail payload) | ✅ |
 | `/device-specs/peripherals` | Peripherals | Server (detail payload) | ✅ |
@@ -358,10 +372,10 @@ in the `updateMutation`).
 | `/screenshots` | Screenshots | Honest empty state (no endpoint) | ❌ |
 | `/live-stream` | Live stream | Honest empty state (no endpoint) | ❌ |
 | `/kpis` | KPIs & KRAs | Hardcoded demo data (scaffolding) | ❌ |
-| `/shifts` | Shift management | Hardcoded demo data (scaffolding) | ❌ |
-| `/timesheets` | Timesheets | Hardcoded demo data (scaffolding) | ❌ |
-| `/attendance` | Attendance | Hardcoded demo data (scaffolding) | ❌ |
-| `/gps-location` | GPS & Location | Hardcoded demo data (scaffolding) | ❌ |
+| `/shifts` | Shift management | Server (`/shifts` CRUD; IANA timezone field; new-shift defaults to browser zone) | ✅ |
+| `/timesheets` | Timesheets | Server (`/attendance/range`; times formatted in `record.timezone`) | ✅ |
+| `/attendance` | Attendance log | Server (`/attendance/range` per employee/day; status + late minutes from server) | ✅ |
+| `/gps-location` | GPS & Location | Coming Soon (`LOCATION_UI_ENABLED=false`; live code in `GpsLocationLive.tsx`) | ⏸ |
 | `/hours-insights` | Hours insights | Honest empty state (no endpoint) | ❌ |
 | `/productivity-scoring` | Score card | Hardcoded demo data (scaffolding) | ❌ |
 | `/goals` | Goals & OKRs | Hardcoded demo data (scaffolding) | ❌ |
@@ -391,6 +405,21 @@ in the `updateMutation`).
 > `app/page.tsx` purges orphaned `alpha_ai_tracker_*` keys from visitors' localStorage on first hit.
 > The legacy client-side permission matrix (`/settings/permissions` page + its localStorage store)
 > was deleted in the same pass — permissions are now server-driven only (§6).
+
+### Location UI gate (Phase 3 GPS — web surface paused)
+
+Location **client sync** and **server APIs** (`GET /location-samples`, geofence CRUD, ingest evaluation) remain in the product. The **admin dashboard pages are intentionally hidden** behind a Coming Soon shell:
+
+| File | Role |
+|------|------|
+| `web/src/lib/locationUi.ts` | `LOCATION_UI_ENABLED` — set `true` to show live UI |
+| `web/src/components/location/LocationComingSoon.tsx` | Shared Coming Soon card |
+| `web/src/app/(app)/gps-location/page.tsx` | Route shell → Coming Soon or `GpsLocationLive.tsx` |
+| `web/src/app/(app)/gps-location/GpsLocationLive.tsx` | Full fleet log + geofence CRUD (preserved) |
+| `web/src/app/(app)/employee-journey/location/page.tsx` | Route shell → Coming Soon or `LocationTrailLive.tsx` |
+| `web/src/app/(app)/employee-journey/location/LocationTrailLive.tsx` | Per-employee trail (preserved) |
+
+Client default: `ALPHA_LOCATION_ENABLED=false` in `.env.example`. No server or client collector code is removed when the web UI is gated.
 
 ---
 

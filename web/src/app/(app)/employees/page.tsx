@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
 import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check, Eye, Monitor, Upload, Download, Pencil, Trash2, AlertTriangle, UserPlus } from 'lucide-react';
@@ -9,6 +9,7 @@ import { toast } from 'sonner';
 import * as XLSX from 'xlsx';
 import { employeesApi, departmentsApi, usersApi, shiftsApi, type Employee, type CreateEmployeePayload, type UpdateEmployeePayload, type ImportEmployeeRow, type ImportEmployeesResponse, type Shift } from '@/lib/api';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { useUrlQueryState } from '@/hooks/use-url-query-state';
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -43,15 +44,37 @@ const normalizeHeader = (raw: string) =>
 const PER_PAGE = 10;
 
 export default function UsersList() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center min-h-[400px]"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>}>
+      <UsersListInner />
+    </Suspense>
+  );
+}
+
+function UsersListInner() {
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [searchInput, setSearchInput] = useState('');
-  const [search, setSearch] = useState('');
+  // URL-synced filter values. The local `searchInput` mirrors the URL's
+  // debounced `search` so the input box stays responsive while we wait out
+  // the 400 ms debounce before the URL (and the React Query key) catches up.
+  const [filters, setFilters] = useUrlQueryState(
+    { search: {}, department: {}, status: {} },
+    { search: '', department: '', status: '' },
+    { debounceMs: 0, history: 'replace' },
+  );
+  const [searchInput, setSearchInput] = useState(filters.search);
+  // Debounced: push the input to the URL (and therefore to the React Query
+  // key + server request) 400 ms after the user stops typing. A manual URL
+  // edit propagates back through `filters.search` via the hook's read effect.
   useEffect(() => {
-    const t = setTimeout(() => setSearch(searchInput), 400);
+    const t = setTimeout(() => {
+      if (searchInput !== filters.search) setFilters({ search: searchInput });
+    }, 400);
     return () => clearTimeout(t);
-  }, [searchInput]);
-  const [deptFilter, setDeptFilter] = useState('');
+  }, [searchInput, filters.search, setFilters]);
+  useEffect(() => {
+    setSearchInput(filters.search);
+  }, [filters.search]);
   const [showAdd, setShowAdd] = useState(false);
   const [showEdit, setShowEdit] = useState<string | null>(null);
   const [showSecret, setShowSecret] = useState<Employee | null>(null);
@@ -81,12 +104,13 @@ export default function UsersList() {
     fetchNextPage,
     hasNextPage,
   } = useInfiniteQuery({
-    queryKey: ['employees', { search, department: deptFilter, perPage: PER_PAGE }],
+    queryKey: ['employees', { search: filters.search, department: filters.department, status: filters.status, perPage: PER_PAGE }],
     queryFn: ({ pageParam }) => employeesApi.list({
       page: pageParam as number,
       perPage: PER_PAGE,
-      search: search || undefined,
-      department: deptFilter || undefined,
+      search: filters.search || undefined,
+      department: filters.department || undefined,
+      status: filters.status || undefined,
     }),
     initialPageParam: 1,
     getNextPageParam: (last) => (last.page < last.totalPages ? last.page + 1 : undefined),
@@ -417,12 +441,21 @@ export default function UsersList() {
         </div>
         <div className='flex space-x-3'>
           <select
-            value={deptFilter}
-            onChange={e => setDeptFilter(e.target.value)}
+            value={filters.department}
+            onChange={e => setFilters({ department: e.target.value })}
             className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground"
           >
             <option value="">All Departments</option>
             {departments.map(d => <option key={d.id} value={d.name}>{d.name}</option>)}
+          </select>
+          <select
+            value={filters.status}
+            onChange={e => setFilters({ status: e.target.value })}
+            className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground"
+          >
+            <option value="">All Statuses</option>
+            <option value="tracked">Tracked</option>
+            <option value="untracked">Untracked</option>
           </select>
           <input
             ref={fileInputRef}
@@ -465,7 +498,7 @@ export default function UsersList() {
         <table className="w-full min-w-[700px]">
           <thead>
             <tr className="border-b border-border">
-              {['Name', 'Employee ID', 'Email', 'Department', 'Shift', 'Status', 'Action'].map(h => (
+              {['Name', 'Employee ID', 'Email', 'Department', 'Shift', 'Version', 'Status', 'Action'].map(h => (
                 <th key={h} className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground">{h}</th>
               ))}
             </tr>
@@ -473,7 +506,7 @@ export default function UsersList() {
           <tbody>
             {employees.length === 0 ? (
               <tr>
-                <td colSpan={7} className="text-center py-12 text-muted-foreground text-sm">
+                <td colSpan={8} className="text-center py-12 text-muted-foreground text-sm">
                   No employees found
                 </td>
               </tr>
@@ -506,6 +539,9 @@ export default function UsersList() {
                   <td className="px-4 py-3 text-sm text-foreground">{emp.department}</td>
                   <td className="px-4 py-3 text-sm text-foreground">
                     {emp.shift || <span className="text-muted-foreground/50 italic">Unassigned</span>}
+                  </td>
+                  <td className="px-4 py-3 text-sm font-mono text-foreground">
+                    {emp.clientVersion || <span className="text-muted-foreground/50 italic">Unknown</span>}
                   </td>
                   <td className="px-4 py-3">
                     <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${

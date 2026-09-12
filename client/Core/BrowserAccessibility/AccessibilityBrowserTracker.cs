@@ -367,6 +367,13 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
     ///      session and alternate titles every poll — the source of the duplicate rows).
     ///   3. the incoming window is title-less (transient tree) → attach to the ONLY
     ///      same-pid tracked window; otherwise treat as a genuinely new window.
+    ///   4. (Bug #8 — 2026-09-04) When the reader returns a NEW WindowKey for a window
+    ///      that was just seen (within poll×2) under the same PID + same appDisplayName,
+    ///      treat the new key as key churn of the FRESHEST same-PID tracked window.
+    ///      This collapses chrome's "open 3 tabs in one window" case where each tab
+    ///      gets a fresh WindowKey from the a11y tree and the old title-match rule let
+    ///      each one open a separate session. The recency guard prevents two real
+    ///      long-lived windows from collapsing when both have been open for a while.
     /// </summary>
     private string ResolveWindowKey(
         AccessibilitySnapshot snap,
@@ -380,6 +387,7 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
         if (samePid.Count == 0) return snap.WindowKey;
 
         var incoming = BrowserAccessibilityHelpers.StripBrowserSuffix(snap.WindowTitle, _browserRegistry?.GetDisplayName(snap.ProcessName)).Trim();
+        var incomingUrl = (snap.Url ?? string.Empty).Trim();
 
         // Exact page-title match — identity is proven by (pid, page). Works for the
         // multi-window case (Chrome/Edge/Firefox share one PID) when a key churns
@@ -389,6 +397,22 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
             var tracked = BrowserAccessibilityHelpers.StripBrowserSuffix(kv.Value.LastTitle, null).Trim();
             if (tracked.Length > 0 && string.Equals(tracked, incoming, StringComparison.OrdinalIgnoreCase))
                 return ReKey(kv, snap.WindowKey, snap.ProcessId);
+        }
+
+        // Exact URL match — stronger than title (URLs are stable identifiers per page).
+        // Helps collapse the "3 tabs, all titled 'Loading…'" transient case where the
+        // title is empty for a few polls after a navigation. Only matches when both
+        // sides have a non-empty URL — empty incoming URLs fall through to the rules
+        // below to avoid accidentally merging genuine separate windows.
+        if (incomingUrl.Length > 0)
+        {
+            foreach (var kv in samePid)
+            {
+                var trackedUrl = (kv.Value.LastUrl ?? string.Empty).Trim();
+                if (trackedUrl.Length > 0 &&
+                    string.Equals(trackedUrl, incomingUrl, StringComparison.OrdinalIgnoreCase))
+                    return ReKey(kv, snap.WindowKey, snap.ProcessId);
+            }
         }
 
         // Title-less snapshot (transient tree state) with a single tracked window:
@@ -407,6 +431,23 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
             lastPidCounts.TryGetValue(snap.ProcessId, out var lastCount) && lastCount == 1 &&
             pidCounts.TryGetValue(snap.ProcessId, out var curCount) && curCount == 1)
             return ReKey(samePid[0], snap.WindowKey, snap.ProcessId);
+
+        // Bug #8 — 2026-09-04: fresh-key churn. If a tracked same-PID window was seen
+        // within the last (poll×2) seconds, treat the new key as churn of the FRESHEST
+        // such window. This collapses chrome's "open tab in already-open window" case
+        // where the a11y reader returns a fresh WindowKey per tab. The recency guard
+        // is what keeps two real long-lived windows from collapsing: when both are old,
+        // both LastSeen are far in the past and the guard fails on every candidate, so
+        // a new session is opened instead.
+        var recencyLimit = TimeSpan.FromSeconds(
+            Math.Max(2, _config.BrowserAccessibilityPollSec * 2));
+        var now = DateTime.UtcNow;
+        var freshest = samePid
+            .Where(kv => (now - kv.Value.LastSeen) <= recencyLimit)
+            .OrderByDescending(kv => kv.Value.LastSeen)
+            .FirstOrDefault();
+        if (freshest.Value != null)
+            return ReKey(freshest, snap.WindowKey, snap.ProcessId);
 
         return snap.WindowKey;
     }

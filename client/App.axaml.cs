@@ -55,6 +55,24 @@ public partial class App : Application
                 if (!AllowShutdown)
                 {
                     e.Cancel = true;
+                    // Time and Attendance (Phase 1, finalplan section 2.6 / BUG-3 fix):
+                    // emit a ui_hidden event BEFORE the window goes to the tray. The
+                    // dashboard can now distinguish "in tray" from "actively using
+                    // the app" without waiting for a heartbeat gap. The IEventRecorder
+                    // is DI-registered as a singleton, so we resolve it from the
+                    // ServiceProvider that Program.cs set in App.ServiceProvider.
+                    try
+                    {
+                        var recorder = ServiceProvider?.GetService<client.Core.Abstractions.IEventRecorder>();
+                        if (recorder != null)
+                        {
+                            _ = recorder.RecordAsync(client.Core.Models.SessionEventTypes.UiHidden);
+                        }
+                    }
+                    catch
+                    {
+                        // Best-effort: telemetry must never break a window close.
+                    }
                     mainWindow.Hide();
                 }
             };

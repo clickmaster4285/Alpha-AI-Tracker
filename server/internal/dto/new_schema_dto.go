@@ -15,6 +15,19 @@ type SyncBatchRequest struct {
 type SyncBatchResponse struct {
 	Synced  int    `json:"synced"`
 	Message string `json:"message"`
+	// RejectedIds carries the client row ids the server REFUSED to store, present
+	// only when a partial acceptance occurred (omitempty keeps the other sync
+	// endpoints' wire format untouched). An absent field means "all rows
+	// accepted" — older clients ignore it, and a new client talking to an older
+	// server preserves the old mark-all behavior when the field is missing.
+	// Currently populated only by SyncAppItems (orphan app_session_id preflight).
+	RejectedIds []string `json:"rejectedIds,omitempty"`
+	// MissingSessionIds carries the distinct app_session_id values the server
+	// could NOT find during the orphan preflight. The client uses this list to
+	// reset those sessions to is_synced=0 so they are re-sent on the next pass,
+	// breaking the permanent orphan deadlock (Bug #9 follow-up).
+	// Currently populated only by SyncAppItems.
+	MissingSessionIds []string `json:"missingSessionIds,omitempty"`
 }
 
 // ────────────────────────────────
@@ -166,10 +179,13 @@ type NetworkInfoResponse struct {
 // ────────────────────────────────
 
 type SessionEventEntry struct {
-	ID         string `json:"id"`
-	EventType  string `json:"eventType"`
-	OsUsername string `json:"osUsername"`
-	EventAt    string `json:"eventAt"`
+	ID         string  `json:"id"`
+	EventType  string  `json:"eventType"`
+	OsUsername string  `json:"osUsername"`
+	EventAt    string  `json:"eventAt"`
+	Count      *int    `json:"count,omitempty"`
+	FirstAt    *string `json:"firstAt,omitempty"`
+	LastAt     *string `json:"lastAt,omitempty"`
 }
 
 type SyncSessionEventsRequest struct {
@@ -184,6 +200,9 @@ type SessionEventResponse struct {
 	EventType  string     `json:"eventType"`
 	OsUsername string     `json:"osUsername"`
 	EventAt    time.Time  `json:"eventAt"`
+	Count      int        `json:"count"`
+	FirstAt    time.Time  `json:"firstAt"`
+	LastAt     time.Time  `json:"lastAt"`
 	SyncedAt   *time.Time `json:"syncedAt,omitempty"`
 }
 
@@ -209,6 +228,10 @@ type AppSessionEntry struct {
 	ContextLabel       *string `json:"contextLabel,omitempty"`
 	ForegroundSeconds  float64 `json:"foregroundSeconds"`
 	BackgroundSeconds  float64 `json:"backgroundSeconds"`
+	// Optional — client populates on heartbeat so the server sweeper
+	// can distinguish "activity within last X min" from "just the
+	// session record survived". Server defaults to started_at on INSERT.
+	LastActivityAt *string `json:"lastActivityAt,omitempty"`
 }
 
 type SyncAppSessionsRequest struct {
@@ -237,6 +260,36 @@ type AppSessionResponse struct {
 	ForegroundSeconds  float64    `json:"foregroundSeconds"`
 	BackgroundSeconds  float64    `json:"backgroundSeconds"`
 	SyncedAt           *time.Time `json:"syncedAt,omitempty"`
+	// 3-state lifecycle (2026-09-02): ACTIVE → STALE → CLOSED.
+	Status         string     `json:"status"`
+	LastActivityAt *time.Time `json:"lastActivityAt,omitempty"`
+	LastSyncAt     *time.Time `json:"lastSyncAt,omitempty"`
+}
+
+// ────────────────────────────────
+// App Usage (per-app aggregate for web dashboard)
+// ────────────────────────────────
+
+type AppUsageRow struct {
+	AppDisplayName       string    `json:"appDisplayName"`
+	ProcessName          string    `json:"processName"`
+	SessionCount         int       `json:"sessionCount"`
+	FirstOpenedAt        time.Time `json:"firstOpenedAt"`
+	LastClosedAt         time.Time `json:"lastClosedAt"`
+	TotalDurationSeconds float64   `json:"totalDurationSeconds"`
+	HasOpenSession       bool      `json:"hasOpenSession"`
+	LastActiveAt         time.Time `json:"lastActiveAt"`
+}
+
+type AppUsageListResponse struct {
+	Data                 []AppUsageRow `json:"data"`
+	Total                int           `json:"total"`
+	Page                 int           `json:"page"`
+	PerPage              int           `json:"perPage"`
+	TotalPages           int           `json:"totalPages"`
+	TotalDurationSeconds float64       `json:"totalDurationSeconds"`
+	TotalSessionCount    int           `json:"totalSessionCount"`
+	OpenSessionCount     int           `json:"openSessionCount"`
 }
 
 // ────────────────────────────────
@@ -382,4 +435,116 @@ type SyncStorageDevicesRequest struct {
 	EmployeeID string               `json:"employeeId"`
 	Token      string               `json:"token"`
 	Entries    []StorageDeviceEntry `json:"entries"`
+}
+
+// ────────────────────────────────
+// location_samples (Phase 3 GPS, 2026-09-01)
+// ────────────────────────────────
+
+type LocationSampleEntry struct {
+	ID         string   `json:"id"`
+	Latitude   float64  `json:"latitude"`
+	Longitude  float64  `json:"longitude"`
+	AccuracyM  *float64 `json:"accuracyM,omitempty"`
+	AltitudeM  *float64 `json:"altitudeM,omitempty"`
+	Source     string   `json:"source"`
+	Address    *string  `json:"address,omitempty"`
+	CapturedAt string   `json:"capturedAt"`
+}
+
+type SyncLocationSamplesRequest struct {
+	EmployeeID string                `json:"employeeId"`
+	Token      string                `json:"token"`
+	Entries    []LocationSampleEntry `json:"entries"`
+}
+
+type LocationSampleResponse struct {
+	ID             string     `json:"id"`
+	EmployeeID     string     `json:"employeeId"`
+	EmployeeName   string     `json:"employeeName,omitempty"`
+	Latitude       float64    `json:"latitude"`
+	Longitude      float64    `json:"longitude"`
+	AccuracyM      *float64   `json:"accuracyM,omitempty"`
+	AltitudeM      *float64   `json:"altitudeM,omitempty"`
+	Source         string     `json:"source"`
+	Address        *string    `json:"address,omitempty"`
+	CapturedAt     time.Time  `json:"capturedAt"`
+	SyncedAt       *time.Time `json:"syncedAt,omitempty"`
+	GeofenceStatus string     `json:"geofenceStatus,omitempty"`
+}
+
+type LocationSampleListResponse struct {
+	Data       []LocationSampleResponse `json:"data"`
+	Total      int                      `json:"total"`
+	Page       int                      `json:"page"`
+	PerPage    int                      `json:"perPage"`
+	TotalPages int                      `json:"totalPages"`
+}
+
+// ────────────────────────────────
+// Hours Insights
+// ────────────────────────────────
+
+type HoursInsightsResponse struct {
+	Employee HoursInsightsEmployee    `json:"employee"`
+	Range    HoursInsightsRange       `json:"range"`
+	Summary  HoursInsightsSummary     `json:"summary"`
+	Chart    []HoursInsightsBucket    `json:"chart"`
+	AppChart []HoursInsightsAppBucket `json:"appChart"`
+	TopApps  []HoursInsightsAppMeta   `json:"topApps"`
+	TopItems []HoursInsightsTopItem   `json:"topItems"`
+}
+
+type HoursInsightsEmployee struct {
+	EmployeeID string `json:"employeeId"`
+	Name       string `json:"name"`
+	Department string `json:"department"`
+}
+
+type HoursInsightsRange struct {
+	From  time.Time `json:"from"`
+	To    time.Time `json:"to"`
+	Label string    `json:"label"`
+}
+
+type HoursInsightsSummary struct {
+	TotalSeconds        float64 `json:"totalSeconds"`
+	ProductiveSeconds   float64 `json:"productiveSeconds"`
+	UnproductiveSeconds float64 `json:"unproductiveSeconds"`
+	NeutralSeconds      float64 `json:"neutralSeconds"`
+	FocusScore          float64 `json:"focusScore"`
+	AppCount            int     `json:"appCount"`
+	SiteCount           int     `json:"siteCount"`
+}
+
+type HoursInsightsBucket struct {
+	Bucket       string  `json:"bucket"`
+	Productive   float64 `json:"productive"`
+	Unproductive float64 `json:"unproductive"`
+	Neutral      float64 `json:"neutral"`
+}
+
+type HoursInsightsAppBucket struct {
+	Bucket string             `json:"bucket"`
+	Apps   map[string]float64 `json:"apps"`
+}
+
+type HoursInsightsAppMeta struct {
+	Name         string  `json:"name"`
+	TotalSeconds float64 `json:"totalSeconds"`
+	Color        string  `json:"color"`
+	Category     string  `json:"category"`
+	Type         string  `json:"type"`
+	SessionCount int     `json:"sessionCount"`
+}
+
+type HoursInsightsTopItem struct {
+	Name         string  `json:"name"`
+	Kind         string  `json:"kind"`
+	Category     string  `json:"category"`
+	Type         string  `json:"type"`
+	Color        string  `json:"color"`
+	TotalSeconds float64 `json:"totalSeconds"`
+	FocusScore   float64 `json:"focusScore"`
+	IsBrowser    bool    `json:"isBrowser"`
 }

@@ -35,6 +35,7 @@ const pageTitles: Record<string, string> = {
   "/timesheets": "Timesheets",
   "/attendance": "Attendance Log",
   "/shifts": "Shift Management",
+  "/holidays": "Company Holidays",
   "/gps-location": "GPS & Location",
   "/productivity-scoring": "Productivity Scoring",
   "/goals": "Goals & OKRs",

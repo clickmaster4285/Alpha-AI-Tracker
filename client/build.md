@@ -45,7 +45,7 @@ brew install create-dmg
 
 ## Build Commands
 
-Run **from the `client/` directory**.
+Run **from the** `client/` **directory**.
 
 ```bash
 # Build everything available on this machine
@@ -166,7 +166,7 @@ echo "YOUR_GITHUB_TOKEN" | gh auth login --with-token
 
 ### Create a Release (One Command)
 
-Run **from the `client/` directory**.
+Run **from the** `client/` **directory**.
 
 ```bash
 # Build all installers, create git tag, and upload to GitHub Releases

@@ -4,7 +4,7 @@ How work actually moves through this repo — the loops you run daily, and the g
 
 Rules live in [AGENTS.md](./AGENTS.md) §6; this file is the *procedure* for obeying them. File locations: [FILE_HIERARCHY.md](./FILE_HIERARCHY.md).
 
-*Last audited: 2026-08-10 — commands verified against `client/publish/*.sh`, `server/Makefile`, `web/package.json`.*
+*Last audited: 2026-09-02 — commands verified against `client/publish/*.sh`, `server/Makefile`, `web/package.json`. New 3-state session lifecycle env knobs `SESSION_STALE_AFTER_MINUTES` / `SESSION_CLOSE_AFTER_HOURS` (server only) live alongside `DEFAULT_SHIFT_TIMEZONE` in `server/.env`.*
 
 ---
 
@@ -38,6 +38,32 @@ make test           # go test ./... -v -count=1
 
 Schema changes are **append-only**: add `017_<name>.sql` to `server/migrations/`, never edit an applied file.
 
+Set `DEFAULT_SHIFT_TIMEZONE` in `server/.env` to your company's IANA zone (e.g. `Asia/Karachi`) so
+legacy shifts on migration 028's `UTC` default are corrected at boot and attendance late/present
+matches local wall-clock. Per-shift overrides live on `/shifts`.
+
+**3-state session lifecycle** (migration 031 + `jobs/session_lifecycle_sweep.go`, since 2026-09-02).
+The sweep is **always on** — a 1-minute goroutine transitions `app_sessions` rows through
+`ACTIVE → STALE → CLOSED` based on `last_sync_at`. Defaults are conservative for desktop
+installations: `SESSION_STALE_AFTER_MINUTES=10` (no heartbeat → "tracker is offline but the PC
+might still be running"), `SESSION_CLOSE_AFTER_HOURS=24` (no heartbeat for a day → truly gone).
+Tune for your deployment. The server will report the chosen values at boot
+(`[session-lifecycle] starting (stale_after=…, close_after=…, interval=1m)`). A live client that
+re-syncs any STALE/CLOSED row with `ended_at=NULL` flips it back to ACTIVE — the sweep will never
+destroy information that may still exist on the client.
+
+**Per-app usage aggregate** (migration 032 + `GET /app-sessions/usage`, since 2026-09-04). The
+"App Usage" page reads this endpoint instead of the raw `GET /app-sessions` list — one row per
+`(appDisplayName, processName)` with `firstOpenedAt` / `lastClosedAt` / `totalDurationSeconds`. The
+page renders `lastClosed - firstOpened` (not `Σ durations`) so multi-tab windows never inflate the
+per-app total. Route is registered BEFORE `GET /app-sessions` for safe future `:id` routing.
+
+**Per-app session list** (`GET /app-sessions/usage/sessions`, since 2026-09-04). Powers the
+chevron expand under each app row on `/employee-journey/apps` — paginated server-side (20/page)
+with the same `(appDisplayName, processName)` group key as the aggregate, so the inner count
+always matches the parent `sessionCount`. Both keys required (400 if both empty). Live test
+playbook: `TESTING.md` §3-7.
+
 ### Web
 
 ```bash
@@ -51,6 +77,11 @@ npm run lint
 > **Web list pages MUST use server-side infinite scroll** (`useInfiniteQuery` + IntersectionObserver
 > sentinel). Next/Previous buttons are forbidden — see AGENTS.md §6 *Web Infinite-Scroll Rule* and
 > `web/ARCHITECTURE.md` §4. Reference: `web/src/app/(app)/employees/page.tsx`.
+
+> **GPS / Location pages** (`/gps-location`, `/employee-journey/location`) show a Coming Soon shell
+> while `web/src/lib/locationUi.ts` has `LOCATION_UI_ENABLED=false`. Live UI lives in
+> `GpsLocationLive.tsx` / `LocationTrailLive.tsx` — set the flag to `true` to re-enable. Client
+> collectors and server sync APIs are unchanged.
 
 ### Client
 

@@ -56,7 +56,10 @@ namespace client.Services;
         if (_autoStartWasEnabled)
             _logger.LogInformation("Auto-start already configured — will watchdog");
         if (_systemdWasInstalled)
+        {
             _logger.LogInformation("Systemd service already installed — will watchdog");
+            await RemoveStaleDisplayOverridesAsync(stoppingToken);
+        }
 
         // ─── Watchdog Loop ───
         // Only protects things that were previously set up. Never creates new ones.
@@ -166,6 +169,59 @@ namespace client.Services;
 
     // ─── Linux Systemd Integration ───
 
+    /// <summary>
+    /// Older units forced DISPLAY=:0 and ~/.Xauthority. GNOME Wayland rotates
+    /// Xwayland authorization under /run/user/&lt;uid&gt;, so the background
+    /// process could track normally but could not create its lazy GUI. Remove
+    /// only those legacy overrides; the user systemd manager already carries
+    /// the live desktop environment.
+    /// </summary>
+    private async Task RemoveStaleDisplayOverridesAsync(CancellationToken ct)
+    {
+        if (!OperatingSystem.IsLinux()) return;
+
+        try
+        {
+            var servicePath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".config", "systemd", "user", "alpha-ai-tracker.service");
+            if (!File.Exists(servicePath)) return;
+
+            var lines = await File.ReadAllLinesAsync(servicePath, ct);
+            var repaired = lines
+                .Where(line =>
+                {
+                    var trimmed = line.Trim();
+                    return !trimmed.StartsWith("Environment=DISPLAY=", StringComparison.Ordinal) &&
+                           !trimmed.StartsWith("Environment=XAUTHORITY=", StringComparison.Ordinal);
+                })
+                .ToArray();
+            if (repaired.Length == lines.Length) return;
+
+            await File.WriteAllLinesAsync(servicePath, repaired, ct);
+            await RunSystemctlAsync("--user daemon-reload", ct);
+            _logger.LogInformation(
+                "Removed stale DISPLAY/XAUTHORITY overrides from the systemd unit");
+
+            // The current service process inherited the stale override before
+            // repairing the file. Restart only when we are actually running
+            // under systemd (never from dotnet run), and do it non-blocking so
+            // systemctl cannot wait on the process that invoked it.
+            if (!string.IsNullOrWhiteSpace(
+                    Environment.GetEnvironmentVariable("INVOCATION_ID")))
+            {
+                await RunSystemctlAsync(
+                    "--user restart --no-block alpha-ai-tracker.service",
+                    ct);
+            }
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to repair systemd display environment");
+        }
+    }
+
     private async Task InstallSystemdServiceAsync(CancellationToken ct)
     {
         try
@@ -182,8 +238,6 @@ namespace client.Services;
                 RestartSec=10
                 StartLimitBurst=0
                 StartLimitIntervalSec=0
-                Environment=DISPLAY=:0
-                Environment=XAUTHORITY={Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)}/.Xauthority
 
                 [Install]
                 WantedBy=default.target
@@ -258,6 +312,22 @@ namespace client.Services;
         {
             _logger.LogWarning(ex, "Failed to install systemd user service");
         }
+    }
+
+    private static async Task RunSystemctlAsync(string arguments, CancellationToken ct)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "systemctl",
+            Arguments = arguments,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        using var proc = Process.Start(psi);
+        if (proc == null) return;
+        await proc.WaitForExitAsync(ct);
     }
 
     #region Windows Persistence

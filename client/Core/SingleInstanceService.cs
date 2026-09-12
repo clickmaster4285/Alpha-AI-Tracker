@@ -22,6 +22,18 @@ namespace client.Core;
 public static class SingleInstanceService
 {
     /// <summary>
+    /// Machine-wide mutex name used by every launch path.
+    ///
+    /// On Unix, an unqualified .NET named mutex is scoped to the process session
+    /// (<c>/tmp/.dotnet/shm/session&lt;sid&gt;</c>). A desktop launch and a systemd
+    /// user service have different session IDs, so both could acquire the old
+    /// mutex and run collectors against the same SQLite database. The
+    /// <c>Global\</c> namespace maps them to the same machine-wide mutex backing
+    /// object. Windows uses the same prefix to cross Terminal Services sessions.
+    /// </summary>
+    public static string MutexName => $@"Global\{AppInfo.AppMutex}";
+
+    /// <summary>
     /// Pipe name used for cross-instance signalling. The same name must be
     /// used by the server (running instance) and the client (second launch).
     /// Lower-case, no path separators — safe on Windows named pipes and on

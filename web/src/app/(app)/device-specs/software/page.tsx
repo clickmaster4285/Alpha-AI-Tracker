@@ -1,8 +1,8 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { Suspense, useMemo } from 'react';
 import { motion } from 'framer-motion';
-import { AppWindow, Package, Search } from 'lucide-react';
+import { AppWindow, Package, Search, Loader2 } from 'lucide-react';
 import EmployeePage from '@/components/employees/EmployeePage';
 import InventoryTable from '@/components/employees/InventoryTable';
 import { formatDate } from '@/lib/format';
@@ -12,21 +12,48 @@ type TabKey = 'applications' | 'packages';
 
 export default function DeviceSpecsSoftware() {
   return (
-    <EmployeePage
-      title="Installed Software"
-      subtitle="Applications and packages currently installed on the employee's machine."
-      icon={AppWindow}
-      fetchDetail
-    >
-      {({ detail }) => <SoftwareBody detail={detail!} />}
-    </EmployeePage>
+    <Suspense fallback={<div className="flex items-center justify-center min-h-[400px]"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>}>
+      <EmployeePage
+        title="Installed Software"
+        subtitle="Applications and packages currently installed on the employee's machine."
+        icon={AppWindow}
+        fetchDetail
+        // URL keys managed by this view's body (active tab + per-tab
+        // search). Forwarded into the shell's `useUrlActivityFilter` so
+        // the body shares the single underlying `useUrlQueryState` with
+        // the picker — there is no second hook instance to race against,
+        // so picking an employee then changing a tab/search (or vice
+        // versa) never resets the sibling URL key.
+        bodySchema={{ tab: {}, appSearch: {}, pkgSearch: {} }}
+        bodyInitial={{ tab: 'applications', appSearch: '', pkgSearch: '' }}
+      >
+        {({ detail, body, setBody }) => (
+          <SoftwareBody detail={detail!} body={body} setBody={setBody} />
+        )}
+      </EmployeePage>
+    </Suspense>
   );
 }
 
-function SoftwareBody({ detail }: { detail: EmployeeDetail }) {
-  const [tab, setTab] = useState<TabKey>('applications');
-  const [appSearch, setAppSearch] = useState('');
-  const [pkgSearch, setPkgSearch] = useState('');
+function SoftwareBody({
+  detail,
+  body,
+  setBody,
+}: {
+  detail: EmployeeDetail;
+  body: Record<string, string>;
+  setBody: (patch: Record<string, string> | ((prev: Record<string, string>) => Record<string, string>)) => void;
+}) {
+  // `tab` + per-tab search are URL-synced through the shell's
+  // `useUrlActivityFilter` — there is no second `useUrlQueryState`
+  // instance on this page, so body writes never erase the picker's
+  // `?employeeId=<uuid>`.
+  const tab = ((body.tab || 'applications') as TabKey);
+  const setTab = (next: TabKey) => setBody({ tab: next });
+  const appSearch = body.appSearch || '';
+  const pkgSearch = body.pkgSearch || '';
+  const setAppSearch = (next: string) => setBody({ appSearch: next });
+  const setPkgSearch = (next: string) => setBody({ pkgSearch: next });
 
   const { applications, packages } = detail;
 

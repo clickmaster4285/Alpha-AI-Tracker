@@ -1,22 +1,14 @@
 'use client';
 
-import { MapPin } from 'lucide-react';
-import EmployeePage from '@/components/employees/EmployeePage';
-import EmptyState from '@/components/employees/EmptyState';
+import LocationComingSoon from '@/components/location/LocationComingSoon';
+import { LOCATION_UI_ENABLED } from '@/lib/locationUi';
+import EmployeeJourneyLocationLive from './LocationTrailLive';
 
-export default function EmployeeJourneyLocation() {
-  return (
-    <EmployeePage
-      title="Location Trail"
-      subtitle="Geographic positions reported by the employee's device over time."
-      icon={MapPin}
-    >
-      {() => (
-        <EmptyState
-          icon={MapPin}
-          text="No location data collected yet — the desktop client does not currently report device location."
-        />
-      )}
-    </EmployeePage>
-  );
+/**
+ * Route shell for /employee-journey/location. Live UI is in LocationTrailLive.tsx;
+ * gated by LOCATION_UI_ENABLED in web/src/lib/locationUi.ts.
+ */
+export default function EmployeeJourneyLocationPage() {
+  if (LOCATION_UI_ENABLED) return <EmployeeJourneyLocationLive />;
+  return <LocationComingSoon variant="trail" />;
 }

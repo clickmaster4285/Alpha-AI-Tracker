@@ -7,6 +7,7 @@ import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from '@tansta
 import { toast } from 'sonner';
 import { usersApi, rolesApi, employeesApi, type Role, type User, type UpdateUserPayload } from '@/lib/api';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { useUrlQueryState } from '@/hooks/use-url-query-state';
 
 const PAGE_SIZE = 10;
 
@@ -178,7 +179,18 @@ function UserManagementInner() {
   const searchParams = useSearchParams();
   const queryClient = useQueryClient();
 
-  const [search, setSearch] = useState('');
+  const [searchUrl, setSearchUrl] = useUrlQueryState({ q: {} }, { q: '' });
+  // Local debounced mirror of the URL-backed `q` so the server query
+  // is only re-fired on the 400ms quiet window.
+  const [searchInput, setSearchInput] = useState(searchUrl.q);
+  useEffect(() => { setSearchInput(searchUrl.q); }, [searchUrl.q]);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (searchInput !== searchUrl.q) setSearchUrl({ q: searchInput });
+    }, 400);
+    return () => clearTimeout(t);
+  }, [searchInput, searchUrl.q, setSearchUrl]);
+  const search = searchUrl.q;
   const [showDialog, setShowDialog] = useState(false);
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [name, setName] = useState('');
@@ -410,8 +422,8 @@ function UserManagementInner() {
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
           <input
-            value={search}
-            onChange={e => setSearch(e.target.value)}
+            value={searchInput}
+            onChange={e => setSearchInput(e.target.value)}
             placeholder="Search users by name or email..."
             className="w-full border border-border rounded-lg pl-9 pr-3 py-2 text-sm bg-card text-foreground placeholder:text-muted-foreground"
           />

@@ -1,29 +1,43 @@
 'use client';
 
-import { useEffect, useMemo, useRef } from 'react';
+import { Suspense, useEffect, useMemo, useRef } from 'react';
 import { Route, Activity, AppWindow, Loader2 } from 'lucide-react';
 import { useInfiniteQuery } from '@tanstack/react-query';
 import EmployeePage from '@/components/employees/EmployeePage';
 import EmptyState from '@/components/employees/EmptyState';
 import FocusTime from '@/components/journey/FocusTime';
+import ActivityFilters, { type ActivityFilter } from '@/components/journey/ActivityFilters';
 import { appSessionsApi } from '@/lib/api';
-import { formatDateTime, formatDuration } from '@/lib/format';
+import { formatDateTime, formatDuration, formatRelative } from '@/lib/format';
+import SessionStatusBadge, { sessionStatus } from '@/components/sessions/SessionStatusBadge';
 
 const PER_PAGE = 30;
 
 export default function EmployeeJourneyTimeline() {
   return (
-    <EmployeePage
-      title="Session Timeline"
-      subtitle="Chronological view of every app session the employee ran."
-      icon={Route}
-    >
-      {({ employee }) => <TimelineBody employeeId={employee.employeeId} />}
-    </EmployeePage>
+    <Suspense fallback={<div className="flex items-center justify-center min-h-[400px]"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>}>
+      <EmployeePage
+        title="Session Timeline"
+        subtitle="Chronological view of every app session the employee ran."
+        icon={Route}
+      >
+        {({ employee, filter, setFilter }) => (
+          <TimelineBody employeeId={employee.employeeId} filter={filter} setFilter={setFilter} />
+        )}
+      </EmployeePage>
+    </Suspense>
   );
 }
 
-function TimelineBody({ employeeId }: { employeeId: string }) {
+function TimelineBody({
+  employeeId,
+  filter,
+  setFilter,
+}: {
+  employeeId: string;
+  filter: ActivityFilter;
+  setFilter: (next: ActivityFilter) => void;
+}) {
   // Server-side pagination with infinite scroll (same pattern as the old
   // employee detail Activity tab).
   const {
@@ -35,8 +49,17 @@ function TimelineBody({ employeeId }: { employeeId: string }) {
     fetchNextPage,
     hasNextPage,
   } = useInfiniteQuery({
-    queryKey: ['app-sessions', { employeeId, perPage: PER_PAGE }],
-    queryFn: ({ pageParam }) => appSessionsApi.list({ employeeId, page: pageParam as number, perPage: PER_PAGE }),
+    // Include every server-side filter in the key so changing a preset starts
+    // at page 1 instead of appending results from the previous date range.
+    queryKey: ['app-sessions', { employeeId, perPage: PER_PAGE, ...filter }],
+    queryFn: ({ pageParam }) => appSessionsApi.list({
+      employeeId,
+      page: pageParam as number,
+      perPage: PER_PAGE,
+      search: filter.search || undefined,
+      dateFrom: filter.dateFrom,
+      dateTo: filter.dateTo,
+    }),
     initialPageParam: 1,
     getNextPageParam: (last) => (last.page < last.totalPages ? last.page + 1 : undefined),
   });
@@ -61,27 +84,8 @@ function TimelineBody({ employeeId }: { employeeId: string }) {
     return () => observer.disconnect();
   }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <Loader2 className="w-6 h-6 animate-spin text-primary" />
-      </div>
-    );
-  }
-  if (isError) {
-    return (
-      <div className="flex flex-col items-center justify-center py-12 gap-3 text-center">
-        <p className="text-sm text-destructive font-medium">Failed to load activity</p>
-        <p className="text-xs text-muted-foreground">{(error as Error)?.message || 'Unknown error'}</p>
-      </div>
-    );
-  }
-  if (sessions.length === 0) {
-    return <EmptyState icon={Activity} text="No app activity synced yet" />;
-  }
-
   return (
-    <div className="bg-card rounded-xl border border-border shadow-card overflow-hidden">
+    <div className="bg-card rounded-xl border border-border shadow-card overflow-hidden animate-fade-in">
       <div className="px-4 py-3 border-b border-border flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Activity className="w-4 h-4 text-primary" />
@@ -89,6 +93,24 @@ function TimelineBody({ employeeId }: { employeeId: string }) {
         </div>
         <span className="text-xs text-muted-foreground">{total.toLocaleString()} session{total === 1 ? '' : 's'}</span>
       </div>
+      <div className="px-4 py-3 border-b border-border">
+        <ActivityFilters value={filter} onChange={setFilter} loading={isLoading || isFetchingNextPage} />
+      </div>
+      {isLoading ? (
+        <div className="flex items-center justify-center py-12">
+          <Loader2 className="w-6 h-6 animate-spin text-primary" />
+        </div>
+      ) : isError ? (
+        <div className="flex flex-col items-center justify-center py-12 gap-3 text-center">
+          <p className="text-sm text-destructive font-medium">Failed to load activity</p>
+          <p className="text-xs text-muted-foreground">{(error as Error)?.message || 'Unknown error'}</p>
+        </div>
+      ) : sessions.length === 0 ? (
+        <EmptyState
+          icon={Activity}
+          text={filter.search || filter.preset !== 'all' ? 'No app activity matches the current filters' : 'No app activity synced yet'}
+        />
+      ) : <>
       <div className="overflow-x-auto">
         <table className="w-full min-w-[980px]">
           <thead>
@@ -102,6 +124,17 @@ function TimelineBody({ employeeId }: { employeeId: string }) {
             {sessions.map(s => {
               const fg = s.foregroundSeconds ?? 0;
               const bg = s.backgroundSeconds ?? 0;
+              const status = sessionStatus(s);
+              // 4-state duration end (2026-09-02 + OFFLINE 2026-09-02):
+              // CLOSED → endedAt, STALE/OFFLINE → lastSyncAt, ACTIVE → now.
+              const endIso =
+                s.endedAt
+                || ((status === 'STALE' || status === 'OFFLINE') && s.lastSyncAt)
+                || new Date().toISOString();
+              const sinceLabel =
+                status === 'OFFLINE' || status === 'STALE'
+                  ? formatRelative(s.lastSyncAt)
+                  : undefined;
               return (
                 <tr key={s.id} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
                   <td className="px-4 py-3">
@@ -115,29 +148,25 @@ function TimelineBody({ employeeId }: { employeeId: string }) {
                           {s.appDisplayName && s.appDisplayName !== s.processName && (
                             <span className="text-xs text-muted-foreground font-mono">{s.processName}</span>
                           )}
-                          <span className="px-1.5 py-px rounded text-[10px] font-mono bg-primary/10 text-primary capitalize">{s.platform || '—'}</span>
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-primary/10 text-primary capitalize">{s.platform || '—'}</span>
                           {s.contextLabel && <span className="text-xs text-muted-foreground truncate max-w-[140px]">· {s.contextLabel}</span>}
                         </div>
                       </div>
                     </div>
                   </td>
                   <td className="px-4 py-3">
-                    {s.endedAt ? (
-                      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-muted text-muted-foreground">
-                        <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground" /> Closed
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-success/15 text-success">
-                        <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse-soft" /> Running
-                      </span>
-                    )}
+                    <SessionStatusBadge status={status} staleSinceLabel={sinceLabel} />
                   </td>
                   <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">{formatDateTime(s.startedAt)}</td>
                   <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">
-                    {s.endedAt ? formatDateTime(s.endedAt) : '—'}
+                    {s.endedAt
+                      ? formatDateTime(s.endedAt)
+                      : (status === 'STALE' || status === 'OFFLINE') && s.lastSyncAt
+                      ? formatDateTime(s.lastSyncAt)
+                      : '—'}
                   </td>
                   <td className="px-4 py-3 text-sm text-foreground font-medium whitespace-nowrap">
-                    {formatDuration(s.startedAt, s.endedAt || new Date().toISOString())}
+                    {formatDuration(s.startedAt, endIso)}
                   </td>
                   <td className="px-4 py-3">
                     <FocusTime fg={fg} bg={bg} />
@@ -162,6 +191,7 @@ function TimelineBody({ employeeId }: { employeeId: string }) {
           Scroll for more
         </div>
       )}
+      </>}
     </div>
   );
 }

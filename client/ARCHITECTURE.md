@@ -1,7 +1,26 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-08-22
+> **Last audited:** 2026-09-04 (browser window-key collapse for multi-tab chrome)
 > **Changelog:**
+> - 2026-09-05: **Core: Windows `power_off` event now fires on shutdown/restart — `SystemEventWatcher` subscribes to `SystemEvents.SessionEnding`.**
+>   The Windows half of `SystemEventWatcher` was missing `SystemEvents.SessionEnding`, so shutdown/restart never emitted `power_off` (sleep/resume via `PowerModeChanged` worked; lock/unlock via `SessionSwitch` worked; power_on worked via `LogCollectorService` on boot). `SessionEnding` with `SessionEndReasons.SystemShutdown` is now subscribed in `SubscribeWindows()` (fire-and-forget, mirrors Linux's synchronous `PrepareForShutdown` handler), with matching unsubscription in `UnsubscribeWindows()`. `Logoff` is intentionally skipped to avoid duplicating the existing `SessionSwitch` → `os_logout` path. `ShutdownSentinel` remains as fallback. This makes Windows match Linux's two-layer power-off detection pattern. Verified: `dotnet build` 0/0, 0 warnings. Real-world test requires a Windows shutdown/restart cycle against an installed build.
+>   The accessibility reader returns a fresh `WindowKey` per tab; the old title-only collapse rule let
+>   transient "Loading…" states slip through and opened a separate `app_sessions` row per tab — which
+>   then summed on the web to 3× the real open time. Two new collapse rules, layered BEFORE the
+>   single-window count guard: (a) **exact URL match** (stronger than title — kills the
+>   "3 tabs all titled 'Loading…'" transient case; both sides must have a non-empty URL to match);
+>   (b) **fresh-key recency window of `poll×2` seconds** — if a same-PID tracked window was seen
+>   within the recency window, the incoming key is treated as churn of the FRESHEST such window.
+>   The recency guard is what keeps two real long-lived windows from collapsing: when both are old,
+>   both `LastSeen` are far in the past and the guard fails on every candidate, so a new session
+>   is opened instead. Existing title-match and single-window-count rules stay as primary
+>   fallbacks. The reader's per-OS WindowKey generation is unchanged — this is purely a tracker-
+>   side identity-resolution fix. Layer 1 of 3 for the "chrome 3 tabs × 10 min renders as 30m on
+>   the web" bug; layers 2 (web defense in depth) and 3 (server `GET /app-sessions/usage`) ship
+>   independently so the page is correct even before the next installer build carries this fix.
+>   No env knob; no DDL change. Verified: `dotnet build` 0/0, 0 warnings.
+> - 2026-09-02: **Client: app_sessions last_activity_at tracking for the 3-state server lifecycle.**
+>   `Core/Models/AppSession.cs` gained a `DateTime? LastActivityAt` property. `Storage/DatabaseSchema.cs` adds the column via an idempotent `MigrateSql` ALTER, refreshes it on `InsertAppSessionSql` (new session = `log.Timestamp`), on the `CONFLICT` update, on `UpdateAppSessionFocusSql` (sets it to NOW() on every focus change), and on `UpdateAppSessionEndedSql` (freezes it to the close moment). `SqliteLogStore.cs` carries the new parameter through the batched INSERT and reads it back in `MapAppSessionReader`. `Services/LogCollectorService.cs` stamps `LastActivityAt = log.Timestamp` when opening a new session, so the server's `session_lifecycle_sweep` has a meaningful `last_activity_at` value to freeze at CLOSE time. `Services/SyncService.cs` includes `lastActivityAt` in the `POST /api/v1/app-sessions/sync` payload (falling back to `startedAt` when null so older calls still validate). The client's local SQLite is the source of truth for activity history; the server is the source of truth for the projected `status` column. No env knob required on the client.
 > - 2026-08-22: **Flatpak `bwrap` PPID chain walk in embedded Python probe.**
 >   `resolve_app_name(pid)` in `LinuxAtSpiBrowserReader.cs` now detects when the AT-SPI PID belongs to Flatpak's `bwrap` or `xdg-dbus-proxy` and walks up the PPID chain (via `/proc/<pid>/stat`) until it reaches the real app process. The FLATPAK_ID / snap / comm resolution then runs against the real PID, so Floorp/LibreWolf/Waterfox Flatpak installs resolve to their short app ID (`floorp`, `librewolf`, `waterfox`) instead of the proxy name. Verified: `dotnet build` 0/0, 0 warnings.
 > - 2026-08-21: **All hardcoded browser names removed — dynamic `IBrowserRegistry` replaces `BrowserProcessHints` / `IsBrowserProcess` / `BROWSER_HINTS` / `ResolveFamily`.**
@@ -89,9 +108,10 @@
 > - 2026-08-07: **Quiet terminal** — per-event browser-journey logs demoted to Debug (visible with
 >   `ALPHA_LOG_LEVEL=debug`); startup banner stays at Information.
 > - 2026-08-07: **Headless `--background` service mode** — `Program.cs` no longer initializes the
->   Avalonia/X11 UI in background mode (the installed systemd unit had hardcoded a stale
->   `XAUTHORITY=~/.Xauthority`; the real Xwayland auth is `/run/user/<uid>/.mutter-Xwaylandauth.*`), so
->   the installed service stays active instead of dying at startup.
+>   Avalonia/X11 UI at boot. Manual launches signal that process to create the UI lazily. Linux user
+>   units inherit the graphical environment from the systemd user manager instead of hardcoding
+>   `DISPLAY` / `XAUTHORITY`; `BackgroundGuardService` removes legacy `~/.Xauthority` overrides and
+>   performs one systemd-only restart so GNOME Wayland's rotating Mutter cookie takes effect.
 > - 2026-08-06: **Hybrid URL fallback — browser profile History reader** (`BrowserHistoryReader.cs`).
 >   Reads Chromium `History` / Firefox `places.sqlite` while the browser runs (safe copy + `-wal`/`-shm`/
 >   `-journal` sidecars, read-only, signature-throttled); resolution is STRICTLY title-match; generic
@@ -848,3 +868,110 @@ into the UI thread.
 ⚠️ **Installers are not code-signed / checksum-verified** — the download is trusted over GitHub's TLS.
 Signing is a future hardening step (the Inno `.iss`, `build-deb.sh` and `build-dmg.sh` have no signing
 hooks yet).
+
+## 19. Time & Attendance (Phase 1 — client foundation)
+
+> Added 2026-08-28. Builds the client half of the **Time & Attendance** sidebar module. The web
+> dashboard (Phase 2) renders this data via new server endpoints. This section is the client
+> foundation only; it is fully transport-independent and ships behind `ALPHA_TA_ENABLED`.
+> See the repo-root `finalplan.txt` (§0–§15) for the authoritative build-order + rule audit.
+
+### Vocabulary (single source of truth, `Core/Models/SessionEvent.cs`)
+
+The `SessionEventTypes` static class is the ONE place every session_events `event_type` string
+lives on the client (finalplan R5). Go and web mirrors exist; run `test/contract-event-types.sh`
+to catch drift.
+
+| Constant | event_type | Emitter |
+|---|---|---|
+| `PowerOn` | `power_on` | `LogCollectorService.StartTracking` + `SystemEventWatcher` boot |
+| `PowerOff` | `power_off` | `ShutdownSentinel` (SIGTERM / Ctrl+C / Avalonia exit / dispose) |
+| `Resume` | `resume` | `SystemEventWatcher` (UPower, SystemEvents resume) |
+| `OsLogin` | `os_login` | `SystemEventWatcher` (Windows SessionSwitch) |
+| `OsLogout` | `os_logout` | `SystemEventWatcher` (Windows SessionSwitch) |
+| `ScreenLock` | `screen_lock` | `SystemEventWatcher` (login1 / GNOME ScreenSaver / SessionSwitch) |
+| `ScreenUnlock` | `screen_unlock` | `SystemEventWatcher` (login1 / ScreenSaver / SessionSwitch) |
+| `TrackerLogin` | `tracker_login` | `LogCollectorService.StartTracking` |
+| `UiHidden` | `ui_hidden` | `App.axaml.cs` window.Closing (hide-to-tray) |
+| `IdleStart` | `idle_start` | `IdleDetector` (threshold crossing) |
+| `IdleEnd` | `idle_end` | `IdleDetector` (threshold crossing) |
+| `OldDataDropped` | `old_data_dropped` | `SyncService` S6 row-ceiling rollup |
+
+`Login` is kept as an `[Obsolete]` alias of `TrackerLogin` for back-compat with pre-2026-08-28 rows.
+
+Cross-service mirrors: `server/internal/models/session_event_types.go`, `web/src/lib/eventTypes.ts`.
+Contract test: `test/contract-event-types.sh` (T5).
+
+### Services
+
+| Service | Type | Cadence | Purpose |
+|---|---|---|---|
+| `SessionEventRecorder` | `IEventRecorder` singleton | — | Single funnel for ALL session_events writes; 5 s dedup window (burst collapse) + hard 2 s write timeout |
+| `ShutdownSentinel` | hosted (FIRST in DI) | — | Writes `power_off` before the host stops; background mode uses `WaitForShutdownAsync` so SIGTERM reaches hosted-service shutdown, then `ManualResetEventSlim` bounds the final write wait |
+| `SystemEventWatcher` | hosted | event-driven | Linux D-Bus (UPower / login1 shutdown+lock / GNOME ScreenSaver), Windows `SystemEvents`, macOS stub; login1 `PrepareForShutdown(true)` persists before Xwayland teardown; touches `ta_last_known_os_event_at` watermark |
+| `IdleDetector` | hosted | 30 s poll | OS idle source (Mutter.IdleMonitor / X11 / GetLastInputInfo); emits `idle_start`/`idle_end` crossings |
+| `ScheduleCacheService` | hosted | login/resume + every 6 h | Mirrors the Phase 2 `GET /api/v1/schedules/me` response into local tables; login wakes it immediately and resume waits 10 s for network stabilization |
+| `LocalTimeSkewService` | hosted | startup/resume + every 15 min | Measures client↔server clock skew from `GET /api/v1/server-time`'s Date header; resume waits 10 s before measuring |
+| `AttendanceAggregator` | hosted | login + every 5 min | Rolls up arrival/last-seen, the union of idle+screen-lock time, active time, schedule overlap, holidays, lateness, absence, half-day, and off-shift time; legacy offset timestamps are normalized to UTC at the store boundary |
+
+DI order (finalplan §3): `ShutdownSentinel` is registered FIRST so .NET stops it LAST — guaranteeing
+`power_off` is written while the SQLite singleton is still alive.
+
+### SQLite additions (made idempotent in `DatabaseSchema.CreateTableSql`)
+
+- `employee_schedule` (PK employee_id) — mirrored shift (timezone, weekly_pattern JSON, grace_minutes, validity).
+- `company_holidays` (PK holiday_date) — mirrored holiday calendar.
+- `daily_attendance_cache` (PK employee_id, work_date) — DERIVED, client-owned, NEVER sent to server.
+- `local_time_skew` (PK server_url) — per-server clock-skew measurement.
+- Indexes: `(event_type, event_at)` on session_events, `(employee_id, work_date)` on
+  `daily_attendance_cache` (finalplan S5).
+
+### Concurrency (finalplan R8 / BUG-9)
+
+With 6 hosted services hitting SQLite, the original single-connection `SemaphoreSlim(1,1)` would
+serialize everything and risk deadlock. `Program.cs` initializes the store before starting hosted
+services (so the first boot event cannot race SQLite); `SqliteLogStore.InitializeAsync` is
+serialized/idempotent and:
+1. enables `PRAGMA journal_mode=WAL;` + `synchronous=NORMAL` FIRST, then
+2. opens a second **ReadOnly** connection (`WithReadConnectionAsync`) for pure readers
+   (`AttendanceAggregator`, schedule/holiday/skew reads).
+
+Writers (collector, sync) still use the gated write connection; readers use the read connection, so
+collection never blocks aggregation and vice versa.
+
+### Feature flag & config
+
+| Key | Default | Meaning |
+|---|---|---|
+| `ALPHA_TA_ENABLED` | true | master switch; false parks SystemEventWatcher, IdleDetector, ScheduleCacheService, LocalTimeSkewService, AttendanceAggregator |
+| `ALPHA_IDLE_THRESHOLD_SEC` | 120 | seconds of no input before `idle_start` |
+| `ALPHA_IDLE_AWAY_THRESHOLD_SEC` | 600 | reserved for A.8 away classification |
+| `ALPHA_IDLE_POLL_SEC` | 30 | idle-source poll cadence |
+| `ALPHA_TA_LOCK_HYSTERESIS_SEC` | 30 | suppress re-locks within this window |
+| `ALPHA_EVENT_AGGREGATION_WINDOW_SEC` | 300 | sync-time bucket size for session_events aggregates (S1) |
+| `ALPHA_TA_MAX_LOCAL_ROWS` | 50000 | unsynced row ceiling; excess rolls into `old_data_dropped` (S6) |
+
+### Session-event sync aggregation (A.9 / A.10)
+
+Raw OS events are written one-per-row to SQLite immediately (BUG-13). `SyncService` groups
+unsynced rows into rolling buckets per `(event_type, window)` when the bucket window has fully
+elapsed, then POSTs `{ count, firstAt, lastAt }` to `/api/v1/session-events/sync`. Closed buckets
+only — the current open window stays local until it closes. `SessionEventSyncAggregator` performs
+the grouping; `DrainSessionEventsAsync` marks every source row `is_synced` after a successful send.
+
+### Phase 1 → Phase 2 handoff
+
+- **Server (Phase 2, implemented 2026-08-31):** `GET /api/v1/schedules/me` (SVR-1),
+  `GET /api/v1/server-time` (SVR-3), `GET /api/v1/attendance/today|range` (SVR-4/5), holiday
+  CRUD, and aggregate-compatible `session-events/sync` fields `{count, firstAt, lastAt}` (SVR-2).
+- **Client (A.9/A.10, implemented 2026-09-01):** `SessionEventSyncAggregator` + `DrainSessionEventsAsync`
+  aggregate unsynced rows at sync time (`ALPHA_EVENT_AGGREGATION_WINDOW_SEC`, default 300 s).
+  S6 ceiling via `ALPHA_TA_MAX_LOCAL_ROWS` + `old_data_dropped` sentinel. Mirrors:
+  `server/internal/models/session_event_types.go`, `web/src/lib/eventTypes.ts`;
+  `test/contract-event-types.sh` (T5).
+- **Client follow-up:** backward compatible — servers without aggregate columns still accept
+  count=1 rows; Phase 2 server expects `{count, firstAt, lastAt}`.
+- **Web (Phase 2, live):** `/attendance`, `/timesheets`, `/holidays` call the attendance/holiday
+  APIs with infinite scroll. First/last active times use `record.timezone` from the server (shift
+  IANA zone) — operators must set `DEFAULT_SHIFT_TIMEZONE` or per-shift timezone on the server so
+  late/present matches wall-clock. `gps-location` UI is gated Coming Soon (`LOCATION_UI_ENABLED`).

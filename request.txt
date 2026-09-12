@@ -1,0 +1,13 @@
+i want 
+
+on @web/src/app/(app)/employees/page.tsx i want
+
+1. add one more filter status
+2. add one more column called "version" from table "employee_devices" column "client_version" 
+
+check also my db
+DB_HOST=localhost
+DB_PORT=5432
+DB_USER=alpha_monitoring
+DB_PASSWORD=123456
+DB_NAME=alpha_ai_tracker

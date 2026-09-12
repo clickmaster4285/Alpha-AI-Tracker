@@ -267,6 +267,7 @@ export interface Employee {
   trackingEnabled: boolean;
   trackingStatus: string;
   isOnline: boolean;
+  clientVersion?: string;
   avatar: string;
   avatarColor: string;
   /** True when a row in the users table exists for this employee's employee_id.
@@ -386,6 +387,8 @@ export interface Shift {
   endTime: string;
   /** Comma-separated weekday short names (e.g. "Mon,Tue,Wed,Thu,Fri"). */
   workingDays: string;
+  /** IANA timezone used to interpret shift hours (e.g. "Asia/Karachi"). */
+  timezone: string;
   graceMinutes: number;
   overtimeHours: number;
   description: string;
@@ -412,6 +415,7 @@ export interface CreateShiftPayload {
   startTime: string;
   endTime: string;
   workingDays: string;
+  timezone: string;
   graceMinutes: number;
   overtimeHours: number;
   description?: string;
@@ -584,6 +588,16 @@ export interface AppSession {
   foregroundSeconds?: number;
   backgroundSeconds?: number;
   syncedAt?: string;
+  // 4-state lifecycle (2026-09-02 + OFFLINE 2026-09-02). The server
+  // sweeper (server/internal/jobs/session_lifecycle_sweep.go) transitions
+  // ACTIVE → OFFLINE → STALE → CLOSED per machine_id based on whether any
+  // row for that machine has a recent lastSyncAt. Only CLOSED is terminal
+  // — a live client re-uploading with no endedAt promotes OFFLINE/STALE
+  // back to ACTIVE; a CLOSED row stays CLOSED. Status defaults to ACTIVE
+  // when the field is absent (pre-031 rows).
+  status?: 'ACTIVE' | 'OFFLINE' | 'STALE' | 'CLOSED' | string;
+  lastActivityAt?: string;
+  lastSyncAt?: string;
 }
 
 export interface AppSessionListResponse {
@@ -594,12 +608,67 @@ export interface AppSessionListResponse {
   totalPages: number;
 }
 
+export interface AppUsageRow {
+  appDisplayName: string;
+  processName: string;
+  sessionCount: number;
+  firstOpenedAt: string;
+  lastClosedAt: string;
+  totalDurationSeconds: number;
+  hasOpenSession: boolean;
+  lastActiveAt: string;
+}
+
+export interface AppUsageListResponse {
+  data: AppUsageRow[];
+  total: number;
+  page: number;
+  perPage: number;
+  totalPages: number;
+  totalDurationSeconds: number;
+  totalSessionCount: number;
+  openSessionCount: number;
+}
+
 export const appSessionsApi = {
   list: (params?: {
     page?: number; perPage?: number; employeeId?: string; search?: string; platform?: string;
     dateFrom?: string; dateTo?: string;
   }) =>
     request<AppSessionListResponse>('/app-sessions', { params: params as Record<string, string | number | undefined> }),
+  /**
+   * Per-app aggregate for the "App Usage" page. The page renders
+   * the server-calculated `totalDurationSeconds` for the Duration cell.
+   * It is the sum of each effective session duration, so inactive gaps
+   * between separate sessions are not counted.
+   */
+  usage: (params?: {
+    page?: number; perPage?: number; employeeId?: string; search?: string; platform?: string;
+    dateFrom?: string; dateTo?: string;
+  }) =>
+    request<AppUsageListResponse>('/app-sessions/usage', { params: params as Record<string, string | number | undefined> }),
+  /**
+   * Per-app session list — fired when the user expands a row on
+   * /employee-journey/apps to see every individual session. The
+   * (appDisplayName, processName) pair is the same GROUP BY key the
+   * aggregate uses, so the result is consistent with the parent row's
+   * sessionCount. Paginated server-side (page/perPage) so a heavy
+   * user (e.g. 200 chrome opens/week) doesn't ship every row up
+   * front. The page re-keys the call when the date filter changes
+   * (dateFrom/dateTo are part of the React Query key).
+   */
+  usageSessions: (params: {
+    appDisplayName: string;
+    processName: string;
+    page?: number;
+    perPage?: number;
+    employeeId?: string;
+    dateFrom?: string;
+    dateTo?: string;
+  }) =>
+    request<AppSessionListResponse>('/app-sessions/usage/sessions', {
+      params: params as Record<string, string | number | undefined>,
+    }),
 };
 
 export interface AppItem {
@@ -906,11 +975,267 @@ export const usersApi = {
 };
 
 // ──────────────────────────
+// Time & Attendance API
+// ──────────────────────────
+
+export type AttendanceStatus =
+  | 'present'
+  | 'late'
+  | 'absent'
+  | 'half_day'
+  | 'off_shift'
+  | 'unknown';
+
+export interface AttendanceRecord {
+  employeeId: string;
+  workDate: string;
+  timezone?: string;
+  firstActiveAt?: string | null;
+  lastActiveAt?: string | null;
+  activeSeconds: number;
+  idleSeconds: number;
+  offShiftSeconds: number;
+  status: AttendanceStatus;
+  lateMinutes: number;
+}
+
+export interface AttendanceRangeResponse {
+  data: AttendanceRecord[];
+  total: number;
+  page: number;
+  perPage: number;
+  totalPages: number;
+}
+
+export interface Holiday {
+  id: number;
+  date: string;
+  label: string;
+}
+
+export interface HolidayListResponse {
+  data: Holiday[];
+  total: number;
+}
+
+export interface HolidayInput {
+  date: string;
+  label: string;
+}
+
+export const attendanceApi = {
+  today: (employeeId: string) =>
+    request<AttendanceRecord>('/attendance/today', { params: { employeeId } }),
+
+  range: (params: {
+    employeeId: string;
+    from: string;
+    to: string;
+    page?: number;
+    perPage?: number;
+  }) =>
+    request<AttendanceRangeResponse>('/attendance/range', {
+      params: params as Record<string, string | number | undefined>,
+    }),
+
+  /** Convenience wrapper: one employee, one calendar day. */
+  day: (employeeId: string, date: string) =>
+    request<AttendanceRangeResponse>('/attendance/range', {
+      params: { employeeId, from: date, to: date, page: 1, perPage: 1 },
+    }).then(r => r.data[0] ?? null),
+};
+
+export const holidaysApi = {
+  list: () => request<HolidayListResponse>('/holidays'),
+
+  create: (data: HolidayInput) =>
+    request<Holiday>('/holidays', { method: 'POST', body: data }),
+
+  update: (id: number, data: HolidayInput) =>
+    request<Holiday>(`/holidays/${id}`, { method: 'PUT', body: data }),
+
+  delete: (id: number) =>
+    request<{ message: string }>(`/holidays/${id}`, { method: 'DELETE' }),
+};
+
+// ──────────────────────────
+// Location Samples API (Phase 3 GPS)
+// ──────────────────────────
+
+export type LocationSource = 'gps' | 'wifi' | 'ip' | 'manual';
+
+export interface LocationSample {
+  id: string;
+  employeeId: string;
+  employeeName?: string;
+  latitude: number;
+  longitude: number;
+  accuracyM?: number;
+  altitudeM?: number;
+  source: LocationSource | string;
+  address?: string;
+  capturedAt: string;
+  syncedAt?: string;
+  geofenceStatus?: string;
+}
+
+export interface LocationSampleListResponse {
+  data: LocationSample[];
+  total: number;
+  page: number;
+  perPage: number;
+  totalPages: number;
+}
+
+export const locationSamplesApi = {
+  list: (params?: {
+    page?: number;
+    perPage?: number;
+    employeeId?: string;
+    dateFrom?: string;
+    dateTo?: string;
+  }) =>
+    request<LocationSampleListResponse>('/location-samples', {
+      params: params as Record<string, string | number | undefined>,
+    }),
+};
+
+// ──────────────────────────
+// Geofence Zones API (Phase 3 GPS B.8)
+// ──────────────────────────
+
+export interface GeofenceZone {
+  id: number;
+  name: string;
+  latitude: number;
+  longitude: number;
+  radiusM: number;
+  alertOnExit: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GeofenceZoneListResponse {
+  data: GeofenceZone[];
+}
+
+export const geofenceApi = {
+  list: () => request<GeofenceZoneListResponse>('/geofence-zones'),
+  create: (body: {
+    name: string;
+    latitude: number;
+    longitude: number;
+    radiusM: number;
+    alertOnExit?: boolean;
+  }) =>
+    request<GeofenceZone>('/geofence-zones', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  update: (
+    id: number,
+    body: Partial<{
+      name: string;
+      latitude: number;
+      longitude: number;
+      radiusM: number;
+      alertOnExit: boolean;
+    }>,
+  ) =>
+    request<GeofenceZone>(`/geofence-zones/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  delete: (id: number) =>
+    request<{ message: string }>(`/geofence-zones/${id}`, { method: 'DELETE' }),
+};
+
+// ──────────────────────────
 // Health API
 // ──────────────────────────
 
 export const healthApi = {
   check: () => request<{ status: string; timestamp: string }>('/health'),
+};
+
+// ──────────────────────────
+// Hours Insights API
+// ──────────────────────────
+
+export interface HoursInsightsEmployee {
+  employeeId: string;
+  name: string;
+  department: string;
+}
+
+export interface HoursInsightsRange {
+  from: string;
+  to: string;
+  label: string;
+}
+
+export interface HoursInsightsSummary {
+  totalSeconds: number;
+  productiveSeconds: number;
+  unproductiveSeconds: number;
+  neutralSeconds: number;
+  focusScore: number;
+  appCount: number;
+  siteCount: number;
+}
+
+export interface HoursInsightsChartBucket {
+  bucket: string;
+  productive: number;
+  unproductive: number;
+  neutral: number;
+}
+
+export interface HoursInsightsTopItem {
+  name: string;
+  kind: 'app' | 'site';
+  category: string;
+  type: string;
+  color: string;
+  totalSeconds: number;
+  focusScore: number;
+  isBrowser: boolean;
+}
+
+export interface HoursInsightsAppBucket {
+  bucket: string;
+  apps: Record<string, number>;
+}
+
+export interface HoursInsightsAppMeta {
+  name: string;
+  totalSeconds: number;
+  color: string;
+  category: string;
+  type: string;
+  sessionCount: number;
+}
+
+export interface HoursInsightsResponse {
+  employee: HoursInsightsEmployee;
+  range: HoursInsightsRange;
+  summary: HoursInsightsSummary;
+  chart: HoursInsightsChartBucket[];
+  appChart: HoursInsightsAppBucket[];
+  topApps: HoursInsightsAppMeta[];
+  topItems: HoursInsightsTopItem[];
+}
+
+export const hoursInsightsApi = {
+  get: (params: {
+    employeeId: string;
+    dateFrom?: string;
+    dateTo?: string;
+    preset?: string;
+  }) =>
+    request<HoursInsightsResponse>('/hours-insights', {
+      params: params as Record<string, string | number | undefined>,
+    }),
 };
 
 export { ApiError };

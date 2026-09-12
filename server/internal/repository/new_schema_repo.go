@@ -2,8 +2,12 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +18,17 @@ import (
 
 type NewSchemaRepo struct {
 	pool *pgxpool.Pool
+}
+
+// sessionStatusForInsert keeps the persisted lifecycle coherent when a session
+// reaches the server for the first time after it has already closed. The
+// conflict path below handles later re-syncs; this helper covers INSERTs, for
+// which PostgreSQL would otherwise apply the column default of ACTIVE.
+func sessionStatusForInsert(endedAt *time.Time) string {
+	if endedAt != nil {
+		return "CLOSED"
+	}
+	return "ACTIVE"
 }
 
 func NewNewSchemaRepo(pool *pgxpool.Pool) *NewSchemaRepo {
@@ -247,25 +262,36 @@ func (r *NewSchemaRepo) BulkInsertSessionEvents(ctx context.Context, entries []m
 		}
 		batch := entries[i:end]
 		valueStrings := make([]string, 0, len(batch))
-		args := make([]interface{}, 0, len(batch)*5)
+		args := make([]interface{}, 0, len(batch)*9)
 		argIdx := 1
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d)",
-				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4, argIdx+5,
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
+				argIdx+5, argIdx+6, argIdx+7, argIdx+8,
 			))
 			args = append(args,
-				e.ID, e.EmployeeID, e.EventType, e.OsUsername, e.EventAt, time.Now(),
+				e.ID, e.EmployeeID, e.EventType, e.OsUsername, e.EventAt,
+				e.EventCount, e.FirstAt, e.LastAt, time.Now(),
 			)
-			argIdx += 6
+			argIdx += 9
 		}
 
 		query := fmt.Sprintf(`
 			INSERT INTO session_events
-				(id, employee_id, event_type, os_username, event_at, synced_at)
+				(id, employee_id, event_type, os_username, event_at,
+				 event_count, first_at, last_at, synced_at)
 			VALUES %s
-			ON CONFLICT (id) DO NOTHING
+			ON CONFLICT (id) DO UPDATE SET
+				event_type = EXCLUDED.event_type,
+				os_username = EXCLUDED.os_username,
+				event_at = EXCLUDED.event_at,
+				event_count = EXCLUDED.event_count,
+				first_at = EXCLUDED.first_at,
+				last_at = EXCLUDED.last_at,
+				synced_at = EXCLUDED.synced_at
+			WHERE session_events.employee_id = EXCLUDED.employee_id
 		`, strings.Join(valueStrings, ", "))
 
 		tag, err := r.pool.Exec(ctx, query, args...)
@@ -294,37 +320,59 @@ func (r *NewSchemaRepo) BulkInsertAppSessions(ctx context.Context, entries []mod
 		}
 		batch := entries[i:end]
 		valueStrings := make([]string, 0, len(batch))
-		args := make([]interface{}, 0, len(batch)*19)
+		args := make([]interface{}, 0, len(batch)*22)
 		argIdx := 1
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
 				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
 				argIdx+10, argIdx+11, argIdx+12, argIdx+13, argIdx+14,
-				argIdx+15, argIdx+16, argIdx+17, argIdx+18,
+				argIdx+15, argIdx+16, argIdx+17, argIdx+18, argIdx+19,
+				argIdx+20, argIdx+21,
 			))
+			now := time.Now()
+			// Default last_activity_at to started_at when client omits it
+			// (older client builds pre-2026-09-02) so the sweep has a
+			// sane baseline from row 1.
+			lastActivity := e.LastActivityAt
+			if lastActivity == nil {
+				lastActivity = &e.StartedAt
+			}
 			args = append(args,
 				e.ID, e.EmployeeID, e.ProcessName, e.AppDisplayName, e.StartedAt,
 				e.EndedAt, e.MachineID, e.SessionID, e.Platform, e.ProcessID, e.ParentProcessID,
 				e.InstalledAppID, e.InstalledPackageID, e.GroupedBy, e.CgroupScope, e.ContextLabel,
 				e.ForegroundSeconds, e.BackgroundSeconds,
-				time.Now(),
+				now,
+				lastActivity,
+				now, // last_sync_at = NOW() — server records the moment this row arrived
+				sessionStatusForInsert(e.EndedAt),
 			)
-			argIdx += 19
+			argIdx += 22
 		}
 
+		// Upsert semantics for the 4-state lifecycle (2026-09-02 + OFFLINE 2026-09-02):
+		//   States: ACTIVE → OFFLINE → STALE → CLOSED.
+		//     ACTIVE  = client is syncing in real time (< SESSION_STALE_AFTER_MINUTES)
+		//     OFFLINE = client hasn't synced for STALE_AFTER min but < 24h (client unreachable)
+		//     STALE   = sweep confirmed the gap is real (≥ STALE_AFTER min of no sync)
+		//     CLOSED  = terminal (≥ CLOSE_AFTER hours of no sync, or client sent ended_at)
+		//   - last_sync_at / last_activity_at always refresh from the client
+		//     (the client is the live source for the activity it observed).
+		//   - foreground_seconds / background_seconds still EXCLUDED-overwrite
+		//     (client keeps a cumulative total).
+		//   - ended_at + status: see CASE blocks below.
 		query := fmt.Sprintf(`
 			INSERT INTO app_sessions
 				(id, employee_id, process_name, app_display_name, started_at,
 				 ended_at, machine_id, session_id, platform, process_id, parent_process_id,
 				 installed_app_id, installed_package_id, grouped_by, cgroup_scope, context_label,
 				 foreground_seconds, background_seconds,
-				 synced_at)
+				 synced_at, last_activity_at, last_sync_at, status)
 			VALUES %s
 			ON CONFLICT (id) DO UPDATE SET
-				ended_at = COALESCE(EXCLUDED.ended_at, app_sessions.ended_at),
 				parent_process_id = COALESCE(EXCLUDED.parent_process_id, app_sessions.parent_process_id),
 				installed_app_id = COALESCE(EXCLUDED.installed_app_id, app_sessions.installed_app_id),
 				installed_package_id = COALESCE(EXCLUDED.installed_package_id, app_sessions.installed_package_id),
@@ -333,7 +381,35 @@ func (r *NewSchemaRepo) BulkInsertAppSessions(ctx context.Context, entries []mod
 				context_label = COALESCE(EXCLUDED.context_label, app_sessions.context_label),
 				foreground_seconds = EXCLUDED.foreground_seconds,
 				background_seconds = EXCLUDED.background_seconds,
-				synced_at = EXCLUDED.synced_at
+				synced_at = EXCLUDED.synced_at,
+				last_activity_at = EXCLUDED.last_activity_at,
+				last_sync_at = EXCLUDED.last_sync_at,
+				-- Client-driven status transitions.
+				--   * Client says ended_at + last_sync_at just landed → CLOSED
+				--     (finalizes an ACTIVE/OFFLINE/STALE row immediately, no 24h wait)
+				--   * Client re-uploads an OFFLINE or STALE row with ended_at=NULL → ACTIVE
+				--     (network came back, the process is still alive; the per-machine
+				--     sweeper had flipped the row, the live client proves the machine
+				--     is back, so resurrect).
+				--   * CLOSED is TERMINAL. Once closed (by the client or by the sweeper
+				--     after CLOSE_AFTER_HOURS), a re-uploaded ended_at=NULL must NOT
+				--     resurrect the row -- that would override the sweeper's frozen
+				--     ended_at and re-open a finalized duration. The row stays CLOSED.
+				--   * Otherwise keep the existing server-side state (the sweeper
+				--     manages ACTIVE→OFFLINE→STALE→CLOSED per-machine).
+				status = CASE
+					WHEN EXCLUDED.ended_at IS NOT NULL
+						AND app_sessions.status IN ('ACTIVE','OFFLINE','STALE') THEN 'CLOSED'
+					WHEN EXCLUDED.ended_at IS NULL
+						AND app_sessions.status IN ('OFFLINE','STALE') THEN 'ACTIVE'
+					ELSE app_sessions.status
+				END,
+				ended_at = CASE
+					WHEN EXCLUDED.ended_at IS NOT NULL THEN EXCLUDED.ended_at
+					WHEN app_sessions.status IN ('OFFLINE','STALE')
+						AND EXCLUDED.ended_at IS NULL THEN NULL
+					ELSE app_sessions.ended_at
+				END
 		`, strings.Join(valueStrings, ", "))
 
 		tag, err := r.pool.Exec(ctx, query, args...)
@@ -349,25 +425,73 @@ func (r *NewSchemaRepo) BulkInsertAppSessions(ctx context.Context, entries []mod
 // App Items (generic child of app_sessions)
 // ────────────────────────────────
 
-func (r *NewSchemaRepo) BulkInsertAppItems(ctx context.Context, entries []models.AppItem) (int, error) {
+// BulkInsertAppItems inserts app_items in 500-row batches after an orphan
+// preflight. Returns the number of inserted rows, the ids of rows that were
+// refused (orphans — their app_session_id had no parent row at insert time),
+// AND the distinct missing parent session IDs (so the client can re-queue
+// them, breaking the permanent orphan deadlock).
+func (r *NewSchemaRepo) BulkInsertAppItems(ctx context.Context, entries []models.AppItem) (int, []string, []string, error) {
 	if len(entries) == 0 {
-		return 0, nil
+		return 0, nil, nil, nil
 	}
 	batchSize := 500
 	inserted := 0
+	rejectedIDs := make([]string, 0)
+	missingSessionIDs := make([]string, 0)
 	for i := 0; i < len(entries); i += batchSize {
 		end := i + batchSize
 		if end > len(entries) {
 			end = len(entries)
 		}
 		batch := entries[i:end]
+
+		// Orphan preflight: app_items.app_session_id has a NOT NULL FK to
+		// app_sessions.id. The client sends sessions and items in separate
+		// HTTP calls — a retry, a second client process, or a network blip
+		// can land the items batch BEFORE the parent session row arrives,
+		// which used to 500 the whole batch and silently drop every row.
+		// The fix: query which app_session_ids actually exist right now,
+		// drop the orphans from THIS batch, and proceed. The dropped row ids
+		// are returned to the caller and surfaced in the sync response as
+		// rejectedIds — the client leaves exactly those rows is_synced=0 so
+		// they re-send on the next pass (where the parent session is already
+		// in the DB). The orphan count is logged at WARN with the first 20
+		// ids so the client-side root cause stays visible.
+		//
+		// Why preflight (not ON CONFLICT DO NOTHING on the FK): Postgres
+		// checks FKs at row-insert time, not at ON CONFLICT time, so the
+		// preflight is the only way to make the rest of the batch succeed
+		// atomically without aborting the whole statement.
+		//
+		// Why log + rejectedIds (not return error): the orphan rows are
+		// recoverable — the client's next sync will re-send them after the
+		// parent session lands. Returning an error here would make the client
+		// treat the entire batch as failed and stop sending until a
+		// restart, which is exactly the wrong failure mode.
+		orphanIDs, orphanItemIDs, survivorIdx := r.filterOrphanAppItems(ctx, batch)
+		if len(orphanIDs) > 0 {
+			logOrphanAppItems(entries, orphanIDs)
+			for _, sid := range orphanIDs {
+				if sid != "<empty>" {
+					missingSessionIDs = append(missingSessionIDs, sid)
+				}
+			}
+		}
+		rejectedIDs = append(rejectedIDs, orphanItemIDs...)
+		if len(survivorIdx) == 0 {
+			// entire batch was orphans — nothing to insert, but the
+			// request itself is well-formed, so report 0 inserted.
+			continue
+		}
+		batch = survivorIdxOf(batch, survivorIdx)
+
 		valueStrings := make([]string, 0, len(batch))
 		args := make([]interface{}, 0, len(batch)*21)
 		argIdx := 1
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
 				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
 				argIdx+10, argIdx+11, argIdx+12, argIdx+13, argIdx+14,
@@ -388,7 +512,7 @@ func (r *NewSchemaRepo) BulkInsertAppItems(ctx context.Context, entries []models
 				(id, employee_id, app_session_id, parent_item_id, item_type,
 				 title, identifier, url, domain, opened_at, closed_at,
 				 process_id, object_type, action, journey_id, sequence,
-				 previous_path, current_path, window_id, tab_id, metadata_json)
+				 previous_path, current_path, window_id, tab_id, metadata_json, synced_at)
 			VALUES %s
 			ON CONFLICT (id) DO UPDATE SET
 				title = EXCLUDED.title,
@@ -412,11 +536,126 @@ func (r *NewSchemaRepo) BulkInsertAppItems(ctx context.Context, entries []models
 
 		tag, err := r.pool.Exec(ctx, query, args...)
 		if err != nil {
-			return inserted, fmt.Errorf("bulk insert app_items: %w", err)
+			return inserted, rejectedIDs, missingSessionIDs, fmt.Errorf("bulk insert app_items: %w", err)
 		}
 		inserted += int(tag.RowsAffected())
 	}
-	return inserted, nil
+	return inserted, rejectedIDs, missingSessionIDs, nil
+}
+
+// filterOrphanAppItems returns the set of appSessionId values in `batch`
+// that are missing from app_sessions right now, the ids of the batch rows
+// that ARE orphans (surfaced to the client as rejectedIds), and the indices
+// of the batch rows that are NOT orphans (so the caller can re-slice). The
+// query is O(1) round-trips (one SELECT with ANY($1) over the distinct
+// ids in the batch, indexed lookup on app_sessions.id).
+func (r *NewSchemaRepo) filterOrphanAppItems(ctx context.Context, batch []models.AppItem) (orphanIDs []string, orphanItemIDs []string, survivorIdx []int) {
+	seen := make(map[string]struct{}, len(batch))
+	distinct := make([]string, 0, len(batch))
+	for _, e := range batch {
+		if e.AppSessionID == "" {
+			continue
+		}
+		if _, ok := seen[e.AppSessionID]; ok {
+			continue
+		}
+		seen[e.AppSessionID] = struct{}{}
+		distinct = append(distinct, e.AppSessionID)
+	}
+	if len(distinct) == 0 {
+		// every row had an empty app_session_id — that's a client bug,
+		// but the FK is NOT NULL on this column, so those rows would
+		// fail to insert anyway. Treat them all as orphans (the server
+		// can't tell if it's a missing FK or a NULL FK — both are bad).
+		for i, e := range batch {
+			if e.AppSessionID == "" {
+				orphanIDs = append(orphanIDs, "<empty>")
+				orphanItemIDs = append(orphanItemIDs, e.ID)
+				continue
+			}
+			survivorIdx = append(survivorIdx, i)
+		}
+		return orphanIDs, orphanItemIDs, survivorIdx
+	}
+
+	rows, err := r.pool.Query(ctx, "SELECT id FROM app_sessions WHERE id = ANY($1)", distinct)
+	if err != nil {
+		// If the preflight itself fails, fail closed — return the full
+		// batch so the caller 500s. Better to alert than to silently
+		// drop data on a transient pg error.
+		return nil, nil, nil
+	}
+	defer rows.Close()
+	present := make(map[string]struct{}, len(distinct))
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err == nil {
+			present[id] = struct{}{}
+		}
+	}
+
+	orphanSet := make(map[string]struct{})
+	for i, e := range batch {
+		// Empty appSessionID is treated as an orphan (the FK is NOT NULL
+		// on app_items.app_session_id, so the INSERT would 500 anyway).
+		if e.AppSessionID == "" {
+			if _, already := orphanSet["<empty>"]; !already {
+				orphanIDs = append(orphanIDs, "<empty>")
+				orphanSet["<empty>"] = struct{}{}
+			}
+			orphanItemIDs = append(orphanItemIDs, e.ID)
+			continue
+		}
+		if _, ok := present[e.AppSessionID]; !ok {
+			if _, already := orphanSet[e.AppSessionID]; !already {
+				orphanIDs = append(orphanIDs, e.AppSessionID)
+				orphanSet[e.AppSessionID] = struct{}{}
+			}
+			orphanItemIDs = append(orphanItemIDs, e.ID)
+			continue
+		}
+		survivorIdx = append(survivorIdx, i)
+	}
+	return orphanIDs, orphanItemIDs, survivorIdx
+}
+
+// survivorIdxOf returns the entries in `batch` at the indices in `idx`,
+// preserving order. The idx slice comes from filterOrphanAppItems.
+func survivorIdxOf(batch []models.AppItem, idx []int) []models.AppItem {
+	out := make([]models.AppItem, 0, len(idx))
+	for _, i := range idx {
+		out = append(out, batch[i])
+	}
+	return out
+}
+
+// logOrphanAppItems writes a single WARN line per batch with the orphan
+// count and the first 20 appSessionIds. Using log.Printf here (not
+// the structured logger) because this file is mid-import-build and
+// adding a logger dep is out of scope. The cap keeps a single misbehaving
+// client from spamming the log on every sync.
+func logOrphanAppItems(entries []models.AppItem, orphanIDs []string) {
+	cap := 20
+	preview := orphanIDs
+	if len(preview) > cap {
+		preview = preview[:cap]
+	}
+	emp := ""
+	if len(entries) > 0 {
+		emp = entries[0].EmployeeID
+	}
+	log.Printf(
+		"[new_schema] WARN: app-items batch contained %d orphan app_session_id(s) for employee=%s (dropped from this batch, will re-sync next pass). ids=%v%s",
+		len(orphanIDs), emp, preview,
+		ifMore(len(orphanIDs), cap),
+	)
+}
+
+func ifMore(have, cap int) string {
+	if have <= cap {
+		return ""
+	}
+	return fmt.Sprintf(" (and %d more)", have-cap)
 }
 
 // ────────────────────────────────
@@ -473,12 +712,18 @@ func (r *NewSchemaRepo) ListAppSessions(ctx context.Context, params AppSessionLi
 		argIdx++
 	}
 	if !params.DateFrom.IsZero() {
-		conditions = append(conditions, fmt.Sprintf("started_at >= $%d", argIdx))
+		conditions = append(conditions, fmt.Sprintf(
+			`COALESCE(
+				CASE WHEN status = 'ACTIVE' AND ended_at IS NULL THEN NOW() END,
+				ended_at, last_sync_at, last_activity_at, started_at
+			) > $%d`,
+			argIdx,
+		))
 		args = append(args, params.DateFrom)
 		argIdx++
 	}
 	if !params.DateTo.IsZero() {
-		conditions = append(conditions, fmt.Sprintf("started_at <= $%d", argIdx))
+		conditions = append(conditions, fmt.Sprintf("started_at < $%d", argIdx))
 		args = append(args, params.DateTo)
 		argIdx++
 	}
@@ -496,12 +741,12 @@ func (r *NewSchemaRepo) ListAppSessions(ctx context.Context, params AppSessionLi
 
 	offset := (params.Page - 1) * params.PerPage
 	totalPages := (total + params.PerPage - 1) / params.PerPage
-
 	query := fmt.Sprintf(`
 		SELECT id, employee_id, process_name, app_display_name, started_at, ended_at,
 		       machine_id, session_id, platform, process_id, parent_process_id,
 		       installed_app_id, installed_package_id, grouped_by, cgroup_scope, context_label,
-		       foreground_seconds, background_seconds, synced_at, created_at
+		       foreground_seconds, background_seconds, synced_at,
+		       status, last_activity_at, last_sync_at, created_at
 		FROM app_sessions %s
 		ORDER BY started_at DESC
 		LIMIT $%d OFFSET $%d
@@ -521,7 +766,443 @@ func (r *NewSchemaRepo) ListAppSessions(ctx context.Context, params AppSessionLi
 			&s.ID, &s.EmployeeID, &s.ProcessName, &s.AppDisplayName, &s.StartedAt, &s.EndedAt,
 			&s.MachineID, &s.SessionID, &s.Platform, &s.ProcessID, &s.ParentProcessID,
 			&s.InstalledAppID, &s.InstalledPackageID, &s.GroupedBy, &s.CgroupScope, &s.ContextLabel,
-			&s.ForegroundSeconds, &s.BackgroundSeconds, &s.SyncedAt, &s.CreatedAt,
+			&s.ForegroundSeconds, &s.BackgroundSeconds, &s.SyncedAt,
+			&s.Status, &s.LastActivityAt, &s.LastSyncAt, &s.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan app_session row: %w", err)
+		}
+		sessions = append(sessions, s)
+	}
+
+	return &AppSessionListResult{
+		Sessions:   sessions,
+		Total:      total,
+		Page:       params.Page,
+		PerPage:    params.PerPage,
+		TotalPages: totalPages,
+	}, nil
+}
+
+// ────────────────────────────────
+// App Sessions Usage (per-app aggregate for web dashboard)
+// ────────────────────────────────
+//
+// The web "App Usage" page needs per-application totals, not the raw
+// session list. Duration is the sum of each session's effective duration,
+// so separate sessions do not include the inactive gap between them.
+// Returns one row per (appDisplayName, processName) with:
+// sessionCount, firstOpenedAt, lastClosedAt, totalDurationSeconds.
+
+type AppSessionUsageListParams struct {
+	EmployeeID string
+	Search     string
+	Platform   string
+	DateFrom   time.Time
+	DateTo     time.Time
+	Page       int
+	PerPage    int
+}
+
+type AppSessionUsageRow struct {
+	AppDisplayName       string
+	ProcessName          string
+	SessionCount         int
+	FirstOpenedAt        time.Time
+	LastClosedAt         time.Time
+	TotalDurationSeconds float64
+	HasOpenSession       bool
+	LastActiveAt         time.Time
+}
+
+type AppSessionUsageListResult struct {
+	Rows                 []AppSessionUsageRow
+	Total                int
+	TotalSessionCount    int
+	OpenSessionCount     int
+	Page                 int
+	PerPage              int
+	TotalPages           int
+	TotalDurationSeconds float64
+}
+
+func (r *NewSchemaRepo) AggregateAppSessionsUsage(ctx context.Context, params AppSessionUsageListParams) (*AppSessionUsageListResult, error) {
+	if params.Page < 1 {
+		params.Page = 1
+	}
+	if params.PerPage < 1 || params.PerPage > 100 {
+		params.PerPage = 20
+	}
+
+	var conditions []string
+	var args []interface{}
+	argIdx := 1
+
+	conditions = append(conditions, "deleted_at IS NULL")
+
+	if params.EmployeeID != "" {
+		conditions = append(conditions, fmt.Sprintf("employee_id = $%d", argIdx))
+		args = append(args, params.EmployeeID)
+		argIdx++
+	}
+	if params.Search != "" {
+		conditions = append(conditions, fmt.Sprintf(
+			"(LOWER(process_name) LIKE LOWER($%d) OR LOWER(app_display_name) LIKE LOWER($%d))",
+			argIdx, argIdx))
+		args = append(args, "%"+params.Search+"%")
+		argIdx++
+	}
+	if params.Platform != "" {
+		conditions = append(conditions, fmt.Sprintf("platform = $%d", argIdx))
+		args = append(args, params.Platform)
+		argIdx++
+	}
+	if !params.DateFrom.IsZero() {
+		conditions = append(conditions, fmt.Sprintf(
+			`COALESCE(
+				CASE WHEN status = 'ACTIVE' AND ended_at IS NULL THEN NOW() END,
+				ended_at, last_sync_at, last_activity_at, started_at
+			) > $%d`,
+			argIdx,
+		))
+		args = append(args, params.DateFrom)
+		argIdx++
+	}
+	if !params.DateTo.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("started_at < $%d", argIdx))
+		args = append(args, params.DateTo)
+		argIdx++
+	}
+
+	whereClause := ""
+	if len(conditions) > 0 {
+		whereClause = "WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	// Count distinct (app_display_name, process_name) groups so the page
+	// can paginate through results, matching the rest of the dashboard.
+	countQuery := fmt.Sprintf(`
+		SELECT COUNT(*) FROM (
+			SELECT 1 FROM app_sessions %s
+			GROUP BY app_display_name, process_name
+		) g
+	`, whereClause)
+	var total int
+	if err := r.pool.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, fmt.Errorf("count app_sessions usage: %w", err)
+	}
+
+	offset := (params.Page - 1) * params.PerPage
+	totalPages := (total + params.PerPage - 1) / params.PerPage
+	rangeFrom := params.DateFrom
+	rangeTo := params.DateTo
+	if rangeFrom.IsZero() {
+		rangeFrom = time.Unix(0, 0).UTC()
+	}
+	if rangeTo.IsZero() {
+		rangeTo = time.Now()
+	}
+	durationToIdx := argIdx
+	durationFromIdx := argIdx + 1
+	queryArgs := append(append([]interface{}{}, args...), rangeTo, rangeFrom)
+	argIdx += 2
+
+	// Per-app aggregate:
+	//   - sessionCount        = COUNT(*)
+	//   - firstOpenedAt       = MIN(started_at)
+	//   - lastClosedAt        = MAX(COALESCE(ended_at, last_sync_at, started_at))
+	//     (2026-09-02 3-state lifecycle: for ACTIVE/STALE sessions the real
+	//      "end" we know about is last_sync_at; for CLOSED rows ended_at
+	//      is final. Using COALESCE picks the most-recent truthful moment
+	//      regardless of status — same shape the web page uses for the
+	//      STALE/CLOSED case in sessionDurationSeconds.)
+	//   - totalDurationSeconds = SUM(each session's effective duration) per
+	//     group. Separate sessions must not include the idle gap between them:
+	//     09:00-11:00 plus 16:00-18:00 is 4 hours, not 9 hours.
+	//     The date range is clipped server-side and ACTIVE sessions end at NOW().
+	query := fmt.Sprintf(`
+		WITH effective_sessions AS (
+			SELECT app_display_name, COALESCE(process_name, '') AS process_name,
+			       status, ended_at, last_activity_at, last_sync_at, started_at,
+			       GREATEST(started_at, $%d) AS eff_start,
+			       LEAST(
+			           CASE
+			               WHEN status = 'ACTIVE' AND ended_at IS NULL
+			               	AND last_sync_at > NOW() - INTERVAL '10 minutes' THEN NOW()
+			               ELSE COALESCE(ended_at, last_sync_at, last_activity_at, started_at)
+			           END,
+			           $%d
+			       ) AS eff_end
+			FROM app_sessions %s
+		),
+		valid_sessions AS (
+			SELECT * FROM effective_sessions WHERE eff_end > eff_start
+		),
+		session_meta AS (
+			SELECT app_display_name, process_name, COUNT(*) AS session_count,
+			       MIN(started_at) AS first_opened_at,
+			       MAX(eff_end) AS last_closed_at,
+			       BOOL_OR(status = 'ACTIVE' AND ended_at IS NULL) AS has_open_session,
+			       MAX(COALESCE(last_activity_at, last_sync_at, ended_at, started_at)) AS last_active_at
+			FROM valid_sessions
+			GROUP BY app_display_name, process_name
+		),
+		ordered AS (
+			SELECT v.*,
+			       MAX(eff_end) OVER (
+			           PARTITION BY app_display_name, process_name
+			           ORDER BY eff_start, eff_end
+			           ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+			       ) AS prior_max_end
+			FROM valid_sessions v
+		),
+		marked AS (
+			SELECT o.*,
+			       CASE WHEN prior_max_end IS NULL OR eff_start > prior_max_end
+			            THEN 1 ELSE 0 END AS new_island
+			FROM ordered o
+		),
+		islands AS (
+			SELECT m.*,
+			       SUM(new_island) OVER (
+			           PARTITION BY app_display_name, process_name
+			           ORDER BY eff_start, eff_end
+			           ROWS UNBOUNDED PRECEDING
+			       ) AS island_id
+			FROM marked m
+		),
+		merged AS (
+			SELECT app_display_name, process_name, island_id,
+			       MIN(eff_start) AS eff_start, MAX(eff_end) AS eff_end
+			FROM islands
+			GROUP BY app_display_name, process_name, island_id
+		)
+		SELECT m.app_display_name, m.process_name,
+		       sm.session_count, sm.first_opened_at, sm.last_closed_at,
+		       COALESCE(SUM(EXTRACT(EPOCH FROM (m.eff_end - m.eff_start))), 0) AS total_duration_seconds,
+		       sm.has_open_session, sm.last_active_at
+		FROM merged m
+		JOIN session_meta sm USING (app_display_name, process_name)
+		GROUP BY m.app_display_name, m.process_name, sm.session_count,
+		         sm.first_opened_at, sm.last_closed_at, sm.has_open_session, sm.last_active_at
+		ORDER BY total_duration_seconds DESC
+		LIMIT $%d OFFSET $%d
+	`, durationFromIdx, durationToIdx, whereClause, argIdx, argIdx+1)
+	queryArgs = append(append([]interface{}{}, args...), rangeTo, rangeFrom, params.PerPage, offset)
+
+	rows, err := r.pool.Query(ctx, query, queryArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate app_sessions usage: %w", err)
+	}
+	defer rows.Close()
+
+	var usage []AppSessionUsageRow
+	for rows.Next() {
+		var u AppSessionUsageRow
+		if err := rows.Scan(
+			&u.AppDisplayName,
+			&u.ProcessName,
+			&u.SessionCount,
+			&u.FirstOpenedAt,
+			&u.LastClosedAt,
+			&u.TotalDurationSeconds,
+			&u.HasOpenSession,
+			&u.LastActiveAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan app_sessions usage row: %w", err)
+		}
+		usage = append(usage, u)
+	}
+
+	// Global total duration across ALL matching sessions is the sum of each
+	// session's effective duration. This deliberately excludes idle gaps and
+	// keeps the header metric consistent with every application row.
+	totalArgs := append(append([]interface{}{}, args...), rangeTo, rangeFrom)
+	var globalTotalDuration float64
+	totalQuery := fmt.Sprintf(`
+		WITH effective_sessions AS (
+			SELECT app_display_name, status, ended_at, last_sync_at, last_activity_at, started_at,
+			       GREATEST(started_at, $%d) AS eff_start,
+			       LEAST(CASE WHEN status = 'ACTIVE' AND ended_at IS NULL THEN NOW()
+			                 ELSE COALESCE(ended_at, last_sync_at, last_activity_at, started_at)
+			           END, $%d) AS eff_end
+			FROM app_sessions %s
+		),
+		valid_sessions AS (
+			SELECT * FROM effective_sessions WHERE eff_end > eff_start
+		),
+		ordered AS (
+			SELECT v.*, MAX(eff_end) OVER (
+				ORDER BY eff_start, eff_end
+				ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+			) AS prior_max_end
+			FROM valid_sessions v
+		),
+		marked AS (
+			SELECT o.*, CASE WHEN prior_max_end IS NULL OR eff_start > prior_max_end THEN 1 ELSE 0 END AS new_island
+			FROM ordered o
+		),
+		islands AS (
+			SELECT m.*, SUM(new_island) OVER (
+				ORDER BY eff_start, eff_end
+				ROWS UNBOUNDED PRECEDING
+			) AS island_id
+			FROM marked m
+		),
+		merged AS (
+			SELECT island_id, MIN(eff_start) AS eff_start, MAX(eff_end) AS eff_end
+			FROM islands
+			GROUP BY island_id
+		)
+		SELECT COALESCE(SUM(EXTRACT(EPOCH FROM (eff_end - eff_start))), 0),
+		       (SELECT COUNT(*) FROM valid_sessions),
+		       (SELECT COUNT(*) FROM valid_sessions WHERE status = 'ACTIVE' AND ended_at IS NULL)
+		FROM merged
+	`, durationFromIdx, durationToIdx, whereClause)
+	var totalSessionCount, openSessionCount int
+	if err := r.pool.QueryRow(ctx, totalQuery, totalArgs...).Scan(
+		&globalTotalDuration,
+		&totalSessionCount,
+		&openSessionCount,
+	); err != nil {
+		return nil, fmt.Errorf("compute total app sessions duration: %w", err)
+	}
+
+	return &AppSessionUsageListResult{
+		Rows:                 usage,
+		Total:                total,
+		TotalSessionCount:    totalSessionCount,
+		OpenSessionCount:     openSessionCount,
+		Page:                 params.Page,
+		PerPage:              params.PerPage,
+		TotalPages:           totalPages,
+		TotalDurationSeconds: globalTotalDuration,
+	}, nil
+}
+
+// ────────────────────────────────
+// Per-app session list (powers the /employee-journey/apps chevron expand)
+// ────────────────────────────────
+//
+// The "App Usage" page lists one row per (appDisplayName, processName).
+// When the user clicks a row's chevron, the page calls this endpoint to
+// fetch the raw app_sessions rows that make up that app's aggregate —
+// with server-side pagination so an employee who opened Chrome 200
+// times in a week doesn't ship 200 rows up front. The page is responsible
+// for re-keying the call when the date filter changes (the URL `?from`
+// and `?to` query params become part of the React Query key).
+//
+// `appDisplayName` and `processName` MUST both be passed: the
+// `(appDisplayName, processName)` tuple is the same grouping key the
+// aggregate uses, so missing either would match too many or too few
+// rows. `appDisplayName` may be empty (rare — only when the aggregate
+// group has no display name and fell back to processName alone); an
+// empty processName matches rows where process_name IS NULL (Postgres
+// NULLs don't match `= ''`, so we special-case to IS NULL).
+
+type AppSessionForAppListParams struct {
+	EmployeeID     string
+	AppDisplayName string
+	ProcessName    string
+	DateFrom       time.Time
+	DateTo         time.Time
+	Page           int
+	PerPage        int
+}
+
+func (r *NewSchemaRepo) ListAppSessionsForApp(ctx context.Context, params AppSessionForAppListParams) (*AppSessionListResult, error) {
+	if params.Page < 1 {
+		params.Page = 1
+	}
+	if params.PerPage < 1 || params.PerPage > 100 {
+		params.PerPage = 20
+	}
+
+	var conditions []string
+	var args []interface{}
+	argIdx := 1
+
+	conditions = append(conditions, "deleted_at IS NULL")
+
+	if params.EmployeeID != "" {
+		conditions = append(conditions, fmt.Sprintf("employee_id = $%d", argIdx))
+		args = append(args, params.EmployeeID)
+		argIdx++
+	}
+
+	// Group key: match the aggregate's GROUP BY exactly so the per-app
+	// session list is consistent with the per-app row's sessionCount.
+	// Postgres NULL doesn't match `= ''`, so each side of the pair needs
+	// its own IS NULL / = '' branch.
+	//
+	// Both real cases:
+	//   - appDisplayName + processName both non-empty: exact match
+	//   - one or both empty: the empty side is treated as "match IS NULL
+	//     OR = ''" so it catches the rows the aggregate grouped together.
+	if params.AppDisplayName == "" {
+		conditions = append(conditions, fmt.Sprintf("(app_display_name = '' OR app_display_name IS NULL)"))
+	} else {
+		conditions = append(conditions, fmt.Sprintf("app_display_name = $%d", argIdx))
+		args = append(args, params.AppDisplayName)
+		argIdx++
+	}
+	if params.ProcessName == "" {
+		conditions = append(conditions, "(process_name = '' OR process_name IS NULL)")
+	} else {
+		conditions = append(conditions, fmt.Sprintf("process_name = $%d", argIdx))
+		args = append(args, params.ProcessName)
+		argIdx++
+	}
+
+	if !params.DateFrom.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("started_at >= $%d", argIdx))
+		args = append(args, params.DateFrom)
+		argIdx++
+	}
+	if !params.DateTo.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("started_at <= $%d", argIdx))
+		args = append(args, params.DateTo)
+		argIdx++
+	}
+
+	whereClause := "WHERE " + strings.Join(conditions, " AND ")
+
+	// Reuse the same count + SELECT shape as ListAppSessions.
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM app_sessions %s", whereClause)
+	var total int
+	if err := r.pool.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, fmt.Errorf("count app_sessions for app: %w", err)
+	}
+
+	offset := (params.Page - 1) * params.PerPage
+	totalPages := (total + params.PerPage - 1) / params.PerPage
+
+	query := fmt.Sprintf(`
+		SELECT id, employee_id, process_name, app_display_name, started_at, ended_at,
+		       machine_id, session_id, platform, process_id, parent_process_id,
+		       installed_app_id, installed_package_id, grouped_by, cgroup_scope, context_label,
+		       foreground_seconds, background_seconds, synced_at,
+		       status, last_activity_at, last_sync_at, created_at
+		FROM app_sessions %s
+		ORDER BY started_at DESC
+		LIMIT $%d OFFSET $%d
+	`, whereClause, argIdx, argIdx+1)
+	args = append(args, params.PerPage, offset)
+
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list app_sessions for app: %w", err)
+	}
+	defer rows.Close()
+
+	var sessions []models.AppSession
+	for rows.Next() {
+		var s models.AppSession
+		if err := rows.Scan(
+			&s.ID, &s.EmployeeID, &s.ProcessName, &s.AppDisplayName, &s.StartedAt, &s.EndedAt,
+			&s.MachineID, &s.SessionID, &s.Platform, &s.ProcessID, &s.ParentProcessID,
+			&s.InstalledAppID, &s.InstalledPackageID, &s.GroupedBy, &s.CgroupScope, &s.ContextLabel,
+			&s.ForegroundSeconds, &s.BackgroundSeconds, &s.SyncedAt,
+			&s.Status, &s.LastActivityAt, &s.LastSyncAt, &s.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan app_session row: %w", err)
 		}
@@ -859,7 +1540,7 @@ func (r *NewSchemaRepo) BulkUpsertHardwareDevices(ctx context.Context, entries [
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
 				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
 			))
@@ -872,7 +1553,7 @@ func (r *NewSchemaRepo) BulkUpsertHardwareDevices(ctx context.Context, entries [
 
 		query := fmt.Sprintf(`
 			INSERT INTO hardware_devices
-				(id, employee_id, device_class, vendor, product, serial, bus_path, device_node, plugged_at, unplugged_at)
+				(id, employee_id, device_class, vendor, product, serial, bus_path, device_node, plugged_at, unplugged_at, synced_at)
 			VALUES %s
 			ON CONFLICT (id) DO UPDATE SET
 				unplugged_at = COALESCE(EXCLUDED.unplugged_at, hardware_devices.unplugged_at),
@@ -910,7 +1591,7 @@ func (r *NewSchemaRepo) BulkUpsertPermissionStatus(ctx context.Context, entries 
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
 				argIdx+5, argIdx+6, argIdx+7, argIdx+8,
 			))
@@ -923,7 +1604,7 @@ func (r *NewSchemaRepo) BulkUpsertPermissionStatus(ctx context.Context, entries 
 
 		query := fmt.Sprintf(`
 			INSERT INTO permission_status
-				(check_id, employee_id, session_id, session_type, platform, checked_at, method, works, details)
+				(check_id, employee_id, session_id, session_type, platform, checked_at, method, works, details, synced_at)
 			VALUES %s
 			ON CONFLICT (check_id) DO UPDATE SET
 				employee_id = EXCLUDED.employee_id,
@@ -967,7 +1648,7 @@ func (r *NewSchemaRepo) BulkUpsertStorageDevices(ctx context.Context, entries []
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d)",
+				"($%d, $%d, $%d, $%d, $%d, $%d, NOW())",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4, argIdx+5,
 			))
 			args = append(args,
@@ -978,7 +1659,7 @@ func (r *NewSchemaRepo) BulkUpsertStorageDevices(ctx context.Context, entries []
 
 		query := fmt.Sprintf(`
 			INSERT INTO storage_devices
-				(id, employee_id, device_hardware_id, device_type, model, capacity_mb)
+				(id, employee_id, device_hardware_id, device_type, model, capacity_mb, synced_at)
 			VALUES %s
 			ON CONFLICT (id) DO NOTHING
 		`, strings.Join(valueStrings, ", "))
@@ -1267,4 +1948,835 @@ func (r *NewSchemaRepo) GetBrowserNameByProcessName(ctx context.Context, process
 		return "", fmt.Errorf("lookup browser name for %s: %w", processName, err)
 	}
 	return name, nil
+}
+
+// ────────────────────────────────
+// Location Samples (Phase 3 GPS)
+// ────────────────────────────────
+
+func (r *NewSchemaRepo) BulkUpsertLocationSamples(ctx context.Context, entries []models.LocationSample) (int, error) {
+	if len(entries) == 0 {
+		return 0, nil
+	}
+	batchSize := 500
+	inserted := 0
+	for i := 0; i < len(entries); i += batchSize {
+		end := i + batchSize
+		if end > len(entries) {
+			end = len(entries)
+		}
+		batch := entries[i:end]
+		valueStrings := make([]string, 0, len(batch))
+		args := make([]interface{}, 0, len(batch)*9)
+		argIdx := 1
+
+		for _, e := range batch {
+			valueStrings = append(valueStrings, fmt.Sprintf(
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
+				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4, argIdx+5, argIdx+6, argIdx+7, argIdx+8,
+			))
+			args = append(args,
+				e.ID, e.EmployeeID, e.Latitude, e.Longitude, e.AccuracyM, e.AltitudeM,
+				e.Source, e.Address, e.CapturedAt,
+			)
+			argIdx += 9
+		}
+
+		query := fmt.Sprintf(`
+			INSERT INTO location_samples
+				(id, employee_id, latitude, longitude, accuracy_m, altitude_m, source, address, captured_at, synced_at)
+			VALUES %s
+			ON CONFLICT (id) DO UPDATE SET
+				latitude = EXCLUDED.latitude,
+				longitude = EXCLUDED.longitude,
+				accuracy_m = EXCLUDED.accuracy_m,
+				altitude_m = EXCLUDED.altitude_m,
+				source = EXCLUDED.source,
+				address = EXCLUDED.address,
+				captured_at = EXCLUDED.captured_at,
+				synced_at = NOW()
+		`, strings.Join(valueStrings, ", "))
+
+		tag, err := r.pool.Exec(ctx, query, args...)
+		if err != nil {
+			return inserted, fmt.Errorf("bulk upsert location_samples: %w", err)
+		}
+		inserted += int(tag.RowsAffected())
+	}
+	return inserted, nil
+}
+
+type LocationSampleListParams struct {
+	EmployeeID string
+	DateFrom   time.Time
+	DateTo     time.Time
+	Page       int
+	PerPage    int
+}
+
+type LocationSampleListResult struct {
+	Items      []models.LocationSample
+	Total      int
+	Page       int
+	PerPage    int
+	TotalPages int
+}
+
+// ────────────────────────────────
+// Hours Insights
+// ────────────────────────────────
+
+type HoursInsightsParams struct {
+	EmployeeID string
+	DateFrom   time.Time
+	DateTo     time.Time
+	Preset     string
+}
+
+type HoursInsightsSummary struct {
+	TotalSeconds        float64
+	ProductiveSeconds   float64
+	UnproductiveSeconds float64
+	NeutralSeconds      float64
+	FocusScore          float64
+	AppCount            int
+	SiteCount           int
+}
+
+type HoursInsightsChartBucket struct {
+	Bucket       string
+	Productive   float64
+	Unproductive float64
+	Neutral      float64
+}
+
+type HoursInsightsAppBucket struct {
+	Bucket string
+	Apps   map[string]float64
+}
+
+type HoursInsightsAppMeta struct {
+	Name         string
+	TotalSeconds float64
+	Color        string
+	Category     string
+	Type         string
+	SessionCount int
+}
+
+type HoursInsightsTopItem struct {
+	Name         string
+	Kind         string
+	Category     string
+	Type         string
+	Color        string
+	TotalSeconds float64
+	FocusScore   float64
+	IsBrowser    bool
+}
+
+type HoursInsightsResult struct {
+	EmployeeID   string
+	EmployeeName string
+	Department   string
+	RangeFrom    time.Time
+	RangeTo      time.Time
+	RangeLabel   string
+	Summary      HoursInsightsSummary
+	Chart        []HoursInsightsChartBucket
+	AppChart     []HoursInsightsAppBucket
+	TopApps      []HoursInsightsAppMeta
+	TopItems     []HoursInsightsTopItem
+}
+
+func (r *NewSchemaRepo) ListLocationSamples(ctx context.Context, params LocationSampleListParams) (*LocationSampleListResult, error) {
+	if params.Page < 1 {
+		params.Page = 1
+	}
+	if params.PerPage < 1 || params.PerPage > 100 {
+		params.PerPage = 30
+	}
+
+	var conditions []string
+	var args []interface{}
+	argIdx := 1
+
+	conditions = append(conditions, "ls.deleted_at IS NULL")
+
+	if params.EmployeeID != "" {
+		conditions = append(conditions, fmt.Sprintf("ls.employee_id = $%d", argIdx))
+		args = append(args, params.EmployeeID)
+		argIdx++
+	}
+	if !params.DateFrom.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("ls.captured_at >= $%d", argIdx))
+		args = append(args, params.DateFrom)
+		argIdx++
+	}
+	if !params.DateTo.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("ls.captured_at <= $%d", argIdx))
+		args = append(args, params.DateTo)
+		argIdx++
+	}
+
+	whereClause := "WHERE " + strings.Join(conditions, " AND ")
+
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM location_samples ls %s", whereClause)
+	var total int
+	if err := r.pool.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, fmt.Errorf("count location_samples: %w", err)
+	}
+
+	offset := (params.Page - 1) * params.PerPage
+	listArgs := append(append([]interface{}{}, args...), params.PerPage, offset)
+	limitIdx := argIdx
+	offsetIdx := argIdx + 1
+
+	query := fmt.Sprintf(`
+		SELECT ls.id, ls.employee_id, COALESCE(e.name, '') AS employee_name,
+		       ls.latitude, ls.longitude, ls.accuracy_m, ls.altitude_m,
+		       ls.source, ls.address, ls.captured_at, ls.synced_at, ls.created_at
+		FROM location_samples ls
+		LEFT JOIN employees e ON e.employee_id = ls.employee_id AND e.deleted_at IS NULL
+		%s
+		ORDER BY ls.captured_at DESC
+		LIMIT $%d OFFSET $%d
+	`, whereClause, limitIdx, offsetIdx)
+
+	rows, err := r.pool.Query(ctx, query, listArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("list location_samples: %w", err)
+	}
+	defer rows.Close()
+
+	var items []models.LocationSample
+	for rows.Next() {
+		var s models.LocationSample
+		if err := rows.Scan(
+			&s.ID, &s.EmployeeID, &s.EmployeeName, &s.Latitude, &s.Longitude, &s.AccuracyM, &s.AltitudeM,
+			&s.Source, &s.Address, &s.CapturedAt, &s.SyncedAt, &s.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan location_sample row: %w", err)
+		}
+		items = append(items, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	totalPages := total / params.PerPage
+	if total%params.PerPage != 0 {
+		totalPages++
+	}
+
+	return &LocationSampleListResult{
+		Items:      items,
+		Total:      total,
+		Page:       params.Page,
+		PerPage:    params.PerPage,
+		TotalPages: totalPages,
+	}, nil
+}
+
+// GetHoursInsights returns aggregated usage data for the hours-insights page.
+// It computes summary stats, chart buckets, individual application chart buckets,
+// and a top-items list for a single employee over the requested date range.
+func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsightsParams) (*HoursInsightsResult, error) {
+	if params.EmployeeID == "" {
+		return nil, fmt.Errorf("employee_id is required")
+	}
+	if params.DateFrom.IsZero() {
+		switch params.Preset {
+		case "today":
+			now := time.Now()
+			params.DateFrom = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+			params.DateTo = time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 999999999, now.Location())
+		case "yesterday":
+			y := time.Now().AddDate(0, 0, -1)
+			params.DateFrom = time.Date(y.Year(), y.Month(), y.Day(), 0, 0, 0, 0, y.Location())
+			params.DateTo = time.Date(y.Year(), y.Month(), y.Day(), 23, 59, 59, 999999999, y.Location())
+		case "7d":
+			now := time.Now()
+			start := now.AddDate(0, 0, -6)
+			params.DateFrom = time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, start.Location())
+			params.DateTo = now
+		case "30d":
+			now := time.Now()
+			start := now.AddDate(0, 0, -29)
+			params.DateFrom = time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, start.Location())
+			params.DateTo = now
+		default:
+			params.DateFrom = time.Now().AddDate(0, 0, -30)
+			params.DateTo = time.Now()
+		}
+	} else if params.DateTo.IsZero() {
+		params.DateTo = time.Now()
+	}
+
+	result := &HoursInsightsResult{
+		EmployeeID: params.EmployeeID,
+		RangeFrom:  params.DateFrom,
+		RangeTo:    params.DateTo,
+		Chart:      []HoursInsightsChartBucket{},
+		AppChart:   []HoursInsightsAppBucket{},
+		TopApps:    []HoursInsightsAppMeta{},
+		TopItems:   []HoursInsightsTopItem{},
+	}
+
+	// 1) Employee info
+	if err := r.pool.QueryRow(ctx, `
+		SELECT e.name, COALESCE(d.name, '')
+		FROM employees e
+		LEFT JOIN departments d ON d.id = e.department_id AND d.deleted_at IS NULL
+		WHERE e.employee_id = $1 AND e.deleted_at IS NULL
+	`, params.EmployeeID).Scan(&result.EmployeeName, &result.Department); err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("employee not found")
+		}
+		return nil, fmt.Errorf("load employee: %w", err)
+	}
+
+	// Determine bucket size for chart: hourly for ranges <= 3 days, daily otherwise.
+	bucketSize := "1 day"
+	bucketField := "day"
+	maxBucketSeconds := 86400.0
+	if params.DateTo.Sub(params.DateFrom) <= 72*time.Hour {
+		bucketSize = "1 hour"
+		bucketField = "hour"
+		maxBucketSeconds = 3600.0
+	}
+	bucketFormat := "HH24:00"
+	if bucketSize == "1 day" {
+		bucketFormat = "Mon DD"
+	}
+
+	// 2) Summary + top items in one query using CTEs.
+	// Bounding rules:
+	// - app_sessions: if ended_at is set, use ended_at; if status is ACTIVE with recent sync, bound by NOW();
+	//   otherwise use COALESCE(last_activity_at, last_sync_at, started_at). Never run away.
+	// - app_items: bound by parent session (s.ended_at / s.last_sync_at) when closed_at is NULL.
+	//   item_type is restricted to 'browser_tab' to avoid double-counting navigation events.
+	summaryQuery := `
+	WITH params AS (
+		SELECT $1::varchar AS emp_id, $2::timestamptz AS from_ts, $3::timestamptz AS to_ts
+	),
+	emp AS (
+		SELECT e.employee_id, e.name, COALESCE(d.name, '') AS department
+		FROM employees e
+		LEFT JOIN departments d ON d.id = e.department_id AND d.deleted_at IS NULL
+		WHERE e.employee_id = (SELECT emp_id FROM params) AND e.deleted_at IS NULL
+	),
+	raw_app_usage AS (
+		SELECT
+			s.app_display_name,
+			s.installed_app_id,
+			GREATEST(s.started_at, (SELECT from_ts FROM params)) AS eff_start,
+			LEAST(
+				CASE
+					WHEN s.status = 'ACTIVE' AND s.ended_at IS NULL
+						AND s.last_sync_at > NOW() - INTERVAL '10 minutes' THEN NOW()
+					ELSE COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at)
+				END,
+				(SELECT to_ts FROM params)
+			) AS eff_end,
+			s.foreground_seconds,
+			s.background_seconds
+		FROM app_sessions s
+		WHERE s.employee_id = (SELECT emp_id FROM params)
+			AND s.deleted_at IS NULL
+			AND s.started_at < (SELECT to_ts FROM params)
+			AND (
+				CASE
+					WHEN s.status = 'ACTIVE' AND s.ended_at IS NULL
+						AND s.last_sync_at > NOW() - INTERVAL '10 minutes' THEN NOW()
+					ELSE COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at)
+				END
+			) > (SELECT from_ts FROM params)
+			AND (
+				CASE
+					WHEN s.status = 'ACTIVE' AND s.ended_at IS NULL THEN NOW()
+					ELSE COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at)
+				END
+			) > s.started_at
+	),
+	ordered_app_usage AS (
+		SELECT au.*,
+		       MAX(eff_end) OVER (
+		           PARTITION BY app_display_name
+		           ORDER BY eff_start, eff_end
+		           ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+		       ) AS prior_max_end
+		FROM raw_app_usage au
+	),
+	marked_app_usage AS (
+		SELECT o.*,
+		       CASE WHEN prior_max_end IS NULL OR eff_start > prior_max_end
+		            THEN 1 ELSE 0 END AS new_island
+		FROM ordered_app_usage o
+	),
+	islands_app_usage AS (
+		SELECT m.*,
+		       SUM(new_island) OVER (
+		           PARTITION BY app_display_name
+		           ORDER BY eff_start, eff_end
+		           ROWS UNBOUNDED PRECEDING
+		       ) AS island_id
+		FROM marked_app_usage m
+	),
+	app_usage AS (
+		SELECT app_display_name,
+		       MIN(installed_app_id) AS installed_app_id,
+		       MIN(eff_start) AS eff_start,
+		       MAX(eff_end) AS eff_end
+		FROM islands_app_usage
+		GROUP BY app_display_name, island_id
+	),
+	app_counts AS (
+		SELECT app_display_name, COUNT(*) AS session_count
+		FROM raw_app_usage
+		GROUP BY app_display_name
+	),
+	site_usage AS (
+		SELECT
+			ai.domain,
+			GREATEST(ai.opened_at, (SELECT from_ts FROM params)) AS eff_start,
+			CASE WHEN ai.closed_at IS NOT NULL THEN ai.closed_at ELSE ai.opened_at END AS eff_end
+		FROM app_items ai
+		LEFT JOIN app_sessions s ON s.id = ai.app_session_id
+		WHERE ai.employee_id = (SELECT emp_id FROM params)
+			AND ai.deleted_at IS NULL
+			AND ai.item_type = 'browser_tab'
+			AND ai.domain IS NOT NULL
+			AND ai.domain <> ''
+			AND ai.opened_at < (SELECT to_ts FROM params)
+			AND COALESCE(ai.closed_at, s.ended_at, s.last_sync_at, s.last_activity_at, ai.opened_at) > (SELECT from_ts FROM params)
+			AND COALESCE(ai.closed_at, s.ended_at, s.last_sync_at, s.last_activity_at, ai.opened_at) > ai.opened_at
+	),
+	app_cat AS (
+		-- Classification resolves by NORMALIZED APP NAME across the whole catalog:
+		-- installed_applications has one row per employee, so the typed row may
+		-- belong to a different employee than the sessions being queried.
+		-- DISTINCT ON prefers rows that actually carry a type/category.
+		SELECT DISTINCT ON (lower(ia.app_name)) lower(ia.app_name) AS app_key,
+			NULLIF(mt.name, '') AS type_name,
+			COALESCE(NULLIF(mt.color, ''), '#6b7280') AS type_color,
+			COALESCE(mc.name, '') AS category_name
+		FROM installed_applications ia
+		LEFT JOIN monitoring_types mt ON mt.id = ia.type_id AND mt.deleted_at IS NULL
+		LEFT JOIN monitoring_categories mc ON mc.id = ia.category_id AND mc.deleted_at IS NULL
+		WHERE ia.deleted_at IS NULL AND ia.app_name <> ''
+		ORDER BY lower(ia.app_name), (ia.type_id IS NULL), (ia.category_id IS NULL), ia.id
+	),
+	site_cat AS (
+		SELECT DISTINCT ON (ms.domain) ms.domain,
+			NULLIF(mt.name, '') AS type_name,
+			COALESCE(NULLIF(mt.color, ''), '#6b7280') AS type_color,
+			COALESCE(mc.name, '') AS category_name
+		FROM monitoring_sites ms
+		LEFT JOIN monitoring_types mt ON mt.id = ms.type_id AND mt.deleted_at IS NULL
+		LEFT JOIN monitoring_categories mc ON mc.id = ms.category_id AND mc.deleted_at IS NULL
+		WHERE ms.domain IN (SELECT DISTINCT domain FROM site_usage) AND ms.deleted_at IS NULL
+	),
+	app_summary AS (
+		SELECT
+			COALESCE(SUM(GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start)))), 0) AS total_sec,
+			COALESCE(SUM(CASE WHEN ac.type_name = 'Productive' THEN GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start))) ELSE 0 END), 0) AS productive_sec,
+			COALESCE(SUM(CASE WHEN ac.type_name = 'Unproductive' THEN GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start))) ELSE 0 END), 0) AS unproductive_sec,
+			COALESCE(SUM(CASE WHEN ac.type_name = 'Neutral' OR ac.type_name IS NULL THEN GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start))) ELSE 0 END), 0) AS neutral_sec,
+			COUNT(DISTINCT app_display_name) AS app_count,
+			COALESCE((SELECT SUM(foreground_seconds) FROM raw_app_usage), 0) AS fg_sec,
+			COALESCE((SELECT SUM(background_seconds) FROM raw_app_usage), 0) AS bg_sec
+		FROM app_usage au
+		LEFT JOIN app_cat ac ON ac.app_key = lower(au.app_display_name)
+	),
+	site_summary AS (
+		SELECT
+			COALESCE(SUM(EXTRACT(EPOCH FROM (eff_end - eff_start))), 0) AS total_sec,
+			COUNT(DISTINCT su.domain) AS site_count
+		FROM site_usage su
+	),
+	combined AS (
+		SELECT
+			CASE WHEN asu.total_sec > 0 THEN asu.total_sec ELSE ssu.total_sec END AS total_seconds,
+			asu.productive_sec AS productive_seconds,
+			asu.unproductive_sec AS unproductive_seconds,
+			asu.neutral_sec AS neutral_seconds,
+			asu.app_count,
+			ssu.site_count,
+			asu.fg_sec AS fg_sec,
+			asu.bg_sec AS bg_sec
+		FROM app_summary asu, site_summary ssu
+	),
+	top_apps AS (
+		SELECT
+			au.app_display_name AS name,
+			'app' AS kind,
+			COALESCE(ac.category_name, '') AS category,
+			COALESCE(ac.type_name, 'Neutral') AS type,
+			COALESCE(ac.type_color, '#6b7280') AS color,
+			SUM(GREATEST(0, EXTRACT(EPOCH FROM (au.eff_end - au.eff_start)))) AS totalSeconds,
+			MAX(cnt.session_count) AS session_count,
+			0 AS focusScore,
+			COALESCE(ia.is_browser, FALSE) AS isBrowser
+		FROM app_usage au
+		LEFT JOIN app_cat ac ON ac.app_key = lower(au.app_display_name)
+		LEFT JOIN installed_applications ia ON ia.id = au.installed_app_id AND ia.deleted_at IS NULL
+		LEFT JOIN app_counts cnt ON cnt.app_display_name = au.app_display_name
+		WHERE au.app_display_name <> '' AND au.app_display_name IS NOT NULL
+		GROUP BY au.app_display_name, cnt.session_count, ac.type_name, ac.type_color, ac.category_name, ia.is_browser
+	),
+	top_sites AS (
+		SELECT
+			su.domain AS name,
+			'site' AS kind,
+			COALESCE(sc.category_name, '') AS category,
+			COALESCE(sc.type_name, 'Neutral') AS type,
+			COALESCE(sc.type_color, '#6b7280') AS color,
+			SUM(EXTRACT(EPOCH FROM (su.eff_end - su.eff_start))) AS totalSeconds,
+			COUNT(*) AS session_count,
+			(SELECT CASE WHEN c.fg_sec + c.bg_sec > 0 THEN ROUND(c.fg_sec / (c.fg_sec + c.bg_sec) * 1000) / 10 ELSE 0 END FROM combined c) AS focusScore,
+			FALSE AS isBrowser
+		FROM site_usage su
+		LEFT JOIN site_cat sc ON sc.domain = su.domain
+		WHERE su.domain <> ''
+		GROUP BY su.domain, sc.type_name, sc.type_color, sc.category_name
+	)
+	SELECT
+		(SELECT row_to_json(e) FROM (SELECT employee_id, name, department FROM emp WHERE employee_id = (SELECT emp_id FROM params)) e) AS employee,
+		(SELECT row_to_json(c) FROM combined c) AS summary,
+		COALESCE(
+			(SELECT json_agg(t ORDER BY t.totalSeconds DESC) FROM (
+				SELECT name, kind, category, type, color, totalSeconds, focusScore, isBrowser FROM top_apps
+				UNION ALL
+				SELECT name, kind, category, type, color, totalSeconds, focusScore, isBrowser FROM top_sites
+				LIMIT 20
+			) t),
+			'[]'::json
+		) AS top_items,
+		COALESCE(
+			(SELECT json_agg(t ORDER BY t.totalSeconds DESC) FROM top_apps t),
+			'[]'::json
+		) AS raw_top_apps
+	`
+
+	var employeeJSON []byte
+	var summaryJSON []byte
+	var topItemsJSON []byte
+	var rawTopAppsJSON []byte
+
+	if err := r.pool.QueryRow(ctx, summaryQuery, params.EmployeeID, params.DateFrom, params.DateTo).Scan(
+		&employeeJSON, &summaryJSON, &topItemsJSON, &rawTopAppsJSON,
+	); err != nil {
+		return nil, fmt.Errorf("hours insights summary query: %w", err)
+	}
+
+	// Parse employee JSON
+	var empMap map[string]interface{}
+	if err := json.Unmarshal(employeeJSON, &empMap); err != nil {
+		return nil, fmt.Errorf("parse employee json: %w", err)
+	}
+	if name, ok := empMap["name"].(string); ok {
+		result.EmployeeName = name
+	}
+	if dept, ok := empMap["department"].(string); ok {
+		result.Department = dept
+	}
+
+	// Parse summary JSON
+	var summaryMap map[string]interface{}
+	if err := json.Unmarshal(summaryJSON, &summaryMap); err != nil {
+		return nil, fmt.Errorf("parse summary json: %w", err)
+	}
+	result.Summary = HoursInsightsSummary{
+		TotalSeconds:        parseFloat(summaryMap["total_seconds"]),
+		ProductiveSeconds:   parseFloat(summaryMap["productive_seconds"]),
+		UnproductiveSeconds: parseFloat(summaryMap["unproductive_seconds"]),
+		NeutralSeconds:      parseFloat(summaryMap["neutral_seconds"]),
+		AppCount:            int(parseFloat(summaryMap["app_count"])),
+		SiteCount:           int(parseFloat(summaryMap["site_count"])),
+	}
+	fg := parseFloat(summaryMap["fg_sec"])
+	bg := parseFloat(summaryMap["bg_sec"])
+	if fg+bg > 0 {
+		result.Summary.FocusScore = math.Round(fg/(fg+bg)*1000) / 10
+	}
+
+	// Parse top items JSON
+	var topItems []HoursInsightsTopItem
+	if err := json.Unmarshal(topItemsJSON, &topItems); err != nil {
+		return nil, fmt.Errorf("parse top items json: %w", err)
+	}
+	result.TopItems = topItems
+
+	// Parse raw top apps
+	type RawAppItem struct {
+		Name         string  `json:"name"`
+		TotalSeconds float64 `json:"totalseconds"`
+		Category     string  `json:"category"`
+		Type         string  `json:"type"`
+		SessionCount int     `json:"session_count"`
+	}
+	var rawApps []RawAppItem
+	_ = json.Unmarshal(rawTopAppsJSON, &rawApps)
+
+	// Build TopApps with curated color palette
+	palette := []string{
+		"#3b82f6", // Blue
+		"#8b5cf6", // Purple
+		"#10b981", // Emerald
+		"#f59e0b", // Amber
+		"#06b6d4", // Cyan
+		"#ec4899", // Pink
+	}
+	topAppNamesMap := make(map[string]bool)
+	limitTop := len(rawApps)
+	if limitTop > 6 {
+		limitTop = 6
+	}
+	for i := 0; i < limitTop; i++ {
+		color := palette[i%len(palette)]
+		result.TopApps = append(result.TopApps, HoursInsightsAppMeta{
+			Name:         rawApps[i].Name,
+			TotalSeconds: rawApps[i].TotalSeconds,
+			Color:        color,
+			Category:     rawApps[i].Category,
+			Type:         rawApps[i].Type,
+			SessionCount: rawApps[i].SessionCount,
+		})
+		topAppNamesMap[rawApps[i].Name] = true
+	}
+
+	// 3) Chart data — Productivity buckets
+	chartQuery := `
+	WITH params AS (
+		SELECT $1::varchar AS emp_id, $2::timestamptz AS from_ts, $3::timestamptz AS to_ts
+	),
+	app_usage AS (
+		SELECT
+			s.app_display_name,
+			s.installed_app_id,
+			GREATEST(s.started_at, (SELECT from_ts FROM params)) AS eff_start,
+			LEAST(
+				CASE 
+					WHEN s.ended_at IS NOT NULL THEN s.ended_at
+					WHEN s.status = 'ACTIVE' AND s.last_sync_at > NOW() - INTERVAL '10 minutes' THEN LEAST(NOW(), (SELECT to_ts FROM params))
+					ELSE COALESCE(s.last_activity_at, s.last_sync_at, s.started_at)
+				END,
+				(SELECT to_ts FROM params)
+			) AS eff_end
+		FROM app_sessions s
+		WHERE s.employee_id = (SELECT emp_id FROM params)
+			AND s.deleted_at IS NULL
+			AND s.started_at < (SELECT to_ts FROM params)
+			AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > (SELECT from_ts FROM params)
+			AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > s.started_at
+	),
+	app_cat AS (
+		-- Classification resolves by NORMALIZED APP NAME across the whole catalog
+		-- (see the app_cat CTE in the summary query for the rationale).
+		SELECT DISTINCT ON (lower(ia.app_name)) lower(ia.app_name) AS app_key,
+			NULLIF(mt.name, '') AS type_name,
+			COALESCE(NULLIF(mt.color, ''), '#6b7280') AS type_color
+		FROM installed_applications ia
+		LEFT JOIN monitoring_types mt ON mt.id = ia.type_id AND mt.deleted_at IS NULL
+		WHERE ia.deleted_at IS NULL AND ia.app_name <> ''
+		ORDER BY lower(ia.app_name), (ia.type_id IS NULL), ia.id
+	),
+	buckets AS (
+		SELECT generate_series(
+			date_trunc($4, (SELECT from_ts FROM params)),
+			date_trunc($4, (SELECT to_ts FROM params)),
+			$5::interval
+		) AS bucket_start
+	)
+	,raw_buckets AS (
+		SELECT b.bucket_start,
+			COALESCE(SUM(CASE WHEN ac.type_name = 'Productive' THEN EXTRACT(EPOCH FROM (LEAST(au.eff_end, b.bucket_start + $5::interval) - GREATEST(au.eff_start, b.bucket_start))) ELSE 0 END), 0) AS productive,
+			COALESCE(SUM(CASE WHEN ac.type_name = 'Unproductive' THEN EXTRACT(EPOCH FROM (LEAST(au.eff_end, b.bucket_start + $5::interval) - GREATEST(au.eff_start, b.bucket_start))) ELSE 0 END), 0) AS unproductive,
+			COALESCE(SUM(CASE WHEN ac.type_name = 'Neutral' OR ac.type_name IS NULL THEN EXTRACT(EPOCH FROM (LEAST(au.eff_end, b.bucket_start + $5::interval) - GREATEST(au.eff_start, b.bucket_start))) ELSE 0 END), 0) AS neutral
+		FROM buckets b
+		LEFT JOIN app_usage au ON au.eff_start < b.bucket_start + $5::interval AND au.eff_end > b.bucket_start
+		LEFT JOIN app_cat ac ON ac.app_key = lower(au.app_display_name)
+		GROUP BY b.bucket_start
+	)
+	SELECT to_char(bucket_start, $6) AS bucket,
+		productive * LEAST(1.0, EXTRACT(EPOCH FROM $5::interval) / NULLIF(productive + unproductive + neutral, 0)) AS productive,
+		unproductive * LEAST(1.0, EXTRACT(EPOCH FROM $5::interval) / NULLIF(productive + unproductive + neutral, 0)) AS unproductive,
+		neutral * LEAST(1.0, EXTRACT(EPOCH FROM $5::interval) / NULLIF(productive + unproductive + neutral, 0)) AS neutral
+	FROM raw_buckets
+	ORDER BY bucket_start
+	`
+
+	rows, err := r.pool.Query(ctx, chartQuery,
+		params.EmployeeID, params.DateFrom, params.DateTo,
+		bucketField, bucketSize, bucketFormat,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("hours insights chart query: %w", err)
+	}
+	defer rows.Close()
+
+	bucketOrder := make([]string, 0)
+	for rows.Next() {
+		var b HoursInsightsChartBucket
+		if err := rows.Scan(&b.Bucket, &b.Productive, &b.Unproductive, &b.Neutral); err != nil {
+			return nil, fmt.Errorf("scan chart row: %w", err)
+		}
+		result.Chart = append(result.Chart, b)
+		bucketOrder = append(bucketOrder, b.Bucket)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// 4) Chart data — Individual application buckets
+	appChartQuery := `
+	WITH params AS (
+		SELECT $1::varchar AS emp_id, $2::timestamptz AS from_ts, $3::timestamptz AS to_ts
+	),
+	raw_app_usage AS (
+		SELECT
+			s.app_display_name,
+			GREATEST(s.started_at, (SELECT from_ts FROM params)) AS eff_start,
+			LEAST(
+				CASE 
+					WHEN s.ended_at IS NOT NULL THEN s.ended_at
+					WHEN s.status = 'ACTIVE' AND s.last_sync_at > NOW() - INTERVAL '10 minutes' THEN LEAST(NOW(), (SELECT to_ts FROM params))
+					ELSE COALESCE(s.last_activity_at, s.last_sync_at, s.started_at)
+				END,
+				(SELECT to_ts FROM params)
+			) AS eff_end
+		FROM app_sessions s
+		WHERE s.employee_id = (SELECT emp_id FROM params)
+			AND s.deleted_at IS NULL
+			AND s.started_at < (SELECT to_ts FROM params)
+			AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > (SELECT from_ts FROM params)
+			AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > s.started_at
+	),
+	ordered AS (
+		SELECT au.*,
+		       MAX(eff_end) OVER (
+		           PARTITION BY app_display_name
+		           ORDER BY eff_start, eff_end
+		           ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+		       ) AS prior_max_end
+		FROM raw_app_usage au
+	),
+	marked AS (
+		SELECT o.*,
+		       CASE WHEN prior_max_end IS NULL OR eff_start > prior_max_end
+		            THEN 1 ELSE 0 END AS new_island
+		FROM ordered o
+	),
+	islands AS (
+		SELECT m.*,
+		       SUM(new_island) OVER (
+		           PARTITION BY app_display_name
+		           ORDER BY eff_start, eff_end
+		           ROWS UNBOUNDED PRECEDING
+		       ) AS island_id
+		FROM marked m
+	),
+	app_usage AS (
+		SELECT app_display_name, island_id,
+		       MIN(eff_start) AS eff_start,
+		       MAX(eff_end) AS eff_end
+		FROM islands
+		WHERE eff_end > eff_start
+		GROUP BY app_display_name, island_id
+	),
+	buckets AS (
+		SELECT generate_series(
+			date_trunc($4, (SELECT from_ts FROM params)),
+			date_trunc($4, (SELECT to_ts FROM params)),
+			$5::interval
+		) AS bucket_start
+	)
+	SELECT
+		to_char(b.bucket_start, $6) AS bucket,
+		au.app_display_name,
+		COALESCE(SUM(EXTRACT(EPOCH FROM (
+			LEAST(au.eff_end, b.bucket_start + $5::interval) -
+			GREATEST(au.eff_start, b.bucket_start)
+		))), 0) AS duration_sec
+	FROM buckets b
+	JOIN app_usage au ON au.eff_start < b.bucket_start + $5::interval AND au.eff_end > b.bucket_start
+	WHERE au.app_display_name <> '' AND au.app_display_name IS NOT NULL
+	GROUP BY b.bucket_start, au.app_display_name
+	ORDER BY b.bucket_start
+	`
+
+	appRows, err := r.pool.Query(ctx, appChartQuery,
+		params.EmployeeID, params.DateFrom, params.DateTo,
+		bucketField, bucketSize, bucketFormat,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("hours insights app chart query: %w", err)
+	}
+	defer appRows.Close()
+
+	appBucketMap := make(map[string]map[string]float64)
+	for appRows.Next() {
+		var bStr, appName string
+		var dur float64
+		if err := appRows.Scan(&bStr, &appName, &dur); err != nil {
+			return nil, fmt.Errorf("scan app chart row: %w", err)
+		}
+		if _, ok := appBucketMap[bStr]; !ok {
+			appBucketMap[bStr] = make(map[string]float64)
+		}
+		if dur > maxBucketSeconds {
+			dur = maxBucketSeconds
+		}
+		if topAppNamesMap[appName] {
+			appBucketMap[bStr][appName] += dur
+		} else {
+			appBucketMap[bStr]["Other"] += dur
+		}
+	}
+	if err := appRows.Err(); err != nil {
+		return nil, err
+	}
+	// Concurrent applications share the same employee time. Keep each bucket
+	// bounded to its actual length before returning chart data.
+	for bucket, apps := range appBucketMap {
+		var total float64
+		for _, seconds := range apps {
+			total += seconds
+		}
+		if total > maxBucketSeconds {
+			scale := maxBucketSeconds / total
+			for app, seconds := range apps {
+				apps[app] = seconds * scale
+			}
+			appBucketMap[bucket] = apps
+		}
+	}
+
+	// Populate AppChart in matching bucket order
+	for _, bStr := range bucketOrder {
+		apps := appBucketMap[bStr]
+		if apps == nil {
+			apps = make(map[string]float64)
+		}
+		result.AppChart = append(result.AppChart, HoursInsightsAppBucket{
+			Bucket: bStr,
+			Apps:   apps,
+		})
+	}
+
+	return result, nil
+}
+
+// parseFloat is a tiny helper for JSON number extraction.
+func parseFloat(v interface{}) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case string:
+		if f, err := strconv.ParseFloat(n, 64); err == nil {
+			return f
+		}
+	}
+	return 0
 }

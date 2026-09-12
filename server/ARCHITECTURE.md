@@ -1,7 +1,36 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-08-18 (date-range filters on app-sessions + app-items)
+> **Last audited:** 2026-09-11 (web apps-page accuracy + per-row stagnation sweep + migrations 034/035)
 > **Changelog:**
+> - 2026-09-11: **App-session usage accuracy, per-row stagnation sweep + migrations 034/035.**
+>   - `AggregateAppSessionsUsage` projects `has_open_session` via `BOOL_OR(status='ACTIVE' AND ended_at IS NULL)` — OFFLINE/STALE rows with `ended_at=NULL` no longer count as open — and `last_active_at = MAX(COALESCE(last_activity_at, last_sync_at, ended_at, started_at))` (new `AppSessionUsageRow.LastActiveAt` + DTO field `lastActiveAt`, consumed by `/employee-journey/apps`).
+>   - Step 4 in `session_lifecycle_sweep.go` is a **per-row stagnation sweep** that closes any OFFLINE/STALE row whose own `last_sync_at` is ≥ CLOSE_AFTER old, independent of the machine-level window.
+>   - Migration 034 aligns historical rows that already carried `ended_at` to `CLOSED`. Migration 035 freezes stranded OFFLINE/STALE sessions older than 24h (verified applied live — `OFFLINE & ended_at IS NULL = 0`).
+> - 2026-09-04: **`GET /api/v1/app-sessions/usage/sessions` — paginated per-app session list for the chevron expand on `/employee-journey/apps`.** The web page's per-app aggregate row now has a chevron; clicking it fires a server call that returns the raw `app_sessions` rows for the chosen `(appDisplayName, processName)` pair (the same GROUP BY key the aggregate uses, so the inner count always matches the parent `sessionCount`). Filters: `employeeId`, `dateFrom`, `dateTo`, `page`, `perPage` — `appDisplayName` and `processName` are the group key (both URL-encoded). Both are REQUIRED: an empty pair matches `IS NULL OR = ''` on each side (Postgres NULL doesn't match `=`), a half-empty pair is a 400. The new repo `ListAppSessionsForApp` reuses the `ListAppSessions` shape (same SELECT, same `AppSessionListResult` return type) so the service is a one-liner that maps models to DTOs. Registered BEFORE the existing `GET /app-sessions/usage` in `router.go` (Echo's static matching means `/app-sessions/usage/sessions` would otherwise be ambiguous with `/app-sessions/usage` if a `:id` route was added later — explicit ordering removes the risk). The web inner list uses `useInfiniteQuery` (per the *Web Infinite-Scroll Rule*); a "Load more sessions" button is the manual sentinel (the inline area is short — IntersectionObserver doesn't add value here). The page does NOT fetch on initial load — the 100-row aggregate is still one HTTP call; the inner fetch is purely on chevron click. Companion to the `GET /app-sessions/usage` aggregate (same date, same changelog).
+> - 2026-09-04: **`GET /api/v1/app-sessions/usage` — per-app aggregate for the web "App Usage" page.** A chrome window with 3 tabs × 10 min used to render as "30 min" because the old page summed per-row `endedAt - startedAt` across every `app_sessions` row with the same `appDisplayName`. New endpoint returns ONE row per `(app_display_name, process_name)` with `MIN(started_at)` (`firstOpenedAt`), `MAX(COALESCE(ended_at, last_sync_at, started_at))` (`lastClosedAt`), `COUNT(*)` (`sessionCount`), and `SUM(EXTRACT(EPOCH FROM (COALESCE(ended_at, last_sync_at, started_at) - started_at)))` (`totalDurationSeconds` — kept for the cross-app "Active Time" tile; the per-app Duration cell uses `lastClosedAt - firstOpenedAt`, NOT the sum, so multi-tab windows never inflate the total). Filters: `employeeId`, `search`, `platform`, `dateFrom`, `dateTo`, `page`, `perPage` — same shape as `ListAppSessions`. The 3-state lifecycle is honored via the `COALESCE(ended_at, last_sync_at, started_at)` expression (CLOSED → `ended_at`, STALE/ACTIVE → `last_sync_at` — never `NOW()`). New repo `AggregateAppSessionsUsage` + service `ListAppSessionsUsage` + handler `ListAppSessionsUsage` + DTO `AppUsageRow` / `AppUsageListResponse`. **Migration 032** adds a composite index `idx_app_sessions_employee_started_name` on `(employee_id, started_at DESC, app_display_name)` so the WHERE + GROUP BY plans without a sort. The route is registered BEFORE the existing `GET /app-sessions` in `router.go` so a future `GET /app-sessions/:id` cannot swallow it. Cross-service contract: web `lib/api.ts` exposes `AppUsageRow` + `appSessionsApi.usage(params)`; web `/employee-journey/apps` switched from a 5×100 raw-row fan-out (silent 500-row truncation bug) to a single `usage()` call and now shows "First Opened" + "Last Closed" columns so the open range is visible directly. The page also re-derives `totalDurationSeconds = lastClosedAt - firstOpenedAt` in JS (defense in depth — if a future server change reintroduces the sum, the page stays correct). Result: chrome 3 tabs × 10 min renders as **Duration: 10m, Sessions: 3**; chrome where tab1 stays open 9:00→9:12 with the others at 9:00→9:10 renders as **Duration: 12m, Sessions: 3**. Verified: `go build`/`go vet` clean, `npx tsc --noEmit` clean, `next build` passes (`/employee-journey/apps` 2.89 kB). No env knobs. Companion client-side fix lives in `client/ARCHITECTURE.md` (`ResolveWindowKey` URL-match + recency rules, ships in next installer build).
+> - 2026-09-02: **3-state app_sessions lifecycle (ACTIVE / STALE / CLOSED) — orphan "Running forever" bug fixed at the schema level.**
+>   Migration **031** adds 3 columns to `app_sessions` — `status TEXT NOT NULL DEFAULT 'ACTIVE'`, `last_activity_at TIMESTAMPTZ`, `last_sync_at TIMESTAMPTZ` — plus 2 indexes (`status, last_sync_at DESC` and a partial `WHERE status='ACTIVE'`) and backfills 1131 pre-existing rows. New background job `internal/jobs/session_lifecycle_sweep.go` runs every minute, transitioning `ACTIVE → STALE` (no sync for > `SESSION_STALE_AFTER_MINUTES`, default 10) and `STALE → CLOSED` (no sync for > `SESSION_CLOSE_AFTER_HOURS`, default 24). When transitioning to CLOSED, the sweep freezes `ended_at = COALESCE(last_activity_at, last_sync_at, started_at)` so duration reflects real activity. **Upsert recovery in `BulkInsertAppSessions`:** a `ON CONFLICT (id) DO UPDATE` CASE flips STALE/CLOSED back to ACTIVE and clears the premature server-side `ended_at` when a live client re-uploads the row with `ended_at=NULL`; a non-NULL `ended_at` from the client keeps the row CLOSED with the new value. `AppSession` model + DTO + list query updated. Live-tested: 1131 ACTIVE→STALE then 1131 STALE→CLOSED in 62 ms; a live `POST /api/v1/app-sessions/sync` with `ended_at=NULL` flipped a CLOSED row back to ACTIVE in one round-trip.
+> - 2026-09-01: **Attendance late/present uses shift IANA timezone; legacy UTC rows auto-migrated.**
+>   Shifts created before admins set a timezone stayed on migration 028's `UTC` default while
+>   `session_events` carried local offsets — status math disagreed with the web table (e.g. 09:08
+>   PKT displayed as on-time when compared to 09:00 UTC). New `DEFAULT_SHIFT_TIMEZONE` in
+>   `config.Load()`; `ShiftRepo.ApplyDefaultTimezone` runs at boot via `ShiftService` when set;
+>   `AttendanceResponse.timezone` echoes the shift zone used for `present`/`late`/`half_day`;
+>   `ShiftService.Create` falls back to `DEFAULT_SHIFT_TIMEZONE` when the payload omits timezone.
+>   Operators must set this to the company's wall-clock zone (e.g. `Asia/Karachi`) or edit each
+>   shift's timezone on `/shifts`.
+> - 2026-08-31: **Time & Attendance Phase 2 server contract.** Migration 028 adds an IANA
+>   timezone to shifts, the company-holiday calendar, and aggregate-compatible
+>   `session_events` fields (`event_count`, `first_at`, `last_at`). Device-authenticated
+>   clients can read `GET /api/v1/schedules/me`; `GET /api/v1/server-time` is public;
+>   JWT-protected admins can manage `/holidays` and read `/attendance/today` or
+>   `/attendance/range`. Attendance is computed on read from session events, the latest
+>   heartbeat, the assigned shift (**in `shifts.timezone` — not the admin's browser zone**), and
+>   holidays; idle and lock intervals are unioned. `late` = earliest active-marker `first_at` is
+>   strictly after `shift_start + grace_minutes` in that IANA zone. Response includes `timezone`
+>   for web display parity.
+>   The range response is paginated for web infinite scrolling. Unit tests cover the
+>   lowercase weekly-pattern contract and overlapping inactive intervals.
 > - 2026-08-18: **Server-side date-range filtering on app-sessions + app-items list endpoints.**
 >   `GET /app-sessions` and `GET /app-items` now accept `dateFrom` and `dateTo` query parameters (RFC3339
 >   or date-only like `2026-08-18`). Sessions filter on `started_at`, items on `opened_at`. Combined with
@@ -85,7 +114,7 @@ server/
 ├── go.mod / go.sum              # Go module: github.com/alpha-ai-tracker/server
 ├── .env.example                 # Environment variable template
 │
-├── migrations/                  # SQL migration files, run in sorted order on startup (001–025 = 24 files; 003 deleted)
+├── migrations/                  # SQL migration files, run in sorted order on startup (latest: 028)
 │   ├── 001_init.sql             # users, departments, employee_id_seq, triggers, seed departments
 │   ├── 002_employees.sql        # Separate employees table, migrate non-admin users out of users
 │   ├── 004_employee_department_id.sql  # FK employees.department_id → departments.id
@@ -108,14 +137,22 @@ server/
 │   ├── 022_sequence_retention_indexes.sql # retention-purge support indexes
 │   ├── 023_monitoring_config.sql    # monitoring_types, monitoring_categories + classification columns + monitoring_sites
 │   ├── 024_catalog_merge.sql        # cross-OS catalog dedup by normalized name
-│   └── 025_rbac_roles_modules.sql   # roles/modules/submodules/role_submodule_permissions; users.role_id sole source of truth
+│   ├── 025_rbac_roles_modules.sql   # roles/modules/submodules/role_submodule_permissions; users.role_id sole source of truth
+│   ├── 026_refresh_tokens.sql        # rotating web refresh-token persistence
+│   ├── 027_shifts.sql               # relational shift catalog + employee assignment
+│   ├── 028_time_attendance_phase2.sql # timezone, holidays, aggregate event fields
+│   ├── 029_location_samples.sql    # location_samples table (Phase 1 of GPS / geofence)
+│   ├── 030_geofence_zones.sql      # geofence_zones table
+│   └── 031_app_sessions_status.sql # 3-state lifecycle: status + last_activity_at + last_sync_at + 2 indexes (backfill of existing rows)
+│   └── 032_app_sessions_usage_index.sql # composite index (employee_id, started_at DESC, app_display_name) for /app-sessions/usage aggregation
 │
 └── internal/
-    ├── config/config.go         # Loads env vars, builds Config struct (incl. LINK_STALE_DAYS)
+    ├── config/config.go         # Loads env vars, builds Config struct (incl. LINK_STALE_DAYS, DEFAULT_SHIFT_TIMEZONE)
     ├── database/postgres.go     # pgxpool creation, migration runner
     ├── redis/redis.go           # Redis client wrapper (StoreSecret, ValidateSecret, DeleteSecret)
     ├── jobs/staleness_sweep.go  # Hourly background job deactivating stale employee↔catalog links
     ├── jobs/retention_sweep.go  # Hourly purge of stale app_items and ended app_sessions (RETENTION_DAYS)
+    ├── jobs/session_lifecycle_sweep.go # 1-min sweep: ACTIVE→STALE→CLOSED by last_sync_at; honors SESSION_STALE_AFTER_MINUTES / SESSION_CLOSE_AFTER_HOURS
     │
     ├── models/                  # Database models (structs with db/json tags)
     │   ├── user.go              # User + UserPublic (safe for API)
@@ -312,7 +349,8 @@ Employee token is carried in the request body (`{employeeId, token, entries: [..
 | POST | `/installed-apps/sync` | `installed_applications` + `employee_installed_applications` | Upsert catalog-then-link in ONE tx |
 | POST | `/installed-packages/sync` | `installed_packages` + `employee_installed_packages` | Upsert catalog-then-link in ONE tx |
 | POST | `/network-info/sync` | `network_info` | Bulk upsert |
-| POST | `/session-events/sync` | `session_events` | Bulk upsert |
+| POST | `/session-events/sync` | `session_events` | Bulk upsert; accepts optional count/firstAt/lastAt aggregates |
+| GET | `/schedules/me` | `shifts`, `company_holidays` | Device-auth schedule mirror |
 | POST | `/app-sessions/sync` | `app_sessions` | Bulk upsert |
 | POST | `/app-items/sync` | `app_items` | Bulk upsert |
 | POST | `/app-status/sync` | `app_status` | Upsert by (employee_id, key) |
@@ -324,14 +362,32 @@ Employee token is carried in the request body (`{employeeId, token, entries: [..
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/app-sessions` | List sessions (paginated, filterable: `search`, `platform`, `dateFrom`, `dateTo`, `employeeId`) |
+| GET | `/app-sessions/usage/sessions` | Per-app session list (paginated, filterable: `employeeId`, `dateFrom`, `dateTo`, `page`, `perPage`). Returns one `app_sessions` row per match for the given `(appDisplayName, processName)` pair — powers the chevron-expanded table under each app row on `/employee-journey/apps`. Both keys REQUIRED (400 if both empty; half-empty is ambiguous). Registered BEFORE `/app-sessions/usage` (since 2026-09-04). |
+| GET | `/app-sessions/usage` | Per-app aggregate (paginated, filterable: `search`, `platform`, `dateFrom`, `dateTo`, `employeeId`). One row per `(appDisplayName, processName)` with `firstOpenedAt`, `lastClosedAt`, `sessionCount`, `totalDurationSeconds`. Powers the web `/employee-journey/apps` page; page renders `lastClosed - firstOpened` so multi-tab windows never inflate the per-app total. Registered BEFORE `/app-sessions` (since 2026-09-04). |
+| GET | `/app-sessions` | List sessions (paginated, filterable: `search`, `platform`, `dateFrom`, `dateTo`, `employeeId`). Each row carries `status` (`ACTIVE`/`STALE`/`CLOSED`), `lastActivityAt`, `lastSyncAt` (3-state lifecycle — see below) |
 | GET | `/app-items` | List items (paginated, filterable: `search` matches title/identifier/url/domain, `dateFrom`, `dateTo`, `itemType`, `session`) |
+
+> **3-state app_sessions lifecycle (migration 031 + `jobs/session_lifecycle_sweep.go`).** Every `app_sessions` row carries a server-projected `status` field (`ACTIVE` / `STALE` / `CLOSED`) plus `lastActivityAt` and `lastSyncAt` timestamps. A 1-minute background sweeper promotes `ACTIVE → STALE` when no sync has been received for `SESSION_STALE_AFTER_MINUTES` (default 10), then `STALE → CLOSED` when no sync has been received for `SESSION_CLOSE_AFTER_HOURS` (default 24). Only CLOSED is terminal. The sweep freezes `ended_at = COALESCE(last_activity_at, last_sync_at, started_at)` at the moment of CLOSE so the duration reflects real activity. **A live client re-uploading a STALE/CLOSED row with `ended_at=NULL` flips it back to ACTIVE** in the upsert (the `ON CONFLICT` CASE in `BulkInsertAppSessions`) and clears the premature server-side `ended_at` — so a network outage never destroys information that may still exist on the client. When the client supplies a non-NULL `ended_at`, the row stays CLOSED with the new value. Pre-031 rows default `status='ACTIVE'`; the web's `sessionStatus()` helper falls back to the legacy `endedAt ? CLOSED : ACTIVE` interpretation for forward compatibility.
 
 ### Employee Detail (Protected)
 
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/employees/:id/detail` | **Aggregate machine picture** for one employee: employee record, latest `device_hardware_info`, `storage_devices`, latest `network_info`, currently-installed apps/packages (active junction links), `hardware_devices` peripherals, `permission_status`, `app_status` map and activity stats. Consumed by the web `/users/[id]` page. |
+
+### Time & Attendance (Protected — web admin reads)
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/attendance/today?employeeId=` | Today's row: `timezone`, `firstActiveAt`, `lastActiveAt`, `status`, `lateMinutes`, active/idle/off-shift seconds |
+| GET | `/attendance/range?employeeId=&from=&to=&page=&perPage=` | Paginated daily rows (timesheets; infinite scroll on web) |
+| GET/POST/PUT/DELETE | `/holidays` | Company holiday calendar CRUD |
+| GET/POST/PUT/DELETE | `/shifts` | Shift catalog CRUD — each shift carries an IANA `timezone` |
+
+> **Shift timezone rule (2026-09-01).** Late/present math runs in `shifts.timezone`, not the admin
+> browser's local zone. Legacy rows still on `UTC` are rewritten at boot when
+> `DEFAULT_SHIFT_TIMEZONE` is set in `.env`. The web shift form defaults new shifts to the admin
+> browser's IANA zone.
 
 ### Missing Endpoints (sync-only tables with no standalone listing API)
 
@@ -500,10 +556,10 @@ id TEXT PK · employee_id FK · public_ip · private_ip · mac_address
 network_interface_name · collected_at / synced_at / created_at / deleted_at
 ```
 
-**`session_events`** — Login/logout/lock/unlock events (migration 006). The client now emits only `login` (via `StartTracking`); `logout` stopped being emitted when the employee-disconnect flow was removed 2026-08-10.
+**`session_events`** — Power/login/lock/idle telemetry (migrations 006, 028).
 ```
 id TEXT PK · employee_id FK · event_type · os_username
-event_at / synced_at / created_at / deleted_at
+event_at · event_count · first_at · last_at / synced_at / created_at / deleted_at
 ```
 
 **`app_sessions`** — Relational app sessions (migrations 006, 010, 013)
@@ -591,7 +647,7 @@ applied_at      TIMESTAMPTZ DEFAULT NOW()
 
 ### Migration Tool
 
-**Custom runner** in `database/postgres.go`. Reads `.sql` files from `migrations/` directory (currently 25 files: 001, 002, 004–026), tracks applied migrations in `schema_migrations` table, runs in transaction order. Each file runs in its own transaction.
+**Custom runner** in `database/postgres.go`. Reads all `.sql` files from `migrations/` in filename order (latest: 035), tracks applied migrations in `schema_migrations`, and runs each file in its own transaction. 034/035 are idempotent session-lifecycle repairs.
 
 ---
 
@@ -768,10 +824,18 @@ The server is **mostly stateless**:
 
 ### Background Jobs
 
-**One job exists:**
-- `jobs/staleness_sweep.go` — hourly goroutine (started in `main.go`) that sets `is_active = false` on `employee_installed_applications` / `employee_installed_packages` rows whose `last_seen_at` is older than `LINK_STALE_DAYS` (default 7). This is link-lifecycle management, NOT data pruning.
+**Jobs started in `main.go`:**
+- `jobs/staleness_sweep.go` — hourly goroutine that sets `is_active = false` on `employee_installed_applications` / `employee_installed_packages` rows whose `last_seen_at` is older than `LINK_STALE_DAYS` (default 7). Link-lifecycle only, NOT data pruning.
+- `ShiftService.ApplyDefaultTimezone` — runs once at boot when `DEFAULT_SHIFT_TIMEZONE` is set; updates all non-deleted shifts whose `timezone` is still `UTC` to that IANA value (idempotent).
 
-**Still missing:**
+**Environment (attendance-related):**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LINK_STALE_DAYS` | `7` | Catalog junction staleness window |
+| `DEFAULT_SHIFT_TIMEZONE` | *(empty)* | Company IANA zone applied to legacy `UTC` shifts at boot; create-shift fallback when timezone omitted |
+
+**Still missing (data jobs):**
 - No data-pruning job — app_sessions/app_items/device_hardware/etc. grow unbounded
 - No data aggregation/pre-computation
 

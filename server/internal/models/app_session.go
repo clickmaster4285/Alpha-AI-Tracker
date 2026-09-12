@@ -24,7 +24,15 @@ type AppSession struct {
 	ForegroundSeconds  float64    `json:"foregroundSeconds" db:"foreground_seconds"`
 	BackgroundSeconds  float64    `json:"backgroundSeconds" db:"background_seconds"`
 	SyncedAt           *time.Time `json:"syncedAt,omitempty" db:"synced_at"`
-	CreatedAt          time.Time  `json:"createdAt" db:"created_at"`
+	// 3-state lifecycle (2026-09-02): ACTIVE → STALE → CLOSED.
+	// Server-side sweeper transitions status based on last_sync_at.
+	// `ended_at` is only populated when status reaches CLOSED (client
+	// may still push activity while STALE → status flips back to ACTIVE
+	// and `ended_at` is cleared).
+	Status          string     `json:"status" db:"status"`
+	LastActivityAt  *time.Time `json:"lastActivityAt,omitempty" db:"last_activity_at"`
+	LastSyncAt      *time.Time `json:"lastSyncAt,omitempty" db:"last_sync_at"`
+	CreatedAt       time.Time  `json:"createdAt" db:"created_at"`
 }
 
 // AppItem is a generic child of AppSession, replacing BrowserContext, FileExplorerContext, UrlRecord, UrlVisit.

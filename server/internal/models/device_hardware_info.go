@@ -3,22 +3,22 @@ package models
 import "time"
 
 type DeviceHardwareInfo struct {
-	ID             string    `json:"id" db:"id"`
-	EmployeeID     string    `json:"employeeId" db:"employee_id"`
-	DeviceID       string    `json:"deviceId" db:"device_id"`
-	MacAddress     string    `json:"macAddress" db:"mac_address"`
-	Hostname       string    `json:"hostname" db:"hostname"`
-	OsName         string    `json:"osName" db:"os_name"`
-	OsVersion      string    `json:"osVersion" db:"os_version"`
-	CpuModel       string    `json:"cpuModel" db:"cpu_model"`
-	CpuCores       int       `json:"cpuCores" db:"cpu_cores"`
-	RamTotalMB     int64     `json:"ramTotalMb" db:"ram_total_mb"`
-	StorageDevices string    `json:"storageDevices" db:"storage_devices"`
-	GpuModel       string    `json:"gpuModel" db:"gpu_model"`
-	GpuVramMB      int64     `json:"gpuVramMb" db:"gpu_vram_mb"`
-	CollectedAt    time.Time `json:"collectedAt" db:"collected_at"`
+	ID             string     `json:"id" db:"id"`
+	EmployeeID     string     `json:"employeeId" db:"employee_id"`
+	DeviceID       string     `json:"deviceId" db:"device_id"`
+	MacAddress     string     `json:"macAddress" db:"mac_address"`
+	Hostname       string     `json:"hostname" db:"hostname"`
+	OsName         string     `json:"osName" db:"os_name"`
+	OsVersion      string     `json:"osVersion" db:"os_version"`
+	CpuModel       string     `json:"cpuModel" db:"cpu_model"`
+	CpuCores       int        `json:"cpuCores" db:"cpu_cores"`
+	RamTotalMB     int64      `json:"ramTotalMb" db:"ram_total_mb"`
+	StorageDevices string     `json:"storageDevices" db:"storage_devices"`
+	GpuModel       string     `json:"gpuModel" db:"gpu_model"`
+	GpuVramMB      int64      `json:"gpuVramMb" db:"gpu_vram_mb"`
+	CollectedAt    time.Time  `json:"collectedAt" db:"collected_at"`
 	SyncedAt       *time.Time `json:"syncedAt,omitempty" db:"synced_at"`
-	CreatedAt      time.Time `json:"createdAt" db:"created_at"`
+	CreatedAt      time.Time  `json:"createdAt" db:"created_at"`
 }
 
 type InstalledApplication struct {
@@ -42,40 +42,42 @@ type InstalledApplication struct {
 }
 
 type NetworkInfo struct {
-	ID                   string    `json:"id" db:"id"`
-	EmployeeID           string    `json:"employeeId" db:"employee_id"`
-	PublicIP             string    `json:"publicIp" db:"public_ip"`
-	PrivateIP            string    `json:"privateIp" db:"private_ip"`
-	MacAddress           string    `json:"macAddress" db:"mac_address"`
-	NetworkInterfaceName string    `json:"networkInterfaceName" db:"network_interface_name"`
-	CollectedAt          time.Time `json:"collectedAt" db:"collected_at"`
+	ID                   string     `json:"id" db:"id"`
+	EmployeeID           string     `json:"employeeId" db:"employee_id"`
+	PublicIP             string     `json:"publicIp" db:"public_ip"`
+	PrivateIP            string     `json:"privateIp" db:"private_ip"`
+	MacAddress           string     `json:"macAddress" db:"mac_address"`
+	NetworkInterfaceName string     `json:"networkInterfaceName" db:"network_interface_name"`
+	CollectedAt          time.Time  `json:"collectedAt" db:"collected_at"`
 	SyncedAt             *time.Time `json:"syncedAt,omitempty" db:"synced_at"`
-	CreatedAt            time.Time `json:"createdAt" db:"created_at"`
+	CreatedAt            time.Time  `json:"createdAt" db:"created_at"`
 }
 
 type InstalledPackage struct {
-	ID            string     `json:"id" db:"id"`
-	EmployeeID    string     `json:"employeeId" db:"employee_id"`
-	PackageName   string     `json:"packageName" db:"package_name"`
-	Version       string     `json:"version" db:"version"`
-	Category      string     `json:"category" db:"category"`
-	SourceManager string     `json:"sourceManager" db:"source_manager"`
-	InstallPath   string     `json:"installPath" db:"install_path"`
-	Publisher     string     `json:"publisher" db:"publisher"`
-	Description   string     `json:"description" db:"description"`
-	DetectedAt    time.Time  `json:"detectedAt" db:"detected_at"`
-	SyncedAt      *time.Time `json:"syncedAt,omitempty" db:"synced_at"`
-	CreatedAt     time.Time  `json:"createdAt" db:"created_at"`
-	PackageFingerprint string `json:"-" db:"package_fingerprint"`
+	ID                 string     `json:"id" db:"id"`
+	EmployeeID         string     `json:"employeeId" db:"employee_id"`
+	PackageName        string     `json:"packageName" db:"package_name"`
+	Version            string     `json:"version" db:"version"`
+	Category           string     `json:"category" db:"category"`
+	SourceManager      string     `json:"sourceManager" db:"source_manager"`
+	InstallPath        string     `json:"installPath" db:"install_path"`
+	Publisher          string     `json:"publisher" db:"publisher"`
+	Description        string     `json:"description" db:"description"`
+	DetectedAt         time.Time  `json:"detectedAt" db:"detected_at"`
+	SyncedAt           *time.Time `json:"syncedAt,omitempty" db:"synced_at"`
+	CreatedAt          time.Time  `json:"createdAt" db:"created_at"`
+	PackageFingerprint string     `json:"-" db:"package_fingerprint"`
 }
 
 type SessionEvent struct {
-	ID         string    `json:"id" db:"id"`
-	EmployeeID string    `json:"employeeId" db:"employee_id"`
-	EventType  string    `json:"eventType" db:"event_type"`
-	OsUsername string    `json:"osUsername" db:"os_username"`
-	EventAt    time.Time `json:"eventAt" db:"event_at"`
+	ID         string     `json:"id" db:"id"`
+	EmployeeID string     `json:"employeeId" db:"employee_id"`
+	EventType  string     `json:"eventType" db:"event_type"`
+	OsUsername string     `json:"osUsername" db:"os_username"`
+	EventAt    time.Time  `json:"eventAt" db:"event_at"`
+	EventCount int        `json:"count" db:"event_count"`
+	FirstAt    time.Time  `json:"firstAt" db:"first_at"`
+	LastAt     time.Time  `json:"lastAt" db:"last_at"`
 	SyncedAt   *time.Time `json:"syncedAt,omitempty" db:"synced_at"`
-	CreatedAt  time.Time `json:"createdAt" db:"created_at"`
+	CreatedAt  time.Time  `json:"createdAt" db:"created_at"`
 }
-

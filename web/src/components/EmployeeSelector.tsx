@@ -9,6 +9,7 @@ interface EmployeeSelectorProps {
   value: string;
   onChange: (employee: Employee | null) => void;
   placeholder?: string;
+  className?: string;
 }
 
 /**
@@ -20,6 +21,7 @@ export default function EmployeeSelector({
   value,
   onChange,
   placeholder = 'Select an employee…',
+  className = '',
 }: EmployeeSelectorProps) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
@@ -60,14 +62,14 @@ export default function EmployeeSelector({
   };
 
   return (
-    <div ref={rootRef} className="relative w-full max-w-sm">
+    <div ref={rootRef} className={`relative w-full max-w-sm shrink-0 ${className}`.trim()}>
       <button
         type="button"
         onClick={() => setOpen(o => !o)}
         className="w-full flex items-center gap-2 bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground hover:bg-muted/40 transition-colors"
       >
-        <User className="w-4 h-4 text-muted-foreground flex-shrink-0" />
-        <span className="flex-1 text-left truncate">
+        <User className="w-4 h-4 text-muted-foreground shrink-0" />
+        <span className="flex-1 text-left truncate min-w-0">
           {selected ? (
             <>
               <span className="font-medium">{selected.name}</span>
@@ -77,22 +79,22 @@ export default function EmployeeSelector({
             <span className="text-muted-foreground">{placeholder}</span>
           )}
         </span>
-        <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform flex-shrink-0 ${open ? 'rotate-180' : ''}`} />
+        <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform shrink-0 ${open ? 'rotate-180' : ''}`} />
       </button>
 
       {open && (
-        <div className="absolute z-50 mt-1 w-full bg-card border border-border rounded-xl shadow-card-hover overflow-hidden">
-          <div className="flex items-center gap-2 px-3 py-2 border-b border-border">
-            <Search className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+        <div className="absolute z-50 mt-1.5 left-0 right-0 min-w-full bg-popover border border-border rounded-xl shadow-card-hover">
+          <div className="flex items-center gap-2 px-3 py-2.5 border-b border-border">
+            <Search className="w-4 h-4 text-muted-foreground shrink-0" />
             <input
               autoFocus
               value={search}
               onChange={e => setSearch(e.target.value)}
               placeholder="Search by name, ID or email…"
-              className="bg-transparent border-none outline-none text-sm flex-1 text-foreground placeholder:text-muted-foreground"
+              className="bg-transparent border-none outline-none text-sm flex-1 min-w-0 text-foreground placeholder:text-muted-foreground"
             />
           </div>
-          <div className="max-h-72 overflow-y-auto py-1">
+          <div className="max-h-72 overflow-y-auto overscroll-contain p-1.5">
             {isLoading ? (
               <div className="flex items-center justify-center gap-2 py-6 text-sm text-muted-foreground">
                 <Loader2 className="w-4 h-4 animate-spin" /> Loading employees…
@@ -107,10 +109,10 @@ export default function EmployeeSelector({
                     key={emp.id}
                     type="button"
                     onClick={() => select(emp)}
-                    className={`w-full flex items-center gap-3 px-3 py-2 text-left text-sm hover:bg-muted/40 transition-colors ${active ? 'bg-sidebar-accent/40' : ''}`}
+                    className={`w-full flex items-center gap-3 rounded-lg px-2.5 py-2 text-left text-sm hover:bg-muted/40 transition-colors ${active ? 'bg-sidebar-accent/40' : ''}`}
                   >
                     <div
-                      className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold text-primary-foreground flex-shrink-0"
+                      className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold text-primary-foreground shrink-0"
                       style={{ backgroundColor: emp.avatarColor || '#7C3AED' }}
                     >
                       {emp.avatar || emp.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)}
@@ -121,7 +123,7 @@ export default function EmployeeSelector({
                         {emp.employeeId} · {emp.department || '—'}
                       </span>
                     </span>
-                    {active && <Check className="w-4 h-4 text-primary flex-shrink-0" />}
+                    {active && <Check className="w-4 h-4 text-primary shrink-0" />}
                   </button>
                 );
               })

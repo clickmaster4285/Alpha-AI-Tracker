@@ -14,12 +14,13 @@ import (
 
 // NewSchemaService handles business logic for Phase 1 & Phase 2 tables.
 type NewSchemaService struct {
-	repo         *repository.NewSchemaRepo
-	employeeRepo *repository.EmployeeRepo
+	repo            *repository.NewSchemaRepo
+	employeeRepo    *repository.EmployeeRepo
+	geofenceService *GeofenceService
 }
 
-func NewNewSchemaService(repo *repository.NewSchemaRepo, employeeRepo *repository.EmployeeRepo) *NewSchemaService {
-	return &NewSchemaService{repo: repo, employeeRepo: employeeRepo}
+func NewNewSchemaService(repo *repository.NewSchemaRepo, employeeRepo *repository.EmployeeRepo, geofenceService *GeofenceService) *NewSchemaService {
+	return &NewSchemaService{repo: repo, employeeRepo: employeeRepo, geofenceService: geofenceService}
 }
 
 // ── device_hardware_info ──
@@ -291,13 +292,42 @@ func (s *NewSchemaService) SyncSessionEvents(ctx context.Context, req *dto.SyncS
 	now := time.Now()
 	entries := make([]models.SessionEvent, 0, len(req.Entries))
 	for _, e := range req.Entries {
-		ts, _ := time.Parse(time.RFC3339, e.EventAt)
+		ts, err := time.Parse(time.RFC3339, e.EventAt)
+		if err != nil {
+			return nil, fmt.Errorf("invalid eventAt for event %q: %w", e.ID, err)
+		}
+		count := 1
+		if e.Count != nil {
+			count = *e.Count
+		}
+		if count < 1 {
+			return nil, fmt.Errorf("event count must be greater than zero")
+		}
+		firstAt, lastAt := ts, ts
+		if e.FirstAt != nil {
+			firstAt, err = time.Parse(time.RFC3339, *e.FirstAt)
+			if err != nil {
+				return nil, fmt.Errorf("invalid firstAt for event %q: %w", e.ID, err)
+			}
+		}
+		if e.LastAt != nil {
+			lastAt, err = time.Parse(time.RFC3339, *e.LastAt)
+			if err != nil {
+				return nil, fmt.Errorf("invalid lastAt for event %q: %w", e.ID, err)
+			}
+		}
+		if lastAt.Before(firstAt) {
+			return nil, fmt.Errorf("lastAt must not be before firstAt")
+		}
 		entries = append(entries, models.SessionEvent{
 			ID:         e.ID,
 			EmployeeID: req.EmployeeID,
 			EventType:  e.EventType,
 			OsUsername: e.OsUsername,
 			EventAt:    ts,
+			EventCount: count,
+			FirstAt:    firstAt,
+			LastAt:     lastAt,
 			SyncedAt:   &now,
 		})
 	}
@@ -333,6 +363,12 @@ func (s *NewSchemaService) SyncAppSessions(ctx context.Context, req *dto.SyncApp
 				ended = &t
 			}
 		}
+		var lastActivity *time.Time
+		if e.LastActivityAt != nil {
+			if t, err := time.Parse(time.RFC3339, *e.LastActivityAt); err == nil {
+				lastActivity = &t
+			}
+		}
 		entries = append(entries, models.AppSession{
 			ID:                 e.ID,
 			EmployeeID:         req.EmployeeID,
@@ -352,6 +388,7 @@ func (s *NewSchemaService) SyncAppSessions(ctx context.Context, req *dto.SyncApp
 			ContextLabel:       e.ContextLabel,
 			ForegroundSeconds:  e.ForegroundSeconds,
 			BackgroundSeconds:  e.BackgroundSeconds,
+			LastActivityAt:     lastActivity,
 			SyncedAt:           &now,
 		})
 	}
@@ -413,11 +450,22 @@ func (s *NewSchemaService) SyncAppItems(ctx context.Context, req *dto.SyncAppIte
 		})
 	}
 
-	inserted, err := s.repo.BulkInsertAppItems(ctx, entries)
+	inserted, rejectedIDs, missingSessionIDs, err := s.repo.BulkInsertAppItems(ctx, entries)
 	if err != nil {
 		return nil, fmt.Errorf("bulk insert app_items: %w", err)
 	}
-	return &dto.SyncBatchResponse{Synced: inserted, Message: fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries))}, nil
+	// rejectedIDs is present only when the orphan preflight refused rows; the
+	// client leaves exactly those rows unsent so they re-send after their parent
+	// session lands (see SyncBatchResponse.RejectedIds).
+	// missingSessionIDs tells the client which parent sessions the server does
+	// NOT have — the client resets those to is_synced=0 so they re-send,
+	// breaking the permanent orphan deadlock (Bug #9 follow-up).
+	return &dto.SyncBatchResponse{
+		Synced:            inserted,
+		Message:           fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries)),
+		RejectedIds:       rejectedIDs,
+		MissingSessionIds: missingSessionIDs,
+	}, nil
 }
 
 // ── List app_sessions (for web dashboard) ──
@@ -430,6 +478,10 @@ func (s *NewSchemaService) ListAppSessions(ctx context.Context, params repositor
 
 	sessions := make([]dto.AppSessionResponse, len(result.Sessions))
 	for i, s := range result.Sessions {
+		status := s.Status
+		if status == "" {
+			status = "ACTIVE" // backfill for pre-031 rows
+		}
 		sessions[i] = dto.AppSessionResponse{
 			ID:                 s.ID,
 			EmployeeID:         s.EmployeeID,
@@ -448,6 +500,92 @@ func (s *NewSchemaService) ListAppSessions(ctx context.Context, params repositor
 			CgroupScope:        s.CgroupScope,
 			ContextLabel:       s.ContextLabel,
 			SyncedAt:           s.SyncedAt,
+			Status:             status,
+			LastActivityAt:     s.LastActivityAt,
+			LastSyncAt:         s.LastSyncAt,
+		}
+	}
+
+	return &dto.AppSessionListResponse{
+		Data:       sessions,
+		Total:      result.Total,
+		Page:       result.Page,
+		PerPage:    result.PerPage,
+		TotalPages: result.TotalPages,
+	}, nil
+}
+
+// ── App sessions usage (per-app aggregate for web dashboard) ──
+
+func (s *NewSchemaService) ListAppSessionsUsage(ctx context.Context, params repository.AppSessionUsageListParams) (*dto.AppUsageListResponse, error) {
+	result, err := s.repo.AggregateAppSessionsUsage(ctx, params)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate app sessions usage: %w", err)
+	}
+
+	rows := make([]dto.AppUsageRow, len(result.Rows))
+	for i, r := range result.Rows {
+		rows[i] = dto.AppUsageRow{
+			AppDisplayName:       r.AppDisplayName,
+			ProcessName:          r.ProcessName,
+			SessionCount:         r.SessionCount,
+			FirstOpenedAt:        r.FirstOpenedAt,
+			LastClosedAt:         r.LastClosedAt,
+			TotalDurationSeconds: r.TotalDurationSeconds,
+			HasOpenSession:       r.HasOpenSession,
+			LastActiveAt:         r.LastActiveAt,
+		}
+	}
+
+	return &dto.AppUsageListResponse{
+		Data:                 rows,
+		Total:                result.Total,
+		Page:                 result.Page,
+		PerPage:              result.PerPage,
+		TotalPages:           result.TotalPages,
+		TotalDurationSeconds: result.TotalDurationSeconds,
+		TotalSessionCount:    result.TotalSessionCount,
+		OpenSessionCount:     result.OpenSessionCount,
+	}, nil
+}
+
+// ── List app sessions for a specific app (per-app chevron expand) ──
+
+func (s *NewSchemaService) ListAppSessionsForApp(ctx context.Context, params repository.AppSessionForAppListParams) (*dto.AppSessionListResponse, error) {
+	result, err := s.repo.ListAppSessionsForApp(ctx, params)
+	if err != nil {
+		return nil, fmt.Errorf("list app sessions for app: %w", err)
+	}
+
+	sessions := make([]dto.AppSessionResponse, len(result.Sessions))
+	for i, sess := range result.Sessions {
+		status := sess.Status
+		if status == "" {
+			status = "ACTIVE"
+		}
+		sessions[i] = dto.AppSessionResponse{
+			ID:                 sess.ID,
+			EmployeeID:         sess.EmployeeID,
+			ProcessName:        sess.ProcessName,
+			AppDisplayName:     sess.AppDisplayName,
+			StartedAt:          sess.StartedAt,
+			EndedAt:            sess.EndedAt,
+			MachineID:          sess.MachineID,
+			SessionID:          sess.SessionID,
+			Platform:           sess.Platform,
+			ProcessID:          sess.ProcessID,
+			ParentProcessID:    sess.ParentProcessID,
+			InstalledAppID:     sess.InstalledAppID,
+			InstalledPackageID: sess.InstalledPackageID,
+			GroupedBy:          sess.GroupedBy,
+			CgroupScope:        sess.CgroupScope,
+			ContextLabel:       sess.ContextLabel,
+			ForegroundSeconds:  sess.ForegroundSeconds,
+			BackgroundSeconds:  sess.BackgroundSeconds,
+			SyncedAt:           sess.SyncedAt,
+			Status:             status,
+			LastActivityAt:     sess.LastActivityAt,
+			LastSyncAt:         sess.LastSyncAt,
 		}
 	}
 
@@ -695,6 +833,102 @@ func (s *NewSchemaService) SyncStorageDevices(ctx context.Context, req *dto.Sync
 	return &dto.SyncBatchResponse{Synced: inserted, Message: fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries))}, nil
 }
 
+// ── location_samples (Phase 3 GPS) ──
+
+func (s *NewSchemaService) SyncLocationSamples(ctx context.Context, req *dto.SyncLocationSamplesRequest) (*dto.SyncBatchResponse, error) {
+	emp, err := s.employeeRepo.GetByEmployeeID(ctx, req.EmployeeID)
+	if err != nil {
+		return nil, fmt.Errorf("verify employee: %w", err)
+	}
+	if emp == nil {
+		return nil, fmt.Errorf("employee not found")
+	}
+	if len(req.Entries) == 0 {
+		return &dto.SyncBatchResponse{Synced: 0, Message: "No entries to sync"}, nil
+	}
+
+	entries := make([]models.LocationSample, 0, len(req.Entries))
+	for _, e := range req.Entries {
+		capturedAt, err := time.Parse(time.RFC3339, e.CapturedAt)
+		if err != nil {
+			continue
+		}
+		if e.Latitude < -90 || e.Latitude > 90 || e.Longitude < -180 || e.Longitude > 180 {
+			continue
+		}
+		source := e.Source
+		if source == "" {
+			source = "ip"
+		}
+		entries = append(entries, models.LocationSample{
+			ID:         e.ID,
+			EmployeeID: req.EmployeeID,
+			Latitude:   e.Latitude,
+			Longitude:  e.Longitude,
+			AccuracyM:  e.AccuracyM,
+			AltitudeM:  e.AltitudeM,
+			Source:     source,
+			Address:    e.Address,
+			CapturedAt: capturedAt,
+		})
+	}
+
+	inserted, err := s.repo.BulkUpsertLocationSamples(ctx, entries)
+	if err != nil {
+		return nil, fmt.Errorf("bulk upsert location_samples: %w", err)
+	}
+	if s.geofenceService != nil && len(entries) > 0 {
+		if err := s.geofenceService.EvaluateSamplesOnIngest(ctx, req.EmployeeID, entries); err != nil {
+			return nil, fmt.Errorf("geofence evaluation: %w", err)
+		}
+	}
+	return &dto.SyncBatchResponse{Synced: inserted, Message: fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries))}, nil
+}
+
+func (s *NewSchemaService) ListLocationSamples(ctx context.Context, params repository.LocationSampleListParams) (*dto.LocationSampleListResponse, error) {
+	result, err := s.repo.ListLocationSamples(ctx, params)
+	if err != nil {
+		return nil, fmt.Errorf("list location_samples: %w", err)
+	}
+
+	items := make([]dto.LocationSampleResponse, len(result.Items))
+	for i, item := range result.Items {
+		var syncedAt *time.Time
+		if item.SyncedAt != nil {
+			t := *item.SyncedAt
+			syncedAt = &t
+		}
+		geofenceStatus := "Outside"
+		if s.geofenceService != nil {
+			if label, err := s.geofenceService.GeofenceLabel(ctx, item.Latitude, item.Longitude); err == nil && label != "" {
+				geofenceStatus = label
+			}
+		}
+		items[i] = dto.LocationSampleResponse{
+			ID:             item.ID,
+			EmployeeID:     item.EmployeeID,
+			EmployeeName:   item.EmployeeName,
+			Latitude:       item.Latitude,
+			Longitude:      item.Longitude,
+			AccuracyM:      item.AccuracyM,
+			AltitudeM:      item.AltitudeM,
+			Source:         item.Source,
+			Address:        item.Address,
+			CapturedAt:     item.CapturedAt,
+			SyncedAt:       syncedAt,
+			GeofenceStatus: geofenceStatus,
+		}
+	}
+
+	return &dto.LocationSampleListResponse{
+		Data:       items,
+		Total:      result.Total,
+		Page:       result.Page,
+		PerPage:    result.PerPage,
+		TotalPages: result.TotalPages,
+	}, nil
+}
+
 // ────────────────────────────────
 // EMPLOYEE DETAIL (web dashboard — GET /employees/:id/detail)
 // Aggregates every synced machine-data surface for one employee into a single response.
@@ -879,4 +1113,101 @@ func (s *NewSchemaService) GetEmployeeDetail(ctx context.Context, id string) (*d
 	}
 
 	return resp, nil
+}
+
+// ── Hours Insights ──
+
+func (s *NewSchemaService) GetHoursInsights(ctx context.Context, params repository.HoursInsightsParams) (*dto.HoursInsightsResponse, error) {
+	result, err := s.repo.GetHoursInsights(ctx, params)
+	if err != nil {
+		return nil, fmt.Errorf("get hours insights: %w", err)
+	}
+
+	rangeLabel := presetLabel(params.Preset)
+
+	topItems := make([]dto.HoursInsightsTopItem, len(result.TopItems))
+	for i, t := range result.TopItems {
+		topItems[i] = dto.HoursInsightsTopItem{
+			Name:         t.Name,
+			Kind:         t.Kind,
+			Category:     t.Category,
+			Type:         t.Type,
+			Color:        t.Color,
+			TotalSeconds: t.TotalSeconds,
+			FocusScore:   t.FocusScore,
+			IsBrowser:    t.IsBrowser,
+		}
+	}
+
+	topApps := make([]dto.HoursInsightsAppMeta, len(result.TopApps))
+	for i, a := range result.TopApps {
+		topApps[i] = dto.HoursInsightsAppMeta{
+			Name:         a.Name,
+			TotalSeconds: a.TotalSeconds,
+			Color:        a.Color,
+			Category:     a.Category,
+			Type:         a.Type,
+			SessionCount: a.SessionCount,
+		}
+	}
+
+	appChart := make([]dto.HoursInsightsAppBucket, len(result.AppChart))
+	for i, ac := range result.AppChart {
+		appChart[i] = dto.HoursInsightsAppBucket{
+			Bucket: ac.Bucket,
+			Apps:   ac.Apps,
+		}
+	}
+
+	return &dto.HoursInsightsResponse{
+		Employee: dto.HoursInsightsEmployee{
+			EmployeeID: result.EmployeeID,
+			Name:       result.EmployeeName,
+			Department: result.Department,
+		},
+		Range: dto.HoursInsightsRange{
+			From:  result.RangeFrom,
+			To:    result.RangeTo,
+			Label: rangeLabel,
+		},
+		Summary: dto.HoursInsightsSummary{
+			TotalSeconds:        result.Summary.TotalSeconds,
+			ProductiveSeconds:   result.Summary.ProductiveSeconds,
+			UnproductiveSeconds: result.Summary.UnproductiveSeconds,
+			NeutralSeconds:      result.Summary.NeutralSeconds,
+			FocusScore:          result.Summary.FocusScore,
+			AppCount:            result.Summary.AppCount,
+			SiteCount:           result.Summary.SiteCount,
+		},
+		Chart: func() []dto.HoursInsightsBucket {
+			chart := make([]dto.HoursInsightsBucket, len(result.Chart))
+			for i, c := range result.Chart {
+				chart[i] = dto.HoursInsightsBucket{
+					Bucket:       c.Bucket,
+					Productive:   c.Productive,
+					Unproductive: c.Unproductive,
+					Neutral:      c.Neutral,
+				}
+			}
+			return chart
+		}(),
+		AppChart: appChart,
+		TopApps:  topApps,
+		TopItems: topItems,
+	}, nil
+}
+
+func presetLabel(preset string) string {
+	switch preset {
+	case "today":
+		return "Today"
+	case "yesterday":
+		return "Yesterday"
+	case "7d":
+		return "Last 7 days"
+	case "30d":
+		return "Last 30 days"
+	default:
+		return "Custom"
+	}
 }

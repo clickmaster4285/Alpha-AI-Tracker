@@ -56,6 +56,16 @@ if (args.Contains("--print-config"))
     Console.WriteLine($"SyncMaxBytes={cfg.SyncMaxBytes}");
     Console.WriteLine($"SyncCompression={cfg.SyncCompression}");
     Console.WriteLine($"SyncRetentionHours={cfg.SyncRetentionHours}");
+    Console.WriteLine($"TaEnabled={cfg.TaEnabled}");
+    Console.WriteLine($"IdleThresholdSeconds={cfg.IdleThresholdSeconds}");
+    Console.WriteLine($"IdleAwayThresholdSeconds={cfg.IdleAwayThresholdSeconds}");
+    Console.WriteLine($"IdlePollSeconds={cfg.IdlePollSeconds}");
+    Console.WriteLine($"LockHysteresisSeconds={cfg.LockHysteresisSeconds}");
+    Console.WriteLine($"EventAggregationWindowSec={cfg.EventAggregationWindowSec}");
+    Console.WriteLine($"TaMaxLocalRows={cfg.TaMaxLocalRows}");
+    Console.WriteLine($"LocationEnabled={cfg.LocationEnabled}");
+    Console.WriteLine($"LocationIpFallback={cfg.LocationIpFallback}");
+    Console.WriteLine($"LocationPollSec={cfg.LocationPollSec}");
     return;
 }
 
@@ -70,7 +80,7 @@ var isMinimized = args.Contains("--minimized");
 // Restart=always racing) must exit quietly so they never disturb the user.
 var isUserLaunch = !isBackground && !isMinimized;
 
-var appMutex = new Mutex(true, "AlphaAITracker", out var mutexCreated);
+var appMutex = new Mutex(true, SingleInstanceService.MutexName, out var mutexCreated);
 if (!mutexCreated)
 {
     // ── --restart (post-update relaunch) ──
@@ -146,6 +156,66 @@ builder.Services.AddSingleton<ILogStore>(sp =>
 {
     return new SqliteLogStore(ResolveDbPath(config.DbPath), config.DbEncryptionKey);
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+// Time & Attendance (Phase 1, finalplan section 3 / R7): the ShutdownSentinel
+// is registered FIRST so it is StartAsync'd first and StopAsync'd last by the
+// .NET host. That ordering guarantees the sentinel's ApplicationStopping hook
+// fires before any other hosted service is torn down (including the SQLite
+// store). The IEventRecorder that the sentinel writes through is registered
+// immediately after so the dependency is satisfied.
+// ────────────────────────────────────────────────────────────────────────────
+builder.Services.AddSingleton<client.Services.Watchers.ShutdownSentinel>();
+builder.Services.AddSingleton<IEventRecorder, SessionEventRecorder>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.Watchers.ShutdownSentinel>());
+
+// ────────────────────────────────────────────────────────────────────────────
+// Time & Attendance (Phase 1, A.3): SystemEventWatcher subscribes to OS power /
+// lock / sleep / login signals and writes them through the IEventRecorder. It
+// runs as a hosted service so the host's lifecycle (StartAsync/StopAsync) governs
+// its D-Bus / SystemEvents subscriptions.
+// ────────────────────────────────────────────────────────────────────────────
+builder.Services.AddSingleton<client.Services.Watchers.SystemEventWatcher>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.Watchers.SystemEventWatcher>());
+
+// ────────────────────────────────────────────────────────────────────────────
+// Time & Attendance (Phase 1, A.4): IdleDetector polls the OS idle source
+// (Mutter.IdleMonitor / XScreenSaver / GetLastInputInfo) and emits idle_start /
+// idle_end threshold crossings through the IEventRecorder.
+// ────────────────────────────────────────────────────────────────────────────
+builder.Services.AddSingleton<client.Services.IdleDetector>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.IdleDetector>());
+
+// ────────────────────────────────────────────────────────────────────────────
+// Time & Attendance (Phase 1, A.7): LocalTimeSkewService measures the client
+// clock's skew against the server's HTTP Date header every 15 min and stores
+// it per server URL (BUG-7 + BUG-12 fix). No-op when ALPHA_TA_ENABLED=false.
+// ────────────────────────────────────────────────────────────────────────────
+builder.Services.AddSingleton<client.Services.LocalTimeSkewService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.LocalTimeSkewService>());
+
+// ────────────────────────────────────────────────────────────────────────────
+// Time & Attendance (Phase 1, A.6): ScheduleCacheService mirrors the employee's
+// shift + holidays from GET /api/v1/schedules/me every 6h (BUG-6 fix). No-op
+// when ALPHA_TA_ENABLED=false or the Phase 2 endpoint is absent (404).
+// ────────────────────────────────────────────────────────────────────────────
+builder.Services.AddSingleton<client.Services.ScheduleCacheService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.ScheduleCacheService>());
+
+// ────────────────────────────────────────────────────────────────────────────
+// Time & Attendance (Phase 1, A.8): AttendanceAggregator rolls up today's
+// session-idle activity into daily_attendance_cache every 5 min. Reads use the
+// read-only connection (R8). No-op when ALPHA_TA_ENABLED=false.
+// ────────────────────────────────────────────────────────────────────────────
+builder.Services.AddSingleton<client.Services.AttendanceAggregator>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.AttendanceAggregator>());
+
+// ────────────────────────────────────────────────────────────────────────────
+// Phase 3 GPS (finalplan §16 B.1): LocationSamplerService polls OS location /
+// IP geolocation on ALPHA_LOCATION_POLL_SEC. Default OFF (ALPHA_LOCATION_ENABLED).
+// ────────────────────────────────────────────────────────────────────────────
+builder.Services.AddSingleton<client.Services.LocationSamplerService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.LocationSamplerService>());
 
 // HTTP Client
 builder.Services.AddSingleton<HttpClient>(sp =>
@@ -262,9 +332,29 @@ builder.Services.AddTransient<MainViewModel>();
 
 var host = builder.Build();
 
+// ────────────────────────────────────────────────────────────────────────────
+// Time & Attendance (Phase 1, finalplan section 2.6 / R7): wire the sentinel to
+// the IHostApplicationLifetime AFTER the host is built (the lifetime is
+// created during host.StartAsync, so we have to reach into Services now).
+// The Console.CancelKeyPress hook is also installed here so a Ctrl+C in a
+// terminal emits the power_off event before the host's normal stop path.
+// ────────────────────────────────────────────────────────────────────────────
+var shutdownSentinel = host.Services.GetRequiredService<client.Services.Watchers.ShutdownSentinel>();
+shutdownSentinel.HookConsoleCancelKeyPress();
+
 try
 {
+    // Initialize SQLite before any hosted service starts. SystemEventWatcher is
+    // intentionally first in DI and emits power_on immediately; starting the
+    // host before the store was ready made that write a silent no-op, while its
+    // dedup bucket then suppressed LogCollectorService's valid retry.
+    await host.Services.GetRequiredService<ILogStore>()
+        .InitializeAsync(CancellationToken.None);
+
     await host.StartAsync(CancellationToken.None);
+
+    // The lifetime is now available - wire the ApplicationStopping hook.
+    shutdownSentinel.HookLifetime(host.Services.GetRequiredService<IHostApplicationLifetime>());
 
     // Set service provider for App to resolve ViewModels from DI
     App.ServiceProvider = host.Services;
@@ -297,6 +387,7 @@ try
                     try
                     {
                         // The user asked for the GUI — show the window immediately.
+                        RefreshLinuxDesktopEnvironment();
                         App.LaunchedHidden = false;
                         BuildAvaloniaApp().StartWithClassicDesktopLifetime(
                             args.Where(a => !a.Equals("--background", StringComparison.OrdinalIgnoreCase)).ToArray());
@@ -318,15 +409,30 @@ try
                 Console.Error.WriteLine($"[client] Failed to start GUI thread: {ex.Message}");
             }
         };
-        await Task.Delay(Timeout.Infinite, CancellationToken.None);
+        // WaitForShutdownAsync is tied to IHostApplicationLifetime. The previous
+        // uncancellable Task.Delay kept the process alive after SIGTERM even though
+        // ConsoleLifetime had fired ApplicationStopping; systemd eventually had to
+        // SIGKILL it and the code below never ran.
+        await host.WaitForShutdownAsync();
     }
     else
     {
         App.LaunchedHidden = isMinimized;
         BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+        await host.StopAsync(CancellationToken.None);
     }
 
-    await host.StopAsync(CancellationToken.None);
+    // ────────────────────────────────────────────────────────────────────────────
+    // Time & Attendance (Phase 1, R7): the ShutdownSentinel writes the power_off
+    // event inside its ApplicationStopping handler. host.StopAsync() returns
+    // AFTER the sentinel's StopAsync runs (reverse DI order), but the SQL write
+    // inside the sentinel is async; the SQLite store's Dispose() may run on
+    // a parallel path. Wait on the sentinel's MRE with a hard 3-second ceiling
+    // (slightly above the recorder's 2s internal timeout) to guarantee the
+    // write finishes before we move into the finally block that disposes the
+    // single-instance service and the mutex.
+    // ────────────────────────────────────────────────────────────────────────────
+    shutdownSentinel.PowerOffWritten.Wait(TimeSpan.FromSeconds(3));
     host.Dispose();
 }
 finally
@@ -340,6 +446,59 @@ static AppBuilder BuildAvaloniaApp()
         .UsePlatformDetect()
         .WithInterFont()
         .LogToTrace();
+
+// A systemd user service keeps the environment captured by its manager, while
+// this long-lived process may have inherited stale values from an old unit.
+// Read the manager's current graphical-session values immediately before lazy
+// Avalonia startup (especially GNOME Wayland's rotating XAUTHORITY path).
+static void RefreshLinuxDesktopEnvironment()
+{
+    if (!OperatingSystem.IsLinux()) return;
+
+    try
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "systemctl",
+            Arguments = "--user show-environment",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        using var proc = System.Diagnostics.Process.Start(psi);
+        if (proc == null) return;
+
+        var outputTask = proc.StandardOutput.ReadToEndAsync();
+        if (!proc.WaitForExit(2000))
+        {
+            try { proc.Kill(entireProcessTree: true); } catch { }
+            return;
+        }
+
+        var allowed = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "XAUTHORITY",
+            "XDG_RUNTIME_DIR",
+            "DBUS_SESSION_BUS_ADDRESS",
+        };
+        foreach (var line in outputTask.GetAwaiter().GetResult().Split('\n'))
+        {
+            var separator = line.IndexOf('=');
+            if (separator <= 0) continue;
+            var name = line[..separator];
+            if (!allowed.Contains(name)) continue;
+            Environment.SetEnvironmentVariable(name, line[(separator + 1)..].TrimEnd('\r'));
+        }
+    }
+    catch
+    {
+        // The existing environment may already be valid; Avalonia will report
+        // the actionable display error if it is not.
+    }
+}
 
 // ─── Log path resolution ───
 static string ResolveDbPath(string dbPath)
