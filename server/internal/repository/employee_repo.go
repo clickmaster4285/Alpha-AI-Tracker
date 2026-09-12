@@ -621,6 +621,7 @@ func scanEmployeeRow(rows pgx.Rows) (*models.Employee, error) {
 			&e.TrackingEnabled, &e.TrackingStatus, &e.IsOnline,
 			&e.Avatar, &e.AvatarColor,
 			&e.CreatedAt, &e.UpdatedAt, &e.DeletedAt,
+			&e.ClientVersion,
 			&e.HasUserLogin,
 		)
 		return e, err
