@@ -215,7 +215,7 @@ function WebBody({
       {/* Server-side filters: search + date (default today) + custom range — always visible,
           never unmounted by loading/error/empty states so the search input keeps focus. */}
       <div className="px-4 py-3 border-b border-border">
-        <ActivityFilters value={filter} onChange={setFilter} loading={isFiltering} />
+        <ActivityFilters value={filter} onChange={setFilter} loading={isFiltering} singleDay />
       </div>
 
       {isLoading && items.length === 0 ? (
