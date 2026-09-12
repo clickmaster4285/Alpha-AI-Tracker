@@ -2353,19 +2353,28 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 			AND COALESCE(ai.closed_at, s.ended_at, s.last_sync_at, s.last_activity_at, ai.opened_at) > ai.opened_at
 	),
 	app_cat AS (
-		SELECT DISTINCT ON (ia.id) ia.id,
+		-- Classification resolves by NORMALIZED APP NAME across the whole catalog:
+		-- installed_applications has one row per employee, so the typed row may
+		-- belong to a different employee than the sessions being queried.
+		-- DISTINCT ON prefers rows that actually carry a type/category.
+		SELECT DISTINCT ON (lower(ia.app_name)) lower(ia.app_name) AS app_key,
 			NULLIF(mt.name, '') AS type_name,
-			COALESCE(NULLIF(mt.color, ''), '#6b7280') AS type_color
+			COALESCE(NULLIF(mt.color, ''), '#6b7280') AS type_color,
+			COALESCE(mc.name, '') AS category_name
 		FROM installed_applications ia
 		LEFT JOIN monitoring_types mt ON mt.id = ia.type_id AND mt.deleted_at IS NULL
-		WHERE ia.employee_id = (SELECT emp_id FROM params) AND ia.deleted_at IS NULL
+		LEFT JOIN monitoring_categories mc ON mc.id = ia.category_id AND mc.deleted_at IS NULL
+		WHERE ia.deleted_at IS NULL AND ia.app_name <> ''
+		ORDER BY lower(ia.app_name), (ia.type_id IS NULL), (ia.category_id IS NULL), ia.id
 	),
 	site_cat AS (
 		SELECT DISTINCT ON (ms.domain) ms.domain,
 			NULLIF(mt.name, '') AS type_name,
-			COALESCE(NULLIF(mt.color, ''), '#6b7280') AS type_color
+			COALESCE(NULLIF(mt.color, ''), '#6b7280') AS type_color,
+			COALESCE(mc.name, '') AS category_name
 		FROM monitoring_sites ms
 		LEFT JOIN monitoring_types mt ON mt.id = ms.type_id AND mt.deleted_at IS NULL
+		LEFT JOIN monitoring_categories mc ON mc.id = ms.category_id AND mc.deleted_at IS NULL
 		WHERE ms.domain IN (SELECT DISTINCT domain FROM site_usage) AND ms.deleted_at IS NULL
 	),
 	app_summary AS (
@@ -2378,7 +2387,7 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 			COALESCE((SELECT SUM(foreground_seconds) FROM raw_app_usage), 0) AS fg_sec,
 			COALESCE((SELECT SUM(background_seconds) FROM raw_app_usage), 0) AS bg_sec
 		FROM app_usage au
-		LEFT JOIN app_cat ac ON ac.id = au.installed_app_id
+		LEFT JOIN app_cat ac ON ac.app_key = lower(au.app_display_name)
 	),
 	site_summary AS (
 		SELECT
@@ -2402,7 +2411,7 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 		SELECT
 			au.app_display_name AS name,
 			'app' AS kind,
-			COALESCE(ac.type_name, 'Neutral') AS category,
+			COALESCE(ac.category_name, '') AS category,
 			COALESCE(ac.type_name, 'Neutral') AS type,
 			COALESCE(ac.type_color, '#6b7280') AS color,
 			SUM(GREATEST(0, EXTRACT(EPOCH FROM (au.eff_end - au.eff_start)))) AS totalSeconds,
@@ -2410,17 +2419,17 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 			0 AS focusScore,
 			COALESCE(ia.is_browser, FALSE) AS isBrowser
 		FROM app_usage au
-		LEFT JOIN app_cat ac ON ac.id = au.installed_app_id
+		LEFT JOIN app_cat ac ON ac.app_key = lower(au.app_display_name)
 		LEFT JOIN installed_applications ia ON ia.id = au.installed_app_id AND ia.deleted_at IS NULL
 		LEFT JOIN app_counts cnt ON cnt.app_display_name = au.app_display_name
 		WHERE au.app_display_name <> '' AND au.app_display_name IS NOT NULL
-		GROUP BY au.app_display_name, cnt.session_count, ac.type_name, ac.type_color, ia.is_browser
+		GROUP BY au.app_display_name, cnt.session_count, ac.type_name, ac.type_color, ac.category_name, ia.is_browser
 	),
 	top_sites AS (
 		SELECT
 			su.domain AS name,
 			'site' AS kind,
-			COALESCE(sc.type_name, 'Neutral') AS category,
+			COALESCE(sc.category_name, '') AS category,
 			COALESCE(sc.type_name, 'Neutral') AS type,
 			COALESCE(sc.type_color, '#6b7280') AS color,
 			SUM(EXTRACT(EPOCH FROM (su.eff_end - su.eff_start))) AS totalSeconds,
@@ -2430,7 +2439,7 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 		FROM site_usage su
 		LEFT JOIN site_cat sc ON sc.domain = su.domain
 		WHERE su.domain <> ''
-		GROUP BY su.domain, sc.type_name, sc.type_color
+		GROUP BY su.domain, sc.type_name, sc.type_color, sc.category_name
 	)
 	SELECT
 		(SELECT row_to_json(e) FROM (SELECT employee_id, name, department FROM emp WHERE employee_id = (SELECT emp_id FROM params)) e) AS employee,
@@ -2563,12 +2572,15 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 			AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > s.started_at
 	),
 	app_cat AS (
-		SELECT DISTINCT ON (ia.id) ia.id,
+		-- Classification resolves by NORMALIZED APP NAME across the whole catalog
+		-- (see the app_cat CTE in the summary query for the rationale).
+		SELECT DISTINCT ON (lower(ia.app_name)) lower(ia.app_name) AS app_key,
 			NULLIF(mt.name, '') AS type_name,
 			COALESCE(NULLIF(mt.color, ''), '#6b7280') AS type_color
 		FROM installed_applications ia
 		LEFT JOIN monitoring_types mt ON mt.id = ia.type_id AND mt.deleted_at IS NULL
-		WHERE ia.employee_id = (SELECT emp_id FROM params) AND ia.deleted_at IS NULL
+		WHERE ia.deleted_at IS NULL AND ia.app_name <> ''
+		ORDER BY lower(ia.app_name), (ia.type_id IS NULL), ia.id
 	),
 	buckets AS (
 		SELECT generate_series(
@@ -2584,7 +2596,7 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 			COALESCE(SUM(CASE WHEN ac.type_name = 'Neutral' OR ac.type_name IS NULL THEN EXTRACT(EPOCH FROM (LEAST(au.eff_end, b.bucket_start + $5::interval) - GREATEST(au.eff_start, b.bucket_start))) ELSE 0 END), 0) AS neutral
 		FROM buckets b
 		LEFT JOIN app_usage au ON au.eff_start < b.bucket_start + $5::interval AND au.eff_end > b.bucket_start
-		LEFT JOIN app_cat ac ON ac.id = au.installed_app_id
+		LEFT JOIN app_cat ac ON ac.app_key = lower(au.app_display_name)
 		GROUP BY b.bucket_start
 	)
 	SELECT to_char(bucket_start, $6) AS bucket,

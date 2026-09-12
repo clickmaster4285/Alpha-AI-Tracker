@@ -302,6 +302,11 @@ function HoursInsightsBody({
               appKeys={appKeysSorted}
               appConfig={appChartConfig}
               totalDuration={totalDuration}
+              productivityTotals={{
+                productive: productiveSec,
+                neutral: neutralSec,
+                unproductive: unproductiveSec,
+              }}
             />
           </div>
 
@@ -316,7 +321,7 @@ function HoursInsightsBody({
                 <table className="w-full min-w-[640px]">
                   <thead>
                     <tr className="border-b border-border bg-muted/20">
-                      {['App / Website', 'Type', 'Category', 'Duration', 'Focus Score'].map(h => (
+                      {['App / Website', 'Category', 'Category Type', 'Duration', 'Focus Score'].map(h => (
                         <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider whitespace-nowrap">{h}</th>
                       ))}
                     </tr>
@@ -347,10 +352,14 @@ function HoursInsightsBody({
                               </div>
                             </div>
                           </td>
-                          <td className="px-4 py-3 text-sm text-muted-foreground capitalize whitespace-nowrap">{item.kind}</td>
+                          <td className="px-4 py-3 whitespace-nowrap">
+                            <span className="px-2 py-0.5 rounded-md text-xs font-medium bg-muted text-muted-foreground border border-border/60">
+                              {item.category || '-'}
+                            </span>
+                          </td>
                           <td className="px-4 py-3 whitespace-nowrap">
                             <span className={cn("px-2 py-0.5 rounded-md text-xs font-medium border", typeBg)}>
-                              {item.category}
+                              {item.type}
                             </span>
                           </td>
                           <td className="px-4 py-3 text-sm text-foreground font-medium whitespace-nowrap font-mono">{formatSeconds(item.totalSeconds)}</td>
@@ -402,7 +411,7 @@ function HoursInsightsBody({
                           </td>
                           <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">
                             <span className="px-2 py-0.5 rounded-md text-xs font-medium bg-muted text-muted-foreground">
-                              {app.category || 'General'}
+                              {app.category || '-'}
                             </span>
                           </td>
                           <td className="px-4 py-3 whitespace-nowrap min-w-[160px]">
@@ -486,6 +495,7 @@ function HoursChart({
   appKeys,
   appConfig,
   totalDuration,
+  productivityTotals,
 }: {
   chartType: ChartType;
   viewMode: 'productivity' | 'applications';
@@ -495,6 +505,7 @@ function HoursChart({
   appKeys: string[];
   appConfig: Record<string, { label: string; color: string }>;
   totalDuration: number;
+  productivityTotals: { productive: number; neutral: number; unproductive: number };
 }) {
   const isProductivity = viewMode === 'productivity';
   const pieData = isProductivity
@@ -519,7 +530,11 @@ function HoursChart({
   // than hourly buckets. This keeps it aligned with the breakdown and avoids
   // presenting one bar for every hour in the selected range.
   const histogramData = isProductivity
-    ? productivityData.map((row) => ({ bucket: row.bucket, total: row.productive + row.neutral + row.unproductive }))
+    ? [
+        { bucket: 'Productive', total: productivityTotals.productive, color: PRODUCTIVE_COLOR },
+        { bucket: 'Neutral', total: productivityTotals.neutral, color: NEUTRAL_COLOR },
+        { bucket: 'Unproductive', total: productivityTotals.unproductive, color: UNPRODUCTIVE_COLOR },
+      ].filter((entry) => entry.total > 0)
     : appTotals
         .filter((app) => app.totalSeconds > 0)
         .map((app) => ({
@@ -562,19 +577,17 @@ function HoursChart({
             <YAxis tickLine={false} axisLine={false} fontSize={11} width={65} tickFormatter={formatValue} />
             <Tooltip formatter={(value: number) => [formatValue(value), 'Usage']} />
             <Bar dataKey="total" name="Usage" radius={[5, 5, 0, 0]} maxBarSize={72}>
-              {!isProductivity && histogramData.map((entry) => (
+              {histogramData.map((entry) => (
                 <Cell key={String(entry.bucket)} fill={'color' in entry ? String(entry.color) : '#3b82f6'} />
               ))}
-              {!isProductivity && (
-                <LabelList
-                  dataKey="total"
-                  position="top"
-                  formatter={(value: unknown) => formatSeconds(Number(value))}
-                  fill="currentColor"
-                  fontSize={12}
-                  fontWeight={600}
-                />
-              )}
+              <LabelList
+                dataKey="total"
+                position="top"
+                formatter={(value: unknown) => formatSeconds(Number(value))}
+                fill="currentColor"
+                fontSize={12}
+                fontWeight={600}
+              />
             </Bar>
           </BarChart>
         ) : chartType === 'pie' || chartType === 'nightingale' ? (

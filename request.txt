@@ -1,17 +1,24 @@
-1. audit all these page (
-    1. /employee-journey/timeline?preset=7d&employeeId=c1f1d4c3-04ba-4002-972f-a43b41f97863
-    2. /employee-journey/apps?preset=today&employeeId=c1f1d4c3-04ba-4002-972f-a43b41f97863
-    3. /employee-journey/web?preset=today&employeeId=c1f1d4c3-04ba-4002-972f-a43b41f97863
-) check in deep every point, every single dot with why here, can this word|status here working good or not etc...
-2. on that page "employee-journey/apps" i seen something confusing|wrong. for example on google chrom i seen 12+ sessions and 5+ status "running" but on the app status is "closed" why????
-3. on that page "employee-journey/apps" why on apps row the "First Opened and Last Closed" column exit whats the purpose , i think this is better colomn "Sessions,	Duration,Last Active,Status", what do you think about that
-4. on that page "employee-journey/apps" i close the app "microsoft edge" but on the web show still shown the status running ???
-5. first analyze the page "/timesheets?preset=custom&from=2026-08-29&to=2026-09-11&employeeId=c1f1d4c3-04ba-4002-972f-a43b41f97863" on that you can clearly seen the user pc is turn off at "Sep 10, 06:08 PM" but on that page with same user "/employee-journey/apps?preset=7d&employeeId=c1f1d4c3-04ba-4002-972f-a43b41f97863"  i clearly seen the session(google chrome) "Sep 10, 05:50 PM" and previouse time still running show the status why and also same as on session(alpha ai tracker) "Sep 10, 05:49 PM" and previouse time still status: running???? but the pc is off on 10sep and now 11 sep 
+now i want on that page @web/src/app/(app)/hours-insights/page.tsx 
+
+category is not a neutral | productive | unproductive,
+on server postgrey i save :
+monitoring_categories: the user create manually like "dev | marketing team | desiner etc.."
+moitorying_types: productive | unproductive | neutral
+
+and attach with installed_applications and monitoring_sites table as columne "type_id" and "category_id" 
+
+on "From Application Individually": on section "Individual Applications Usage Breakdown" 
+on column
+category:user manually create:  if not assigned then shown "-",
+status: replate to category type=== productive | unprodutive | neutral,
 
 
-check on your self in deep and also analyze my db(postgrey and sqlite) also and also read my .env
+on "From Productivity": on section "Productivity Time Distribution"
+on column
+category:user manually create:  if not assigned then shown "-",
+category type: productive | unprodutive | neutral,
 
-auth_token:5I1_XJqzBnL4BxMygq4lvzUclgNGvlpmYurTvBjIdW4UoD2uVk65xnSlKxijFt-gMv5EhSYXLZB0fEU0t_YGak3uob4JNSr0D0yEXLpe-O9PsPH1hCA4J8cu8XkV-NH3ELDExbccHY6gU8aS8ShO9RGao2vV6SFEwm4KxbLlqXNHrQer2TiL_7Dw9UAgrbLzR9lbY8Pk52tYePHBQ8apdoAcQXe-dfwjOPih7zJmmOzJLDUbEJXTdP3UrY8Onij2eIQkxgqaLkUlruAaKOFHefrvZxpk1rQLmsNVX3dBpSV1ap3itAec0bJHG7N2ND_ZEigzb8hutZnOrT3qBXvxikajQ0a7icHhEISXYcvBS3fecZCLqsmVO7U6cvt-HnG6yQ0wbbt2bDjNlkgCyHj7y-omPzzdju_DYb58ztjhRJythyotXj7dQvD72LMV4JfU
-refresh_token:grKqXgj50bUhqzCy025xFspp3qLexI5lzBGHbGgAFjA=
 
-and deduct all the real issue and save on @./issues.md and also prepare the plan and save on @./plan.md file by check my actual code
+shown 
+
+check also /configuration/categories page types tab
