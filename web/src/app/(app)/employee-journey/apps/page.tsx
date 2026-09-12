@@ -117,7 +117,7 @@ function AppUsageBody({
   return (
     <div className="space-y-4 animate-fade-in">
       <div className="h-1.5 w-full bg-gradient-to-r from-primary via-violet-500 to-cyan-500" />
-      <ActivityFilters value={filter} onChange={setFilter} loading={isFiltering} />
+      <ActivityFilters value={filter} onChange={setFilter} loading={isFiltering} singleDay />
 
       {query.isLoading ? (
         <div className="flex items-center justify-center py-12">
