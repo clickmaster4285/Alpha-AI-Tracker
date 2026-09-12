@@ -10,7 +10,7 @@ import {
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, ResponsiveContainer,
-  Legend, Tooltip, PieChart, Pie, Cell, LineChart, Line,
+  Legend, Tooltip, PieChart, Pie, Cell, LineChart, Line, LabelList,
 } from 'recharts';
 import EmployeePage from '@/components/employees/EmployeePage';
 import EmptyState from '@/components/employees/EmptyState';
@@ -279,14 +279,14 @@ function HoursInsightsBody({
                   ) : (
                     <>
                       <BarChart3 className="w-4 h-4 text-blue-500" />
-                      <span>Application Usage by Time / Hour</span>
+                      <span>Application Usage Time</span>
                     </>
                   )}
                 </h4>
                 <p className="text-xs text-muted-foreground mt-0.5">
                   {viewMode === 'productivity'
                     ? 'Stacked view showing productive, neutral, and unproductive hours'
-                    : 'Individual application usage breakdown with highest usage prioritized on top'
+                    : 'Total time by application for the selected range'
                   }
                 </p>
               </div>
@@ -515,12 +515,18 @@ function HoursChart({
         return items;
       })();
 
+  // Application Histogram intentionally uses the server-provided totals rather
+  // than hourly buckets. This keeps it aligned with the breakdown and avoids
+  // presenting one bar for every hour in the selected range.
   const histogramData = isProductivity
     ? productivityData.map((row) => ({ bucket: row.bucket, total: row.productive + row.neutral + row.unproductive }))
-    : appData.map((row) => ({
-        bucket: String(row.bucket),
-        total: appKeys.reduce((sum, key) => sum + Number(row[key] || 0), 0),
-      }));
+    : appTotals
+        .filter((app) => app.totalSeconds > 0)
+        .map((app) => ({
+          bucket: app.name,
+          total: app.totalSeconds,
+          color: app.color,
+        }));
 
   const lineKeys = isProductivity ? ['productive', 'neutral', 'unproductive'] : appKeys;
   const lineConfig = isProductivity
@@ -534,12 +540,42 @@ function HoursChart({
     <ChartContainer config={lineConfig} className={`${chartHeight} w-full`}>
       <ResponsiveContainer width="100%" height="100%">
         {chartType === 'histogram' ? (
-          <BarChart data={histogramData} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
+          <BarChart
+            data={histogramData}
+            margin={{ top: isProductivity ? 10 : 28, right: 18, left: 0, bottom: isProductivity ? 0 : 18 }}
+          >
             <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.6} />
-            <XAxis dataKey="bucket" tickLine={false} axisLine={false} fontSize={11} />
+            <XAxis
+              dataKey="bucket"
+              tickLine={false}
+              axisLine={false}
+              fontSize={11}
+              interval={0}
+              angle={isProductivity ? 0 : -18}
+              textAnchor={isProductivity ? 'middle' : 'end'}
+              height={isProductivity ? 30 : 54}
+              tickFormatter={(value: unknown) => {
+                const label = String(value);
+                return isProductivity ? label : (label.length > 18 ? `${label.slice(0, 18)}…` : label);
+              }}
+            />
             <YAxis tickLine={false} axisLine={false} fontSize={11} width={65} tickFormatter={formatValue} />
             <Tooltip formatter={(value: number) => [formatValue(value), 'Usage']} />
-            <Bar dataKey="total" name="Usage" fill={isProductivity ? PRODUCTIVE_COLOR : '#3b82f6'} radius={[5, 5, 0, 0]} />
+            <Bar dataKey="total" name="Usage" radius={[5, 5, 0, 0]} maxBarSize={72}>
+              {!isProductivity && histogramData.map((entry) => (
+                <Cell key={String(entry.bucket)} fill={'color' in entry ? String(entry.color) : '#3b82f6'} />
+              ))}
+              {!isProductivity && (
+                <LabelList
+                  dataKey="total"
+                  position="top"
+                  formatter={(value: unknown) => formatSeconds(Number(value))}
+                  fill="currentColor"
+                  fontSize={12}
+                  fontWeight={600}
+                />
+              )}
+            </Bar>
           </BarChart>
         ) : chartType === 'pie' || chartType === 'nightingale' ? (
           <PieChart>
