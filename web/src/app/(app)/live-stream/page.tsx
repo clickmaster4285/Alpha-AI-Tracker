@@ -10,7 +10,7 @@ export default function LiveStream() {
         <h3 className="font-display font-semibold text-foreground mb-4">Live Stream</h3>
         <EmptyState
           icon={Monitor}
-          text="Live screen streaming is not available yet — no streaming backend exists. This page will activate once screen broadcast ships."
+          text="Live screen media is not available yet. The secure server-side viewing session foundation is now in place; WebRTC capture and SFU playback will be enabled only after the employee consent and platform-capture pilot is complete."
         />
       </div>
     </div>

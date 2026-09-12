@@ -27,6 +27,7 @@ func Setup(
 	shiftHandler *handlers.ShiftHandler,
 	timeAttendanceHandler *handlers.TimeAttendanceHandler,
 	geofenceHandler *handlers.GeofenceHandler,
+	liveViewHandler *handlers.LiveViewHandler,
 ) {
 	// ─────────────────────────────
 	// Global Middleware
@@ -148,6 +149,14 @@ func Setup(
 
 	// App Items listing (protected — web admin access)
 	protected.GET("/app-items", newSchemaHandler.ListAppItems)
+
+	// Live screen viewing control plane. Media is handled by a future SFU
+	// integration; these endpoints only manage authorization and lifecycle.
+	liveView := protected.Group("/live-view")
+	liveView.POST("/sessions", liveViewHandler.Create)
+	liveView.GET("/sessions", liveViewHandler.List)
+	liveView.GET("/sessions/:id", liveViewHandler.Get)
+	liveView.POST("/sessions/:id/stop", liveViewHandler.Stop)
 
 	// Location samples (Phase 3 GPS — web admin access)
 	protected.GET("/location-samples", newSchemaHandler.ListLocationSamples)

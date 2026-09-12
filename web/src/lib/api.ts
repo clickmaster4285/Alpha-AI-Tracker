@@ -671,6 +671,55 @@ export const appSessionsApi = {
     }),
 };
 
+export type LiveViewSessionStatus =
+  | 'REQUESTED'
+  | 'APPROVED'
+  | 'STARTING'
+  | 'ACTIVE'
+  | 'STOPPING'
+  | 'ENDED'
+  | 'DENIED'
+  | 'REVOKED'
+  | 'EXPIRED'
+  | 'FAILED';
+
+export interface LiveViewSession {
+  id: string;
+  employeeId: string;
+  requestedBy: string;
+  status: LiveViewSessionStatus;
+  reason: string;
+  requestedAt: string;
+  approvedAt?: string;
+  startedAt?: string;
+  endedAt?: string;
+  expiresAt: string;
+  endReason?: string;
+}
+
+export interface LiveViewSessionListResponse {
+  data: LiveViewSession[];
+  total: number;
+  page: number;
+  perPage: number;
+  totalPages: number;
+}
+
+export const liveViewApi = {
+  create: (body: { employeeId: string; reason: string; durationMinutes: number }) =>
+    request<LiveViewSession>('/live-view/sessions', { method: 'POST', body }),
+  list: (params?: { page?: number; perPage?: number }) =>
+    request<LiveViewSessionListResponse>('/live-view/sessions', {
+      params: params as Record<string, string | number | undefined>,
+    }),
+  get: (id: string) => request<LiveViewSession>(`/live-view/sessions/${id}`),
+  stop: (id: string, reason?: string) =>
+    request<LiveViewSession>(`/live-view/sessions/${id}/stop`, {
+      method: 'POST',
+      body: { reason: reason ?? 'Stopped by administrator' },
+    }),
+};
+
 export interface AppItem {
   id: string;
   employeeId: string;

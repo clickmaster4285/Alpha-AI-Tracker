@@ -72,6 +72,7 @@ func main() {
 	newSchemaRepo := repository.NewNewSchemaRepo(pool)
 	monitoringRepo := repository.NewMonitoringRepo(pool)
 	rbacRepo := repository.NewRBACRepo(pool)
+	liveViewRepo := repository.NewLiveViewRepo(pool)
 	refreshTokenRepo := repository.NewRefreshTokenRepo(pool)
 	shiftRepo := repository.NewShiftRepo(pool)
 	timeAttendanceRepo := repository.NewTimeAttendanceRepo(pool)
@@ -87,6 +88,7 @@ func main() {
 	rbacService := services.NewRBACService(rbacRepo)
 	shiftService := services.NewShiftService(shiftRepo, cfg.DefaultShiftTimezone)
 	timeAttendanceService := services.NewTimeAttendanceService(timeAttendanceRepo)
+	liveViewService := services.NewLiveViewService(liveViewRepo, employeeRepo, rbacRepo)
 
 	// Cast Redis client to interface
 	var redisInterface services.RedisClientInterface
@@ -104,6 +106,7 @@ func main() {
 	shiftHandler := handlers.NewShiftHandler(shiftService)
 	timeAttendanceHandler := handlers.NewTimeAttendanceHandler(timeAttendanceService)
 	geofenceHandler := handlers.NewGeofenceHandler(geofenceService)
+	liveViewHandler := handlers.NewLiveViewHandler(liveViewService)
 
 	// ────────────────
 	// Seed RBAC catalog (modules, submodules, system role) — idempotent
@@ -142,6 +145,8 @@ func main() {
 
 	sessionLifecycleSweep := jobs.NewSessionLifecycleSweep(pool)
 	go sessionLifecycleSweep.Start(sweepCtx)
+	liveViewExpiry := jobs.NewLiveViewExpiry(liveViewService)
+	go liveViewExpiry.Start(sweepCtx)
 
 	// ────────────────
 	// Setup Echo
@@ -150,7 +155,7 @@ func main() {
 	e.HideBanner = true
 	e.HidePort = true
 
-	router.Setup(e, cfg, authService, deviceRepo, userRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler, rbacHandler, shiftHandler, timeAttendanceHandler, geofenceHandler)
+	router.Setup(e, cfg, authService, deviceRepo, userRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler, rbacHandler, shiftHandler, timeAttendanceHandler, geofenceHandler, liveViewHandler)
 
 	// ────────────────
 	// Graceful Shutdown
