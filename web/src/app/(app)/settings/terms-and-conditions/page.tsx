@@ -1,297 +1,363 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Loader2,
-  Globe,
-  FolderOpen,
-  MonitorPlay,
-  Eye,
-  CheckCircle2,
-  AlertCircle,
   Pencil,
+  Trash2,
+  Plus,
+  Star,
+  ArrowLeft,
   Save,
-  X,
-  RotateCcw,
+  Eye,
 } from "lucide-react";
-import { termsConsentApi, termsContentApi, type TermsConsentEntry, type TermsContentItem } from "@/lib/api";
+import { termsContentApi, type TermsContentItem } from "@/lib/api";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { RichTextEditor } from "@/components/terms/rich-text-editor";
 
-const FEATURE_ICONS: Record<string, React.ReactNode> = {
-  app_usage: <MonitorPlay className="w-5 h-5" />,
-  browser_journey: <Globe className="w-5 h-5" />,
-  file_journey: <FolderOpen className="w-5 h-5" />,
-  live_view: <Eye className="w-5 h-5" />,
-};
-
-const FEATURE_DEFAULTS: Record<string, { heading: string; body: string; required: boolean }> = {
-  app_usage: {
-    heading: "Application Usage Tracking",
-    body: "Alpha AI Tracker monitors which desktop applications are open and actively used on your work machine. This includes the application name, process name, and the duration each application remains in focus.",
-    required: true,
-  },
-  browser_journey: {
-    heading: "Browser Journey Tracking",
-    body: "When enabled, Alpha AI Tracker records the web pages you visit in supported browsers (Chrome, Firefox, Edge, Brave, Opera, and others). This includes the page URL, page title, and the time spent on each page.",
-    required: false,
-  },
-  file_journey: {
-    heading: "File Explorer Journey Tracking",
-    body: "When enabled, Alpha AI Tracker monitors file manager activity on your machine. This includes which folders you navigate to, and any files you create, rename, or delete through the file explorer.",
-    required: false,
-  },
-  live_view: {
-    heading: "Live Screen Viewing",
-    body: "When enabled, authorized administrators can view your screen in real-time. This feature is intended for remote support, training, and collaboration scenarios.",
-    required: false,
-  },
-};
-
-function FeatureCard({
-  content,
-  consent,
-  onSave,
+function TermsList({
+  items,
+  onEdit,
+  onDelete,
 }: {
-  content: TermsContentItem | null;
-  consent: TermsConsentEntry | null;
-  onSave: (featureId: string, heading: string, body: string, version: string) => void;
+  items: TermsContentItem[];
+  onEdit: (item: TermsContentItem) => void;
+  onDelete: (item: TermsContentItem) => void;
 }) {
-  const [editing, setEditing] = useState(false);
-  const [heading, setHeading] = useState(content?.heading ?? "");
-  const [body, setBody] = useState(content?.body ?? "");
-  const [version, setVersion] = useState(content?.termsVersion ?? "1.0");
-
-  const featureId = content?.featureId ?? "";
-  const defaults = FEATURE_DEFAULTS[featureId];
-  const isAccepted = consent?.action === "accepted" || consent?.action === "re_accepted";
-  const isRevoked = consent?.action === "revoked";
-
-  const handleSave = () => {
-    onSave(featureId, heading, body, version);
-    setEditing(false);
-  };
-
-  const handleCancel = () => {
-    setHeading(content?.heading ?? defaults?.heading ?? "");
-    setBody(content?.body ?? defaults?.body ?? "");
-    setVersion(content?.termsVersion ?? "1.0");
-    setEditing(false);
-  };
-
-  const handleReset = () => {
-    setHeading(defaults?.heading ?? "");
-    setBody(defaults?.body ?? "");
-    setVersion("1.0");
-  };
+  const featured = items.filter((i) => i.isSystem);
+  const custom = items.filter((i) => !i.isSystem);
 
   return (
-    <Card className="overflow-hidden">
-      <CardContent className="p-0">
-        {/* Header bar */}
-        <div className="flex items-center gap-3 px-6 py-4 bg-muted/40">
-          <div className="flex items-center justify-center w-9 h-9 rounded-lg bg-background border">
-            {FEATURE_ICONS[featureId] ?? <MonitorPlay className="w-5 h-5" />}
+    <div className="space-y-8">
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">Terms &amp; Conditions</h1>
+          <p className="text-muted-foreground mt-1">
+            Manage the T&amp;C content for each tracking feature. Featured terms are built-in
+            and cannot be deleted. Custom terms can be created and removed.
+          </p>
+        </div>
+      </div>
+
+      {/* Featured terms */}
+      <div className="space-y-4">
+        <div className="flex items-center gap-2">
+          <h2 className="text-lg font-bold">Featured Terms</h2>
+          <Badge variant="secondary" className="text-xs">{featured.length}</Badge>
+        </div>
+        <div className="space-y-3">
+          {featured.map((item) => (
+            <Card key={item.id} className="overflow-hidden cursor-pointer hover:border-primary/50 transition-colors" onClick={() => onEdit(item)}>
+              <CardContent className="p-4">
+                <div className="flex items-center gap-3">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      <h3 className="font-bold">{item.heading}</h3>
+                      <Badge variant="secondary" className="text-xs gap-1">
+                        <Star className="w-3 h-3" /> Featured
+                      </Badge>
+                    </div>
+                    <p className="text-sm text-muted-foreground mt-1 line-clamp-2">
+                      {item.body.replace(/<[^>]*>/g, "").slice(0, 150)}...
+                    </p>
+                    <div className="flex items-center gap-3 mt-2 text-xs text-muted-foreground">
+                      <span>v{item.termsVersion}</span>
+                      <span>|</span>
+                      <span>Updated {new Date(item.updatedAt).toLocaleDateString()}</span>
+                    </div>
+                  </div>
+                  <Pencil className="h-4 w-4 text-muted-foreground" />
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      </div>
+
+      {/* Custom terms */}
+      <div className="space-y-4">
+        <div className="flex items-center gap-2">
+          <h2 className="text-lg font-bold">Custom Terms</h2>
+          <Badge variant="outline" className="text-xs">{custom.length}</Badge>
+        </div>
+        {custom.length === 0 ? (
+          <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
+            No custom terms created yet. Use the sidebar to add new terms.
           </div>
-          <div className="flex-1">
-            {editing ? (
-              <Input
-                value={heading}
-                onChange={(e) => setHeading(e.target.value)}
-                className="h-8 text-lg font-bold"
-              />
-            ) : (
-              <h2 className="text-xl font-bold tracking-tight">{content?.heading ?? defaults?.heading ?? featureId}</h2>
-            )}
+        ) : (
+          <div className="space-y-3">
+            {custom.map((item) => (
+              <Card key={item.id} className="overflow-hidden cursor-pointer hover:border-primary/50 transition-colors" onClick={() => onEdit(item)}>
+                <CardContent className="p-4">
+                  <div className="flex items-center gap-3">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2">
+                        <h3 className="font-bold">{item.heading}</h3>
+                        <Badge variant="outline" className="text-xs">Custom</Badge>
+                      </div>
+                      <p className="text-sm text-muted-foreground mt-1 line-clamp-2">
+                        {item.body.replace(/<[^>]*>/g, "").slice(0, 150)}...
+                      </p>
+                      <div className="flex items-center gap-3 mt-2 text-xs text-muted-foreground">
+                        <span>v{item.termsVersion}</span>
+                        <span>|</span>
+                        <span>Updated {new Date(item.updatedAt).toLocaleDateString()}</span>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                      <Pencil className="h-4 w-4 text-muted-foreground cursor-pointer hover:text-foreground" onClick={() => onEdit(item)} />
+                      <Trash2 className="h-4 w-4 text-destructive cursor-pointer hover:text-destructive/80" onClick={() => onDelete(item)} />
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
           </div>
-          <div className="flex items-center gap-2">
-            {defaults?.required && (
-              <Badge variant="secondary" className="text-xs font-semibold">Required</Badge>
-            )}
-            {!defaults?.required && (
-              <Badge variant="outline" className="text-xs font-semibold">Optional</Badge>
-            )}
-            {isAccepted && (
-              <Badge variant="default" className="gap-1 text-xs font-semibold bg-green-600 hover:bg-green-700">
-                <CheckCircle2 className="w-3 h-3" /> Accepted
-              </Badge>
-            )}
-            {isRevoked && (
-              <Badge variant="destructive" className="gap-1 text-xs font-semibold">
-                <AlertCircle className="w-3 h-3" /> Revoked
-              </Badge>
-            )}
-            {!consent && (
-              <Badge variant="outline" className="text-xs font-semibold text-muted-foreground">Not yet presented</Badge>
-            )}
-            {!editing ? (
-              <Button variant="ghost" size="sm" onClick={() => setEditing(true)}>
-                <Pencil className="w-4 h-4" />
-              </Button>
-            ) : (
-              <>
-                <Button variant="ghost" size="sm" onClick={handleCancel}>
-                  <X className="w-4 h-4" />
-                </Button>
-                <Button variant="ghost" size="sm" onClick={handleReset} title="Reset to default">
-                  <RotateCcw className="w-4 h-4" />
-                </Button>
-                <Button variant="default" size="sm" onClick={handleSave}>
-                  <Save className="w-4 h-4 mr-1" /> Save
-                </Button>
-              </>
-            )}
-          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TermsEditor({
+  item,
+  onBack,
+}: {
+  item: TermsContentItem | null;
+  onBack: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const isNew = item === null;
+  const [heading, setHeading] = useState(item?.heading ?? "");
+  const [body, setBody] = useState(item?.body ?? "");
+  const [version, setVersion] = useState(item?.termsVersion ?? "1.0");
+
+  const updateMutation = useMutation({
+    mutationFn: (data: { heading: string; body: string; termsVersion: string }) =>
+      termsContentApi.update(item!.id, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["terms-content"] });
+      onBack();
+    },
+  });
+
+  const createMutation = useMutation({
+    mutationFn: (data: { heading: string; body: string; termsVersion: string }) =>
+      termsContentApi.create(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["terms-content"] });
+      onBack();
+    },
+  });
+
+  const handleSave = () => {
+    if (!heading.trim()) return;
+    const data = { heading, body, termsVersion: version };
+    if (isNew) {
+      createMutation.mutate(data);
+    } else {
+      updateMutation.mutate(data);
+    }
+  };
+
+  const isSaving = updateMutation.isPending || createMutation.isPending;
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center gap-3">
+        <Button variant="ghost" size="sm" onClick={onBack}>
+          <ArrowLeft className="h-4 w-4 mr-1" /> Back
+        </Button>
+        <Separator orientation="vertical" className="h-6" />
+        <h1 className="text-2xl font-bold tracking-tight">
+          {isNew ? "Create New Terms" : `Edit: ${item?.heading}`}
+        </h1>
+        {item?.isSystem && (
+          <Badge variant="secondary" className="text-xs gap-1">
+            <Star className="w-3 h-3" /> Featured
+          </Badge>
+        )}
+      </div>
+
+      <div className="space-y-4">
+        <div className="space-y-2">
+          <Label className="text-sm font-bold">Heading</Label>
+          <Input
+            value={heading}
+            onChange={(e) => setHeading(e.target.value)}
+            placeholder="e.g. Screen Recording Policy"
+          />
         </div>
 
-        {/* Content */}
-        <div className="px-6 py-5 space-y-4">
-          {editing ? (
-            <>
-              <div className="space-y-2">
-                <Label className="text-sm font-bold">Terms Content</Label>
-                <Textarea
-                  value={body}
-                  onChange={(e) => setBody(e.target.value)}
-                  rows={6}
-                  className="resize-y"
-                />
-              </div>
-              <div className="flex items-center gap-2">
-                <Label className="text-sm font-bold">Terms Version</Label>
-                <Input
-                  value={version}
-                  onChange={(e) => setVersion(e.target.value)}
-                  className="h-8 w-24"
-                />
-              </div>
-            </>
+        <div className="space-y-2">
+          <Label className="text-sm font-bold">Content</Label>
+          <RichTextEditor value={body} onChange={setBody} />
+        </div>
+
+        <div className="flex items-center gap-4">
+          <div className="space-y-1">
+            <Label className="text-sm font-bold">Version</Label>
+            <Input
+              value={version}
+              onChange={(e) => setVersion(e.target.value)}
+              className="h-9 w-24"
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <Button onClick={handleSave} disabled={!heading.trim() || isSaving}>
+          {isSaving ? (
+            <Loader2 className="h-4 w-4 mr-1 animate-spin" />
           ) : (
-            <p className="text-sm leading-relaxed text-muted-foreground">
-              {content?.body ?? defaults?.body ?? "No content configured."}
-            </p>
+            <Save className="h-4 w-4 mr-1" />
           )}
+          {isNew ? "Create Terms" : "Save Changes"}
+        </Button>
+        <Button variant="outline" onClick={onBack}>Cancel</Button>
+      </div>
+    </div>
+  );
+}
 
-          {content && !editing && (
-            <div className="flex items-center gap-3 pt-2 text-xs text-muted-foreground border-t">
-              <span>Terms v{content.termsVersion}</span>
-              <span className="text-border">|</span>
-              <span>Updated {new Date(content.updatedAt).toLocaleString()}</span>
-            </div>
-          )}
-        </div>
-      </CardContent>
-    </Card>
+function TermsPreview({
+  item,
+  onBack,
+}: {
+  item: TermsContentItem;
+  onBack: () => void;
+}) {
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center gap-3">
+        <Button variant="ghost" size="sm" onClick={onBack}>
+          <ArrowLeft className="h-4 w-4 mr-1" /> Back
+        </Button>
+        <Separator orientation="vertical" className="h-6" />
+        <h1 className="text-2xl font-bold tracking-tight">{item.heading}</h1>
+        {item.isSystem && (
+          <Badge variant="secondary" className="text-xs gap-1">
+            <Star className="w-3 h-3" /> Featured
+          </Badge>
+        )}
+      </div>
+
+      <Card>
+        <CardContent className="p-6">
+          <div
+            className="prose prose-sm dark:prose-invert max-w-none"
+            dangerouslySetInnerHTML={{ __html: item.body }}
+          />
+          <div className="flex items-center gap-3 mt-6 pt-4 border-t text-xs text-muted-foreground">
+            <span>Terms v{item.termsVersion}</span>
+            <span>|</span>
+            <span>Updated {new Date(item.updatedAt).toLocaleString()}</span>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
   );
 }
 
 function TermsAndConditionsInner() {
   const queryClient = useQueryClient();
-  const [employeeId, setEmployeeId] = useState<string>("");
-
-  const profileQuery = useQuery({
-    queryKey: ["auth", "profile"],
-    queryFn: async () => {
-      const res = await fetch("/api/v1/auth/profile", { credentials: "include" });
-      if (!res.ok) return null;
-      return res.json();
-    },
-  });
-
-  useEffect(() => {
-    const empId = profileQuery.data?.employee?.employeeId;
-    if (empId) setEmployeeId(empId);
-  }, [profileQuery.data]);
+  const [editing, setEditing] = useState<TermsContentItem | null | "new">(null);
+  const [previewing, setPreviewing] = useState<TermsContentItem | null>(null);
+  const [deleting, setDeleting] = useState<TermsContentItem | null>(null);
 
   const contentQuery = useQuery({
     queryKey: ["terms-content"],
     queryFn: () => termsContentApi.list(),
   });
 
-  const consentQuery = useQuery({
-    queryKey: ["terms-consent", employeeId],
-    queryFn: () => termsConsentApi.list(employeeId),
-    enabled: !!employeeId,
-  });
-
-  const updateMutation = useMutation({
-    mutationFn: (data: { featureId: string; heading: string; body: string; termsVersion: string }) =>
-      termsContentApi.update(data.featureId, {
-        heading: data.heading,
-        body: data.body,
-        termsVersion: data.termsVersion,
-      }),
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => termsContentApi.delete(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["terms-content"] });
     },
   });
 
-  const getConsentStatus = (featureId: string): TermsConsentEntry | null => {
-    const entries = consentQuery.data?.entries ?? [];
-    let latest: TermsConsentEntry | null = null;
-    for (const entry of entries) {
-      if (entry.featureId === featureId) {
-        if (!latest || new Date(entry.createdAt) > new Date(latest.createdAt)) {
-          latest = entry;
-        }
-      }
+  if (editing !== null || previewing !== null) {
+    if (previewing) {
+      return <TermsPreview item={previewing} onBack={() => setPreviewing(null)} />;
     }
-    return latest;
-  };
-
-  const getContent = (featureId: string): TermsContentItem | null => {
-    const items = contentQuery.data?.items ?? [];
-    return items.find((i) => i.featureId === featureId) ?? null;
-  };
-
-  const handleSave = (featureId: string, heading: string, body: string, version: string) => {
-    updateMutation.mutate({ featureId, heading, body, termsVersion: version });
-  };
-
-  const featureIds = ["app_usage", "browser_journey", "file_journey", "live_view"];
+    return (
+      <TermsEditor
+        item={editing === "new" ? null : editing}
+        onBack={() => setEditing(null)}
+      />
+    );
+  }
 
   return (
-    <div className="space-y-8">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Terms &amp; Conditions</h1>
-        <p className="text-muted-foreground mt-1">
-          Manage the Terms &amp; Conditions content for each tracking feature. Click the edit
-          icon to modify the heading, body text, and version number.
-        </p>
+    <>
+      <div className="flex items-start justify-between mb-6">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">Terms &amp; Conditions</h1>
+          <p className="text-muted-foreground mt-1">
+            Manage the T&amp;C content for each tracking feature. Click a term to edit,
+            or use &quot;New Terms&quot; to create a custom entry.
+          </p>
+        </div>
+        <Button onClick={() => setEditing("new")}>
+          <Plus className="w-4 h-4 mr-1" /> New Terms
+        </Button>
       </div>
 
-      <Separator />
+      <Separator className="mb-6" />
 
       {contentQuery.isLoading ? (
         <div className="flex items-center justify-center min-h-[200px]">
           <Loader2 className="w-6 h-6 animate-spin text-primary" />
         </div>
       ) : (
-        <div className="space-y-6">
-          {featureIds.map((featureId) => (
-            <FeatureCard
-              key={featureId}
-              content={getContent(featureId)}
-              consent={getConsentStatus(featureId)}
-              onSave={handleSave}
-            />
-          ))}
-        </div>
+        <TermsList
+          items={contentQuery.data?.items ?? []}
+          onEdit={(item) => setEditing(item)}
+          onDelete={(item) => setDeleting(item)}
+        />
       )}
 
-      <div className="rounded-lg border bg-muted/50 p-4 text-sm text-muted-foreground">
-        <p>
-          Changes take effect immediately. The desktop client fetches the latest terms content
-          when displaying T&C modals to employees.
-        </p>
-      </div>
-    </div>
+      <AlertDialog open={!!deleting} onOpenChange={() => setDeleting(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Custom Terms</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete &quot;{deleting?.heading}&quot;? This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (deleting) deleteMutation.mutate(deleting.id);
+                setDeleting(null);
+              }}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }
 

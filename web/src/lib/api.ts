@@ -1274,22 +1274,33 @@ export const termsConsentApi = {
 
 export interface TermsContentItem {
   id: string;
-  featureId: string;
+  slug: string;
   heading: string;
   body: string;
   termsVersion: string;
+  isSystem: boolean;
+  sortOrder: number;
   updatedAt: string;
   createdAt: string;
 }
 
 export const termsContentApi = {
   list: () => request<{ items: TermsContentItem[] }>('/terms-content'),
-  get: (featureId: string) =>
-    request<TermsContentItem>(`/terms-content/${featureId}`),
-  update: (featureId: string, data: { heading: string; body: string; termsVersion: string }) =>
-    request<TermsContentItem>(`/terms-content/${featureId}`, {
+  get: (id: string) =>
+    request<TermsContentItem>(`/terms-content/${id}`),
+  update: (id: string, data: { heading: string; body: string; termsVersion: string }) =>
+    request<TermsContentItem>(`/terms-content/${id}`, {
       method: 'PUT',
       body: data,
+    }),
+  create: (data: { heading: string; body: string; termsVersion: string }) =>
+    request<TermsContentItem>('/terms-content', {
+      method: 'POST',
+      body: data,
+    }),
+  delete: (id: string) =>
+    request<void>(`/terms-content/${id}`, {
+      method: 'DELETE',
     }),
 };
 

@@ -2,7 +2,7 @@
 
 > **Last audited:** 2026-09-14 (per-feature Terms & Conditions consent framework — migration 036)
 > **Changelog:**
-> - 2026-09-14: **Per-feature T&C consent audit trail.** Migration 036 creates append-only `terms_consent` table (`employee_id`, `feature_id`, `terms_version`, `action`, `created_at`). New `terms_consent_repo` (BulkInsert, ListByEmployee, HasAccepted) + `terms_consent_handler` (POST `/terms-consent/sync`, GET `/terms-consent`, GET `/terms-consent/check`). Routes registered in the protected group. Verified: `go build`/`go vet` clean.
+> - 2026-09-14: **Per-feature T&C consent audit trail.** Migration 036 creates append-only `terms_consent` table (`employee_id`, `feature_id`, `terms_version`, `action`, `created_at`). Migration 037 adds `terms_content` table (editable T&C content with `is_system` flag for featured vs user-created terms). New `terms_consent_repo` + `terms_content_repo` with full CRUD. `terms_consent_handler` (POST sync, GET list, GET check) + `terms_content_handler` (GET/PUT/POST/DELETE `/terms-content`). Verified: `go build`/`go vet` clean.
 > - 2026-09-11: **App-session usage accuracy, per-row stagnation sweep + migrations 034/035.**
 >   - `AggregateAppSessionsUsage` projects `has_open_session` via `BOOL_OR(status='ACTIVE' AND ended_at IS NULL)` — OFFLINE/STALE rows with `ended_at=NULL` no longer count as open — and `last_active_at = MAX(COALESCE(last_activity_at, last_sync_at, ended_at, started_at))` (new `AppSessionUsageRow.LastActiveAt` + DTO field `lastActiveAt`, consumed by `/employee-journey/apps`).
 >   - Step 4 in `session_lifecycle_sweep.go` is a **per-row stagnation sweep** that closes any OFFLINE/STALE row whose own `last_sync_at` is ≥ CLOSE_AFTER old, independent of the machine-level window.
@@ -395,11 +395,21 @@ Employee token is carried in the request body (`{employeeId, token, entries: [..
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/terms-consent/sync` | Bulk insert consent records (append-only). Used by client `SyncService`. |
-| GET | `/terms-consent?employeeId=` | List consent records for one employee (newest first). Used by web `/settings/privacy`. |
+| GET | `/terms-consent?employeeId=` | List consent records for one employee (newest first). Used by web `/settings/terms-and-conditions`. |
 | GET | `/terms-consent/check?employeeId=&featureId=` | Check if an employee has accepted a specific feature's T&C. |
 
-> **Append-only design.** Every accept/revoke is recorded as a new row in `terms_consent`.
-> No UPDATE or DELETE. The latest row per `(employeeId, featureId)` determines current status.
+### Terms & Conditions Content (Protected — editable by admin)
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/terms-content` | List all T&C content (featured + custom). |
+| GET | `/terms-content/:featureId` | Get T&C content for one feature. |
+| PUT | `/terms-content/:featureId` | Update T&C content (heading, body, version). |
+| POST | `/terms-content` | Create new custom T&C entry. |
+| DELETE | `/terms-content/:featureId` | Soft-delete a custom T&C entry (featured terms cannot be deleted). |
+
+> **Two term types.** Featured terms (`is_system=true`) are seeded by migration 037 and cannot
+> be deleted. Custom terms (`is_system=false`) can be created and deleted by the admin.
 
 ### Missing Endpoints (sync-only tables with no standalone listing API)
 
@@ -660,7 +670,7 @@ applied_at      TIMESTAMPTZ DEFAULT NOW()
 
 ### Migration Tool
 
-**Custom runner** in `database/postgres.go`. Reads all `.sql` files from `migrations/` in filename order (latest: 036), tracks applied migrations in `schema_migrations`, and runs each file in its own transaction.
+**Custom runner** in `database/postgres.go`. Reads all `.sql` files from `migrations/` in filename order (latest: 037), tracks applied migrations in `schema_migrations`, and runs each file in its own transaction.
 
 ---
 

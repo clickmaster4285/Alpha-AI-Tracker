@@ -218,6 +218,8 @@ func Setup(
 
 	// Terms & Conditions content management (editable by admin)
 	protected.GET("/terms-content", termsContentHandler.ListTermsContent)
-	protected.GET("/terms-content/:featureId", termsContentHandler.GetTermsContent)
-	protected.PUT("/terms-content/:featureId", termsContentHandler.UpdateTermsContent)
+	protected.GET("/terms-content/:id", termsContentHandler.GetTermsContent)
+	protected.PUT("/terms-content/:id", termsContentHandler.UpdateTermsContent)
+	protected.POST("/terms-content", termsContentHandler.CreateTermsContent)
+	protected.DELETE("/terms-content/:id", termsContentHandler.DeleteTermsContent)
 }

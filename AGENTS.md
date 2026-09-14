@@ -4,7 +4,7 @@
 > **Changelog:**
 >
 > - 2026-09-14: **Per-feature Terms & Conditions (T&C) consent framework — client, server, web.**
->   New per-feature consent system where each tracking feature carries its own T&C version. Four features tracked: `app_usage` (required), `browser_journey` (optional+revocable), `file_journey` (optional+revocable), `live_view` (optional+revocable). **Client:** `FeatureTermsRegistry` manages feature registration, version checking, pending detection, accept/revoke (stored in SQLite `app_status` keyed by `terms_accepted_{featureId}` / `terms_version_{featureId}`). `TermsModal` shows platform-native uncloseable dialogs — PowerShell `System.Windows.Forms` on Windows, zenity/kdialog on Linux, osascript on macOS; headless `--background` mode uses the same fallback dialogs. `TermsConsentSyncer` builds a sync payload for the existing `SyncService` loop. `Program.cs` startup: register 4 features → check pending → show required T&C modal(s) → record acceptance → then `host.StartAsync()`. 5 new config gates: `ALPHA_TERMS_ENABLED`, `ALPHA_TERMS_APP_USAGE_ENABLED`, `ALPHA_TERMS_BROWSER_JOURNEY_ENABLED`, `ALPHA_TERMS_LIVE_VIEW_ENABLED`, `ALPHA_TERMS_FILE_JOURNEY_ENABLED` (feature kill switches independent of T&C acceptance). **Server:** Migration 036 creates append-only `terms_consent` audit table (`terms_consent_repo`, `terms_consent_handler` with `POST /terms-consent/sync`, `GET /terms-consent`, `GET /terms-consent/check`). **Web:** New `/settings/terms-and-conditions` page with styled T&C content per feature (required/optional badges, accepted/revoked status, per-section headings). Verified: `dotnet build` 0/0, `go build`/`go vet` clean, `npx tsc --noEmit` clean, `next build` passes (`/settings/terms-and-conditions` 6.27 kB).
+>   New per-feature consent system where each tracking feature carries its own T&C version. Four features tracked: `app_usage` (required), `browser_journey` (optional+revocable), `file_journey` (optional+revocable), `live_view` (optional+revocable). **Client:** `FeatureTermsRegistry` manages feature registration, version checking, pending detection, accept/revoke (stored in SQLite `app_status` keyed by `terms_accepted_{featureId}` / `terms_version_{featureId}`). `TermsModal` shows platform-native uncloseable dialogs — PowerShell `System.Windows.Forms` on Windows, zenity/kdialog on Linux, osascript on macOS; headless `--background` mode uses the same fallback dialogs. `TermsConsentSyncer` builds a sync payload for the existing `SyncService` loop. `Program.cs` startup: register 4 features → check pending → show required T&C modal(s) → record acceptance → then `host.StartAsync()`. 5 new config gates: `ALPHA_TERMS_ENABLED`, `ALPHA_TERMS_APP_USAGE_ENABLED`, `ALPHA_TERMS_BROWSER_JOURNEY_ENABLED`, `ALPHA_TERMS_LIVE_VIEW_ENABLED`, `ALPHA_TERMS_FILE_JOURNEY_ENABLED` (feature kill switches independent of T&C acceptance). **Server:** Migration 036 creates append-only `terms_consent` audit table; migration 037 adds `terms_content` table (editable T&C content, `is_system` flag for featured vs user-created). `terms_content_repo` + `terms_content_handler` with CRUD (`GET/POST/PUT/DELETE /terms-content`). **Web:** `/settings/terms-and-conditions` page with editable per-feature T&C cards (featured terms cannot be deleted, custom terms can be created and removed). Verified: `dotnet build` 0/0, `go build`/`go vet` clean, `npx tsc --noEmit` clean, `next build` passes (`/settings/terms-and-conditions` 8.3 kB).
 >
 > - 2026-09-11: **Core + Web: app-session accuracy, per-row stagnation sweep, Windows shutdown finalizer, migrations 034/035.**
 >   - **Server:** `AggregateAppSessionsUsage` now projects `has_open_session = BOOL_OR(status='ACTIVE' AND ended_at IS NULL)` (I-01 — OFFLINE/STALE rows with `ended_at=NULL` no longer count as "Running") and `last_active_at = MAX(COALESCE(last_activity_at, last_sync_at, ended_at, started_at))`. A new **per-row stagnation sweep** (step 4 of `session_lifecycle_sweep.go`) advances any OFFLINE/STALE row whose OWN `last_sync_at` is ≥ CLOSE_AFTER old — even on a machine that is still alive — so a single abandoned session can never be stranded forever (I-02). **Migration 034** aligns historical rows that already carried `ended_at` to `CLOSED`; **migration 035** freezes stranded OFFLINE/STALE sessions (`status='CLOSED'`, `ended_at=COALESCE(last_activity_at,last_sync_at,started_at)`) older than 24h. 035 verified applied on the live DB (`OFFLINE & ended_at IS NULL = 0`).
@@ -1113,7 +1113,7 @@ flowchart LR
 | **Cross-table boolean flags** | Booleans that depend on a cross-table relationship (e.g. "does this employee have a login account?") MUST be projected by the server in the same query that returns the row — never built client-side from a separate fetch (see *Server-Projected Flags Rule* below) |
 | **Branding & version**  | Product name and version are written in exactly two files — `client/APP_IDENTIFIERS` and `client/VERSION`. No literal product name or version string anywhere else in C#, XAML, or the build scripts (see below) |
 | **Cross-platform OS guards** | Guard platform-specific method bodies with `OperatingSystem.IsWindows/Linux/MacOS()`; do not propagate `[SupportedOSPlatform]` through cross-platform partial/background-service call graphs (see below) |
-| **Per-feature T&C consent** | Every tracking feature carries its own T&C version + acceptance timestamp. Required features (`app_usage`) block startup until accepted; optional features (`browser_journey`, `file_journey`, `live_view`) are revocable. Consent is stored in `app_status` as `terms_accepted_{featureId}` / `terms_version_{featureId}` keys, synced to the server's `terms_consent` audit table, and displayed on the web `/settings/privacy` page (see below) |
+| **Per-feature T&C consent** | Every tracking feature carries its own T&C version + acceptance timestamp. Required features (`app_usage`) block startup until accepted; optional features (`browser_journey`, `file_journey`, `live_view`) are revocable. Two term types: **featured** (built-in, `is_system=true`, cannot delete) and **custom** (admin-created, `is_system=false`, can delete). Consent stored in `app_status`, synced to server `terms_consent` audit table; editable content in `terms_content` table. Web page at `/settings/terms-and-conditions` (see below) |
 
 ### Web Infinite-Scroll Rule (mandatory)
 
@@ -1241,6 +1241,13 @@ call graph. .NET 10's `PlatformCompatibilityAnalyzer` can enter exponential glob
 
 **Every tracking feature carries its own Terms & Conditions version and acceptance timestamp.** Required features block startup until the user accepts; optional features are revocable at any time.
 
+**Two term types:**
+
+| Type | `is_system` | Description | Can Edit | Can Delete |
+|---|---|---|---|---|
+| **Featured** | `true` | Built-in terms seeded by migration 037 (app_usage, browser_journey, file_journey, live_view) | Yes (heading/body/version) | No |
+| **Custom** | `false` | Admin-created terms for organization-specific features | Yes | Yes |
+
 **Features and defaults:**
 
 | Feature ID | Default | Revocable | Description |
@@ -1252,13 +1259,13 @@ call graph. .NET 10's `PlatformCompatibilityAnalyzer` can enter exponential glob
 
 **Client storage:** `app_status` table keyed by `terms_accepted_{featureId}` (timestamp) and `terms_version_{featureId}` (version string). Stored locally, synced to server via `SyncService`.
 
-**Server storage:** append-only `terms_consent` audit table (migration 036). Every accept/revoke is recorded with `employee_id`, `feature_id`, `terms_version`, `action`, `created_at`.
+**Server storage:** append-only `terms_consent` audit table (migration 036). Every accept/revoke is recorded with `employee_id`, `feature_id`, `terms_version`, `action`, `created_at`. Editable `terms_content` table (migration 037) stores heading, body, version, and `is_system` flag per feature.
 
 **Config gates:** `ALPHA_TERMS_ENABLED` master switch + per-feature `ALPHA_TERMS_{FEATURE}__ENABLED` kill switches. Kill switches are independent of T&C acceptance — a disabled feature never shows its modal regardless of consent state.
 
 **Modals:** `TermsModal` shows platform-native uncloseable dialogs — Windows `System.Windows.Forms` via PowerShell, Linux `zenity`/`kdialog`, macOS `osascript`. Headless `--background` mode uses the same fallback dialogs.
 
-**Web:** `/settings/terms-and-conditions` displays per-feature T&C content (description, rights, data usage) with acceptance status badges.
+**Web:** `/settings/terms-and-conditions` displays per-feature T&C content with edit/save functionality. Featured terms (built-in) cannot be deleted; custom terms can be created and removed via the UI.
 
 ---
 
