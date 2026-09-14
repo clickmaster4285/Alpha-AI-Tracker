@@ -1238,4 +1238,34 @@ export const hoursInsightsApi = {
     }),
 };
 
+// ──────────────────────────
+// Terms & Conditions consent
+// ──────────────────────────
+
+export interface TermsConsentEntry {
+  id: string;
+  employeeId: string;
+  featureId: string;
+  termsVersion: string;
+  action: 'accepted' | 'revoked' | 're_accepted';
+  createdAt: string;
+}
+
+export interface TermsConsentCheckResponse {
+  accepted: boolean;
+  employeeId: string;
+  featureId: string;
+}
+
+export const termsConsentApi = {
+  list: (employeeId: string) =>
+    request<{ entries: TermsConsentEntry[]; total: number }>('/terms-consent', {
+      params: { employeeId },
+    }),
+  check: (employeeId: string, featureId: string) =>
+    request<TermsConsentCheckResponse>('/terms-consent/check', {
+      params: { employeeId, featureId },
+    }),
+};
+
 export { ApiError };

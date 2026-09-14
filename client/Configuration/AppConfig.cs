@@ -83,6 +83,16 @@ public class AppConfig
     public int UpdateAutoCheckHours { get; init; } = 24;      // min hours between quiet background checks
     public bool UpdateAutoInstall { get; init; } = true;      // auto-download+install when a check finds a newer version
 
+    // ─── Per-feature Terms & Conditions ───
+    // Master switch: when true, the T&C framework is active and required features block
+    // tracking until accepted. When false, all T&C checks are bypassed (development mode).
+    public bool TermsEnabled { get; init; } = true;
+    // Per-feature kill switches — a feature can be code-complete but terms-gated.
+    public bool TermsBrowserJourneyEnabled { get; init; } = true;
+    public bool TermsAppUsageEnabled { get; init; } = true;
+    public bool TermsLiveViewEnabled { get; init; } = true;
+    public bool TermsFileJourneyEnabled { get; init; } = true;
+
     public static AppConfig FromEnv()
     {
         return new AppConfig
@@ -125,6 +135,11 @@ public class AppConfig
             LocationEnabled = GetEnv("ALPHA_LOCATION_ENABLED") is ("1" or "true" or "True"),
             LocationPollSec = Math.Max(60, int.TryParse(GetEnv("ALPHA_LOCATION_POLL_SEC"), out var locPoll) ? locPoll : 300),
             LocationIpFallback = GetEnv("ALPHA_LOCATION_IP_FALLBACK") is ("1" or "true" or "True"),
+            TermsEnabled = GetEnv("ALPHA_TERMS_ENABLED") is not ("0" or "false" or "False"),
+            TermsBrowserJourneyEnabled = GetEnv("ALPHA_TERMS_BROWSER_JOURNEY_ENABLED") is not ("0" or "false" or "False"),
+            TermsAppUsageEnabled = GetEnv("ALPHA_TERMS_APP_USAGE_ENABLED") is not ("0" or "false" or "False"),
+            TermsLiveViewEnabled = GetEnv("ALPHA_TERMS_LIVE_VIEW_ENABLED") is not ("0" or "false" or "False"),
+            TermsFileJourneyEnabled = GetEnv("ALPHA_TERMS_FILE_JOURNEY_ENABLED") is not ("0" or "false" or "False"),
         };
     }
 

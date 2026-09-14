@@ -1,7 +1,8 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-09-11 (web apps-page accuracy + per-row stagnation sweep + migrations 034/035)
+> **Last audited:** 2026-09-14 (per-feature Terms & Conditions consent framework — migration 036)
 > **Changelog:**
+> - 2026-09-14: **Per-feature T&C consent audit trail.** Migration 036 creates append-only `terms_consent` table (`employee_id`, `feature_id`, `terms_version`, `action`, `created_at`). New `terms_consent_repo` (BulkInsert, ListByEmployee, HasAccepted) + `terms_consent_handler` (POST `/terms-consent/sync`, GET `/terms-consent`, GET `/terms-consent/check`). Routes registered in the protected group. Verified: `go build`/`go vet` clean.
 > - 2026-09-11: **App-session usage accuracy, per-row stagnation sweep + migrations 034/035.**
 >   - `AggregateAppSessionsUsage` projects `has_open_session` via `BOOL_OR(status='ACTIVE' AND ended_at IS NULL)` — OFFLINE/STALE rows with `ended_at=NULL` no longer count as open — and `last_active_at = MAX(COALESCE(last_activity_at, last_sync_at, ended_at, started_at))` (new `AppSessionUsageRow.LastActiveAt` + DTO field `lastActiveAt`, consumed by `/employee-journey/apps`).
 >   - Step 4 in `session_lifecycle_sweep.go` is a **per-row stagnation sweep** that closes any OFFLINE/STALE row whose own `last_sync_at` is ≥ CLOSE_AFTER old, independent of the machine-level window.
@@ -389,6 +390,17 @@ Employee token is carried in the request body (`{employeeId, token, entries: [..
 > `DEFAULT_SHIFT_TIMEZONE` is set in `.env`. The web shift form defaults new shifts to the admin
 > browser's IANA zone.
 
+### Terms & Conditions Consent (Protected — audit trail)
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/terms-consent/sync` | Bulk insert consent records (append-only). Used by client `SyncService`. |
+| GET | `/terms-consent?employeeId=` | List consent records for one employee (newest first). Used by web `/settings/privacy`. |
+| GET | `/terms-consent/check?employeeId=&featureId=` | Check if an employee has accepted a specific feature's T&C. |
+
+> **Append-only design.** Every accept/revoke is recorded as a new row in `terms_consent`.
+> No UPDATE or DELETE. The latest row per `(employeeId, featureId)` determines current status.
+
 ### Missing Endpoints (sync-only tables with no standalone listing API)
 
 | Expected Endpoint | Purpose | Status |
@@ -644,10 +656,11 @@ applied_at      TIMESTAMPTZ DEFAULT NOW()
 - installed_applications: `app_fingerprint` UNIQUE, `binary_name`, `(employee_id, detected_at DESC)`, `app_name`
 - installed_packages: `package_fingerprint` UNIQUE, `source_manager`, `category`, `(employee_id, detected_at DESC)`
 - refresh_tokens: `(user_id)`, `(expires_at)`
+- terms_consent: `(employee_id, feature_id)`, `(created_at DESC)`
 
 ### Migration Tool
 
-**Custom runner** in `database/postgres.go`. Reads all `.sql` files from `migrations/` in filename order (latest: 035), tracks applied migrations in `schema_migrations`, and runs each file in its own transaction. 034/035 are idempotent session-lifecycle repairs.
+**Custom runner** in `database/postgres.go`. Reads all `.sql` files from `migrations/` in filename order (latest: 036), tracks applied migrations in `schema_migrations`, and runs each file in its own transaction.
 
 ---
 

@@ -344,11 +344,11 @@ mandatory.
 
 ### Phase 0 - Governance and feasibility
 
-- Complete DPIA, policy/notice, lawful-basis review, RBAC matrix, retention decision, and threat
+- [ ] Complete DPIA, policy/notice, lawful-basis review, RBAC matrix, retention decision, and threat
   model.
-- Build a capture-only lab prototype for Windows, macOS, Wayland, and X11.
-- Measure CPU, memory, latency, bandwidth, and battery impact on minimum supported hardware.
-- **Per-feature Terms & Conditions system** — implement the client-side T&C framework (see
+- [ ] Build a capture-only lab prototype for Windows, macOS, Wayland, and X11.
+- [ ] Measure CPU, memory, latency, bandwidth, and battery impact on minimum supported hardware.
+- [ ] **Per-feature Terms & Conditions system** — implement the client-side T&C framework (see
   section 14) so every feature (browser journey, app usage, live stream, future features)
   carries its own consent gate. This must be in place before any feature that requires explicit
   employee consent ships.
@@ -361,7 +361,7 @@ stop, heartbeat, indicator state). Prototype it in isolation before touching Web
 
 **Scope of this phase:**
 
-1. **Define the transport.** Evaluate options against the existing codebase constraints:
+1. [ ] **Define the transport.** Evaluate options against the existing codebase constraints:
    - **WebSocket (recommended starting point):** persistent authenticated connection from
      employee client to server. Reconnectable, bounded, supports server-push (request signal)
      and client-push (heartbeat, stop, indicator state). The .NET client already has HTTP
@@ -374,7 +374,7 @@ stop, heartbeat, indicator state). Prototype it in isolation before touching Web
      pollute the existing telemetry sync endpoints," and long-poll adds latency to request
      delivery.
 
-2. **Define the message contract.** All messages are JSON envelopes with:
+2. [ ] **Define the message contract.** All messages are JSON envelopes with:
    ```
    { "type": "...", "id": "<uuid>", "timestamp": "...", "payload": {...} }
    ```
@@ -395,7 +395,7 @@ stop, heartbeat, indicator state). Prototype it in isolation before touching Web
 
    Every message carries an idempotency key (`id` field). Duplicate delivery is safe.
 
-3. **Define the connection lifecycle:**
+3. [ ] **Define the connection lifecycle:**
    - Client connects on startup (after login, after `StartTracking()`).
    - Client authenticates the WebSocket with the same JWT/device token used for sync.
    - Server validates and associates the connection with the employee's device.
@@ -407,7 +407,7 @@ stop, heartbeat, indicator state). Prototype it in isolation before touching Web
      replays any missed state changes (idempotent replay from in-memory buffer, bounded to
      last 5 minutes).
 
-4. **Prototype in isolation:**
+4. [ ] **Prototype in isolation:**
    - Server: new `control_channel` package with `WebSocketHandler`, `ConnectionRegistry`
      (in-memory map of employee_id → active connection), `MessageBus` (route messages by
      type), and `HeartbeatMonitor` (goroutine per connection).
@@ -417,7 +417,7 @@ stop, heartbeat, indicator state). Prototype it in isolation before touching Web
    - Test: server sends `view.request` → client logs it and responds `view.accept` → server
      logs it. Proves the full round-trip works.
 
-5. **Failure modes to test before Phase 1:**
+5. [ ] **Failure modes to test before Phase 1:**
    - Client disconnects mid-request (server must not leave session in limbo).
    - Server restarts while a view is active (client must reconnect and report state).
    - Multiple connections from the same device (server rejects duplicates).
@@ -425,28 +425,28 @@ stop, heartbeat, indicator state). Prototype it in isolation before touching Web
    - Token expiry during an active WebSocket (server closes; client reconnects with fresh token).
 
 **Exit criteria for Phase 0.5:**
-- Control channel works end-to-end in `dotnet run` against the Go server.
-- Heartbeat + reconnect + idempotent message delivery verified.
-- Message contract documented and reviewed.
-- No screen capture, no WebRTC, no SFU — just the channel.
+- [ ] Control channel works end-to-end in `dotnet run` against the Go server.
+- [ ] Heartbeat + reconnect + idempotent message delivery verified.
+- [ ] Message contract documented and reviewed.
+- [ ] No screen capture, no WebRTC, no SFU — just the channel.
 
 ### Phase 1 - Secure internal pilot
 
-- Implement one-to-one live-only WebRTC viewing, explicit employee indicator/consent, bounded
+- [ ] Implement one-to-one live-only WebRTC viewing, explicit employee indicator/consent, bounded
   leases, server-side RBAC, audit events, expiry, stop/revoke, and no recording.
-- Deploy to an isolated staging tenant with synthetic or consenting test users.
-- Complete security review, dependency/SBOM review, and installed-build testing.
+- [ ] Deploy to an isolated staging tenant with synthetic or consenting test users.
+- [ ] Complete security review, dependency/SBOM review, and installed-build testing.
 
 ### Phase 2 - Controlled production rollout
 
-- Enable by tenant/department feature flag, with a small operator group.
-- Review audit logs and support incidents weekly; tune bitrate and duration limits.
-- Add regional SFU/TURN capacity only after measured demand.
+- [ ] Enable by tenant/department feature flag, with a small operator group.
+- [ ] Review audit logs and support incidents weekly; tune bitrate and duration limits.
+- [ ] Add regional SFU/TURN capacity only after measured demand.
 
 ### Phase 3 - Expansion
 
-- Add multi-viewer or manager approval only if a new policy review supports it.
-- Treat recording, audio, mobile clients, and unattended access as separate projects.
+- [ ] Add multi-viewer or manager approval only if a new policy review supports it.
+- [ ] Treat recording, audio, mobile clients, and unattended access as separate projects.
 
 ## 12. What this plan does NOT cover
 
@@ -465,25 +465,25 @@ requiring its own plan, DPIA, and approval process:
 
 ## 13. Definition of done
 
-- Counsel/DPIA and employee notice approved for every deployment jurisdiction.
-- Per-feature T&C accepted by the target employee (server-side check on `terms_consent`).
-- No stream can start without a server-authorized lease, required consent/indicator, and a
+- [ ] Counsel/DPIA and employee notice approved for every deployment jurisdiction.
+- [ ] Per-feature T&C accepted by the target employee (server-side check on `terms_consent`).
+- [ ] No stream can start without a server-authorized lease, required consent/indicator, and a
   valid control-channel connection to the target device.
-- Unauthorized admins cannot request, subscribe, or mint tokens.
-- Stop, expiry, revoke, logout, lock, disconnect, and server restart terminate publishing.
-- No media frames or raw tokens are persisted in application databases or normal logs.
-- Audit records are complete, tamper-resistant to ordinary admins, queryable, and retained per
+- [ ] Unauthorized admins cannot request, subscribe, or mint tokens.
+- [ ] Stop, expiry, revoke, logout, lock, disconnect, and server restart terminate publishing.
+- [ ] No media frames or raw tokens are persisted in application databases or normal logs.
+- [ ] Audit records are complete, tamper-resistant to ordinary admins, queryable, and retained per
   policy.
-- CPU, memory, bandwidth, latency, and battery targets are met on the support matrix.
-- API, SFU, TURN, client, and web failure modes have tested recovery behavior.
-- `dotnet build` (0 warnings/0 errors), `go build`/`go vet` clean, `npx tsc --noEmit` clean,
+- [ ] CPU, memory, bandwidth, latency, and battery targets are met on the support matrix.
+- [ ] API, SFU, TURN, client, and web failure modes have tested recovery behavior.
+- [ ] `dotnet build` (0 warnings/0 errors), `go build`/`go vet` clean, `npx tsc --noEmit` clean,
   `next build` passes. Focused integration and security tests added.
-- The feature is verified from installed client artifacts on every supported platform
+- [ ] The feature is verified from installed client artifacts on every supported platform
   (Installer-Parity Rule). `dotnet run` alone is insufficient.
-- Cross-platform analyzer safety: no `[SupportedOSPlatform]` propagation through
+- [ ] Cross-platform analyzer safety: no `[SupportedOSPlatform]` propagation through
   background-service call graphs; every platform method guarded with
   `OperatingSystem.IsWindows/Linux/MacOS()`.
-- New env vars baked into `config.enc` before installer build.
+- [ ] New env vars baked into `config.enc` before installer build.
 
 ## 14. Per-feature Terms & Conditions — Client-side consent framework
 

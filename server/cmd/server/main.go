@@ -75,6 +75,7 @@ func main() {
 	refreshTokenRepo := repository.NewRefreshTokenRepo(pool)
 	shiftRepo := repository.NewShiftRepo(pool)
 	timeAttendanceRepo := repository.NewTimeAttendanceRepo(pool)
+	termsConsentRepo := repository.NewTermsConsentRepo(pool)
 
 	authService := services.NewAuthService(userRepo, rbacRepo, refreshTokenRepo, cfg.JWT, cfg.Admin)
 	userService := services.NewUserService(userRepo, rbacRepo, employeeRepo)
@@ -104,6 +105,7 @@ func main() {
 	shiftHandler := handlers.NewShiftHandler(shiftService)
 	timeAttendanceHandler := handlers.NewTimeAttendanceHandler(timeAttendanceService)
 	geofenceHandler := handlers.NewGeofenceHandler(geofenceService)
+	termsConsentHandler := handlers.NewTermsConsentHandler(termsConsentRepo)
 
 	// ────────────────
 	// Seed RBAC catalog (modules, submodules, system role) — idempotent
@@ -150,7 +152,7 @@ func main() {
 	e.HideBanner = true
 	e.HidePort = true
 
-	router.Setup(e, cfg, authService, deviceRepo, userRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler, rbacHandler, shiftHandler, timeAttendanceHandler, geofenceHandler)
+	router.Setup(e, cfg, authService, deviceRepo, userRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler, rbacHandler, shiftHandler, timeAttendanceHandler, geofenceHandler, termsConsentHandler)
 
 	// ────────────────
 	// Graceful Shutdown

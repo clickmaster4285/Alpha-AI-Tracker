@@ -27,6 +27,7 @@ func Setup(
 	shiftHandler *handlers.ShiftHandler,
 	timeAttendanceHandler *handlers.TimeAttendanceHandler,
 	geofenceHandler *handlers.GeofenceHandler,
+	termsConsentHandler *handlers.TermsConsentHandler,
 ) {
 	// ─────────────────────────────
 	// Global Middleware
@@ -208,4 +209,9 @@ func Setup(
 
 	protected.GET("/attendance/today", timeAttendanceHandler.GetToday)
 	protected.GET("/attendance/range", timeAttendanceHandler.GetRange)
+
+	// Terms & Conditions consent (audit trail + check endpoint)
+	protected.POST("/terms-consent/sync", termsConsentHandler.SyncTermsConsent)
+	protected.GET("/terms-consent", termsConsentHandler.ListTermsConsent)
+	protected.GET("/terms-consent/check", termsConsentHandler.HasAccepted)
 }

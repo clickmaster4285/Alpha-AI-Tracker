@@ -8,6 +8,7 @@ using client.Core;
 using client.Core.Abstractions;
 using client.Core.BrowserAccessibility;
 using client.Core.DesktopEventBus;
+using client.Core.TermsAndConditions;
 using client.Services;
 using client.Services.Watchers;
 using client.Storage;
@@ -66,6 +67,11 @@ if (args.Contains("--print-config"))
     Console.WriteLine($"LocationEnabled={cfg.LocationEnabled}");
     Console.WriteLine($"LocationIpFallback={cfg.LocationIpFallback}");
     Console.WriteLine($"LocationPollSec={cfg.LocationPollSec}");
+    Console.WriteLine($"TermsEnabled={cfg.TermsEnabled}");
+    Console.WriteLine($"TermsBrowserJourneyEnabled={cfg.TermsBrowserJourneyEnabled}");
+    Console.WriteLine($"TermsAppUsageEnabled={cfg.TermsAppUsageEnabled}");
+    Console.WriteLine($"TermsLiveViewEnabled={cfg.TermsLiveViewEnabled}");
+    Console.WriteLine($"TermsFileJourneyEnabled={cfg.TermsFileJourneyEnabled}");
     return;
 }
 
@@ -156,6 +162,18 @@ builder.Services.AddSingleton<ILogStore>(sp =>
 {
     return new SqliteLogStore(ResolveDbPath(config.DbPath), config.DbEncryptionKey);
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+// Per-feature Terms &amp; Conditions (plan.md section 14): the T&amp;C framework
+// must be available BEFORE any hosted service starts so the startup sequence
+// can check acceptance state and show modals before tracking begins.
+// ────────────────────────────────────────────────────────────────────────────
+if (config.TermsEnabled)
+{
+    builder.Services.AddSingleton<FeatureTermsRegistry>();
+    builder.Services.AddSingleton<TermsModal>();
+    builder.Services.AddSingleton<TermsConsentSyncer>();
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // Time & Attendance (Phase 1, finalplan section 3 / R7): the ShutdownSentinel
@@ -350,6 +368,112 @@ try
     // dedup bucket then suppressed LogCollectorService's valid retry.
     await host.Services.GetRequiredService<ILogStore>()
         .InitializeAsync(CancellationToken.None);
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Per-feature Terms &amp; Conditions: check required T&amp;C acceptance BEFORE
+    // starting any hosted services. The modal blocks startup until the employee
+    // accepts required terms. In --background mode, platform-native dialogs are
+    // used (no Avalonia window).
+    // ────────────────────────────────────────────────────────────────────────
+    if (config.TermsEnabled)
+    {
+        var termsRegistry = host.Services.GetRequiredService<FeatureTermsRegistry>();
+
+        // Register all features
+        termsRegistry.Register(new FeatureTermsEntry
+        {
+            FeatureId = "app_usage",
+            DisplayName = "Application Usage Tracking",
+            Description = "This feature tracks which applications you open and close, " +
+                          "including duration of use. This data is visible to your administrator.",
+            TermsVersion = "1.0.0",
+            TermsText = "By accepting, you agree that the Alpha AI Tracker application will " +
+                        "record the names of applications you use and the duration of each " +
+                        "session. This information is stored locally on your device and " +
+                        "synced to the company server for productivity analytics. Your " +
+                        "administrator can view application usage reports. No keystrokes, " +
+                        "screenshots, or content within applications is captured.",
+            IsRequired = true,
+            CanRevoke = false,
+            MinimumAcceptedVersion = "1.0.0"
+        });
+        termsRegistry.Register(new FeatureTermsEntry
+        {
+            FeatureId = "browser_journey",
+            DisplayName = "Browser Journey Tracking",
+            Description = "This feature tracks which websites you visit, including page titles " +
+                          "and URLs. This data is visible to your administrator.",
+            TermsVersion = "1.0.0",
+            TermsText = "By accepting, you agree that the Alpha AI Tracker application will " +
+                        "record the URLs and page titles of websites you visit in your " +
+                        "web browser. This information is stored locally on your device " +
+                        "and synced to the company server. Your administrator can view " +
+                        "browsing history reports. Incognito/private browsing is excluded " +
+                        "by default. You may revoke this consent at any time via Settings > " +
+                        "Privacy, which will immediately stop browser tracking.",
+            IsRequired = false,
+            CanRevoke = true,
+            RevokeEffect = "Browser journey tracking stops immediately. No new URLs or page titles are recorded.",
+            MinimumAcceptedVersion = "1.0.0"
+        });
+        termsRegistry.Register(new FeatureTermsEntry
+        {
+            FeatureId = "file_journey",
+            DisplayName = "File Explorer Journey Tracking",
+            Description = "This feature tracks which folders you browse and files you create, " +
+                          "rename, or delete. This data is visible to your administrator.",
+            TermsVersion = "1.0.0",
+            TermsText = "By accepting, you agree that the Alpha AI Tracker application will " +
+                        "record file manager navigations (folders you open) and file " +
+                        "operations (create, rename, delete) performed through your file " +
+                        "manager. This information is stored locally and synced to the " +
+                        "company server. Your administrator can view file journey reports. " +
+                        "File content is never accessed or recorded. You may revoke this " +
+                        "consent at any time via Settings > Privacy.",
+            IsRequired = false,
+            CanRevoke = true,
+            RevokeEffect = "File explorer journey tracking stops immediately. No new folder navigations or file operations are recorded.",
+            MinimumAcceptedVersion = "1.0.0"
+        });
+        termsRegistry.Register(new FeatureTermsEntry
+        {
+            FeatureId = "live_view",
+            DisplayName = "Live Screen Viewing",
+            Description = "This feature allows an administrator to view your screen in " +
+                          "real-time for support or supervision purposes.",
+            TermsVersion = "1.0.0",
+            TermsText = "By accepting, you agree that an authorized administrator may " +
+                        "request to view your screen in real-time. You will see a " +
+                        "persistent \"Screen is being viewed\" indicator during any " +
+                        "active session. You can stop sharing at any time. No audio, " +
+                        "webcam, keyboard, or clipboard data is captured. Each viewing " +
+                        "session requires a reason and has a maximum duration. All " +
+                        "sessions are logged in an audit trail. You may revoke this " +
+                        "consent at any time via Settings > Privacy.",
+            IsRequired = false,
+            CanRevoke = true,
+            RevokeEffect = "Live screen viewing requests are rejected. No administrator can view your screen.",
+            MinimumAcceptedVersion = "1.0.0"
+        });
+
+        // Check pending features and show modals
+        var pending = await termsRegistry.GetPendingFeaturesAsync(CancellationToken.None);
+        if (pending.Count > 0)
+        {
+            var termsModal = host.Services.GetRequiredService<TermsModal>();
+            var accepted = await termsModal.ShowAsync(pending, CancellationToken.None);
+            if (!accepted)
+            {
+                Console.Error.WriteLine("[client] Required Terms & Conditions not accepted — exiting.");
+                return;
+            }
+            // Record acceptance for each pending feature
+            foreach (var feature in pending)
+            {
+                await termsRegistry.AcceptAsync(feature.FeatureId, feature.TermsVersion, CancellationToken.None);
+            }
+        }
+    }
 
     await host.StartAsync(CancellationToken.None);
 
