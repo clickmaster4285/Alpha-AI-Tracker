@@ -1274,7 +1274,6 @@ export const termsConsentApi = {
 
 export interface TermsContentItem {
   id: string;
-  slug: string;
   heading: string;
   body: string;
   termsVersion: string;

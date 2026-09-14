@@ -78,6 +78,12 @@ func main() {
 	termsConsentRepo := repository.NewTermsConsentRepo(pool)
 	termsContentRepo := repository.NewTermsContentRepo(pool)
 
+	// Seed featured Terms & Conditions (idempotent — safe on every startup)
+	termsSeeder := services.NewTermsContentSeeder(termsContentRepo)
+	if err := termsSeeder.SeedFeaturedTerms(context.Background()); err != nil {
+		log.Printf("[server] WARNING: terms seeder error: %v", err)
+	}
+
 	authService := services.NewAuthService(userRepo, rbacRepo, refreshTokenRepo, cfg.JWT, cfg.Admin)
 	userService := services.NewUserService(userRepo, rbacRepo, employeeRepo)
 	employeeService := services.NewEmployeeService(employeeRepo, shiftRepo, redisClient)

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/alpha-ai-tracker/server/internal/repository"
@@ -18,11 +19,13 @@ func NewTermsContentHandler(repo *repository.TermsContentRepo) *TermsContentHand
 
 type TermsContentResponse struct {
 	ID           string `json:"id"`
-	Slug         string `json:"slug"`
 	Heading      string `json:"heading"`
 	Body         string `json:"body"`
 	TermsVersion string `json:"termsVersion"`
 	IsSystem     bool   `json:"isSystem"`
+	FeatureID    string `json:"featureId,omitempty"`
+	TermType     string `json:"termType"`
+	IsActive     int    `json:"isActive"`
 	SortOrder    int    `json:"sortOrder"`
 	UpdatedAt    string `json:"updatedAt"`
 	CreatedAt    string `json:"createdAt"`
@@ -44,14 +47,20 @@ type CreateTermsContentRequest struct {
 	TermsVersion string `json:"termsVersion"`
 }
 
+type UpdateActiveRequest struct {
+	IsActive int `json:"isActive"`
+}
+
 func toResponse(item *repository.TermsContent) TermsContentResponse {
 	return TermsContentResponse{
 		ID:           item.ID,
-		Slug:         item.Slug,
 		Heading:      item.Heading,
 		Body:         item.Body,
 		TermsVersion: item.TermsVersion,
 		IsSystem:     item.IsSystem,
+		FeatureID:    item.FeatureID,
+		TermType:     item.TermType,
+		IsActive:     item.IsActive,
 		SortOrder:    item.SortOrder,
 		UpdatedAt:    item.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 		CreatedAt:    item.CreatedAt.Format("2006-01-02T15:04:05Z"),
@@ -105,6 +114,28 @@ func (h *TermsContentHandler) UpdateTermsContent(c echo.Context) error {
 	return c.JSON(http.StatusOK, toResponse(item))
 }
 
+func (h *TermsContentHandler) UpdateActive(c echo.Context) error {
+	id := c.Param("id")
+	var req UpdateActiveRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	}
+
+	if req.IsActive != 0 && req.IsActive != 1 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "isActive must be 0 or 1"})
+	}
+
+	ctx := c.Request().Context()
+	if err := h.repo.UpdateActive(ctx, id, req.IsActive); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	return c.JSON(http.StatusOK, map[string]string{
+		"message":  "updated",
+		"isActive": strconv.Itoa(req.IsActive),
+	})
+}
+
 func (h *TermsContentHandler) CreateTermsContent(c echo.Context) error {
 	var req CreateTermsContentRequest
 	if err := c.Bind(&req); err != nil {
@@ -115,19 +146,6 @@ func (h *TermsContentHandler) CreateTermsContent(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "heading is required"})
 	}
 
-	// Auto-generate slug from heading
-	slug := strings.ToLower(strings.TrimSpace(req.Heading))
-	slug = strings.ReplaceAll(slug, " ", "_")
-	slug = strings.ReplaceAll(slug, "-", "_")
-	// Remove non-alphanumeric/underscore chars
-	var cleaned []rune
-	for _, r := range slug {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
-			cleaned = append(cleaned, r)
-		}
-	}
-	slug = string(cleaned)
-
 	if req.TermsVersion == "" {
 		req.TermsVersion = "1.0"
 	}
@@ -135,7 +153,7 @@ func (h *TermsContentHandler) CreateTermsContent(c echo.Context) error {
 	ctx := c.Request().Context()
 	maxOrder := h.repo.GetMaxSortOrder(ctx)
 
-	item, err := h.repo.Create(ctx, slug, req.Heading, req.Body, req.TermsVersion, maxOrder+1)
+	item, err := h.repo.Create(ctx, req.Heading, req.Body, req.TermsVersion, maxOrder+1)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}

@@ -220,6 +220,7 @@ func Setup(
 	protected.GET("/terms-content", termsContentHandler.ListTermsContent)
 	protected.GET("/terms-content/:id", termsContentHandler.GetTermsContent)
 	protected.PUT("/terms-content/:id", termsContentHandler.UpdateTermsContent)
+	protected.PATCH("/terms-content/:id/active", termsContentHandler.UpdateActive)
 	protected.POST("/terms-content", termsContentHandler.CreateTermsContent)
 	protected.DELETE("/terms-content/:id", termsContentHandler.DeleteTermsContent)
 }
