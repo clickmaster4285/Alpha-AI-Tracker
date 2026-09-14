@@ -1,4 +1,9 @@
-# Live Employee Screen Viewing - Legal and Production Plan
+# Live Employee Screen Viewing — Engineering Plan
+
+> **Status:** Design. Not implemented.
+> **Scope:** Admin-authorized, employee-visible, time-bounded live screen viewing.
+> **Depends on:** Phase 0.5 (control channel), Phase 0 (T&C framework), server migration
+> sequencing, and the existing Installer-Parity Rule.
 
 ## 1. Scope and non-negotiable product rule
 
@@ -240,34 +245,60 @@ Start conservatively and measure on representative employee hardware:
 
 ## 9. Where this fits in the current codebase
 
+All file placement follows `FILE_HIERARCHY.md` ownership and the naming conventions in
+`AGENTS.md` §6 (PascalCase C#, camelCase TypeScript, PascalCase Go exports, camelCase JSON).
+
 ### Client
 
 - Add capture/publisher services under `client/Services/LiveView/`.
 - Add platform providers under `client/Platform/Windows`, `client/Platform/Linux`, and
-  `client/Platform/MacOS` or the repository's established partial-file pattern.
-- Add configuration gates such as `ALPHA_LIVE_VIEW_ENABLED`, max duration, max resolution, and
-  max fps to `.env`, `.env.example`, config printing, and the encrypted installer config path.
+  `client/Platform/MacOS` using the repository's established partial-file pattern. Guard every
+  platform method body with `OperatingSystem.IsWindows/Linux/MacOS()` — do NOT propagate
+  `[SupportedOSPlatform]` through cross-platform partial/background-service call graphs
+  (Cross-Platform Analyzer Safety Rule).
+- Add configuration gates (`ALPHA_LIVE_VIEW_ENABLED`, max duration, max resolution, max fps) to
+  `.env`, `.env.example`, config printing (`--print-config`), and the encrypted installer config
+  path. Per the **Installer-Parity Rule**, these vars MUST be in `.env` BEFORE
+  `encrypt-config.sh` runs — `dotnet run` reads `.env` directly, but installed builds ship
+  `config.enc` baked at build time.
 - Add the employee indicator to the existing Avalonia shell/tray. It must work in headless mode
-  and must not depend on opening the GUI.
+  (`--background`) and must not depend on opening the GUI.
 - Add a dedicated control channel; do not reuse telemetry payloads or the 11 sync endpoints.
+- Branding: the indicator text and any new UI strings must resolve through `Core/AppInfo.cs`
+  (the `APP_IDENTIFIERS` + `VERSION` single source) — never hardcoded literals.
 
 ### Server
 
-- Add live-view handler/service/repository packages and sequential migrations.
-- Add server-side RBAC checks and employee scope checks before issuing any token.
+- Add live-view handler/service/repository packages and sequential migration files in
+  `server/migrations/`.
+- Add server-side RBAC checks (using the existing `roles`/`modules`/`submodules` catalog from
+  migration 025) and employee scope checks before issuing any token. Permission keys follow the
+  `employee-journey/live-view/*` convention.
 - Add an expiry/revocation worker and an audit writer.
 - Add SFU token generation using the provider's Go SDK and keep the SFU secret server-side.
 - Add a control-channel transport that is authenticated, reconnectable, idempotent, and bounded.
+- All new endpoints go under `/api/v1/live-view/` and use the existing `dto.APIError` error
+  response format. Register routes in `cmd/server/main.go` before existing `:id` routes (safe
+  ordering convention).
 
 ### Web
 
 - Replace the current placeholder in `web/src/app/(app)/live-stream/page.tsx` only after the
   backend contract exists.
-- Use the existing URL-synced filter and infinite-scroll rules for employee/session history.
+- **URL-Synced Filters Rule:** the session history page must keep filter state (employee,
+  date range, status) in the browser URL query string via `useUrlQueryState` or
+  `useUrlActivityFilter`. The search input uses a local debounced mirror (~400 ms); date
+  modals have no Clear button.
+- **Web Infinite-Scroll Rule:** session history and audit history tables MUST use
+  `useInfiniteQuery` with an IntersectionObserver sentinel. Previous/Next buttons are forbidden.
+- **Server-Projected Flags Rule:** any boolean that depends on a cross-table relationship (e.g.
+  "has this employee accepted live-view T&C?") must be projected in the server query, not
+  reconstructed client-side.
 - Use the LiveKit browser client for playback, not a custom `<img>` polling loop.
 - Show request state, employee indicator state, timer, reason, connection quality, and an
   unmistakable Stop button. Never autoplay audio because audio is not part of this feature.
 - Add an audit/history view with permissions separate from live viewing where policy requires it.
+- Wrap any component using `useSearchParams` in a `<Suspense>` boundary.
 
 ## 10. Dependency and deployment recommendation
 
@@ -277,6 +308,7 @@ Start conservatively and measure on representative employee hardware:
 2. Validate a maintained native .NET publisher binding for the exact target OS versions. If no
    binding is production-quality, create a small native bridge around the official libwebrtc/
    LiveKit native SDK per platform rather than selecting an abandoned all-in-one NuGet package.
+   Review the binding's license, CVE history, update cadence, and SBOM impact before commitment.
 3. Keep the browser dependency to the LiveKit JavaScript client and the server dependency to
    the LiveKit Go SDK. Pin versions and generate an SBOM.
 4. Do not add FFmpeg, GStreamer, or a software JPEG pipeline for the first interactive release.
@@ -290,8 +322,23 @@ Start conservatively and measure on representative employee hardware:
 - Monitor SFU and API metrics without recording media.
 - Test NAT/firewall, VPN, proxy, Wayland permissions, macOS TCC, Windows capture permission,
   lock/unlock, sleep/resume, fast client restart, token expiry, and server restart.
-- Rebuild and verify the installed client on every supported platform per the repository's
-  Installer-Parity Rule. A successful `dotnet run` is not release evidence.
+
+### Verification (per the Installer-Parity Rule)
+
+A successful `dotnet run` is NOT release evidence. Every phase must be verified against these
+checks before proceeding:
+
+| Service | Required checks |
+|---------|----------------|
+| **Client** | `dotnet build` (0 warnings/0 errors); for cross-platform analyzer changes, non-incremental build must not exceed 2× baseline duration or approach 1 GB compiler memory |
+| **Server** | `go build` + `go vet` clean |
+| **Web** | `npx tsc --noEmit` clean, `next build` passes |
+| **Cross-service** | All affected services pass; serialized contracts (DTO ↔ API client ↔ TypeScript types) are consistent |
+| **Installer** | Build the platform installer (`bash publish/build-installer.sh -b linux`), install the artifact, run the new functionality from the installed binary. Report clearly when installation could not be completed. |
+
+New env vars must be added to `.env` BEFORE `encrypt-config.sh` runs. Config changes now
+auto-propagate via `EnvLoader` replacing stale user-config copies, but the initial bake is
+mandatory.
 
 ## 11. Delivery phases
 
@@ -302,7 +349,7 @@ Start conservatively and measure on representative employee hardware:
 - Build a capture-only lab prototype for Windows, macOS, Wayland, and X11.
 - Measure CPU, memory, latency, bandwidth, and battery impact on minimum supported hardware.
 - **Per-feature Terms & Conditions system** — implement the client-side T&C framework (see
-  section 13) so every feature (browser journey, app usage, live stream, future features)
+  section 14) so every feature (browser journey, app usage, live stream, future features)
   carries its own consent gate. This must be in place before any feature that requires explicit
   employee consent ships.
 
@@ -401,10 +448,27 @@ stop, heartbeat, indicator state). Prototype it in isolation before touching Web
 - Add multi-viewer or manager approval only if a new policy review supports it.
 - Treat recording, audio, mobile clients, and unattended access as separate projects.
 
-## 12. Definition of done
+## 12. What this plan does NOT cover
+
+The following are explicitly out of scope. If any is proposed, treat it as a separate project
+requiring its own plan, DPIA, and approval process:
+
+- **Recording, replay, screenshots, or archival** of any screen content.
+- **Audio capture** — microphone, system audio, or speaker output.
+- **Webcam capture** — camera feeds are unrelated to screen viewing.
+- **Keyboard logging, clipboard capture, or input recording.**
+- **Multi-viewer sessions** — more than one admin viewing simultaneously.
+- **Manager approval workflows** — a second-level approver before a view starts.
+- **Unattended access** — viewing when the employee is away from the machine.
+- **Mobile client support** — iOS/Android screen capture and viewing.
+- **AI-based analysis** of screen content (OCR, activity classification, etc.).
+
+## 13. Definition of done
 
 - Counsel/DPIA and employee notice approved for every deployment jurisdiction.
-- No stream can start without a server-authorized lease and required consent/indicator.
+- Per-feature T&C accepted by the target employee (server-side check on `terms_consent`).
+- No stream can start without a server-authorized lease, required consent/indicator, and a
+  valid control-channel connection to the target device.
 - Unauthorized admins cannot request, subscribe, or mint tokens.
 - Stop, expiry, revoke, logout, lock, disconnect, and server restart terminate publishing.
 - No media frames or raw tokens are persisted in application databases or normal logs.
@@ -412,11 +476,16 @@ stop, heartbeat, indicator state). Prototype it in isolation before touching Web
   policy.
 - CPU, memory, bandwidth, latency, and battery targets are met on the support matrix.
 - API, SFU, TURN, client, and web failure modes have tested recovery behavior.
-- `go build`/`go vet`, `npx tsc --noEmit`, `next build`, and `dotnet build` pass, plus focused
-  integration/security tests.
-- The feature is verified from installed client artifacts on every supported platform.
+- `dotnet build` (0 warnings/0 errors), `go build`/`go vet` clean, `npx tsc --noEmit` clean,
+  `next build` passes. Focused integration and security tests added.
+- The feature is verified from installed client artifacts on every supported platform
+  (Installer-Parity Rule). `dotnet run` alone is insufficient.
+- Cross-platform analyzer safety: no `[SupportedOSPlatform]` propagation through
+  background-service call graphs; every platform method guarded with
+  `OperatingSystem.IsWindows/Linux/MacOS()`.
+- New env vars baked into `config.enc` before installer build.
 
-## 13. Per-feature Terms & Conditions — Client-side consent framework
+## 14. Per-feature Terms & Conditions — Client-side consent framework
 
 Every feature that collects, transmits, or exposes employee data must have its own
 Terms & Conditions that the employee reads and explicitly accepts before the feature activates.
@@ -533,7 +602,12 @@ cannot use the feature (or the app, if required) until they accept the updated t
 
 ### Headless (`--background`) mode handling
 
-In `--background` mode there is no Avalonia window. The approach per platform:
+In `--background` mode there is no Avalonia window. Platform-specific dialog calls are
+guarded with `OperatingSystem.IsWindows/Linux/MacOS()` — each platform has its own native
+dialog implementation, and the cross-platform call site must never propagate
+`[SupportedOSPlatform]` through the `BackgroundService` call graph.
+
+The approach per platform:
 
 - **Windows:** Use `System.Windows.Forms.MessageBox` (requires `System.Windows.Forms`
   reference, which is available in .NET 10). The MessageBox is modal, blocks the thread,
@@ -567,27 +641,34 @@ CREATE TABLE terms_consent (
 );
 ```
 
-Server sync endpoint: `POST /api/v1/terms-consent/sync` — the client sends consent events
-on every sync pass so the server audit trail stays current. The server does NOT use this
-table to gate features — it is append-only for compliance evidence.
+Server sync endpoint: `POST /api/v1/terms-consent/sync` — follows the existing 11 sync endpoint
+conventions (`{employeeId, token, entries: [...]}` body, JWT auth, upsert on conflict). The
+client sends consent events on every sync pass so the server audit trail stays current. The
+server does NOT use this table to gate features — it is append-only for compliance evidence.
 
 ### Codebase integration
+
+All file placement follows `FILE_HIERARCHY.md` and the naming conventions in `AGENTS.md` §6.
 
 - `client/Core/TermsAndConditions/FeatureTermsRegistry.cs` — feature registration and
   version checking.
 - `client/Core/TermsAndConditions/TermsModal.cs` — standalone window / platform dialog
-  launcher.
+  launcher. Platform-specific dialog calls guarded with `OperatingSystem.IsWindows/Linux/MacOS()`
+  (Cross-Platform Analyzer Safety Rule).
 - `client/Core/TermsAndConditions/TermsConsentStore.cs` — read/write `app_status`.
 - `client/Services/TermsConsentSyncService.cs` — sync consent events to server (can be
-  part of the existing `SyncService` loop, not a separate BackgroundService).
+  part of the existing `SyncService` loop, not a separate BackgroundService). Follows the
+  existing sync payload conventions (`{employeeId, token, entries: [...]}`).
 - `server/internal/repository/terms_consent_repo.go` — append-only insert + list.
 - `server/internal/handler/terms_consent_handler.go` — sync endpoint.
 - `server/migrations/0XX_terms_consent.sql` — the table above.
 - `web/src/app/(app)/settings/privacy/page.tsx` — employee-facing T&C status and revoke
-  controls (reads from a `GET /api/v1/terms-consent?employeeId=` endpoint).
+  controls (reads from `GET /api/v1/terms-consent?employeeId=` endpoint). Uses
+  `useUrlQueryState` for filter state (URL-Synced Filters Rule) and `useInfiniteQuery` for
+  any list view (Web Infinite-Scroll Rule).
 - Config gates: `ALPHA_TERMS_BROWSER_JOURNEY_ENABLED`, `ALPHA_TERMS_LIVE_VIEW_ENABLED`,
   etc. — feature-level kill switches independent of T&C (a feature can be code-complete
-  but terms-gated).
+  but terms-gated). Added to `.env`, `.env.example`, `AppConfig`, and `--print-config`.
 
 ### Relationship to live stream feature
 
