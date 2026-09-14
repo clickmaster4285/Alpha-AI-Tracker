@@ -1268,4 +1268,29 @@ export const termsConsentApi = {
     }),
 };
 
+// ──────────────────────────
+// Terms & Conditions content management
+// ──────────────────────────
+
+export interface TermsContentItem {
+  id: string;
+  featureId: string;
+  heading: string;
+  body: string;
+  termsVersion: string;
+  updatedAt: string;
+  createdAt: string;
+}
+
+export const termsContentApi = {
+  list: () => request<{ items: TermsContentItem[] }>('/terms-content'),
+  get: (featureId: string) =>
+    request<TermsContentItem>(`/terms-content/${featureId}`),
+  update: (featureId: string, data: { heading: string; body: string; termsVersion: string }) =>
+    request<TermsContentItem>(`/terms-content/${featureId}`, {
+      method: 'PUT',
+      body: data,
+    }),
+};
+
 export { ApiError };

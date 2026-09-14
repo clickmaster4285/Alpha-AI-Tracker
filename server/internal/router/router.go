@@ -28,6 +28,7 @@ func Setup(
 	timeAttendanceHandler *handlers.TimeAttendanceHandler,
 	geofenceHandler *handlers.GeofenceHandler,
 	termsConsentHandler *handlers.TermsConsentHandler,
+	termsContentHandler *handlers.TermsContentHandler,
 ) {
 	// ─────────────────────────────
 	// Global Middleware
@@ -214,4 +215,9 @@ func Setup(
 	protected.POST("/terms-consent/sync", termsConsentHandler.SyncTermsConsent)
 	protected.GET("/terms-consent", termsConsentHandler.ListTermsConsent)
 	protected.GET("/terms-consent/check", termsConsentHandler.HasAccepted)
+
+	// Terms & Conditions content management (editable by admin)
+	protected.GET("/terms-content", termsContentHandler.ListTermsContent)
+	protected.GET("/terms-content/:featureId", termsContentHandler.GetTermsContent)
+	protected.PUT("/terms-content/:featureId", termsContentHandler.UpdateTermsContent)
 }
