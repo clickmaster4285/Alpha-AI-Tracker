@@ -301,6 +301,87 @@ Start conservatively and measure on representative employee hardware:
   model.
 - Build a capture-only lab prototype for Windows, macOS, Wayland, and X11.
 - Measure CPU, memory, latency, bandwidth, and battery impact on minimum supported hardware.
+- **Per-feature Terms & Conditions system** — implement the client-side T&C framework (see
+  section 13) so every feature (browser journey, app usage, live stream, future features)
+  carries its own consent gate. This must be in place before any feature that requires explicit
+  employee consent ships.
+
+### Phase 0.5 - Control Channel RFC
+
+The control channel is the most architecturally novel piece in this feature — it does not
+exist in the current codebase and is the dependency for everything else (request, approve,
+stop, heartbeat, indicator state). Prototype it in isolation before touching WebRTC.
+
+**Scope of this phase:**
+
+1. **Define the transport.** Evaluate options against the existing codebase constraints:
+   - **WebSocket (recommended starting point):** persistent authenticated connection from
+     employee client to server. Reconnectable, bounded, supports server-push (request signal)
+     and client-push (heartbeat, stop, indicator state). The .NET client already has HTTP
+     infrastructure; a single `System.Net.Websockets.ClientWebSocket` connection with
+     exponential backoff reconnect is minimal new dependency.
+   - **gRPC bidirectional stream:** stronger contract, code-gen, but heavier for a .NET
+     client that currently has zero gRPC dependencies. Consider only if WebSocket proves
+     inadequate.
+   - **Long-poll on existing sync endpoints:** rejected — the plan explicitly says "do not
+     pollute the existing telemetry sync endpoints," and long-poll adds latency to request
+     delivery.
+
+2. **Define the message contract.** All messages are JSON envelopes with:
+   ```
+   { "type": "...", "id": "<uuid>", "timestamp": "...", "payload": {...} }
+   ```
+   Message types (server → client):
+   - `view.request` — admin wants to view; carries session ID, reason, duration, expiry
+   - `view.approve` — server approves (carries room token, SFU URL)
+   - `view.deny` — server denies
+   - `view.stop` — server forces stop (expiry, revocation, policy)
+   - `view.heartbeat` — server liveness check, client must respond within N seconds
+
+   Message types (client → server):
+   - `view.accept` — employee accepts, client ready to publish
+   - `view.deny` — employee declines
+   - `view.stop` — employee stops sharing
+   - `view.heartbeat.ack` — liveness response
+   - `view.status` — permission state, capture provider diagnostics
+   - `view.error` — capture failed, permission denied, etc.
+
+   Every message carries an idempotency key (`id` field). Duplicate delivery is safe.
+
+3. **Define the connection lifecycle:**
+   - Client connects on startup (after login, after `StartTracking()`).
+   - Client authenticates the WebSocket with the same JWT/device token used for sync.
+   - Server validates and associates the connection with the employee's device.
+   - Client sends heartbeat every 30s; server expects ack within 10s.
+   - On disconnect, client reconnects with exponential backoff (1s → 2s → 4s → … → 30s max).
+   - Server marks the device "offline" after 2 missed heartbeats; no view requests are sent
+     to offline devices.
+   - On reconnect, client sends a `sync` message with the last received message ID; server
+     replays any missed state changes (idempotent replay from in-memory buffer, bounded to
+     last 5 minutes).
+
+4. **Prototype in isolation:**
+   - Server: new `control_channel` package with `WebSocketHandler`, `ConnectionRegistry`
+     (in-memory map of employee_id → active connection), `MessageBus` (route messages by
+     type), and `HeartbeatMonitor` (goroutine per connection).
+   - Client: new `ControlChannelService` (BackgroundService) with `WebSocketClient`,
+     `MessageHandler` dispatch, and `HeartbeatSender`.
+   - No WebRTC, no SFU, no screen capture in this phase. Just the channel + messages.
+   - Test: server sends `view.request` → client logs it and responds `view.accept` → server
+     logs it. Proves the full round-trip works.
+
+5. **Failure modes to test before Phase 1:**
+   - Client disconnects mid-request (server must not leave session in limbo).
+   - Server restarts while a view is active (client must reconnect and report state).
+   - Multiple connections from the same device (server rejects duplicates).
+   - Malformed/unknown message types (server logs and ignores, client is resilient).
+   - Token expiry during an active WebSocket (server closes; client reconnects with fresh token).
+
+**Exit criteria for Phase 0.5:**
+- Control channel works end-to-end in `dotnet run` against the Go server.
+- Heartbeat + reconnect + idempotent message delivery verified.
+- Message contract documented and reviewed.
+- No screen capture, no WebRTC, no SFU — just the channel.
 
 ### Phase 1 - Secure internal pilot
 
@@ -334,3 +415,185 @@ Start conservatively and measure on representative employee hardware:
 - `go build`/`go vet`, `npx tsc --noEmit`, `next build`, and `dotnet build` pass, plus focused
   integration/security tests.
 - The feature is verified from installed client artifacts on every supported platform.
+
+## 13. Per-feature Terms & Conditions — Client-side consent framework
+
+Every feature that collects, transmits, or exposes employee data must have its own
+Terms & Conditions that the employee reads and explicitly accepts before the feature activates.
+This is not a single generic "I agree to be monitored" checkbox — each feature carries its
+own T&C because each feature has different data scope, retention, and access characteristics.
+
+### Why per-feature, not one blanket T&C
+
+- Browser journey tracking (URLs, titles) has different privacy implications than app usage
+  duration (which apps, how long). A single blanket notice is legally weak — it does not
+  satisfy purpose limitation under GDPR Art. 5(1)(b) or similar regulations.
+- Live screen viewing is fundamentally different from passive telemetry. An employee who
+  accepted app-duration tracking has NOT consented to being watched live.
+- Future features (file journeys, location, screenshots) each need their own scope-limited
+  notice. The framework must scale to features that don't exist yet.
+- Jurisdiction-specific requirements vary per feature. Some features may require explicit
+  opt-in (live view), others may operate under legitimate interest with an opt-out (basic
+  app usage). Per-feature T&C makes this enforceable.
+
+### Feature registry
+
+Define a `FeatureTermsRegistry` in the client that maps each feature to its T&C metadata:
+
+```text
+FeatureTermsEntry {
+    FeatureId:         string          // e.g. "browser_journey", "app_usage", "live_view"
+    DisplayName:       string          // human-readable name for the modal title
+    Description:       string          // what the feature does (plain language)
+    TermsVersion:      string          // semver, bumped when legal text changes
+    TermsText:         string          // the full T&C text (or a file path / resource key)
+    IsRequired:        bool            // true = employee MUST accept to use the app at all
+                                      // false = employee can decline; feature is disabled
+    CanRevoke:         bool            // true = employee can revoke acceptance later
+    RevokeEffect:      string          // what happens on revoke (e.g. "browser journey tracking stops")
+    MinimumAcceptedVersion: string     // if stored version < this, re-acceptance required
+}
+```
+
+Features register themselves at startup. The first set:
+
+| FeatureId        | IsRequired | CanRevoke | Notes                                              |
+|------------------|------------|-----------|-----------------------------------------------------|
+| `app_usage`     | true       | false     | Core tracking — app open/close duration. Required for the app to function. |
+| `browser_journey` | false    | true      | URL and title tracking. Employee can decline; browser tracking is disabled. |
+| `live_view`     | false      | true      | Live screen viewing. Employee can decline; live view requests are rejected. |
+| `file_journey`  | false      | true      | File explorer tracking. Employee can decline; file event bus is disabled. |
+| *(future)*      | —          | —         | Every new feature adds a row to the registry.       |
+
+### Storage
+
+- Accepted T&C records are stored in SQLite `app_status` table as key-value pairs:
+  `terms_accepted_{featureId} = { version, acceptedAt, revokedAt? }`.
+- On first launch (no `app_status` rows), the framework initializes and shows the required
+  T&C modals before any tracking starts.
+- The server receives the accepted versions in the sync payload so it can verify consent
+  state during audit — but the server does NOT gate feature activation (the client is the
+  authority for local consent; the server is the authority for server-side access like
+  live-view requests).
+
+### Modal behavior — standalone window, not inside the GUI
+
+The T&C modal is a **separate Avalonia window**, not embedded in the existing
+`MainWindow.axaml` GUI shell. Reasons:
+
+1. The GUI may not be open (headless `--background` mode). T&C must still be enforceable.
+2. The modal must be **uncloseable** until the employee accepts or declines. A separate
+   window with no close button, no Alt+F4, and no tray interaction is simpler to enforce
+   than modal state inside a complex router.
+3. The modal must appear **before any tracking starts** — even in `--background` mode.
+
+**Launch sequence:**
+
+```
+Program.cs startup
+  -> ILogStore.InitializeAsync()
+  -> FeatureTermsRegistry.InitializeAsync()   // reads app_status for accepted versions
+  -> if (required T&C not accepted)
+       -> FeatureTermsModal.Show()             // blocking, separate window
+       -> employee accepts or declines
+       -> write to app_status
+  -> StartTracking()                           // only after required T&C accepted
+  -> --background mode: same flow, but the modal appears as a system-level window
+     (on Linux: use XDG activation or a minimal GTK/Qt dialog; on Windows: WinForms/WPF
+      MessageBox-style; on macOS: NSAlert). The Avalonia window is NOT created in
+      --background mode — platform-native dialogs are used instead.
+```
+
+**Modal UI (GUI mode):**
+
+- Full-screen or large centered window, no close button, no escape key, no Alt+F4.
+- Title: feature display name (e.g. "Browser Journey Tracking").
+- Body: the T&C text in readable formatting (scrollable if long).
+- Footer: two buttons — "I Accept" (enabled only after scrolling to bottom, if text is
+  long) and "I Decline" (only for non-required features; for required features, only
+  "I Accept" is shown — declining means the app exits).
+- Version number displayed ("Terms v1.2.0").
+- On accept: write `{ version: "1.2.0", acceptedAt: <now> }` to `app_status`, close the
+  modal, proceed to next T&C or to tracking.
+- On decline (non-required): feature is disabled, tracking continues without it. A small
+  indicator in the dashboard shows "Browser Journey: Declined — click to review".
+
+**Re-acceptance on version bump:**
+
+When a new client build ships with a higher `MinimumAcceptedVersion` for a feature, the
+stored version is below the minimum → the modal re-appears on next launch. The employee
+cannot use the feature (or the app, if required) until they accept the updated terms.
+
+**Revoke flow (non-required features):**
+
+- Employee opens the client GUI → Settings/Privacy → per-feature toggle.
+- Toggling OFF shows a confirmation: "This will stop [feature]. You can re-enable it
+  anytime." On confirm: `revokedAt` is set in `app_status`, feature stops.
+- Toggling ON shows the T&C modal again → re-acceptance required.
+
+### Headless (`--background`) mode handling
+
+In `--background` mode there is no Avalonia window. The approach per platform:
+
+- **Windows:** Use `System.Windows.Forms.MessageBox` (requires `System.Windows.Forms`
+  reference, which is available in .NET 10). The MessageBox is modal, blocks the thread,
+  and cannot be closed without clicking a button. Set topmost.
+- **Linux:** Use `zenity --text-info --filename=<terms.txt> --checkbox="I Accept"` or
+  `kdialog --textinfo <terms.txt> --checkbbox "I Accept"`. These are modal system dialogs
+  that work without a display server in many environments. Fallback: if no display is
+  available (SSH/headless server), log a warning and skip the feature (required features
+  should still block — document this as a known limitation for server-only installs).
+- **macOS:** Use `osascript` with `display dialog` — modal, blocks, cannot be dismissed
+  without clicking.
+
+If the platform dialog is unavailable (no display, no zenity, etc.) and the T&C is
+required: the client logs a FATAL error and exits. The employee must run the GUI at least
+once to accept terms. This is intentional — required consent must not be silently bypassed.
+
+### Data model addition
+
+New client SQLite migration adds nothing — the existing `app_status` key-value table
+stores T&C state. New server migration adds a `terms_consent` table for audit:
+
+```sql
+CREATE TABLE terms_consent (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    employee_id     VARCHAR(20) NOT NULL REFERENCES employees(employee_id),
+    feature_id      TEXT NOT NULL,
+    terms_version   TEXT NOT NULL,
+    action          TEXT NOT NULL CHECK (action IN ('accepted', 'revoked', 're_accepted')),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (employee_id, feature_id, terms_version, action)
+);
+```
+
+Server sync endpoint: `POST /api/v1/terms-consent/sync` — the client sends consent events
+on every sync pass so the server audit trail stays current. The server does NOT use this
+table to gate features — it is append-only for compliance evidence.
+
+### Codebase integration
+
+- `client/Core/TermsAndConditions/FeatureTermsRegistry.cs` — feature registration and
+  version checking.
+- `client/Core/TermsAndConditions/TermsModal.cs` — standalone window / platform dialog
+  launcher.
+- `client/Core/TermsAndConditions/TermsConsentStore.cs` — read/write `app_status`.
+- `client/Services/TermsConsentSyncService.cs` — sync consent events to server (can be
+  part of the existing `SyncService` loop, not a separate BackgroundService).
+- `server/internal/repository/terms_consent_repo.go` — append-only insert + list.
+- `server/internal/handler/terms_consent_handler.go` — sync endpoint.
+- `server/migrations/0XX_terms_consent.sql` — the table above.
+- `web/src/app/(app)/settings/privacy/page.tsx` — employee-facing T&C status and revoke
+  controls (reads from a `GET /api/v1/terms-consent?employeeId=` endpoint).
+- Config gates: `ALPHA_TERMS_BROWSER_JOURNEY_ENABLED`, `ALPHA_TERMS_LIVE_VIEW_ENABLED`,
+  etc. — feature-level kill switches independent of T&C (a feature can be code-complete
+  but terms-gated).
+
+### Relationship to live stream feature
+
+For live screen viewing specifically, the T&C must be accepted BEFORE a live-view session
+can start. The server checks `terms_consent` for `feature_id = 'live_view'` when processing
+`POST /api/v1/live-view/sessions` — if the target employee has not accepted (or has revoked),
+the request is rejected with a clear error: "Employee has not accepted the Live Viewing
+terms." This is a server-side enforcement, not just client-side — even if a compromised
+client tried to start publishing, the server would refuse to mint tokens.
