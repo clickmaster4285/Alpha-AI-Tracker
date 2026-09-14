@@ -45,16 +45,6 @@ function TermsList({
 
   return (
     <div className="space-y-8">
-      <div className="flex items-start justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Terms &amp; Conditions</h1>
-          <p className="text-muted-foreground mt-1">
-            Manage the T&amp;C content for each tracking feature. Featured terms are built-in
-            and cannot be deleted. Custom terms can be created and removed.
-          </p>
-        </div>
-      </div>
-
       {/* Featured terms */}
       <div className="space-y-4">
         <div className="flex items-center gap-2">
