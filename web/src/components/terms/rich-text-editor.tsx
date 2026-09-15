@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Underline from "@tiptap/extension-underline";
@@ -52,6 +53,18 @@ export function RichTextEditor({ value, onChange, placeholder }: RichTextEditorP
       },
     },
   });
+
+  // Sync an externally-controlled `value` into the editor. TipTap's `content`
+  // option is only honored at editor creation, so a parent that fetches a record
+  // asynchronously (the T&C edit page) must push the resolved HTML in manually.
+  // The comparison guards against resetting the document / cursor while the user
+  // is typing (their keystrokes already surface back up as `value` via onUpdate).
+  useEffect(() => {
+    if (!editor) return;
+    if (value && value !== editor.getHTML()) {
+      editor.commands.setContent(value, { emitUpdate: false });
+    }
+  }, [editor, value]);
 
   if (!editor) return null;
 
