@@ -1,0 +1,14 @@
+now i want 
+
+to enhance the /terms-and-conditions page 
+and aslo i want seperate page 
+
+
+pages i want:
+1. list of terms: /settings/terms-and-conditions,
+2. view detial: /settings/terms-and-conditions/view/{id},
+3. create | edit: /settings/terms-and-conditions/{create|edit}/{if edit then id}
+
+
+on page 1: i want tab (Custom Terms, Featured Terms) and select accordingly
+and enhance the page
