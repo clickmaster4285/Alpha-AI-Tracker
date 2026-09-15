@@ -14,6 +14,8 @@ import {
   Globe,
   FolderOpen,
   Monitor,
+  MoreVertical,
+  Calendar,
 } from "lucide-react";
 import { termsContentApi, type TermsContentItem } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
@@ -32,6 +34,13 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 type TermTab = "featured" | "custom";
 
@@ -113,56 +122,58 @@ function TermCard({
 
       {/* bottom bar */}
       <div className="mt-auto flex items-center justify-between pt-3 border-t">
-        <span className="text-xs text-muted-foreground">v{item.termsVersion}</span>
+        <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+          <span>v{item.termsVersion}</span>
+          <span className="text-border">·</span>
+          <Calendar className="w-3 h-3" />
+          <span>{new Date(item.updatedAt).toLocaleDateString()}</span>
+        </div>
 
         <div className="flex items-center gap-2">
-          <div className="flex items-center gap-2">
-            <span className={`text-xs font-medium ${isActive ? "text-primary" : "text-muted-foreground"}`}>
+          <div className="flex items-center gap-1.5 rounded-full border px-2.5 py-1">
+            <div className={`h-1.5 w-1.5 rounded-full ${isActive ? "bg-green-500" : "bg-muted-foreground/40"}`} />
+            <span className={`text-[11px] font-medium ${isActive ? "text-green-600 dark:text-green-400" : "text-muted-foreground"}`}>
               {isActive ? "Active" : "Inactive"}
             </span>
             <Switch
               checked={isActive}
               onCheckedChange={onToggleActive}
               disabled={isToggling}
+              className="h-4 w-7 [&>span]:h-3 [&>span]:w-3"
             />
           </div>
-          <div className="flex items-center gap-1">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 px-2 text-xs"
-              onClick={(e) => {
-                e.stopPropagation();
-                onOpen();
-              }}
-            >
-              <Eye className="w-3.5 h-3.5 mr-1" /> View
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 px-2 text-xs"
-              onClick={(e) => {
-                e.stopPropagation();
-                onEdit();
-              }}
-            >
-              <Pencil className="w-3.5 h-3.5 mr-1" /> Edit
-            </Button>
-            {!item.isSystem && (
+
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
               <Button
                 variant="ghost"
                 size="sm"
-                className="h-7 px-2 text-xs text-destructive hover:text-destructive"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDelete();
-                }}
+                className="h-7 w-7 p-0"
+                onClick={(e) => e.stopPropagation()}
               >
-                <Trash2 className="w-3.5 h-3.5 mr-1" /> Delete
+                <MoreVertical className="h-3.5 w-3.5" />
               </Button>
-            )}
-          </div>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-36">
+              <DropdownMenuItem onClick={onOpen}>
+                <Eye className="h-3.5 w-3.5 mr-2" /> View
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={onEdit}>
+                <Pencil className="h-3.5 w-3.5 mr-2" /> Edit
+              </DropdownMenuItem>
+              {!item.isSystem && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onClick={onDelete}
+                    className="text-destructive focus:text-destructive"
+                  >
+                    <Trash2 className="h-3.5 w-3.5 mr-2" /> Delete
+                  </DropdownMenuItem>
+                </>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
     </div>
