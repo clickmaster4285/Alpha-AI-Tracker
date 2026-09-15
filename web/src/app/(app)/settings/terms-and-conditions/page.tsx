@@ -85,7 +85,11 @@ function TermCard({
 
   return (
     <div
-      className={`group relative flex flex-col h-80 rounded-xl border bg-card p-5 transition-all hover:shadow-md ${
+      role="button"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") onOpen(); }}
+      className={`group relative flex flex-col h-80 rounded-xl border bg-card p-5 transition-all duration-200 cursor-pointer hover:shadow-md hover:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
         isActive ? "border-border" : "border-dashed border-muted-foreground/30 opacity-60"
       }`}
     >
