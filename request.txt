@@ -1,5 +1,17 @@
-i want to enhanve the gui of /settings/terms-and-conditions page 
+currently i am working on "term and condition" 
 
-i want card veiw 
+currnelty i have builted to manage(crud) on server with web side 
+know i want to add on client side 
 
-with i want also the active/inactive btn
+
+System Architecture
+1. on the client side i want to make a new totaly different intense(client_terms) which have specific task is that to get the new or upgraded terms from server and store on local db(sqlite) with coloumn "is_accepted:0|1",
+2. the client_terms get the terms from server every reboot the system and every alpha-ai-tracker version upgraded,
+3. and every time the client_terms are getting all the terms and once recived then differce on stored locally, only new or differed terms are update on the db with is_accepted:0
+
+Information Architecture | Flow 
+1. every reboot the system the intense client_terms modal gui open with maximize the screen and always on top and not closeable or minimizeable.
+2. open the client_terms modal gui with loading as "reaching to server for new terms" and when no internet then direct check on local db terms with is_accepted:0 and display the terms with exact gui as html/css step by step and accept one by one 
+3. when all the terms accepted then close the intense client_terms
+
+get also missing permission like "always open" "always on top" "not closeable " etc...
