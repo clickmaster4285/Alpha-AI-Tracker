@@ -1,11 +1,11 @@
 currently i am working on "term and condition" 
 
-currnelty i have builted to manage(crud) on server with web side 
-know i want to add on client side 
+currnelty i have built on server and web side of "term and condition" 
+now i want to config with client side 
 
 
 System Architecture
-1. on the client side i want to make a new totaly different intense(client_terms) which have specific task is that to get the new or upgraded terms from server and store on local db(sqlite) with coloumn "is_accepted:0|1",
+1. on the client side i want to make a new totaly different intense(client_terms) which have specific task is that to get the new or upgraded terms from server(is_active:1) and store on local db(sqlite) with coloumn "is_accepted:0|1",
 2. the client_terms get the terms from server every reboot the system and every alpha-ai-tracker version upgraded,
 3. and every time the client_terms are getting all the terms and once recived then differce on stored locally, only new or differed terms are update on the db with is_accepted:0
 
