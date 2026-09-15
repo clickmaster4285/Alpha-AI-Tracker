@@ -72,27 +72,25 @@ function TermCard({
   isToggling: boolean;
 }) {
   const isActive = item.isActive === 1;
-  const snippet = item.body.replace(/<[^>]*>/g, "").slice(0, 120);
+  const snippet = item.body.replace(/<[^>]*>/g, "").slice(0, 600);
 
   return (
     <div
-      className={`group relative rounded-xl border bg-card p-5 transition-all hover:shadow-md ${
+      className={`group relative flex flex-col h-80 rounded-xl border bg-card p-5 transition-all hover:shadow-md ${
         isActive ? "border-border" : "border-dashed border-muted-foreground/30 opacity-60"
       }`}
     >
-      <div className="flex items-start justify-between gap-3 mb-3">
-        <div className="flex items-center gap-2.5">
+      <div className="flex items-start justify-between gap-3 mb-2">
+        <div className="flex items-center gap-2.5 min-w-0">
           <div
             className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
-              isActive
-                ? "bg-primary/10 text-primary"
-                : "bg-muted text-muted-foreground"
+              isActive ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"
             }`}
           >
             {getFeatureIcon(item.featureId)}
           </div>
-          <div>
-            <h3 className="font-semibold leading-tight">{item.heading}</h3>
+          <div className="min-w-0">
+            <h3 className="font-semibold leading-tight truncate">{item.heading}</h3>
             {item.featureId && (
               <span className="text-xs text-muted-foreground">
                 {getFeatureLabel(item.featureId)}
@@ -109,16 +107,13 @@ function TermCard({
         </div>
       </div>
 
-      <p className="text-sm text-muted-foreground line-clamp-2 mb-4 min-h-[2.5rem]">
+      <p className="text-sm text-muted-foreground line-clamp-8 ">
         {snippet || "No content yet..."}
       </p>
 
-      <div className="flex items-center justify-between pt-3 border-t">
-        <div className="flex items-center gap-3 text-xs text-muted-foreground">
-          <span>v{item.termsVersion}</span>
-          <span className="text-border">|</span>
-          <span>{new Date(item.updatedAt).toLocaleDateString()}</span>
-        </div>
+      {/* bottom bar */}
+      <div className="mt-auto flex items-center justify-between pt-3 border-t">
+        <span className="text-xs text-muted-foreground">v{item.termsVersion}</span>
 
         <div className="flex items-center gap-2">
           <div className="flex items-center gap-2">
@@ -131,45 +126,44 @@ function TermCard({
               disabled={isToggling}
             />
           </div>
+          <div className="flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpen();
+              }}
+            >
+              <Eye className="w-3.5 h-3.5 mr-1" /> View
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              onClick={(e) => {
+                e.stopPropagation();
+                onEdit();
+              }}
+            >
+              <Pencil className="w-3.5 h-3.5 mr-1" /> Edit
+            </Button>
+            {!item.isSystem && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-xs text-destructive hover:text-destructive"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDelete();
+                }}
+              >
+                <Trash2 className="w-3.5 h-3.5 mr-1" /> Delete
+              </Button>
+            )}
+          </div>
         </div>
-      </div>
-
-      <div className="flex items-center gap-1 mt-3 pt-3 border-t opacity-0 group-hover:opacity-100 transition-opacity">
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-7 px-2 text-xs"
-          onClick={(e) => {
-            e.stopPropagation();
-            onOpen();
-          }}
-        >
-          <Eye className="w-3.5 h-3.5 mr-1" /> View
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-7 px-2 text-xs"
-          onClick={(e) => {
-            e.stopPropagation();
-            onEdit();
-          }}
-        >
-          <Pencil className="w-3.5 h-3.5 mr-1" /> Edit
-        </Button>
-        {!item.isSystem && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 px-2 text-xs text-destructive hover:text-destructive"
-            onClick={(e) => {
-              e.stopPropagation();
-              onDelete();
-            }}
-          >
-            <Trash2 className="w-3.5 h-3.5 mr-1" /> Delete
-          </Button>
-        )}
       </div>
     </div>
   );
