@@ -1,3 +1,5 @@
 on that page /settings/terms-and-conditions/edit/{id}
 
-the heading is fetched and populated but not the content why???
+the list / order is not working 
+the components \src\components\terms\rich-text-editor.tsx on section  {/* Lists */}
+is not working why???
