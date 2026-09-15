@@ -1278,6 +1278,9 @@ export interface TermsContentItem {
   body: string;
   termsVersion: string;
   isSystem: boolean;
+  featureId?: string;
+  featureType?: string;
+  isActive: number;
   sortOrder: number;
   updatedAt: string;
   createdAt: string;
@@ -1300,6 +1303,11 @@ export const termsContentApi = {
   delete: (id: string) =>
     request<void>(`/terms-content/${id}`, {
       method: 'DELETE',
+    }),
+  updateActive: (id: string, isActive: number) =>
+    request<{ message: string; isActive: string }>(`/terms-content/${id}/active`, {
+      method: 'PATCH',
+      body: { isActive },
     }),
 };
 

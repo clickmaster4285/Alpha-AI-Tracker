@@ -1,5 +1,5 @@
-on that page /settings/terms-and-conditions/edit/{id}
+i want to enhanve the gui of /settings/terms-and-conditions page 
 
-the list / order is not working 
-the components \src\components\terms\rich-text-editor.tsx on section  {/* Lists */}
-is not working why???
+i want card veiw 
+
+with i want also the active/inactive btn

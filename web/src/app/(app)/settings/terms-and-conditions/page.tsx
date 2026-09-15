@@ -3,12 +3,23 @@
 import { Suspense, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Loader2, Pencil, Trash2, Plus, Star, ChevronRight } from "lucide-react";
+import {
+  Loader2,
+  Pencil,
+  Trash2,
+  Plus,
+  Star,
+  Eye,
+  FileText,
+  Globe,
+  FolderOpen,
+  Monitor,
+} from "lucide-react";
 import { termsContentApi, type TermsContentItem } from "@/lib/api";
-import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
+import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useUrlQueryState } from "@/hooks/use-url-query-state";
 import {
@@ -24,85 +35,191 @@ import {
 
 type TermTab = "featured" | "custom";
 
-function TermCard({ item, onOpen }: { item: TermsContentItem; onOpen: (item: TermsContentItem) => void }) {
+const FEATURE_ICONS: Record<string, React.ReactNode> = {
+  app_usage: <FileText className="w-5 h-5" />,
+  browser_journey: <Globe className="w-5 h-5" />,
+  file_journey: <FolderOpen className="w-5 h-5" />,
+  live_view: <Monitor className="w-5 h-5" />,
+};
+
+function getFeatureIcon(featureId?: string) {
+  return featureId ? FEATURE_ICONS[featureId] ?? <FileText className="w-5 h-5" /> : <FileText className="w-5 h-5" />;
+}
+
+function getFeatureLabel(featureId?: string) {
+  const labels: Record<string, string> = {
+    app_usage: "App Usage",
+    browser_journey: "Browser Journey",
+    file_journey: "File Journey",
+    live_view: "Live View",
+  };
+  return featureId ? labels[featureId] ?? featureId : "";
+}
+
+function TermCard({
+  item,
+  onOpen,
+  onEdit,
+  onDelete,
+  onToggleActive,
+  isToggling,
+}: {
+  item: TermsContentItem;
+  onOpen: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+  onToggleActive: (checked: boolean) => void;
+  isToggling: boolean;
+}) {
+  const isActive = item.isActive === 1;
+  const snippet = item.body.replace(/<[^>]*>/g, "").slice(0, 120);
+
   return (
-    <Card
-      className="overflow-hidden cursor-pointer hover:border-primary/50 transition-colors"
-      onClick={() => onOpen(item)}
+    <div
+      className={`group relative rounded-xl border bg-card p-5 transition-all hover:shadow-md ${
+        isActive ? "border-border" : "border-dashed border-muted-foreground/30 opacity-60"
+      }`}
     >
-      <CardContent className="p-4">
-        <div className="flex items-center gap-3">
-          <div className="flex-1">
-            <div className="flex items-center gap-2">
-              <h3 className="font-bold truncate">{item.heading}</h3>
-              {item.isSystem ? (
-                <Badge variant="secondary" className="text-xs gap-1 shrink-0">
-                  <Star className="w-3 h-3" /> Featured
-                </Badge>
-              ) : (
-                <Badge variant="outline" className="text-xs shrink-0">Custom</Badge>
-              )}
-            </div>
-            <p className="text-sm text-muted-foreground mt-1 line-clamp-2">
-              {item.body.replace(/<[^>]*>/g, "").slice(0, 150)}...
-            </p>
-            <div className="flex items-center gap-3 mt-2 text-xs text-muted-foreground">
-              <span>v{item.termsVersion}</span>
-              <span>|</span>
-              <span>Updated {new Date(item.updatedAt).toLocaleDateString()}</span>
-            </div>
+      <div className="flex items-start justify-between gap-3 mb-3">
+        <div className="flex items-center gap-2.5">
+          <div
+            className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
+              isActive
+                ? "bg-primary/10 text-primary"
+                : "bg-muted text-muted-foreground"
+            }`}
+          >
+            {getFeatureIcon(item.featureId)}
           </div>
-          <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
+          <div>
+            <h3 className="font-semibold leading-tight">{item.heading}</h3>
+            {item.featureId && (
+              <span className="text-xs text-muted-foreground">
+                {getFeatureLabel(item.featureId)}
+              </span>
+            )}
+          </div>
         </div>
-      </CardContent>
-    </Card>
+        <div className="flex items-center gap-1.5 shrink-0">
+          {item.isSystem && (
+            <Badge variant="secondary" className="text-[10px] gap-1">
+              <Star className="w-2.5 h-2.5" /> Featured
+            </Badge>
+          )}
+        </div>
+      </div>
+
+      <p className="text-sm text-muted-foreground line-clamp-2 mb-4 min-h-[2.5rem]">
+        {snippet || "No content yet..."}
+      </p>
+
+      <div className="flex items-center justify-between pt-3 border-t">
+        <div className="flex items-center gap-3 text-xs text-muted-foreground">
+          <span>v{item.termsVersion}</span>
+          <span className="text-border">|</span>
+          <span>{new Date(item.updatedAt).toLocaleDateString()}</span>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2">
+            <span className={`text-xs font-medium ${isActive ? "text-primary" : "text-muted-foreground"}`}>
+              {isActive ? "Active" : "Inactive"}
+            </span>
+            <Switch
+              checked={isActive}
+              onCheckedChange={onToggleActive}
+              disabled={isToggling}
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-1 mt-3 pt-3 border-t opacity-0 group-hover:opacity-100 transition-opacity">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 px-2 text-xs"
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpen();
+          }}
+        >
+          <Eye className="w-3.5 h-3.5 mr-1" /> View
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 px-2 text-xs"
+          onClick={(e) => {
+            e.stopPropagation();
+            onEdit();
+          }}
+        >
+          <Pencil className="w-3.5 h-3.5 mr-1" /> Edit
+        </Button>
+        {!item.isSystem && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-xs text-destructive hover:text-destructive"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete();
+            }}
+          >
+            <Trash2 className="w-3.5 h-3.5 mr-1" /> Delete
+          </Button>
+        )}
+      </div>
+    </div>
   );
 }
-function TermsList({
+
+function TermsGrid({
   items,
   onOpen,
   onEdit,
   onDelete,
+  onToggleActive,
+  togglingId,
 }: {
   items: TermsContentItem[];
   onOpen: (item: TermsContentItem) => void;
   onEdit: (item: TermsContentItem) => void;
   onDelete: (item: TermsContentItem) => void;
+  onToggleActive: (item: TermsContentItem, checked: boolean) => void;
+  togglingId: string | null;
 }) {
+  if (items.length === 0) {
+    return (
+      <div className="rounded-xl border border-dashed p-12 text-center text-sm text-muted-foreground">
+        No terms in this category.
+      </div>
+    );
+  }
+
   return (
-    <div className="space-y-3">
-      {items.length === 0 ? (
-        <div className="rounded-lg border border-dashed p-10 text-center text-sm text-muted-foreground">
-          No terms in this category.
-        </div>
-      ) : (
-        items.map((item) => (
-          <div key={item.id} className="flex items-start gap-2">
-            <div className="flex-1">
-              <TermCard item={item} onOpen={onOpen} />
-            </div>
-            <div className="flex flex-col items-center gap-2 w-8">
-              <Pencil
-                className="h-4 w-4 text-muted-foreground cursor-pointer hover:text-foreground"
-                onClick={() => onEdit(item)}
-              />
-              {!item.isSystem && (
-                <Trash2
-                  className="h-4 w-4 text-destructive cursor-pointer hover:text-destructive/80"
-                  onClick={() => onDelete(item)}
-                />
-              )}
-            </div>
-          </div>
-        ))
-      )}
+    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+      {items.map((item) => (
+        <TermCard
+          key={item.id}
+          item={item}
+          onOpen={() => onOpen(item)}
+          onEdit={() => onEdit(item)}
+          onDelete={() => onDelete(item)}
+          onToggleActive={(checked) => onToggleActive(item, checked)}
+          isToggling={togglingId === item.id}
+        />
+      ))}
     </div>
   );
 }
+
 function TermsAndConditionsInner() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const [deleting, setDeleting] = useState<TermsContentItem | null>(null);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
 
   const [urlState, setUrlState] = useUrlQueryState<{ tab: TermTab }>(
     { tab: { parse: (raw) => (raw === "custom" ? "custom" : "featured") } },
@@ -121,9 +238,41 @@ function TermsAndConditionsInner() {
     },
   });
 
+  const toggleActiveMutation = useMutation({
+    mutationFn: ({ id, isActive }: { id: string; isActive: number }) =>
+      termsContentApi.updateActive(id, isActive),
+    onMutate: async ({ id, isActive }) => {
+      setTogglingId(id);
+      await queryClient.cancelQueries({ queryKey: ["terms-content"] });
+      const previous = queryClient.getQueryData<{ items: TermsContentItem[] }>(["terms-content"]);
+      queryClient.setQueryData<{ items: TermsContentItem[] }>(["terms-content"], (old) => {
+        if (!old) return old;
+        return {
+          ...old,
+          items: old.items.map((item) =>
+            item.id === id ? { ...item, isActive } : item
+          ),
+        };
+      });
+      return { previous };
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(["terms-content"], context.previous);
+      }
+    },
+    onSettled: () => {
+      setTogglingId(null);
+      queryClient.invalidateQueries({ queryKey: ["terms-content"] });
+    },
+  });
+
   const items = contentQuery.data?.items ?? [];
   const featured = items.filter((i) => i.isSystem);
   const custom = items.filter((i) => !i.isSystem);
+
+  const activeCount = items.filter((i) => i.isActive === 1).length;
+  const totalCount = items.length;
 
   return (
     <>
@@ -131,12 +280,27 @@ function TermsAndConditionsInner() {
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Terms &amp; Conditions</h1>
           <p className="text-muted-foreground mt-1">
-            Manage the T&amp;C content for each tracking feature. Select a category to review its terms.
+            Manage the T&amp;C content for each tracking feature.
           </p>
         </div>
         <Button onClick={() => router.push("/settings/terms-and-conditions/create")}>
           <Plus className="w-4 h-4 mr-1" /> New Terms
         </Button>
+      </div>
+
+      <div className="flex items-center gap-4 mb-6">
+        <div className="flex items-center gap-2 text-sm">
+          <div className="h-2 w-2 rounded-full bg-green-500" />
+          <span className="text-muted-foreground">
+            <span className="font-medium text-foreground">{activeCount}</span> active
+          </span>
+        </div>
+        <div className="flex items-center gap-2 text-sm">
+          <div className="h-2 w-2 rounded-full bg-muted-foreground/40" />
+          <span className="text-muted-foreground">
+            <span className="font-medium text-foreground">{totalCount - activeCount}</span> inactive
+          </span>
+        </div>
       </div>
 
       <Separator className="mb-6" />
@@ -158,19 +322,27 @@ function TermsAndConditionsInner() {
             </TabsTrigger>
           </TabsList>
           <TabsContent value="featured" className="mt-4">
-            <TermsList
+            <TermsGrid
               items={featured}
               onOpen={(item) => router.push(`/settings/terms-and-conditions/view/${item.id}`)}
               onEdit={(item) => router.push(`/settings/terms-and-conditions/edit/${item.id}`)}
               onDelete={(item) => setDeleting(item)}
+              onToggleActive={(item, checked) =>
+                toggleActiveMutation.mutate({ id: item.id, isActive: checked ? 1 : 0 })
+              }
+              togglingId={togglingId}
             />
           </TabsContent>
           <TabsContent value="custom" className="mt-4">
-            <TermsList
+            <TermsGrid
               items={custom}
               onOpen={(item) => router.push(`/settings/terms-and-conditions/view/${item.id}`)}
               onEdit={(item) => router.push(`/settings/terms-and-conditions/edit/${item.id}`)}
               onDelete={(item) => setDeleting(item)}
+              onToggleActive={(item, checked) =>
+                toggleActiveMutation.mutate({ id: item.id, isActive: checked ? 1 : 0 })
+              }
+              togglingId={togglingId}
             />
           </TabsContent>
         </Tabs>

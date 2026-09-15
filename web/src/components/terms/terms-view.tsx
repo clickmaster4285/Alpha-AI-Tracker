@@ -4,11 +4,12 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, Loader2, Pencil, Star, Trash2 } from "lucide-react";
-import { termsContentApi } from "@/lib/api";
+import { termsContentApi, type TermsContentItem } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import { Switch } from "@/components/ui/switch";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -35,6 +36,27 @@ export default function TermsView({ id }: { id: string }) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["terms-content"] });
       router.push("/settings/terms-and-conditions");
+    },
+  });
+
+  const toggleActiveMutation = useMutation({
+    mutationFn: ({ id, isActive }: { id: string; isActive: number }) =>
+      termsContentApi.updateActive(id, isActive),
+    onMutate: async ({ id, isActive }) => {
+      await queryClient.cancelQueries({ queryKey: ["terms-content", id] });
+      const previous = queryClient.getQueryData<TermsContentItem>(["terms-content", id]);
+      queryClient.setQueryData<TermsContentItem>(["terms-content", id], (old) =>
+        old ? { ...old, isActive } : old
+      );
+      return { previous };
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(["terms-content", _vars.id], context.previous);
+      }
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["terms-content"] });
     },
   });
 
@@ -82,6 +104,9 @@ export default function TermsView({ id }: { id: string }) {
             <Star className="w-3 h-3" /> Featured
           </Badge>
         )}
+        <Badge variant={item.isActive === 1 ? "default" : "outline"} className="text-xs shrink-0">
+          {item.isActive === 1 ? "Active" : "Inactive"}
+        </Badge>
       </div>
 
       <Card>
@@ -100,7 +125,7 @@ export default function TermsView({ id }: { id: string }) {
         </CardContent>
       </Card>
 
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-3">
         <Button onClick={() => router.push(`/settings/terms-and-conditions/edit/${item.id}`)}>
           <Pencil className="h-4 w-4 mr-1" /> Edit
         </Button>
@@ -109,6 +134,17 @@ export default function TermsView({ id }: { id: string }) {
             <Trash2 className="h-4 w-4 mr-1" /> Delete
           </Button>
         )}
+        <div className="ml-auto flex items-center gap-2">
+          <span className="text-sm text-muted-foreground">
+            {item.isActive === 1 ? "Active" : "Inactive"}
+          </span>
+          <Switch
+            checked={item.isActive === 1}
+            onCheckedChange={(checked) =>
+              toggleActiveMutation.mutate({ id: item.id, isActive: checked ? 1 : 0 })
+            }
+          />
+        </div>
       </div>
 
       <AlertDialog open={confirmingDelete} onOpenChange={setConfirmingDelete}>
