@@ -1,8 +1,7 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-09-14 (per-feature Terms & Conditions consent framework)
+> **Last audited:** 2026-09-04 (browser window-key collapse for multi-tab chrome)
 > **Changelog:**
-> - 2026-09-14: **Per-feature T&C consent framework.** New `Core/TermsAndConditions/` package with `FeatureTermsRegistry` (feature registration, version checking, pending detection, accept/revoke), `TermsModal` (platform-native uncloseable dialogs — PowerShell `System.Windows.Forms` on Windows, zenity/kdialog on Linux, osascript on macOS; headless `--background` mode uses the same fallback), `TermsConsentSyncer` (sync payload for existing `SyncService` loop). `Program.cs` startup: register 4 features → check pending → show required T&C modal(s) → record acceptance → then `host.StartAsync()`. 5 new config gates in `AppConfig` (`ALPHA_TERMS_ENABLED` + per-feature kill switches). Consent stored in `app_status` keyed by `terms_accepted_{featureId}` / `terms_version_{featureId}`. Server has editable `terms_content` table with featured (cannot delete) and custom (can create/delete) term types. Verified: `dotnet build` 0/0, 0 warnings.
 > - 2026-09-05: **Core: Windows `power_off` event now fires on shutdown/restart — `SystemEventWatcher` subscribes to `SystemEvents.SessionEnding`.**
 >   The Windows half of `SystemEventWatcher` was missing `SystemEvents.SessionEnding`, so shutdown/restart never emitted `power_off` (sleep/resume via `PowerModeChanged` worked; lock/unlock via `SessionSwitch` worked; power_on worked via `LogCollectorService` on boot). `SessionEnding` with `SessionEndReasons.SystemShutdown` is now subscribed in `SubscribeWindows()` (fire-and-forget, mirrors Linux's synchronous `PrepareForShutdown` handler), with matching unsubscription in `UnsubscribeWindows()`. `Logoff` is intentionally skipped to avoid duplicating the existing `SessionSwitch` → `os_logout` path. `ShutdownSentinel` remains as fallback. This makes Windows match Linux's two-layer power-off detection pattern. Verified: `dotnet build` 0/0, 0 warnings. Real-world test requires a Windows shutdown/restart cycle against an installed build.
 >   The accessibility reader returns a fresh `WindowKey` per tab; the old title-only collapse rule let
@@ -348,7 +347,7 @@ shell state binds through the window:
 
 | Lifetime | Services |
 |---|---|
-| **Singleton** | `AppConfig`, `ILogStore` (SqliteLogStore), `HttpClient` (30s timeout), `IInstalledAppDetector`, `IPackageDetector`, `IActivityCollector` (per-platform), `AutoStartService`, `LogCollectorService`, `EventCoordinator`, `JourneyEngine`, `ATSPIEventWatcher`, `WindowsExplorerWatcher`, `IExplorerWindowProvider`, `FileSystemEventWatcher`, `RecentFilesWatcher`, `AppUpdateService`, `IBrowserRegistry` (unconditional — consumed by `LogCollectorService` + `SessionLabelResolver` regardless of `ALPHA_BROWSER_TRACKING_ENABLED`), **`FeatureTermsRegistry`**, **`TermsModal`**, **`TermsConsentSyncer`** |
+| **Singleton** | `AppConfig`, `ILogStore` (SqliteLogStore), `HttpClient` (30s timeout), `IInstalledAppDetector`, `IPackageDetector`, `IActivityCollector` (per-platform), `AutoStartService`, `LogCollectorService`, `EventCoordinator`, `JourneyEngine`, `ATSPIEventWatcher`, `WindowsExplorerWatcher`, `IExplorerWindowProvider`, `FileSystemEventWatcher`, `RecentFilesWatcher`, `AppUpdateService`, `IBrowserRegistry` (unconditional — consumed by `LogCollectorService` + `SessionLabelResolver` regardless of `ALPHA_BROWSER_TRACKING_ENABLED`) |
 | **Singleton (conditional)** | `IAccessibilityBrowserReader` (platform reader) + `BrowserHistoryReader` — only when `ALPHA_BROWSER_TRACKING_ENABLED` |
 | **Hosted** | `BackgroundGuardService`, `LogCollectorService`, `DesktopEventService`, `AccessibilityBrowserTracker` (conditional), `HardwareDeviceWatcherService`, `AppUpdateService` |
 | **Transient** | `DashboardViewModel`, `SystemSpecsViewModel`, `InstalledAppsViewModel`, `MainViewModel` |
@@ -392,17 +391,6 @@ log banners).
 | `app_sessions` | `ON CONFLICT(id)` | Merge `ended_at` / `parent_process_id` |
 | `app_items` | `ON CONFLICT(id)` | Merge title/identifier/url/domain/parent/closed_at/journey fields |
 
-### T&C consent keys in `app_status`
-
-The `app_status` key-value table stores per-feature Terms & Conditions state:
-
-| Key pattern | Value | Purpose |
-|---|---|---|
-| `terms_accepted_{featureId}` | ISO 8601 timestamp | When the user last accepted this feature's T&C |
-| `terms_version_{featureId}` | Version string (e.g. `1.0`) | The T&C version that was accepted |
-
-Where `{featureId}` is one of: `app_usage`, `browser_journey`, `file_journey`, `live_view`. These are synced to the server's `terms_consent` audit table via `TermsConsentSyncer`.
-
 ### Migration strategy
 
 `DatabaseSchema.MigrateSql` + `SqliteLogStore.InitializeAsync`: base schema via `IF NOT EXISTS` on every start, then a batch of **idempotent `ALTER TABLE ... ADD COLUMN`** statements (caught via "duplicate column" SqliteException), the installed_packages dedup block, and a few `CREATE INDEX IF NOT EXISTS`. There is no numbered version table.
@@ -415,7 +403,7 @@ Where `{featureId}` is one of: `app_usage`, `browser_journey`, `file_journey`, `
 
 ## 6. Lifecycle & Startup Sequence
 
-1. `Program.cs` handles CLI modes, acquires the mutex, starts the single-instance pipe server, builds DI, **shows required T&C modal(s) if any are pending** (`FeatureTermsRegistry.GetPendingFeaturesAsync` → `TermsModal` for required features → `FeatureTermsRegistry.AcceptAsync` for each), then `host.StartAsync`.
+1. `Program.cs` handles CLI modes, acquires the mutex, starts the single-instance pipe server, builds DI, `host.StartAsync`.
 2. **`LogCollectorService`** (hosted):
    - `InitializeAsync` (schema), `RefreshEmployeeInfo` (restores login from SQLite),
    - **Headless session restore (2026-08-18):** if persisted employee credentials exist, `StartTracking()` runs here at boot — so `--background` mode (no GUI) tracks app sessions from power-on, not just browser journeys. Previously this restore happened ONLY in the Avalonia GUI (`MainViewModel.InitializeAsync`), so a headless boot spun on "waiting for login" forever while the browser tracker (which restores the login itself) kept working — the dashboard showed browser activity but zero app sessions.
