@@ -14,6 +14,11 @@ public partial class App : Application
     public static IServiceProvider? ServiceProvider { get; internal set; }
     public static bool AllowShutdown { get; set; }
 
+    /// <summary>True in the standalone terms-agent process (client.exe --terms):
+    /// OnFrameworkInitializationCompleted then creates ONLY the TermsWindow with the
+    /// agent's own DI services — no MainViewModel, no shell, no tray.</summary>
+    public static bool TermsAgentMode { get; set; }
+
     /// <summary>
     /// True when the UI is being created HIDDEN (auto-start / systemd boot instance
     /// launched with --background/--minimized — no window at boot). A manual user
@@ -36,6 +41,34 @@ public partial class App : Application
                 throw new InvalidOperationException("ServiceProvider must be set before app starts");
             }
 
+            // ─── Terms agent mode: ONLY the standalone terms window ───
+            // A completely separate app surface: neutral-styled TermsWindow bound to
+            // TermsViewModel from the agent's own DI container. No MainViewModel, no
+            // shell, no tray, no collector. ShutdownMode=OnMainWindowClose so the
+            // process exits when the terms window closes.
+            if (TermsAgentMode)
+            {
+                var termsVm = ServiceProvider.GetRequiredService<client.ViewModels.TermsViewModel>();
+                desktop.ShutdownMode = Avalonia.Controls.ShutdownMode.OnMainWindowClose;
+
+                var agentWindow = new TermsWindow { DataContext = termsVm };
+                desktop.MainWindow = agentWindow;
+
+                // Refuse dismissal while terms are still pending.
+                agentWindow.Closing += (s, e) =>
+                {
+                    if (termsVm.TotalCount > 0 && termsVm.CurrentTerm != null && !AllowShutdown)
+                    {
+                        e.Cancel = true;
+                    }
+                };
+
+                agentWindow.Show();
+                _ = termsVm.LoadAsync();
+                base.OnFrameworkInitializationCompleted();
+                return;
+            }
+
             var viewModel = ServiceProvider.GetRequiredService<MainViewModel>();
 
             // Initialize async (check existing login state from SQLite)
@@ -49,18 +82,9 @@ public partial class App : Application
                 DataContext = viewModel,
             };
 
-            // Intercept close to hide instead (only block normal window-close, not explicit shutdown).
-            // Terms gate (2026-09-16): while unaccepted terms hold RequiresTermsAcceptance,
-            // the close is CANCELLED outright (no hide-to-tray) — the acceptance flow is a
-            // locked fullscreen gate. Explicit shutdown (AllowShutdown) always wins.
+            // Intercept close to hide instead (only block normal window-close, not explicit shutdown)
             mainWindow.Closing += (s, e) =>
             {
-                if (viewModel.RequiresTermsAcceptance && !AllowShutdown)
-                {
-                    e.Cancel = true;
-                    return;
-                }
-
                 if (!AllowShutdown)
                 {
                     e.Cancel = true;
@@ -154,34 +178,12 @@ public partial class App : Application
                 mainWindow.Show();
             }
 
-            // Terms gate (2026-09-16): while the acceptance flow is up, pin the window
-            // on top and strip minimize/maximize affordances (close stays intercepted
-            // above). Restored when the last term is accepted. Wayland note: the WM
-            // protocol has no always-on-top — Topmost is best-effort there (documented
-            // environment limitation in plan.md workstream 5).
-            void ApplyTermsGateWindowFlags()
-            {
-                if (viewModel.RequiresTermsAcceptance)
-                {
-                    mainWindow.Topmost = true;
-                    mainWindow.WindowState = Avalonia.Controls.WindowState.Maximized;
-                    mainWindow.CanMinimize = false;
-                }
-                else
-                {
-                    mainWindow.Topmost = false;
-                    mainWindow.CanMinimize = true;
-                }
-            }
-
-            ApplyTermsGateWindowFlags();
-            viewModel.PropertyChanged += (s, e) =>
-            {
-                if (e.PropertyName == nameof(MainViewModel.RequiresTermsAcceptance))
-                {
-                    Dispatcher.UIThread.Post(ApplyTermsGateWindowFlags);
-                }
-            };
+            // ─── Terms & Conditions (2026-09-16) ───
+            // The tracker GUI never shows terms itself: the standalone terms-agent
+            // process (client.exe --terms, instance 3) owns the acceptance flow. The
+            // MainViewModel spawns the agent when pending terms exist — its DI reaches
+            // TermsService, whose ReadyToSpawn logic is wired through TermsViewModel.
+            // No tracker-side window, no tracker-side close guard.
         }
 
         base.OnFrameworkInitializationCompleted();

@@ -59,6 +59,11 @@ public sealed class TermsService : BackgroundService
     /// the server was unreachable — the UI shows an honest offline notice.</summary>
     public bool LastRefreshWasOffline { get; private set; }
 
+    /// <summary>True inside the standalone terms-agent process (client.exe --terms).
+    /// Suppresses the tracker-side spawn logic and the background retry loop — the
+    /// agent does its consent retrying inline as the user accepts, then exits.</summary>
+    public static bool IsAgentMode { get; set; }
+
     public TermsService(
         ILogStore store,
         AppConfig config,
@@ -113,7 +118,10 @@ public sealed class TermsService : BackgroundService
                     await Task.Delay(delay, stoppingToken);
 
                 await RefreshAsync(stoppingToken);
-                await RetryUnacknowledgedConsentsAsync(stoppingToken);
+                if (!IsAgentMode)
+                {
+                    await RetryUnacknowledgedConsentsAsync(stoppingToken);
+                }
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
@@ -178,44 +186,117 @@ public sealed class TermsService : BackgroundService
             serverTerms = await FetchActiveTermsAsync(employee, ct);
             LastRefreshWasOffline = false;
         }
+        catch (HttpRequestException ex)
+        {
+            // LOUD, not silent: a 401 here means the persisted employee credentials no
+            // longer match the server (DB restore / secret rotation); a 5xx means the
+            // server is unhealthy. The cached pending queue still gates either way.
+            LastRefreshWasOffline = true;
+            serverTerms = null;
+            _logger.LogWarning(
+                "TermsService: fetch failed ({Detail}) - serving {Pending} pending term(s) from cache",
+                ex.StatusCode.HasValue ? $"HTTP {(int)ex.StatusCode.Value}" : ex.Message,
+                await _store.CountPendingClientTermsAsync(employee.EmployeeId, ct));
+        }
         catch (Exception ex)
         {
             // Offline: keep the cached pending queue (it still gates the UI). Nothing
             // to diff until the network returns; the next cycle retries.
             LastRefreshWasOffline = true;
-            _logger.LogDebug("TermsService: fetch failed - serving from cache ({Reason})", ex.Message);
-            return;
+            serverTerms = null;
+            _logger.LogWarning(
+                "TermsService: fetch failed ({Reason}) - serving {Pending} pending term(s) from cache",
+                ex.Message,
+                await _store.CountPendingClientTermsAsync(employee.EmployeeId, ct));
         }
 
-        var changed = 0;
-        foreach (var t in serverTerms)
+        if (serverTerms != null)
         {
-            var local = new ClientTerm
+            var changed = 0;
+            foreach (var t in serverTerms)
             {
-                Id = t.Id,
-                FeatureId = t.FeatureId ?? string.Empty,
-                Heading = t.Heading ?? string.Empty,
-                Body = t.Body ?? string.Empty,
-                TermsVersion = string.IsNullOrWhiteSpace(t.TermsVersion) ? "1.0" : t.TermsVersion,
-                ContentHash = ComputeContentHash(t.Heading, t.Body),
-                SortOrder = t.SortOrder,
-                EmployeeId = employee.EmployeeId,
-            };
-            await _store.UpsertClientTermAsync(local, ct);
-            changed++;
+                var local = new ClientTerm
+                {
+                    Id = t.Id,
+                    FeatureId = t.FeatureId ?? string.Empty,
+                    Heading = t.Heading ?? string.Empty,
+                    Body = t.Body ?? string.Empty,
+                    TermsVersion = string.IsNullOrWhiteSpace(t.TermsVersion) ? "1.0" : t.TermsVersion,
+                    ContentHash = ComputeContentHash(t.Heading, t.Body),
+                    SortOrder = t.SortOrder,
+                    EmployeeId = employee.EmployeeId,
+                };
+                await _store.UpsertClientTermAsync(local, ct);
+                changed++;
+            }
+
+            // Admin un-required terms (deactivated or deleted) drop out of the pending
+            // queue; accepted rows stay as the local audit mirror.
+            var activeIds = new HashSet<string>(serverTerms.Select(t => t.Id), StringComparer.Ordinal);
+            var purged = await _store.PurgeStalePendingClientTermsAsync(employee.EmployeeId, activeIds, ct);
+
+            _logger.LogInformation(
+                "TermsService: refreshed {Count} active terms (purged {Purged} stale pending) for {Employee}",
+                changed, purged, employee.EmployeeId);
         }
 
-        // Admin un-required terms (deactivated or deleted) drop out of the pending
-        // queue; accepted rows stay as the local audit mirror.
-        var activeIds = new HashSet<string>(serverTerms.Select(t => t.Id), StringComparer.Ordinal);
-        var purged = await _store.PurgeStalePendingClientTermsAsync(employee.EmployeeId, activeIds, ct);
-
-        _logger.LogInformation(
-            "TermsService: refreshed {Count} active terms (purged {Purged} stale pending) for {Employee}",
-            changed, purged, employee.EmployeeId);
+        // Instance-3 spawn + notify — ALWAYS, even on a failed fetch: the local cache
+        // still holds pending terms and they must still be shown. (The previous
+        // early-return on fetch failure silently skipped this — pending terms sat in
+        // SQLite with no window and no explanation.)
+        if (!IsAgentMode)
+        {
+            var pendingNow = await _store.GetPendingClientTermsAsync(employee.EmployeeId, ct);
+            if (pendingNow.Count > 0)
+            {
+                SpawnTermsAgent();
+            }
+        }
 
         PendingTermsChanged?.Invoke();
     }
+
+    /// <summary>
+    /// Launch the standalone terms-agent process (client.exe --terms). Fire-and-forget:
+    /// the agent is its own GUI app with its own single-instance mutex; the tracker
+    /// neither waits for it nor blocks on its exit. Runs from the exe's own directory
+    /// so installed builds and `dotnet run` both resolve the same binary.
+    /// </summary>
+    private void SpawnTermsAgent()
+    {
+        try
+        {
+            var exeDir = AppContext.BaseDirectory;
+            var exeName = OperatingSystem.IsWindows() ? "client.exe" : "client";
+            var exePath = Path.Combine(exeDir, exeName);
+            if (!File.Exists(exePath))
+            {
+                _logger.LogDebug("TermsService: terms-agent exe not found at {Path} - skipping spawn", exePath);
+                return;
+            }
+
+            // Coalesce: at most one spawn attempt per 60s (the fetch cycle re-fires
+            // this on every refresh while terms remain pending).
+            if ((DateTime.UtcNow - _lastAgentSpawnUtc) < TimeSpan.FromSeconds(60)) return;
+            _lastAgentSpawnUtc = DateTime.UtcNow;
+
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = exePath,
+                Arguments = "--terms",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            System.Diagnostics.Process.Start(psi);
+            _logger.LogInformation("TermsService: spawned standalone terms-agent (--terms)");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "TermsService: failed to spawn terms-agent");
+        }
+    }
+
+    private DateTime _lastAgentSpawnUtc = DateTime.MinValue;
 
     /// <summary>
     /// Full accept path for one pending term: record the user's agreement locally, POST

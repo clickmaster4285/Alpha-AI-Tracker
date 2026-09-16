@@ -73,6 +73,18 @@ if (args.Contains("--print-config"))
 
 EnvLoader.Load();
 
+// ─── Terms agent mode (instance 3, 2026-09-16) ───
+// `client.exe --terms` runs a STANDALONE Terms & Conditions app: its own process,
+// its own neutral GUI (TermsWindow), no tracking, no sync engine, no shell. It owns
+// the whole T&C lifecycle — pull, diff, show, accept, sync consent — against the
+// SAME local SQLite, then exits. The tracker GUI never shows terms itself; it
+// spawns this agent when pending terms exist (TermsService.SpawnTermsAgent).
+if (args.Contains("--terms"))
+{
+    await RunTermsAgentAsync(args);
+    return;
+}
+
 var isBackground = args.Contains("--background");
 var isMinimized = args.Contains("--minimized");
 // A "user launch" is one without --background / --minimized — i.e. the user
@@ -458,6 +470,54 @@ static AppBuilder BuildAvaloniaApp()
         .UsePlatformDetect()
         .WithInterFont()
         .LogToTrace();
+
+// ─── Terms agent (instance 3) ───
+// Minimal host: config + SQLite + HttpClient + TermsService ONLY. None of the
+// tracking/sync/inventory services are registered — this process is exclusively
+// the T&C app. Single-instanced by its OWN mutex (derived from AppInfo.AppMutex)
+// so it runs ALONGSIDE the tracker instance without tripping its guard.
+static async Task RunTermsAgentAsync(string[] args)
+{
+    using var agentMutex = new Mutex(true, client.Core.AppInfo.AppMutex + "-terms-agent", out var agentCreated);
+    if (!agentCreated)
+    {
+        return; // an agent instance is already showing terms
+    }
+
+    client.Services.TermsService.IsAgentMode = true;
+
+    var config = client.Configuration.AppConfig.FromEnv();
+    var builder = Host.CreateApplicationBuilder(args);
+    builder.Logging.ClearProviders();
+    builder.Logging.AddConsole();
+    builder.Logging.AddFile(ResolveLogPath());
+    builder.Logging.SetMinimumLevel(LogLevel.Information);
+
+    builder.Services.AddSingleton(config);
+    builder.Services.AddSingleton<ILogStore>(sp =>
+        new SqliteLogStore(ResolveDbPath(config.DbPath), config.DbEncryptionKey));
+    builder.Services.AddSingleton<HttpClient>(sp => new HttpClient { Timeout = TimeSpan.FromSeconds(30) });
+    builder.Services.AddSingleton<client.Services.TermsService>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.TermsService>());
+    builder.Services.AddTransient<client.ViewModels.TermsViewModel>();
+
+    var host = builder.Build();
+
+    await host.Services.GetRequiredService<ILogStore>()
+        .InitializeAsync(CancellationToken.None);
+
+    App.ServiceProvider = host.Services;
+    App.TermsAgentMode = true;
+
+    await host.StartAsync(CancellationToken.None);
+
+    // Own Avalonia lifetime — when the terms window closes (all accepted or user
+    // dismissed), StartWithClassicDesktopLifetime returns and the process exits.
+    BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+
+    await host.StopAsync(CancellationToken.None);
+    host.Dispose();
+}
 
 // A systemd user service keeps the environment captured by its manager, while
 // this long-lived process may have inherited stale values from an old unit.

@@ -232,21 +232,20 @@ public partial class MainViewModel : ViewModelBase
     public bool IsDependencyStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.Dependencies;
     public bool IsLocationStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.Location;
     public bool IsPermissionStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.OtherPermissions;
-    public bool IsProfile => IsLoggedIn && CurrentPermissionStep == PermissionStep.None && !RequiresTermsAcceptance;
+    public bool IsProfile => IsLoggedIn && CurrentPermissionStep == PermissionStep.None;
     public bool RequiresPermissionAction => IsLoggedIn && CurrentPermissionStep != PermissionStep.None;
 
-    // ─── Terms & Conditions gate (2026-09-16) ───
-    // Page 7 guard: short-circuits the shell (same guard-property idiom as
-    // RequiresPermissionAction) whenever the logged-in employee has unaccepted terms.
-    // While true, the router shows the locked TermsPage, the rail/top bar are bound
-    // away, and the window close is cancelled.
+    // ─── Terms & Conditions modal (2026-09-16) ───
+    // The acceptance flow lives in its OWN standalone modal window (TermsWindow) —
+    // visually unrelated to the tracker shell. The main window keeps its previous
+    // position/behavior (normal title bar, hide-to-tray); the modal is shown on top
+    // and blocks interaction until every pending term is accepted.
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsProfile))]
     private bool _requiresTermsAcceptance;
 
-    /// <summary>Re-evaluate the gate from the pending queue and (re)load the flow when
-    /// it must be shown. Called after login, session restore, and every fetch that may
-    /// have added terms mid-session.</summary>
+    /// <summary>Show the modal when pending terms exist; no-op otherwise. Called after
+    /// login, session restore, and every TermsService refresh (new terms mid-session
+    /// re-open the modal).</summary>
     public async Task EvaluateTermsGateAsync(CancellationToken ct = default)
     {
         if (!IsLoggedIn || !_config.TermsEnabled)
@@ -265,12 +264,18 @@ public partial class MainViewModel : ViewModelBase
         {
             RequiresTermsAcceptance = false;
         }
+
+        // Always re-notify: when the flag was ALREADY true (e.g. new terms arrived
+        // after the user finished the first flow) the generated setter raises no
+        // PropertyChanged, so the App-level visibility handler would never run and
+        // the modal would stay closed. The handler is idempotent (show → activate,
+        // hide → no-op), so a redundant notification is harmless.
+        OnPropertyChanged(nameof(RequiresTermsAcceptance));
     }
 
-    /// <summary>TermsService finished a refresh — new terms mid-session raise the gate
-    /// again; nothing to do when the queue is empty and the gate is already down.
-    /// ⚠️ Fired on the TermsService background thread — every property write must be
-    /// marshaled to the UI thread or Avalonia's binding system can miss the change.</summary>
+    /// <summary>TermsService finished a refresh — new terms mid-session re-open the
+    /// modal. ⚠️ Fired on the TermsService background thread — marshal to the UI
+    /// thread or Avalonia's binding/window system can miss the change.</summary>
     private void OnPendingTermsChanged()
     {
         Avalonia.Threading.Dispatcher.UIThread.Post(async () =>
@@ -284,20 +289,6 @@ public partial class MainViewModel : ViewModelBase
                 // A gate re-evaluation must never crash the background refresh.
             }
         });
-    }
-
-    /// <summary>Last pending term accepted — release the gate and enter the shell.</summary>
-    private async void OnTermsAccepted()
-    {
-        RequiresTermsAcceptance = false;
-        try
-        {
-            await EnterShellAsync();
-        }
-        catch
-        {
-            // Shell entry failure must not resurrect the gate.
-        }
     }
 
     public string StepTitle => CurrentPermissionStep switch
@@ -377,7 +368,6 @@ public partial class MainViewModel : ViewModelBase
         SystemSpecs = systemSpecs;
         InstalledApps = installedApps;
         Terms = new TermsViewModel(terms);
-        Terms.Done += OnTermsAccepted;
         _terms.PendingTermsChanged += OnPendingTermsChanged;
     }
 
