@@ -670,7 +670,7 @@ applied_at      TIMESTAMPTZ DEFAULT NOW()
 
 ### Migration Tool
 
-**Custom runner** in `database/postgres.go`. Reads all `.sql` files from `migrations/` in filename order (latest: 037), tracks applied migrations in `schema_migrations`, and runs each file in its own transaction.
+**Custom runner** in `database/postgres.go`. Reads all `.sql` files from `migrations/` in filename order (latest: 039), tracks applied migrations in `schema_migrations`, and runs each file in its own transaction.
 
 ---
 
