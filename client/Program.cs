@@ -515,8 +515,20 @@ static async Task RunTermsAgentAsync(string[] args)
     // dismissed), StartWithClassicDesktopLifetime returns and the process exits.
     BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
 
-    await host.StopAsync(CancellationToken.None);
+    // The window is gone — the agent's job is done. Stop the host with a BOUNDED
+    // wait and then exit deterministically: a hung hosted-service stop must never
+    // leave a zombie windowless agent process behind (2026-09-16 — the agent
+    // outlived its own closed window because the unbounded StopAsync blocked).
+    // Safe here: the agent has no collector/sync in flight, and consent writes
+    // are already flushed synchronously at accept time.
+    try
+    {
+        using var stopCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await host.StopAsync(stopCts.Token);
+    }
+    catch { /* stop failures are irrelevant for the agent */ }
     host.Dispose();
+    Environment.Exit(0);
 }
 
 // A systemd user service keeps the environment captured by its manager, while

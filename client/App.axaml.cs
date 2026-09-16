@@ -63,6 +63,29 @@ public partial class App : Application
                     }
                 };
 
+                // Flow complete (last pending term accepted → queue empty): close the
+                // window. (2026-09-16 bug: this subscription was missing, so the modal
+                // stayed open forever after the final acceptance.)
+                termsVm.Done += () => Dispatcher.UIThread.Post(() =>
+                {
+                    try { agentWindow.Close(); }
+                    catch { /* already closing/closed */ }
+                });
+
+                // Decisive exit — the agent's job ends with its window. The agent holds
+                // NO unsaved state (consents are flushed synchronously at accept time),
+                // so once the window is gone the process has nothing left to do.
+                // Environment.Exit(0) is deliberate: ShutdownMode.OnMainWindowClose
+                // proved unreliable here — the window closed but
+                // StartWithClassicDesktopLifetime never returned, leaving a zombie
+                // windowless agent process (2026-09-16). Exit also covers the
+                // empty-queue race where the window closes during initialization.
+                void ExitAgent()
+                {
+                    Environment.Exit(0);
+                }
+                agentWindow.Closed += (s, e) => ExitAgent();
+
                 agentWindow.Show();
                 _ = termsVm.LoadAsync();
                 base.OnFrameworkInitializationCompleted();

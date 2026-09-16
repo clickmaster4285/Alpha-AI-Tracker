@@ -35,10 +35,15 @@ public partial class TermsViewModel : ViewModelBase
     private string _currentBodyText = string.Empty;
 
     [ObservableProperty]
-    private int _currentIndex;
-
-    [ObservableProperty]
     private int _totalCount;
+
+    /// <summary>Terms accepted during the CURRENT flow session. Progress is derived
+    /// from this plus the live queue length — never from an index into a re-read list.
+    /// The old CurrentIndex arithmetic desynced from the shrinking pending list
+    /// (pending[i] with i from the previous read) and eventually indexed past the end,
+    /// crashing the agent mid-flow — the modal "closed itself" on the 3rd accept
+    /// (2026-09-16 bug report).</summary>
+    private int _acceptedCount;
 
     [ObservableProperty]
     private bool _showOfflineNotice;
@@ -51,15 +56,15 @@ public partial class TermsViewModel : ViewModelBase
         _terms = terms;
     }
 
-    /// <summary>Progress 0–100 across the pending queue.</summary>
+    /// <summary>Progress 0–100 across the flow.</summary>
     public double ProgressPercent => TotalCount == 0
         ? 100
-        : Math.Clamp(CurrentIndex * 100.0 / TotalCount, 0, 100);
+        : Math.Clamp(_acceptedCount * 100.0 / TotalCount, 0, 100);
 
     /// <summary>"Term 2 of 4" position label.</summary>
     public string PositionLabel => TotalCount == 0
         ? string.Empty
-        : $"Term {Math.Min(CurrentIndex + 1, TotalCount)} of {TotalCount}";
+        : $"Term {Math.Min(_acceptedCount + 1, TotalCount)} of {TotalCount}";
 
     public bool HasError => !string.IsNullOrWhiteSpace(StatusMessage);
 
@@ -72,7 +77,7 @@ public partial class TermsViewModel : ViewModelBase
         {
             var pending = await _terms.GetPendingTermsAsync(ct);
             TotalCount = pending.Count;
-            CurrentIndex = 0;
+            _acceptedCount = 0;
             ShowOfflineNotice = _terms.LastRefreshWasOffline && pending.Count > 0;
             PresentCurrent(pending);
         }
@@ -82,9 +87,15 @@ public partial class TermsViewModel : ViewModelBase
         }
     }
 
-    private async void PresentCurrent(IReadOnlyList<ClientTerm> pending)
+    /// <summary>Present the HEAD of the pending queue — ALWAYS pending[0], because the
+    /// list is re-read fresh after every acceptance and positional indices from the
+    /// previous read are meaningless against it. Empty queue → flow complete → Done.</summary>
+    private void PresentCurrent(IReadOnlyList<ClientTerm> pending)
     {
-        if (CurrentIndex >= TotalCount)
+        OnPropertyChanged(nameof(ProgressPercent));
+        OnPropertyChanged(nameof(PositionLabel));
+
+        if (pending.Count == 0)
         {
             CurrentTerm = null;
             CurrentBodyText = string.Empty;
@@ -92,14 +103,8 @@ public partial class TermsViewModel : ViewModelBase
             return;
         }
 
-        CurrentTerm = pending[CurrentIndex];
+        CurrentTerm = pending[0];
         CurrentBodyText = HtmlToPlainText(CurrentTerm.Body);
-        OnPropertyChanged(nameof(ProgressPercent));
-        OnPropertyChanged(nameof(PositionLabel));
-
-        // Refresh the in-memory queue in the background so mid-session arrivals
-        // (admin adds a term) join the flow after the current one.
-        await Task.Yield();
     }
 
     [RelayCommand]
@@ -114,7 +119,6 @@ public partial class TermsViewModel : ViewModelBase
             // Server-acknowledged acceptance only — on failure the term stays
             // pending, the notice shows, and the user can retry.
             await _terms.AcceptAsync(CurrentTerm, ct);
-            CurrentIndex++;
             await LoadRemainingAsync(ct);
         }
         catch (Exception)
@@ -132,8 +136,9 @@ public partial class TermsViewModel : ViewModelBase
     /// row is marked accepted) and present the next remaining term.</summary>
     private async Task LoadRemainingAsync(CancellationToken ct)
     {
+        _acceptedCount++;
         var pending = await _terms.GetPendingTermsAsync(ct);
-        TotalCount = Math.Max(TotalCount, CurrentIndex + pending.Count);
+        TotalCount = Math.Max(TotalCount, _acceptedCount + pending.Count);
         ShowOfflineNotice = _terms.LastRefreshWasOffline && pending.Count > 0;
         PresentCurrent(pending);
     }

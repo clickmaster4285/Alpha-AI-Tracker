@@ -10,6 +10,7 @@
         WindowStartupLocation="CenterScreen"
         CanResize="False"
         CanMinimize="False"
+        Topmost="True"
         ShowInTaskbar="True"
         Width="720" Height="740"
         Background="#F7F8FA">
