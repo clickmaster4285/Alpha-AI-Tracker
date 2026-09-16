@@ -1,0 +1,85 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:client.ViewModels"
+             mc:Ignorable="d" d:DesignWidth="900" d:DesignHeight="700"
+             x:Class="client.Views.Pages.TermsPage"
+             x:DataType="vm:TermsViewModel">
+
+    <!-- ═══ PAGE 7 — Terms & Conditions acceptance gate ════════════════════
+         Locked fullscreen flow: one term at a time in server order, per-term
+         "I agree", progress indicator, honest offline/error notices. The shell
+         (nav rail / top bar) is bound away while this page is visible, and the
+         window close is cancelled while the gate holds (MainWindow.axaml.cs).
+         All brand strings come from AppInfo — nothing hardcoded here.
+    ═══════════════════════════════════════════════════════════════════════ -->
+    <Panel>
+
+        <!-- Loading state -->
+        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Spacing="14" IsVisible="{Binding IsLoading}">
+            <ProgressBar IsIndeterminate="True" Width="220" Height="4"/>
+            <TextBlock Text="Loading terms…"
+                       Foreground="{StaticResource MutedFgBrush}"
+                       HorizontalAlignment="Center"/>
+        </StackPanel>
+
+        <!-- Acceptance flow -->
+        <Grid RowDefinitions="Auto,*,Auto" Margin="0"
+              IsVisible="{Binding !IsLoading}">
+
+            <!-- Header: title + progress -->
+            <StackPanel Grid.Row="0" Margin="48,40,48,10" Spacing="8">
+                <TextBlock Text="Terms &amp; Conditions" Classes="h1" FontSize="26"/>
+                <TextBlock Text="Please review and accept each term to continue."
+                           Classes="label" FontSize="13"/>
+                <ProgressBar Value="{Binding ProgressPercent}" Maximum="100"
+                             Height="4" Margin="0,10,0,0"/>
+                <StackPanel Orientation="Horizontal" Spacing="10">
+                    <TextBlock Text="{Binding PositionLabel}" Classes="label"
+                               IsVisible="{Binding CurrentTerm, Converter={x:Static ObjectConverters.IsNotNull}}"/>
+                    <Border Classes="badge warn"
+                            IsVisible="{Binding ShowOfflineNotice}">
+                        <TextBlock Text="Offline — showing saved terms"/>
+                    </Border>
+                </StackPanel>
+            </StackPanel>
+
+            <!-- Term card -->
+            <Border Grid.Row="1" Margin="48,10,48,10"
+                    Background="{StaticResource CardBrush}"
+                    BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="1" CornerRadius="10"
+                    Padding="34,26"
+                    IsVisible="{Binding CurrentTerm, Converter={x:Static ObjectConverters.IsNotNull}}">
+                <ScrollViewer>
+                    <StackPanel Spacing="14">
+                        <TextBlock Text="{Binding CurrentTerm.Heading}"
+                                   Classes="h2" FontSize="20" TextWrapping="Wrap"/>
+                        <TextBlock Text="{Binding CurrentBodyText}"
+                                   FontSize="13.5" LineHeight="21"
+                                   TextWrapping="Wrap"
+                                   Foreground="{StaticResource FgBrush}"/>
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
+
+            <!-- Footer: error notice + accept button -->
+            <StackPanel Grid.Row="2" Margin="48,10,48,36" Spacing="12">
+                <TextBlock Text="{Binding StatusMessage}"
+                           Foreground="{StaticResource DestructiveBrush}"
+                           FontSize="12.5" TextWrapping="Wrap"
+                           IsVisible="{Binding HasError}"/>
+                <Button Classes="primary" HorizontalAlignment="Left"
+                        Command="{Binding AgreeCommand}"
+                        IsEnabled="{Binding !IsLoading}"
+                        IsVisible="{Binding CurrentTerm, Converter={x:Static ObjectConverters.IsNotNull}}">
+                    <StackPanel Orientation="Horizontal" Spacing="9">
+                        <TextBlock Text="I agree" FontWeight="SemiBold"/>
+                    </StackPanel>
+                </Button>
+            </StackPanel>
+        </Grid>
+    </Panel>
+</UserControl>

@@ -49,9 +49,18 @@ public partial class App : Application
                 DataContext = viewModel,
             };
 
-            // Intercept close to hide instead (only block normal window-close, not explicit shutdown)
+            // Intercept close to hide instead (only block normal window-close, not explicit shutdown).
+            // Terms gate (2026-09-16): while unaccepted terms hold RequiresTermsAcceptance,
+            // the close is CANCELLED outright (no hide-to-tray) — the acceptance flow is a
+            // locked fullscreen gate. Explicit shutdown (AllowShutdown) always wins.
             mainWindow.Closing += (s, e) =>
             {
+                if (viewModel.RequiresTermsAcceptance && !AllowShutdown)
+                {
+                    e.Cancel = true;
+                    return;
+                }
+
                 if (!AllowShutdown)
                 {
                     e.Cancel = true;
@@ -144,6 +153,35 @@ public partial class App : Application
             {
                 mainWindow.Show();
             }
+
+            // Terms gate (2026-09-16): while the acceptance flow is up, pin the window
+            // on top and strip minimize/maximize affordances (close stays intercepted
+            // above). Restored when the last term is accepted. Wayland note: the WM
+            // protocol has no always-on-top — Topmost is best-effort there (documented
+            // environment limitation in plan.md workstream 5).
+            void ApplyTermsGateWindowFlags()
+            {
+                if (viewModel.RequiresTermsAcceptance)
+                {
+                    mainWindow.Topmost = true;
+                    mainWindow.WindowState = Avalonia.Controls.WindowState.Maximized;
+                    mainWindow.CanMinimize = false;
+                }
+                else
+                {
+                    mainWindow.Topmost = false;
+                    mainWindow.CanMinimize = true;
+                }
+            }
+
+            ApplyTermsGateWindowFlags();
+            viewModel.PropertyChanged += (s, e) =>
+            {
+                if (e.PropertyName == nameof(MainViewModel.RequiresTermsAcceptance))
+                {
+                    Dispatcher.UIThread.Post(ApplyTermsGateWindowFlags);
+                }
+            };
         }
 
         base.OnFrameworkInitializationCompleted();

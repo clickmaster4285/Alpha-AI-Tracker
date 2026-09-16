@@ -52,6 +52,33 @@ func (r *TermsContentRepo) ListAll(ctx context.Context) ([]TermsContent, error) 
 	return results, nil
 }
 
+// ListActive returns only ACTIVE, non-deleted terms — the shape the desktop
+// client consumes for its acceptance gate. The client-side is_active == 1 filter
+// from the original plan is enforced here instead so the client-facing endpoint
+// can never leak admin-drafted (inactive) content to employee machines.
+func (r *TermsContentRepo) ListActive(ctx context.Context) ([]TermsContent, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, heading, body, terms_version, is_system, feature_id, term_type, is_active, sort_order, updated_at, created_at
+		FROM terms_content
+		WHERE deleted_at IS NULL AND is_active = 1
+		ORDER BY sort_order ASC, created_at ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []TermsContent
+	for rows.Next() {
+		var tc TermsContent
+		if err := rows.Scan(&tc.ID, &tc.Heading, &tc.Body, &tc.TermsVersion, &tc.IsSystem, &tc.FeatureID, &tc.TermType, &tc.IsActive, &tc.SortOrder, &tc.UpdatedAt, &tc.CreatedAt); err != nil {
+			return nil, err
+		}
+		results = append(results, tc)
+	}
+	return results, nil
+}
+
 func (r *TermsContentRepo) GetByID(ctx context.Context, id string) (*TermsContent, error) {
 	var tc TermsContent
 	err := r.pool.QueryRow(ctx, `

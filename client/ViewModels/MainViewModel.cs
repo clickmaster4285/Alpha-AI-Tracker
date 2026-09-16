@@ -21,6 +21,7 @@ public partial class MainViewModel : ViewModelBase
     private readonly AutoStartService _autoStart;
     private readonly LogCollectorService _logCollector;
     private readonly SyncService _syncService;
+    private readonly TermsService _terms;
 
     /// <summary>Self-update state — bound by the top-bar buttons and the dashboard banner.</summary>
     public AppUpdateService Update { get; }
@@ -231,8 +232,68 @@ public partial class MainViewModel : ViewModelBase
     public bool IsDependencyStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.Dependencies;
     public bool IsLocationStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.Location;
     public bool IsPermissionStep => IsLoggedIn && CurrentPermissionStep == PermissionStep.OtherPermissions;
-    public bool IsProfile => IsLoggedIn && CurrentPermissionStep == PermissionStep.None;
+    public bool IsProfile => IsLoggedIn && CurrentPermissionStep == PermissionStep.None && !RequiresTermsAcceptance;
     public bool RequiresPermissionAction => IsLoggedIn && CurrentPermissionStep != PermissionStep.None;
+
+    // ─── Terms & Conditions gate (2026-09-16) ───
+    // Page 7 guard: short-circuits the shell (same guard-property idiom as
+    // RequiresPermissionAction) whenever the logged-in employee has unaccepted terms.
+    // While true, the router shows the locked TermsPage, the rail/top bar are bound
+    // away, and the window close is cancelled.
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsProfile))]
+    private bool _requiresTermsAcceptance;
+
+    /// <summary>Re-evaluate the gate from the pending queue and (re)load the flow when
+    /// it must be shown. Called after login, session restore, and every fetch that may
+    /// have added terms mid-session.</summary>
+    public async Task EvaluateTermsGateAsync(CancellationToken ct = default)
+    {
+        if (!IsLoggedIn || !_config.TermsEnabled)
+        {
+            RequiresTermsAcceptance = false;
+            return;
+        }
+
+        var pending = await _terms.GetPendingTermsAsync(ct);
+        if (pending.Count > 0)
+        {
+            RequiresTermsAcceptance = true;
+            await Terms.LoadAsync(ct);
+        }
+        else
+        {
+            RequiresTermsAcceptance = false;
+        }
+    }
+
+    /// <summary>TermsService finished a refresh — new terms mid-session raise the gate
+    /// again; nothing to do when the queue is empty and the gate is already down.</summary>
+    private async void OnPendingTermsChanged()
+    {
+        try
+        {
+            await EvaluateTermsGateAsync();
+        }
+        catch
+        {
+            // A gate re-evaluation must never crash the background refresh.
+        }
+    }
+
+    /// <summary>Last pending term accepted — release the gate and enter the shell.</summary>
+    private async void OnTermsAccepted()
+    {
+        RequiresTermsAcceptance = false;
+        try
+        {
+            await EnterShellAsync();
+        }
+        catch
+        {
+            // Shell entry failure must not resurrect the gate.
+        }
+    }
 
     public string StepTitle => CurrentPermissionStep switch
     {
@@ -293,6 +354,7 @@ public partial class MainViewModel : ViewModelBase
         LogCollectorService logCollector,
         SyncService syncService,
         AppUpdateService updateService,
+        TermsService terms,
         DashboardViewModel dashboard,
         SystemSpecsViewModel systemSpecs,
         InstalledAppsViewModel installedApps)
@@ -304,10 +366,14 @@ public partial class MainViewModel : ViewModelBase
         _autoStart = autoStart;
         _logCollector = logCollector;
         _syncService = syncService;
+        _terms = terms;
         Update = updateService;
         Dashboard = dashboard;
         SystemSpecs = systemSpecs;
         InstalledApps = installedApps;
+        Terms = new TermsViewModel(terms);
+        Terms.Done += OnTermsAccepted;
+        _terms.PendingTermsChanged += OnPendingTermsChanged;
     }
 
     // ─── Post-setup navigation (pages 4–6) ───
@@ -322,6 +388,9 @@ public partial class MainViewModel : ViewModelBase
 
     /// <summary>Page 6 — Installed Applications.</summary>
     public InstalledAppsViewModel InstalledApps { get; }
+
+    /// <summary>Page 7 — Terms &amp; Conditions acceptance gate (locked fullscreen flow).</summary>
+    public TermsViewModel Terms { get; }
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsDashboardPage))]
@@ -434,6 +503,12 @@ public partial class MainViewModel : ViewModelBase
 
             // Forced auto-start — always ensure it's configured
             _autoStart.EnableAutoStartForced();
+
+            // Terms gate (2026-09-16): restore the pending queue BEFORE the shell so a
+            // reboot with unaccepted terms re-locks the UI immediately. Ask the service
+            // for an immediate pull too — new terms arrive while the gate is up.
+            await EvaluateTermsGateAsync(ct);
+            _terms.RequestImmediatePull();
 
             await EnterShellAsync();
         }
@@ -850,6 +925,11 @@ public partial class MainViewModel : ViewModelBase
 
             // Scan for browsers and enable auto-start after GUI login too
             _autoStart.EnableAutoStartForced();
+
+            // Terms gate (2026-09-16): first-login acceptance flow — the gate rises
+            // here if the server has terms this employee has not accepted yet.
+            await EvaluateTermsGateAsync();
+            _terms.RequestImmediatePull();
 
             await EnterShellAsync();
         }

@@ -25,6 +25,7 @@
            IsSplashVisible          → page 1  SplashPage
            !IsLoggedIn              → page 2  LoginPage
            RequiresPermissionAction → page 3  PermissionSetupPage
+           RequiresTermsAcceptance  → page 7  TermsPage (locked gate)
            IsProfile                → pages 4–6 behind the rail
 
          All brand strings come from AppInfo (client/APP_IDENTIFIERS +
@@ -51,7 +52,14 @@
             <!-- ── Page 3 — permission wizard ── -->
             <pages:PermissionSetupPage IsVisible="{Binding RequiresPermissionAction}"/>
 
-            <!-- ── Pages 4–6 — main shell ── -->
+            <!-- ── Page 7 — Terms & Conditions acceptance gate ──
+                 Sits ABOVE the shell in z-order and binds the shell away while
+                 pending; the window close is cancelled for the same condition
+                 (MainWindow.axaml.cs). ── -->
+            <pages:TermsPage IsVisible="{Binding RequiresTermsAcceptance}"/>
+
+            <!-- ── Pages 4–6 — main shell (hidden while the terms gate holds;
+                 IsProfile already includes !RequiresTermsAcceptance) ── -->
             <Grid IsVisible="{Binding IsProfile}" ColumnDefinitions="246,*">
 
                 <!-- ══ Nav rail ══ -->

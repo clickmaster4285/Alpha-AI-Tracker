@@ -18,9 +18,11 @@ func NewTermsConsentHandler(repo *repository.TermsConsentRepo) *TermsConsentHand
 	return &TermsConsentHandler{repo: repo}
 }
 
-// SyncTermsConsent handles POST /api/v1/terms-consent/sync
-// Follows the existing sync endpoint conventions:
-// Request: { employeeId, token, entries: [{ featureId, termsVersion, action, acceptedAt, revokedAt }] }
+// SyncTermsConsent handles POST /api/v1/terms-consent/sync — a CLIENT (device)
+// endpoint. It lives under DeviceAuth, whose middleware is the only one that sets
+// the "employee_id" context value this handler reads (the web-admin JWTAuth group
+// never sets it — see the Client-vs-Web API Auth Separation Rule in AGENTS.md §6).
+// Request: { entries: [{ featureId, termsVersion, action, acceptedAt, revokedAt }] }
 // Response: { synced: N }
 func (h *TermsConsentHandler) SyncTermsConsent(c echo.Context) error {
 	var req struct {

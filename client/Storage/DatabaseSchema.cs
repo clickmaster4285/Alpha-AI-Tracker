@@ -384,6 +384,30 @@ internal static class DatabaseSchema
 
         CREATE INDEX IF NOT EXISTS idx_location_samples_captured
             ON location_samples(captured_at DESC);
+
+        -- Terms & Conditions acceptance gate. One row per (employee, server term).
+        -- Equality = (id, terms_version, content_hash): a changed body or bumped version
+        -- inserts a NEW pending row so the employee is re-prompted. Accepted rows are
+        -- never duplicated and retained as the local audit mirror.
+        CREATE TABLE IF NOT EXISTS client_terms (
+            id               TEXT NOT NULL,
+            feature_id       TEXT NOT NULL DEFAULT '',
+            heading          TEXT NOT NULL DEFAULT '',
+            body             TEXT NOT NULL DEFAULT '',
+            terms_version    TEXT NOT NULL DEFAULT '1.0',
+            content_hash     TEXT NOT NULL DEFAULT '',
+            sort_order       INTEGER NOT NULL DEFAULT 0,
+            is_accepted      INTEGER NOT NULL DEFAULT 0,
+            accepted_at      TEXT,
+            employee_id      TEXT NOT NULL DEFAULT '',
+            synced_at        TEXT,
+            created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')),
+            updated_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')),
+            PRIMARY KEY (id, employee_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_client_terms_employee_pending
+            ON client_terms(employee_id, is_accepted);
     ";
 
     internal const string MigrateSql = @"
@@ -479,6 +503,26 @@ internal static class DatabaseSchema
             ON location_samples(is_synced, captured_at);
         CREATE INDEX IF NOT EXISTS idx_location_samples_captured
             ON location_samples(captured_at DESC);
+        -- Terms & Conditions gate (2026-09-16): add the table to EXISTING databases too —
+        -- CreateTableSql above only runs on fresh DBs.
+        CREATE TABLE IF NOT EXISTS client_terms (
+            id               TEXT NOT NULL,
+            feature_id       TEXT NOT NULL DEFAULT '',
+            heading          TEXT NOT NULL DEFAULT '',
+            body             TEXT NOT NULL DEFAULT '',
+            terms_version    TEXT NOT NULL DEFAULT '1.0',
+            content_hash     TEXT NOT NULL DEFAULT '',
+            sort_order       INTEGER NOT NULL DEFAULT 0,
+            is_accepted      INTEGER NOT NULL DEFAULT 0,
+            accepted_at      TEXT,
+            employee_id      TEXT NOT NULL DEFAULT '',
+            synced_at        TEXT,
+            created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')),
+            updated_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')),
+            PRIMARY KEY (id, employee_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_terms_employee_pending
+            ON client_terms(employee_id, is_accepted);
     ";
 
     // PHASE 1: INSERT STATEMENTS

@@ -63,6 +63,8 @@ if (args.Contains("--print-config"))
     Console.WriteLine($"LockHysteresisSeconds={cfg.LockHysteresisSeconds}");
     Console.WriteLine($"EventAggregationWindowSec={cfg.EventAggregationWindowSec}");
     Console.WriteLine($"TaMaxLocalRows={cfg.TaMaxLocalRows}");
+    Console.WriteLine($"TermsEnabled={cfg.TermsEnabled}");
+    Console.WriteLine($"TermsCheckHours={cfg.TermsCheckHours}");
     Console.WriteLine($"LocationEnabled={cfg.LocationEnabled}");
     Console.WriteLine($"LocationIpFallback={cfg.LocationIpFallback}");
     Console.WriteLine($"LocationPollSec={cfg.LocationPollSec}");
@@ -201,6 +203,16 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.Lo
 // ────────────────────────────────────────────────────────────────────────────
 builder.Services.AddSingleton<client.Services.ScheduleCacheService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.ScheduleCacheService>());
+
+// ────────────────────────────────────────────────────────────────────────────
+// Terms & Conditions acceptance gate (2026-09-16): TermsService pulls the server's
+// active terms (GET /terms-content/active, DeviceAuth), diffs them into the local
+// client_terms table and records consent via POST /terms-consent/sync. The
+// MainViewModel router raises the locked TermsPage while pending terms exist.
+// No-op when ALPHA_TERMS_ENABLED=false.
+// ────────────────────────────────────────────────────────────────────────────
+builder.Services.AddSingleton<client.Services.TermsService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.TermsService>());
 
 // ────────────────────────────────────────────────────────────────────────────
 // Time & Attendance (Phase 1, A.8): AttendanceAggregator rolls up today's

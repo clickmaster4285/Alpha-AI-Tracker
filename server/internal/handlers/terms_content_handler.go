@@ -67,6 +67,26 @@ func toResponse(item *repository.TermsContent) TermsContentResponse {
 	}
 }
 
+// ListActiveTermsContent handles GET /api/v1/terms-content/active — the
+// CLIENT-facing variant of the admin list. It lives under DeviceAuth (the
+// employee-device auth surface, NOT JWTAuth/web-admin) and returns only active
+// terms ordered by sort_order ASC, created_at ASC. See the Client-vs-Web API
+// Auth Separation Rule in AGENTS.md §6.
+func (h *TermsContentHandler) ListActiveTermsContent(c echo.Context) error {
+	ctx := c.Request().Context()
+	items, err := h.repo.ListActive(ctx)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	resp := make([]TermsContentResponse, len(items))
+	for i, item := range items {
+		resp[i] = toResponse(&item)
+	}
+
+	return c.JSON(http.StatusOK, TermsContentListResponse{Items: resp})
+}
+
 func (h *TermsContentHandler) ListTermsContent(c echo.Context) error {
 	ctx := c.Request().Context()
 	items, err := h.repo.ListAll(ctx)
