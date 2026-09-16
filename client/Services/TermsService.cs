@@ -147,6 +147,16 @@ public sealed class TermsService : BackgroundService
         return await _store.GetPendingClientTermsAsync(employee.EmployeeId, ct);
     }
 
+    /// <summary>Record the user's agreement locally WITHOUT claiming the server
+    /// acknowledged it. The row stays pending (gates the shell) until the consent POST
+    /// succeeds; the retry loop only re-sends user-accepted rows.</summary>
+    public async Task MarkUserAcceptedAsync(ClientTerm term, CancellationToken ct = default)
+    {
+        var employee = await _store.GetEmployeeInfoAsync(ct)
+            ?? throw new InvalidOperationException("No logged-in employee");
+        await _store.MarkClientTermUserAcceptedAsync(term.Id, employee.EmployeeId, ct);
+    }
+
     /// <summary>
     /// Pull the active terms catalog, diff it into client_terms and purge stale pending
     /// rows. Best-effort by design: failures leave the cached queue in place.
@@ -208,11 +218,20 @@ public sealed class TermsService : BackgroundService
     }
 
     /// <summary>
-    /// Accept one pending term: POST the consent entry to /terms-consent/sync (DeviceAuth)
-    /// and only mark the local row accepted after a 2xx. Throws on failure so the UI can
-    /// keep the term pending and retry.
+    /// Full accept path for one pending term: record the user's agreement locally, POST
+    /// the consent entry to /terms-consent/sync (DeviceAuth), and only mark the local row
+    /// accepted after a 2xx. Throws on failure so the UI can keep the term pending and
+    /// retry.
     /// </summary>
     public async Task AcceptAsync(ClientTerm term, CancellationToken ct = default)
+    {
+        await MarkUserAcceptedAsync(term, ct);
+        await SendConsentAsync(term, ct);
+    }
+
+    /// <summary>POST the consent entry; on 2xx mark the local row accepted. Called by the
+    /// UI accept path and by the retry loop (user-accepted rows only).</summary>
+    private async Task SendConsentAsync(ClientTerm term, CancellationToken ct)
     {
         var employee = await _store.GetEmployeeInfoAsync(ct)
             ?? throw new InvalidOperationException("No logged-in employee - cannot record consent");
@@ -244,8 +263,8 @@ public sealed class TermsService : BackgroundService
         using var response = await _httpClient.SendAsync(request, ct);
         if (!response.IsSuccessStatusCode)
         {
-            // NOT marked accepted locally — the unacknowledged acceptance stays pending
-            // and retries on the next cycle (2026-09-09 sync-fix principle).
+            // NOT marked accepted locally — the user-acknowledged-but-unsynced row stays
+            // pending and retries on the next cycle (2026-09-09 sync-fix principle).
             throw new HttpRequestException(
                 $"Consent sync failed with {(int)response.StatusCode} {response.StatusCode}");
         }
@@ -258,8 +277,11 @@ public sealed class TermsService : BackgroundService
     }
 
     /// <summary>
-    /// Re-send consents that were accepted in the UI but never acknowledged by the
-    /// server (accept-time outage). Rows stay pending until a 2xx lands.
+    /// Re-send consents the USER agreed to but the server never acknowledged
+    /// (accept-time outage). Rows stay pending until a 2xx lands.
+    /// ⚠️ ONLY is_user_accepted=1 rows are eligible — treating every pending row as
+    /// "agreed" auto-accepted terms the user had never seen (2026-09-16 fix; the gate
+    /// then never opened because the queue silently emptied behind the GUI).
     /// </summary>
     private async Task RetryUnacknowledgedConsentsAsync(CancellationToken ct)
     {
@@ -267,12 +289,12 @@ public sealed class TermsService : BackgroundService
         if (employee == null || string.IsNullOrWhiteSpace(employee.EmployeeId)) return;
 
         var pending = await _store.GetPendingClientTermsAsync(employee.EmployeeId, ct);
-        foreach (var term in pending)
+        foreach (var term in pending.Where(t => t.IsUserAccepted == 1))
         {
             if (ct.IsCancellationRequested) return;
             try
             {
-                await AcceptAsync(term, ct);
+                await SendConsentAsync(term, ct);
             }
             catch (Exception ex)
             {

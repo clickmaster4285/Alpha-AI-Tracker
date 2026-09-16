@@ -1756,10 +1756,10 @@ public class SqliteLogStore : ILogStore, IDisposable
             cmd.CommandText = @"
                 INSERT INTO client_terms
                     (id, feature_id, heading, body, terms_version, content_hash, sort_order,
-                     is_accepted, accepted_at, employee_id, synced_at, updated_at)
+                     is_accepted, is_user_accepted, accepted_at, employee_id, synced_at, updated_at)
                 VALUES
                     ($id, $feature_id, $heading, $body, $terms_version, $content_hash, $sort_order,
-                     0, NULL, $employee_id, NULL, strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+                     0, 0, NULL, $employee_id, NULL, strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
                 ON CONFLICT(id, employee_id) DO UPDATE SET
                     feature_id = excluded.feature_id,
                     heading = excluded.heading,
@@ -1773,6 +1773,12 @@ public class SqliteLogStore : ILogStore, IDisposable
                         WHEN excluded.terms_version = client_terms.terms_version
                              AND excluded.content_hash = client_terms.content_hash
                         THEN client_terms.is_accepted
+                        ELSE 0
+                    END,
+                    is_user_accepted = CASE
+                        WHEN excluded.terms_version = client_terms.terms_version
+                             AND excluded.content_hash = client_terms.content_hash
+                        THEN client_terms.is_user_accepted
                         ELSE 0
                     END,
                     accepted_at = CASE
@@ -1807,7 +1813,7 @@ public class SqliteLogStore : ILogStore, IDisposable
             var cmd = conn.CreateCommand();
             cmd.CommandText = @"
                 SELECT id, feature_id, heading, body, terms_version, content_hash, sort_order,
-                       is_accepted, accepted_at, employee_id, synced_at, created_at, updated_at
+                       is_accepted, is_user_accepted, accepted_at, employee_id, synced_at, created_at, updated_at
                 FROM client_terms
                 WHERE employee_id = $eid AND is_accepted = 0
                 ORDER BY sort_order ASC, created_at ASC, id ASC
@@ -1833,6 +1839,29 @@ public class SqliteLogStore : ILogStore, IDisposable
         }, ct);
     }
 
+    public async Task MarkClientTermUserAcceptedAsync(string termId, string employeeId, CancellationToken ct)
+    {
+        if (_connection == null) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+                UPDATE client_terms
+                SET is_user_accepted = 1,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')
+                WHERE id = $id AND employee_id = $eid
+            ";
+            cmd.Parameters.AddWithValue("$id", termId);
+            cmd.Parameters.AddWithValue("$eid", employeeId ?? string.Empty);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
     public async Task MarkClientTermAcceptedAsync(string termId, string employeeId, DateTime acceptedAt, CancellationToken ct)
     {
         if (_connection == null) return;
@@ -1843,6 +1872,7 @@ public class SqliteLogStore : ILogStore, IDisposable
             cmd.CommandText = @"
                 UPDATE client_terms
                 SET is_accepted = 1,
+                    is_user_accepted = 1,
                     accepted_at = $accepted_at,
                     synced_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'),
                     updated_at = strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')
@@ -1907,6 +1937,7 @@ public class SqliteLogStore : ILogStore, IDisposable
             ContentHash = TryGetString(r, "content_hash") ?? string.Empty,
             SortOrder = TryGetInt(r, "sort_order") ?? 0,
             IsAccepted = TryGetInt(r, "is_accepted") ?? 0,
+            IsUserAccepted = TryGetInt(r, "is_user_accepted") ?? 0,
             AcceptedAt = TryGetDateTime(r, "accepted_at"),
             EmployeeId = TryGetString(r, "employee_id") ?? string.Empty,
             SyncedAt = TryGetDateTime(r, "synced_at"),

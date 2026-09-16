@@ -268,17 +268,22 @@ public partial class MainViewModel : ViewModelBase
     }
 
     /// <summary>TermsService finished a refresh — new terms mid-session raise the gate
-    /// again; nothing to do when the queue is empty and the gate is already down.</summary>
-    private async void OnPendingTermsChanged()
+    /// again; nothing to do when the queue is empty and the gate is already down.
+    /// ⚠️ Fired on the TermsService background thread — every property write must be
+    /// marshaled to the UI thread or Avalonia's binding system can miss the change.</summary>
+    private void OnPendingTermsChanged()
     {
-        try
+        Avalonia.Threading.Dispatcher.UIThread.Post(async () =>
         {
-            await EvaluateTermsGateAsync();
-        }
-        catch
-        {
-            // A gate re-evaluation must never crash the background refresh.
-        }
+            try
+            {
+                await EvaluateTermsGateAsync();
+            }
+            catch
+            {
+                // A gate re-evaluation must never crash the background refresh.
+            }
+        });
     }
 
     /// <summary>Last pending term accepted — release the gate and enter the shell.</summary>

@@ -12,6 +12,7 @@
         Title="{Binding AppTitleWithVersion}"
         WindowStartupLocation="CenterScreen"
         WindowState="Maximized"
+        SystemDecorations="None"
         MinWidth="1000" MinHeight="660"
         Width="1280" Height="800"
         Background="{StaticResource CanvasBrush}"
@@ -55,8 +56,11 @@
             <!-- ── Page 7 — Terms & Conditions acceptance gate ──
                  Sits ABOVE the shell in z-order and binds the shell away while
                  pending; the window close is cancelled for the same condition
-                 (MainWindow.axaml.cs). ── -->
-            <pages:TermsPage IsVisible="{Binding RequiresTermsAcceptance}"/>
+                 (App.axaml.cs). DataContext MUST point at the TermsViewModel —
+                 the page's bindings target it, not the shell MainViewModel
+                 (same pattern as pages 4–6 below). ── -->
+            <pages:TermsPage DataContext="{Binding Terms}"
+                             IsVisible="{Binding $parent[Window].((vm:MainViewModel)DataContext).RequiresTermsAcceptance}"/>
 
             <!-- ── Pages 4–6 — main shell (hidden while the terms gate holds;
                  IsProfile already includes !RequiresTermsAcceptance) ── -->

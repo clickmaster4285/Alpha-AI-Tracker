@@ -37,6 +37,11 @@ public class ClientTerm
     /// <summary>0 = pending acceptance (gates the shell), 1 = accepted (server acknowledged).</summary>
     public int IsAccepted { get; set; }
 
+    /// <summary>1 = the user clicked "I agree" (may still be awaiting server ack).
+    /// ONLY user-accepted rows are eligible for consent re-sending — treating a plain
+    /// pending row as "agreed" auto-accepted terms the user never saw (2026-09-16 fix).</summary>
+    public int IsUserAccepted { get; set; }
+
     /// <summary>UTC moment the server acknowledged the consent (NULL while pending).</summary>
     public DateTime? AcceptedAt { get; set; }
 

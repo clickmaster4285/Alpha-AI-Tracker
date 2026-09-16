@@ -305,8 +305,12 @@ public interface ILogStore
     Task<IReadOnlyList<ClientTerm>> GetPendingClientTermsAsync(string employeeId, CancellationToken ct);
     /// <summary>Count of pending terms for one employee — the cheap gate check.</summary>
     Task<int> CountPendingClientTermsAsync(string employeeId, CancellationToken ct);
-    /// <summary>Mark one term accepted for an employee. Called ONLY after the server
-    /// acknowledged the consent (2xx) — an unacknowledged acceptance must never masquerade
+    /// <summary>Mark one term as agreed by the USER (clicked "I agree"). The row stays
+    /// pending (is_accepted=0) until the server acknowledges the consent.</summary>
+    Task MarkClientTermUserAcceptedAsync(string termId, string employeeId, CancellationToken ct);
+
+    /// <summary>Mark one term accepted (server acknowledged via 2xx). Called ONLY after
+    /// the consent POST succeeds — an unacknowledged acceptance must never masquerade
     /// as accepted (2026-09-09 sync-fix principle).</summary>
     Task MarkClientTermAcceptedAsync(string termId, string employeeId, DateTime acceptedAt, CancellationToken ct);
     /// <summary>Purge pending rows whose terms the server no longer requires (deactivated or
