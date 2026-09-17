@@ -1,3 +1,140 @@
+# Release Notes — v1.1.6
+
+## Overview
+
+v1.1.6 is the **Terms & Conditions release**: a per-feature T&C consent framework spanning all three
+services, shipped as a **third standalone client instance**. Employees see a neutral, always-on-top
+acceptance dialog owned by its own process — completely separate from the Alpha AI Tracker GUI — and
+every acceptance lands in the server's append-only audit trail. The release includes 44 files
+changed (+5,038 / −407), migrations **036–039**, a new TipTap-based admin editor on the web, and a
+new `--terms` agent mode on the client.
+
+---
+
+## 1. Server — Terms & Conditions Framework (migrations 036–039)
+
+- **Migration `036_terms_consent.sql`** — append-only `terms_consent` table
+  (`employee_id`, `feature_id`, `terms_version`, `action`, `created_at`; UNIQUE on
+  `(employee_id, feature_id, terms_version, action)` — re-sending an accepted entry is idempotent).
+- **Migrations `037`/`038`** — `terms_content`: `id` (UUID-text), `heading`, `body` (**HTML**),
+  `terms_version`, `is_system`, `feature_id`, `term_type`, `is_active`, `sort_order`, soft delete.
+- **Migration `039_terms_content_unique_feature_fix.sql`** — the unique index on `feature_id` is
+  re-scoped to non-empty values only:
+  `CREATE UNIQUE INDEX idx_terms_content_feature ON terms_content (feature_id) WHERE deleted_at IS NULL AND feature_id <> ''`.
+  Featured terms keep their one-per-feature guarantee; admin-created manual terms
+  (`feature_id = ''`) are exempt — unlimited creates. (Fixes the `POST /terms-content` 500s caused
+  by a manually-added live-DB index colliding every manual create on the empty string,
+  SQLSTATE 23505.)
+- **Boot seeder** (`terms_content_seeder.go`): four featured terms seeded idempotently —
+  `app_usage`, `browser_journey`, `file_journey`, `live_view` (all `terms_version` `1.0`).
+
+### Auth surfaces separated (Client-vs-Web API Auth Separation Rule, codified in AGENTS.md §6)
+
+| Surface | Routes | Auth |
+|---|---|---|
+| **Client (device)** | `GET /terms-content/active`, `POST /terms-consent/sync` | `DeviceAuth` (the `syncGroup` — employee JWTs were rejected by the old JWTAuth admin-issuer check, and `employee_id` was never set under JWTAuth) |
+| **Web admin** | `POST/PUT/PATCH/DELETE /terms-content`, `GET /terms-content[/:id]`, `GET /terms-consent` (+ `/check`) | `JWTAuth` |
+
+`GET /terms-content/active` returns **only** `is_active = 1` terms in server order
+(`sort_order ASC, created_at ASC`); `GET /terms-consent` remains the web's privacy/audit view.
+
+---
+
+## 2. Web — Terms Management UI (`/settings/terms-and-conditions`)
+
+- **List page**: feature cards with hover-border highlight, deep-link to detail; featured
+  (`is_system`) terms are protected from deletion.
+- **Create / Edit / View** routes (`/create`, `/edit/{id}`, `/view/{id}`).
+- **TipTap rich-text editor** (`terms-editor.tsx` + `rich-text-editor.tsx`) — headings, bold,
+  italic, underline, bullet/ordered lists, text alignment; new deps
+  `@tiptap/react`, `@tiptap/starter-kit`, `@tiptap/pm`, and the underline / list / text-align
+  extensions.
+- Sidebar entry added under Settings.
+
+---
+
+## 3. Client — Third Standalone Instance: the Terms & Conditions App
+
+The client now runs as **three instances**:
+
+| Instance | What | How it runs |
+|---|---|---|
+| 1 | **Tracker GUI** — login, shell, dashboard pages | `client.exe` (normal launch) — unchanged behavior |
+| 2 | **Collector / sync engine** — journeys + sync | Headless services inside the tracker process (`--background` for pure headless) |
+| 3 | **Terms & Conditions app** (new) — fetch → show → accept → sync consent | `client.exe --terms` — **own process, own neutral GUI, own mutex**, no tracking services registered, exits when the queue is done |
+
+- **`TermsService`** (new): ScheduleCacheService-style pull loop (login/session-restore wake +
+  `ALPHA_TERMS_CHECK_HOURS` timer) hitting `GET /terms-content/active` with Device-token auth;
+  SHA-256 content-hash diff of (`heading`, `body`) + `terms_version` — only new or changed terms
+  open a pending row; stale pending rows whose feature was deactivated/deleted server-side are
+  purged; consent is POSTed and the local row flips to accepted **only on a 2xx**; unacknowledged
+  consents retry on every cycle; offline boots serve the cached pending queue with an honest badge.
+- **Two-state acceptance** in SQLite `client_terms` (PK `(id, employee_id)`):
+  `is_user_accepted` (the user clicked *I agree*) vs `is_accepted` (the server acknowledged).
+  The background retry loop re-sends **only user-accepted** rows — it can never accept on the
+  user's behalf. A content/version change resets both flags (re-prompt); the migration includes a
+  one-time repair re-opening rows the pre-release loop had auto-accepted.
+- **Spawn bridge**: the tracker's TermsService detects pending terms and launches the agent
+  (`client.exe --terms`); new terms arriving mid-session spawn the agent again. A failed fetch is
+  now **loud** (warning logged) and still spawns from the cached queue.
+- **`TermsWindow`**: neutral styling (plain light palette, "Terms and Conditions" title — no
+  tracker branding, no shell brushes), `Topmost`, sequential one-term-at-a-time flow with progress
+  bar + position label, HTML stripped to plain text for display (raw HTML kept in SQLite).
+- **Config knobs** (installer-parity §5): `ALPHA_TERMS_ENABLED` (default `true`) +
+  `ALPHA_TERMS_CHECK_HOURS` in `.env` / `.env.example` / `AppConfig` / `--print-config`.
+
+---
+
+## Bug Fixes Summary
+
+| # | Issue | Root cause | Fix |
+|---|-------|-----------|-----|
+| 1 | Terms visible in SQLite but the GUI showed nothing | `TermsPage` never got its `DataContext` (inherited `MainViewModel`; bindings target `TermsViewModel`) | Explicit `DataContext="{Binding Terms}"` + `PendingTermsChanged` marshaled through `Dispatcher.UIThread.Post` |
+| 2 | Terms auto-accepted without the user ever seeing them | Retry loop re-POSTed every `is_accepted=0` row — pending also meant "not yet agreed" | Two-state `is_user_accepted` / `is_accepted`; retry loop re-sends user-accepted rows only; one-time data repair in `MigrateSql` |
+| 3 | Accepting the 3rd term crashed the modal; after relaunch every accept closed it | Index/list desync — the pending list shrank after each accept but presentation kept indexing with the stale counter → `ArgumentOutOfRangeException` inside `async void` (terms were also silently skipped) | Queue head always presented (`pending[0]`); progress/position derived from counts |
+| 4 | Modal stayed open after the last acceptance | The `Done` event subscription was lost in the move to the standalone agent | `Done` → `Dispatcher.UIThread.Post(close)` |
+| 5 | Modal not always on top | Standalone `TermsWindow` never set `Topmost` | `Topmost="True"` |
+| 6 | Agent process lingered as a windowless zombie after its window closed | `ShutdownMode.OnMainWindowClose` never ended the Avalonia lifetime; unbounded `host.StopAsync` hung; empty-queue close-during-init wedged the lifetime | `Environment.Exit(0)` from the window's `Closed` event (safe — consents flush synchronously at accept) + bounded 5 s `host.StopAsync` on the pre-window path |
+| 7 | `POST /terms-content` returned 500 on every create after the first | Manually-added live-DB UNIQUE index on `feature_id` collided on the hardcoded empty string | Migration `039` re-scopes the index to `feature_id <> ''` |
+| 8 | Client startup crashed with `SQLite Error 1: near "is_user_accepted": syntax error` | Migration comments contained `;` / quotes — `RunMigrationsAsync` splits `MigrateSql` on `;` **before** stripping comments, gluing half a comment onto the `ALTER TABLE` | All semicolons/quotes removed from migration comments (trap documented in `StripSqlLineComments`) |
+| 9 | A failed terms fetch was silent — no spawn, no window, no log | `RefreshAsync` swallowed all exceptions and returned without raising `PendingTermsChanged` | Loud warning + spawn from the cached pending queue |
+
+---
+
+## Verification
+
+- ✅ `go build` / `go vet` clean · ✅ `dotnet build` 0 errors (non-incremental after window-code
+  changes — no analyzer blowup) · ✅ `npx tsc --noEmit` clean
+- ✅ Live dev-server scenarios: fetch → spawn → sequential acceptance → server ack → auto-close →
+  process exit; empty-queue instant exit; mid-session term arrival re-spawn; duplicate-feature and
+  manual-term creates return 201 after migration 039.
+- ⚠️ **Tiers 2–3 not run**: the scenario matrix is exercised from dev only, and per the
+  Installer-Parity Rule this release is **not "done" until verified from an installed build** —
+  `config.enc` must be re-baked so the `ALPHA_TERMS_*` knobs ship.
+
+---
+
+## Deploy Sequence
+
+1. **Server first** — applies migrations 036–039 on startup (the boot seeder re-ensures the four
+   featured terms idempotently).
+2. **Web** — rebuild and deploy (`npm ci` — new TipTap deps).
+3. **Client** — ships in the next installer build (the `--terms` agent, `client_terms` schema, and
+   the new knobs require a re-baked `config.enc`).
+
+---
+
+## Known Gaps / Follow-ups
+
+- Installed-build ship-test pending (Installer-Parity Rule).
+- Wayland has no always-on-top protocol — the agent's topmost is best-effort there
+  (environment limitation, not a bug).
+- Server-side permission enforcement (RBAC grants) is still not implemented in API middleware.
+- No rate limiting on login or sync endpoints.
+
+---
+---
+
 # Release Notes — v1.1.5
 
 ## Overview

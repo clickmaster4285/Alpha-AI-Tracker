@@ -9,6 +9,34 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
+// compareVersions returns -1, 0, or 1 comparing a to b.
+// Versions are split on "." and compared numerically left-to-right.
+// Non-numeric parts are compared lexicographically.
+func compareVersions(a, b string) int {
+	partsA := strings.Split(a, ".")
+	partsB := strings.Split(b, ".")
+	maxLen := len(partsA)
+	if len(partsB) > maxLen {
+		maxLen = len(partsB)
+	}
+	for i := 0; i < maxLen; i++ {
+		var va, vb int
+		if i < len(partsA) {
+			va, _ = strconv.Atoi(partsA[i])
+		}
+		if i < len(partsB) {
+			vb, _ = strconv.Atoi(partsB[i])
+		}
+		if va < vb {
+			return -1
+		}
+		if va > vb {
+			return 1
+		}
+	}
+	return 0
+}
+
 type TermsContentHandler struct {
 	repo *repository.TermsContentRepo
 }
@@ -126,6 +154,20 @@ func (h *TermsContentHandler) UpdateTermsContent(c echo.Context) error {
 	}
 
 	ctx := c.Request().Context()
+
+	// Version upgrade validation: new version must be strictly greater than current.
+	existing, err := h.repo.GetByID(ctx, id)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "terms content not found"})
+	}
+	if req.TermsVersion != "" && existing.TermsVersion != "" {
+		if compareVersions(req.TermsVersion, existing.TermsVersion) <= 0 {
+			return c.JSON(http.StatusBadRequest, map[string]string{
+				"message": "new version must be greater than current version (" + existing.TermsVersion + ")",
+			})
+		}
+	}
+
 	item, err := h.repo.Update(ctx, id, req.Heading, req.Body, req.TermsVersion)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})

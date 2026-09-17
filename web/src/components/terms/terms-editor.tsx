@@ -35,6 +35,8 @@ export default function TermsEditor({ mode, id }: TermsEditorProps) {
   const [heading, setHeading] = useState<string>("");
   const [body, setBody] = useState<string>("");
   const [version, setVersion] = useState<string>("1.0");
+  const [originalVersion, setOriginalVersion] = useState<string>("");
+  const [versionError, setVersionError] = useState<string>("");
   const [hydrated, setHydrated] = useState<boolean>(false);
 
   // Hydrate the form from the fetched record once (edit mode).
@@ -43,6 +45,7 @@ export default function TermsEditor({ mode, id }: TermsEditorProps) {
       setHeading(item.heading);
       setBody(item.body);
       setVersion(item.termsVersion || "1.0");
+      setOriginalVersion(item.termsVersion || "1.0");
       setHydrated(true);
     }
   }, [isEdit, item, hydrated]);
@@ -53,6 +56,12 @@ export default function TermsEditor({ mode, id }: TermsEditorProps) {
     onSuccess: (updated: TermsContentItem) => {
       queryClient.invalidateQueries({ queryKey: ["terms-content"] });
       router.push(`/settings/terms-and-conditions/view/${updated.id}`);
+    },
+    onError: (error: Error) => {
+      const msg = error?.message || "";
+      if (msg.toLowerCase().includes("version")) {
+        setVersionError(msg);
+      }
     },
   });
 
@@ -65,8 +74,26 @@ export default function TermsEditor({ mode, id }: TermsEditorProps) {
     },
   });
 
+  const compareVersions = (a: string, b: string): number => {
+    const partsA = a.split(".").map(Number);
+    const partsB = b.split(".").map(Number);
+    const maxLen = Math.max(partsA.length, partsB.length);
+    for (let i = 0; i < maxLen; i++) {
+      const va = partsA[i] || 0;
+      const vb = partsB[i] || 0;
+      if (va < vb) return -1;
+      if (va > vb) return 1;
+    }
+    return 0;
+  };
+
   const handleSave = () => {
     if (!heading.trim() || isSaving) return;
+    if (isEdit && originalVersion && version && compareVersions(version, originalVersion) <= 0) {
+      setVersionError(`Version must be greater than ${originalVersion}`);
+      return;
+    }
+    setVersionError("");
     const data = { heading, body, termsVersion: version };
     if (isEdit) updateMutation.mutate(data);
     else createMutation.mutate(data);
@@ -133,9 +160,12 @@ export default function TermsEditor({ mode, id }: TermsEditorProps) {
             <Label className="text-sm font-bold">Version</Label>
             <Input
               value={version}
-              onChange={(e) => setVersion(e.target.value)}
+              onChange={(e) => { setVersion(e.target.value); setVersionError(""); }}
               className="h-9 w-24"
             />
+            {versionError && (
+              <p className="text-sm text-destructive mt-1">{versionError}</p>
+            )}
           </div>
         </div>
       </div>
