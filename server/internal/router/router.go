@@ -27,6 +27,8 @@ func Setup(
 	shiftHandler *handlers.ShiftHandler,
 	timeAttendanceHandler *handlers.TimeAttendanceHandler,
 	geofenceHandler *handlers.GeofenceHandler,
+	termsConsentHandler *handlers.TermsConsentHandler,
+	termsContentHandler *handlers.TermsContentHandler,
 ) {
 	// ─────────────────────────────
 	// Global Middleware
@@ -94,6 +96,16 @@ func Setup(
 	syncGroup.POST("/storage-devices/sync", newSchemaHandler.SyncStorageDevices)
 	syncGroup.POST("/location-samples/sync", newSchemaHandler.SyncLocationSamples)
 	syncGroup.GET("/schedules/me", timeAttendanceHandler.GetMySchedule)
+
+	// ─── Terms & Conditions (CLIENT surface — DeviceAuth) ───
+	// The desktop client's acceptance flow lives here, NOT under the web-admin
+	// JWTAuth group: DeviceAuth sets the "employee_id" context value the consent
+	// handler reads, and employee JWTs/device tokens are the only credentials an
+	// employee machine holds. See the Client-vs-Web API Auth Separation Rule in
+	// AGENTS.md §6 — /terms-content/active returns ONLY active terms so the
+	// client-facing endpoint never leaks admin-drafted (inactive) content.
+	syncGroup.GET("/terms-content/active", termsContentHandler.ListActiveTermsContent)
+	syncGroup.POST("/terms-consent/sync", termsConsentHandler.SyncTermsConsent)
 
 	// ─────────────────────────────
 	// Semi-Protected Routes (optional auth)
@@ -208,4 +220,21 @@ func Setup(
 
 	protected.GET("/attendance/today", timeAttendanceHandler.GetToday)
 	protected.GET("/attendance/range", timeAttendanceHandler.GetRange)
+
+	// Terms & Conditions — web-admin surface. The client-facing consent sync and
+	// active-content endpoints live under DeviceAuth above (JWTAuth never sets the
+	// "employee_id" the consent handler reads). ListTermsConsent stays here for the
+	// web privacy/audit view; /terms-consent/check is registered FIRST so it cannot
+	// be shadowed by /terms-consent/:id-style future routes.
+	protected.GET("/terms-consent/check", termsConsentHandler.HasAccepted)
+	protected.GET("/terms-consent", termsConsentHandler.ListTermsConsent)
+	protected.GET("/terms-consent/check", termsConsentHandler.HasAccepted)
+
+	// Terms & Conditions content management (editable by admin)
+	protected.GET("/terms-content", termsContentHandler.ListTermsContent)
+	protected.GET("/terms-content/:id", termsContentHandler.GetTermsContent)
+	protected.PUT("/terms-content/:id", termsContentHandler.UpdateTermsContent)
+	protected.PATCH("/terms-content/:id/active", termsContentHandler.UpdateActive)
+	protected.POST("/terms-content", termsContentHandler.CreateTermsContent)
+	protected.DELETE("/terms-content/:id", termsContentHandler.DeleteTermsContent)
 }

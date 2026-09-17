@@ -1198,6 +1198,30 @@ server in the same query that returns the row — never built client-side from a
 
 **Allowed exceptions (OS-shell constructs, NOT user software):** Linux GNOME/session daemon prefixes in `NonAppProcesses`/`NonAppProcessPrefixes` (gnome-*, gsd-*, gvfsd-*, ibus-*, evolution-*), Windows shell display names (`DisplayNameOverrides`: explorer→File Explorer, svchost→Windows Services…), and the Windows Update `KB`-prefix naming convention. These are OS-provided labels for OS processes; user-installed software detection must stay 100% metadata-driven. When a fix is tempting as a name list, it must be implemented as metadata first (probe the OS), and the resulting rule documented here.
 
+### Client-vs-Web API Auth Separation Rule (mandatory, 2026-09-16)
+
+**An endpoint consumed by the desktop client MUST live under `DeviceAuth` (the `syncGroup` in
+`router.go`); an endpoint consumed by the web dashboard MUST live under `JWTAuth` (the
+`protected` group). Never put a client-facing route in the web-admin group, and never make a
+client handler depend on context values only the other middleware sets.**
+
+- The two middlewares are NOT interchangeable. `DeviceAuth` accepts `Authorization: Device <token>`
+  (or the legacy employee-Bearer fallback) and sets **`employee_id`** (+ `device_id`) in the Echo
+  context. `JWTAuth` accepts the httpOnly web cookie (or Bearer) with the **web-admin issuer**
+  (`alpha-ai-tracker`) and sets only **`user_id`** — employee JWTs carry a different issuer
+  (`alpha-ai-tracker-employee`) and are rejected with 401.
+- A handler reading `c.Get("employee_id")` (e.g. `getAuthenticatedEmployeeID`) **always 401s**
+  when mounted under `JWTAuth`, even for valid admin tokens — that context key is never set
+  there. This exact wiring bug shipped in the T&C feature (`POST /terms-consent/sync`) and had
+  to be remounted under `DeviceAuth`.
+- Client-facing content endpoints that must not leak admin-drafted data get a dedicated
+  client-shaped route under `DeviceAuth` (e.g. `GET /terms-content/active` returns only
+  `is_active = 1` rows) instead of exposing the admin list.
+- Web-admin endpoints that need employee scoping take `?employeeId=` explicitly and stay under
+  `JWTAuth` (e.g. `GET /terms-consent`).
+- When adding any new endpoint, name its consumer FIRST (client machine vs admin browser) and
+  mount it in the matching group — do not copy the group of whatever route happens to be nearby.
+
 ### Cross-Platform Analyzer Safety Rule (mandatory)
 
 **A client build that hangs or consumes multiple GB is a critical development/CI blocker.** In this

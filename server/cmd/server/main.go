@@ -75,6 +75,14 @@ func main() {
 	refreshTokenRepo := repository.NewRefreshTokenRepo(pool)
 	shiftRepo := repository.NewShiftRepo(pool)
 	timeAttendanceRepo := repository.NewTimeAttendanceRepo(pool)
+	termsConsentRepo := repository.NewTermsConsentRepo(pool)
+	termsContentRepo := repository.NewTermsContentRepo(pool)
+
+	// Seed featured Terms & Conditions (idempotent — safe on every startup)
+	termsSeeder := services.NewTermsContentSeeder(termsContentRepo)
+	if err := termsSeeder.SeedFeaturedTerms(context.Background()); err != nil {
+		log.Printf("[server] WARNING: terms seeder error: %v", err)
+	}
 
 	authService := services.NewAuthService(userRepo, rbacRepo, refreshTokenRepo, cfg.JWT, cfg.Admin)
 	userService := services.NewUserService(userRepo, rbacRepo, employeeRepo)
@@ -104,6 +112,8 @@ func main() {
 	shiftHandler := handlers.NewShiftHandler(shiftService)
 	timeAttendanceHandler := handlers.NewTimeAttendanceHandler(timeAttendanceService)
 	geofenceHandler := handlers.NewGeofenceHandler(geofenceService)
+	termsConsentHandler := handlers.NewTermsConsentHandler(termsConsentRepo)
+	termsContentHandler := handlers.NewTermsContentHandler(termsContentRepo)
 
 	// ────────────────
 	// Seed RBAC catalog (modules, submodules, system role) — idempotent
@@ -150,7 +160,7 @@ func main() {
 	e.HideBanner = true
 	e.HidePort = true
 
-	router.Setup(e, cfg, authService, deviceRepo, userRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler, rbacHandler, shiftHandler, timeAttendanceHandler, geofenceHandler)
+	router.Setup(e, cfg, authService, deviceRepo, userRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler, rbacHandler, shiftHandler, timeAttendanceHandler, geofenceHandler, termsConsentHandler, termsContentHandler)
 
 	// ────────────────
 	// Graceful Shutdown

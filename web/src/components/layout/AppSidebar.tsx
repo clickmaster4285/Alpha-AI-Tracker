@@ -444,6 +444,11 @@ const navSections: NavSection[] = [
             path: "/settings/security",
             module: "settings/security",
           },
+          {
+            // Visible to every authenticated user — no module key.
+            label: "Terms & Conditions",
+            path: "/settings/terms-and-conditions",
+          },
         ],
       },
     ],
