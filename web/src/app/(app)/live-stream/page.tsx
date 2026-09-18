@@ -131,15 +131,40 @@ function LiveStreamInner() {
               <p className="text-sm text-muted-foreground">Select an employee to watch</p>
             )}
           </div>
-          {selected && socket.status === 'live' && (
-            <div className="flex items-center gap-2 text-xs shrink-0">
-              <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-red-500/10 text-red-600 font-medium">
-                <Circle className="w-2 h-2 fill-current" />
-                LIVE
-              </span>
-              <span className="text-muted-foreground">{socket.fps} fps</span>
-            </div>
-          )}
+          <div className="flex items-center gap-3 shrink-0">
+            {selected && socket.clientConnected && socket.monitors.length > 0 && (
+              <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                <span className="sr-only">Monitor</span>
+                <select
+                  value={socket.selectedMonitor}
+                  onChange={(e) => socket.selectMonitor(Number(e.target.value))}
+                  disabled={socket.monitors.length < 2}
+                  className="h-8 max-w-[14rem] rounded-md border border-border bg-background px-2 text-sm text-foreground disabled:opacity-70"
+                  title={
+                    socket.monitors.length < 2
+                      ? 'Only one display reported by this PC'
+                      : 'Select display to preview'
+                  }
+                >
+                  {socket.monitors.map((m) => (
+                    <option key={m.index} value={m.index}>
+                      {m.name || `Display ${m.index + 1}`}
+                      {m.width && m.height ? ` (${m.width}×${m.height})` : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {selected && socket.status === 'live' && (
+              <div className="flex items-center gap-2 text-xs">
+                <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-red-500/10 text-red-600 font-medium">
+                  <Circle className="w-2 h-2 fill-current" />
+                  LIVE
+                </span>
+                <span className="text-muted-foreground">{socket.fps} fps</span>
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="flex-1 relative bg-muted/30 flex items-center justify-center overflow-hidden">

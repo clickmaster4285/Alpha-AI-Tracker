@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { liveStreamApi } from '@/lib/api';
 
 export type LiveStreamSocketStatus =
@@ -12,6 +12,14 @@ export type LiveStreamSocketStatus =
   | 'unavailable'
   | 'error';
 
+export interface LiveStreamMonitor {
+  index: number;
+  name: string;
+  width: number;
+  height: number;
+  isPrimary: boolean;
+}
+
 export interface LiveStreamSocketState {
   status: LiveStreamSocketStatus;
   streaming: boolean;
@@ -20,6 +28,9 @@ export interface LiveStreamSocketState {
   consentMissing: boolean;
   fps: number;
   error: string | null;
+  monitors: LiveStreamMonitor[];
+  selectedMonitor: number;
+  selectMonitor: (index: number) => void;
 }
 
 function resolveWsBase(): string {
@@ -27,7 +38,6 @@ function resolveWsBase(): string {
   if (fromEnv) return fromEnv.replace(/\/$/, '');
   if (typeof window !== 'undefined') {
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // Dev default: Go server on :8080 (Next rewrites do not proxy WebSockets).
     if (window.location.port === '3000') {
       return `${proto}//${window.location.hostname}:8080`;
     }
@@ -47,7 +57,7 @@ export function useLiveStreamSocket(
   opts?: { enabled?: boolean },
 ): LiveStreamSocketState {
   const enabled = opts?.enabled !== false;
-  const [state, setState] = useState<LiveStreamSocketState>({
+  const [state, setState] = useState<Omit<LiveStreamSocketState, 'selectMonitor'>>({
     status: 'idle',
     streaming: false,
     streamAvailable: false,
@@ -55,12 +65,21 @@ export function useLiveStreamSocket(
     consentMissing: false,
     fps: 0,
     error: null,
+    monitors: [],
+    selectedMonitor: 0,
   });
 
   const frameTimes = useRef<number[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const canvasHolder = useRef(canvasRef);
   canvasHolder.current = canvasRef;
+
+  const selectMonitor = useCallback((index: number) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: 'select_monitor', index }));
+    setState((s) => ({ ...s, selectedMonitor: index }));
+  }, []);
 
   useEffect(() => {
     if (!employeeId || !enabled) {
@@ -72,6 +91,8 @@ export function useLiveStreamSocket(
         consentMissing: false,
         fps: 0,
         error: null,
+        monitors: [],
+        selectedMonitor: 0,
       });
       return;
     }
@@ -99,7 +120,6 @@ export function useLiveStreamSocket(
           error: msg,
           streaming: false,
         }));
-        // Retry ticket mint on transient errors.
         if (!consent) {
           attempt += 1;
           const delay = Math.min(10_000, 1000 * Math.pow(2, Math.min(attempt, 4)));
@@ -138,6 +158,8 @@ export function useLiveStreamSocket(
               clientConnected?: boolean;
               consentMissing?: boolean;
               code?: string;
+              monitors?: LiveStreamMonitor[];
+              selectedMonitor?: number;
             };
             if (msg.type === 'status') {
               setState((s) => ({
@@ -146,6 +168,9 @@ export function useLiveStreamSocket(
                 streamAvailable: !!msg.streamAvailable,
                 clientConnected: !!msg.clientConnected,
                 consentMissing: !!msg.consentMissing,
+                monitors: Array.isArray(msg.monitors) ? msg.monitors : s.monitors,
+                selectedMonitor:
+                  typeof msg.selectedMonitor === 'number' ? msg.selectedMonitor : s.selectedMonitor,
                 status: msg.consentMissing
                   ? 'consentMissing'
                   : msg.streaming
@@ -235,5 +260,5 @@ export function useLiveStreamSocket(
     };
   }, [employeeId, enabled]);
 
-  return state;
+  return { ...state, selectMonitor };
 }

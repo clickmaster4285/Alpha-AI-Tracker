@@ -125,6 +125,7 @@ public sealed class LiveStreamClient : BackgroundService
         _logger.LogInformation("LiveStreamClient connecting to {Url}", wsUrl);
         await ws.ConnectAsync(new Uri(wsUrl), ct);
 
+        var monitors = _capture.GetMonitors();
         var hello = JsonSerializer.Serialize(new
         {
             type = "hello",
@@ -132,6 +133,15 @@ public sealed class LiveStreamClient : BackgroundService
                 : OperatingSystem.IsLinux() ? "linux" : "macos",
             streamAvailable = _capture.StreamAvailable,
             version = AppInfo.Version,
+            selectedMonitor = _capture.SelectedMonitorIndex,
+            monitors = monitors.Select(m => new
+            {
+                index = m.Index,
+                name = m.Name,
+                width = m.Width,
+                height = m.Height,
+                isPrimary = m.IsPrimary,
+            }).ToArray(),
         }, JsonOpts);
         var helloBytes = Encoding.UTF8.GetBytes(hello);
         await ws.SendAsync(helloBytes, WebSocketMessageType.Text, true, ct);
@@ -165,6 +175,34 @@ public sealed class LiveStreamClient : BackgroundService
                 {
                     _logger.LogInformation("LiveStreamClient: stop capture");
                     _capture.SetStreamActive(false);
+                }
+                else if (type == "select_monitor")
+                {
+                    var idx = 0;
+                    if (doc.RootElement.TryGetProperty("index", out var idxProp) &&
+                        idxProp.ValueKind == JsonValueKind.Number)
+                        idx = idxProp.GetInt32();
+                    var applied = _capture.SetSelectedMonitor(idx);
+                    _logger.LogInformation("LiveStreamClient: select_monitor → {Index}", applied);
+                    // Re-advertise so watchers' status picks up the new selection.
+                    var ack = JsonSerializer.Serialize(new
+                    {
+                        type = "hello",
+                        platform = OperatingSystem.IsWindows() ? "windows"
+                            : OperatingSystem.IsLinux() ? "linux" : "macos",
+                        streamAvailable = _capture.StreamAvailable,
+                        version = AppInfo.Version,
+                        selectedMonitor = _capture.SelectedMonitorIndex,
+                        monitors = _capture.GetMonitors().Select(m => new
+                        {
+                            index = m.Index,
+                            name = m.Name,
+                            width = m.Width,
+                            height = m.Height,
+                            isPrimary = m.IsPrimary,
+                        }).ToArray(),
+                    }, JsonOpts);
+                    await ws.SendAsync(Encoding.UTF8.GetBytes(ack), WebSocketMessageType.Text, true, ct);
                 }
                 else if (type == "error")
                 {

@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Phase 1 working (Windows `dotnet run` e2e); Windows installer parity next |
+| **Status** | Phase 1 complete (Windows); Phase 2 multi-monitor in progress |
 | **Branch** | `feature/live_stream` |
 | **Created** | 2026-09-18 |
 | **Updated** | 2026-09-18 |
@@ -263,14 +263,15 @@ Employee list is polled (~15 s); infinite scroll not required at current company
 5. **Installer parity** — bake `config.enc`, Windows installer, ship-test installed build; document Linux unavailable.
 6. **Docs** — `AGENTS.md`, server/client/web `ARCHITECTURE.md`.
 
-### Phase 2 (explicitly out of scope now)
+### Phase 2 (in progress)
 
-- Linux PipeWire / portal capture  
-- Multi-monitor selection  
-- **WebRTC media path** (keep control plane; swap payload)  
-- Redis-backed hub for multi-node  
-- Server-side RBAC on which admins may watch whom  
-
+| Track | Status | Notes |
+|-------|--------|-------|
+| **Multi-monitor selection** | **Landed (code)** | Admin picker → `select_monitor` → client EnumDisplayMonitors; restart server+client+web to verify |
+| Linux PipeWire / portal capture | Deferred | No Linux ship-test machine yet |
+| WebRTC media path | Later | Keep control plane; swap JPEG payload |
+| Redis-backed hub | Later | Multi-node fan-out |
+| Server-side who-can-watch RBAC | Later | Today any admin with module access can watch |
 ---
 
 ## 9. Verification matrix

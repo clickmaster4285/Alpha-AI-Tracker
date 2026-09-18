@@ -206,3 +206,43 @@ func TestCapability(t *testing.T) {
 		t.Fatalf("bad capability: ok=%v %+v", ok, cap)
 	}
 }
+
+func TestSelectMonitor(t *testing.T) {
+	h := testHub()
+	defer h.Close()
+
+	ctrl, ok := h.RegisterClient("EMP-M")
+	if !ok {
+		t.Fatal("register failed")
+	}
+	h.SetCapability("EMP-M", Capability{
+		Platform:        "windows",
+		StreamAvailable: true,
+		Monitors: []MonitorInfo{
+			{Index: 0, Name: "Primary", Width: 1920, Height: 1080, IsPrimary: true},
+			{Index: 1, Name: "Secondary", Width: 1280, Height: 720, IsPrimary: false},
+		},
+		SelectedMonitor: 0,
+	})
+
+	// Drain any unexpected events.
+	select {
+	case <-ctrl:
+	default:
+	}
+
+	h.SelectMonitor("EMP-M", 1)
+	select {
+	case ev := <-ctrl:
+		if ev.Type != "select_monitor" || ev.MonitorIndex != 1 {
+			t.Fatalf("want select_monitor index=1, got %+v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected select_monitor control event")
+	}
+
+	snap := h.Snapshot("EMP-M")
+	if snap.SelectedMonitor != 1 || len(snap.Monitors) != 2 {
+		t.Fatalf("bad snapshot after select: %+v", snap)
+	}
+}

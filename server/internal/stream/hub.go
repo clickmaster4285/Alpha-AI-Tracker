@@ -56,9 +56,20 @@ func DefaultConfig() Config {
 
 // Capability is advertised by the desktop client in its hello message.
 type Capability struct {
-	Platform        string
-	StreamAvailable bool
-	Version         string
+	Platform         string
+	StreamAvailable  bool
+	Version          string
+	Monitors         []MonitorInfo
+	SelectedMonitor  int
+}
+
+// MonitorInfo is one display the client can capture.
+type MonitorInfo struct {
+	Index     int    `json:"index"`
+	Name      string `json:"name"`
+	Width     int    `json:"width"`
+	Height    int    `json:"height"`
+	IsPrimary bool   `json:"isPrimary"`
 }
 
 // Frame is one JPEG preview (latest-wins).
@@ -68,20 +79,23 @@ type Frame struct {
 	At   time.Time
 }
 
-// ControlEvent is sent to the push-socket handler (start/stop capture).
+// ControlEvent is sent to the push-socket handler (start/stop/select_monitor).
 type ControlEvent struct {
-	Type string // "start" | "stop"
+	Type         string // "start" | "stop" | "select_monitor"
+	MonitorIndex int    // for select_monitor
 }
 
 // EmployeeSnapshot is hub-side state for the employees REST list / watch status.
 type EmployeeSnapshot struct {
-	Wanted          bool
-	Streaming       bool
-	StreamAvailable bool
-	WatcherCount    int
-	ClientConnected bool
-	Seq             uint64
-	LastFrameAt     time.Time
+	Wanted           bool
+	Streaming        bool
+	StreamAvailable  bool
+	WatcherCount     int
+	ClientConnected  bool
+	Seq              uint64
+	LastFrameAt      time.Time
+	Monitors         []MonitorInfo
+	SelectedMonitor  int
 }
 
 type mailbox struct {
@@ -233,22 +247,44 @@ func (h *Hub) getOrCreateLocked(empID string) *mailbox {
 }
 
 func (h *Hub) sendCtrlLocked(m *mailbox, typ string) {
+	h.sendCtrlEventLocked(m, ControlEvent{Type: typ})
+}
+
+func (h *Hub) sendCtrlEventLocked(m *mailbox, ev ControlEvent) {
 	if m.ctrl == nil {
 		return
 	}
 	select {
-	case m.ctrl <- ControlEvent{Type: typ}:
+	case m.ctrl <- ev:
 	default:
-		// Drop oldest by draining one, then retry once.
 		select {
 		case <-m.ctrl:
 		default:
 		}
 		select {
-		case m.ctrl <- ControlEvent{Type: typ}:
+		case m.ctrl <- ev:
 		default:
 		}
 	}
+}
+
+// SelectMonitor asks the push client to switch capture target (Phase 2 multi-monitor).
+func (h *Hub) SelectMonitor(empID string, index int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	m, ok := h.boxes[empID]
+	if !ok || !m.clientConnected {
+		return
+	}
+	if index < 0 {
+		index = 0
+	}
+	if n := len(m.cap.Monitors); n > 0 && index >= n {
+		index = n - 1
+	}
+	m.cap.SelectedMonitor = index
+	m.lastActivity = time.Now()
+	h.sendCtrlEventLocked(m, ControlEvent{Type: "select_monitor", MonitorIndex: index})
 }
 
 func (h *Hub) markStreamLocked(m *mailbox) error {
@@ -466,6 +502,8 @@ func (h *Hub) Snapshot(empID string) EmployeeSnapshot {
 		ClientConnected: m.clientConnected,
 		Seq:             m.seq,
 		LastFrameAt:     m.lastFrameAt,
+		Monitors:        append([]MonitorInfo(nil), m.cap.Monitors...),
+		SelectedMonitor: m.cap.SelectedMonitor,
 	}
 }
 

@@ -263,9 +263,13 @@ func (h *StreamHandler) Push(c echo.Context) error {
 				if !ok {
 					return
 				}
+				payload := map[string]interface{}{"type": ev.Type}
+				if ev.Type == "select_monitor" {
+					payload["index"] = ev.MonitorIndex
+				}
 				writeMu.Lock()
 				_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
-				err := conn.WriteJSON(map[string]string{"type": ev.Type})
+				err := conn.WriteJSON(payload)
 				writeMu.Unlock()
 				if err != nil {
 					return
@@ -316,10 +320,12 @@ func (h *StreamHandler) Push(c echo.Context) error {
 
 func (h *StreamHandler) handlePushText(empID string, data []byte) {
 	var msg struct {
-		Type            string `json:"type"`
-		Platform        string `json:"platform"`
-		StreamAvailable bool   `json:"streamAvailable"`
-		Version         string `json:"version"`
+		Type             string               `json:"type"`
+		Platform         string               `json:"platform"`
+		StreamAvailable  bool                 `json:"streamAvailable"`
+		Version          string               `json:"version"`
+		SelectedMonitor  int                  `json:"selectedMonitor"`
+		Monitors         []stream.MonitorInfo `json:"monitors"`
 	}
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return
@@ -329,8 +335,23 @@ func (h *StreamHandler) handlePushText(empID string, data []byte) {
 			Platform:        msg.Platform,
 			StreamAvailable: msg.StreamAvailable,
 			Version:         msg.Version,
+			Monitors:        msg.Monitors,
+			SelectedMonitor: msg.SelectedMonitor,
 		})
-		log.Printf("[live-stream] hello employee=%s platform=%s available=%v", empID, msg.Platform, msg.StreamAvailable)
+		log.Printf("[live-stream] hello employee=%s platform=%s available=%v monitors=%d selected=%d",
+			empID, msg.Platform, msg.StreamAvailable, len(msg.Monitors), msg.SelectedMonitor)
+	}
+}
+
+func statusPayload(snap stream.EmployeeSnapshot) map[string]interface{} {
+	return map[string]interface{}{
+		"type":             "status",
+		"streaming":        snap.Streaming,
+		"streamAvailable":  snap.StreamAvailable,
+		"clientConnected":  snap.ClientConnected,
+		"consentMissing":   false,
+		"monitors":         snap.Monitors,
+		"selectedMonitor":  snap.SelectedMonitor,
 	}
 }
 
@@ -402,13 +423,7 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 	log.Printf("[live-stream] watch connected employee=%s watcher=%d", empID, watcherID)
 
 	snap := h.hub.Snapshot(empID)
-	_ = writeJSON(conn, map[string]interface{}{
-		"type":            "status",
-		"streaming":       snap.Streaming,
-		"streamAvailable": snap.StreamAvailable,
-		"clientConnected": snap.ClientConnected,
-		"consentMissing":  false,
-	})
+	_ = writeJSON(conn, statusPayload(snap))
 
 	// Dev-only synthetic frames when no client is pushing.
 	var testStop chan struct{}
@@ -446,13 +461,7 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 				s := h.hub.Snapshot(empID)
 				writeMu.Lock()
 				_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
-				err := conn.WriteJSON(map[string]interface{}{
-					"type":            "status",
-					"streaming":       s.Streaming,
-					"streamAvailable": s.StreamAvailable,
-					"clientConnected": s.ClientConnected,
-					"consentMissing":  false,
-				})
+				err := conn.WriteJSON(statusPayload(s))
 				writeMu.Unlock()
 				if err != nil {
 					return
@@ -478,12 +487,27 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 	})
 
 	for {
-		if _, _, err := conn.ReadMessage(); err != nil {
+		msgType, data, err := conn.ReadMessage()
+		if err != nil {
 			closeDone()
 			log.Printf("[live-stream] watch disconnected employee=%s watcher=%d", empID, watcherID)
 			return nil
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(wsPongWait))
+		if msgType != websocket.TextMessage {
+			continue
+		}
+		var msg struct {
+			Type  string `json:"type"`
+			Index int    `json:"index"`
+		}
+		if json.Unmarshal(data, &msg) != nil {
+			continue
+		}
+		if msg.Type == "select_monitor" {
+			h.hub.SelectMonitor(empID, msg.Index)
+			log.Printf("[live-stream] select_monitor employee=%s index=%d", empID, msg.Index)
+		}
 	}
 }
 
