@@ -29,6 +29,7 @@ func Setup(
 	geofenceHandler *handlers.GeofenceHandler,
 	termsConsentHandler *handlers.TermsConsentHandler,
 	termsContentHandler *handlers.TermsContentHandler,
+	streamHandler *handlers.StreamHandler,
 ) {
 	// ─────────────────────────────
 	// Global Middleware
@@ -106,6 +107,11 @@ func Setup(
 	// client-facing endpoint never leaks admin-drafted (inactive) content.
 	syncGroup.GET("/terms-content/active", termsContentHandler.ListActiveTermsContent)
 	syncGroup.POST("/terms-consent/sync", termsConsentHandler.SyncTermsConsent)
+
+	// Live stream — client push socket (DeviceAuth). Web watch/employees live under JWTAuth.
+	if streamHandler != nil {
+		syncGroup.GET("/live-stream/push", streamHandler.Push)
+	}
 
 	// ─────────────────────────────
 	// Semi-Protected Routes (optional auth)
@@ -237,4 +243,14 @@ func Setup(
 	protected.PATCH("/terms-content/:id/active", termsContentHandler.UpdateActive)
 	protected.POST("/terms-content", termsContentHandler.CreateTermsContent)
 	protected.DELETE("/terms-content/:id", termsContentHandler.DeleteTermsContent)
+
+	// Live stream — web admin surface.
+	// employees + watch-ticket stay under JWTAuth (cookies work on REST).
+	// watch WebSocket is public but requires a one-time ticket (browsers often
+	// omit httpOnly cookies on cross-port WS handshakes to :8080 from :3000).
+	if streamHandler != nil {
+		protected.GET("/live-stream/employees", streamHandler.ListEmployees)
+		protected.GET("/live-stream/watch-ticket", streamHandler.IssueWatchTicket)
+		e.GET("/api/v1/live-stream/watch", streamHandler.Watch)
+	}
 }

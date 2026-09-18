@@ -82,6 +82,14 @@ public class AppConfig
     /// <summary>When false, only OS GPS/WiFi fixes are stored — no coarse IP geolocation.</summary>
     public bool LocationIpFallback { get; init; } = false;
 
+    // ─── Live stream (Phase 1 — Windows screen preview) ───
+    // Outbound WS to /live-stream/push. Frames flow only after the server sends start
+    // (an admin is watching). Default OFF — fleet opt-in + config.enc bake required.
+    public bool StreamEnabled { get; init; } = false;
+    public int StreamFps { get; init; } = 10;
+    public int StreamMaxWidth { get; init; } = 1600;
+    public int StreamJpegQuality { get; init; } = 60;
+
     // ─── Self-update (GitHub Releases) ───
     // The client checks https://github.com/{UpdateRepo}/releases/latest for an
     // installer newer than the running VERSION, downloads it into the user data dir
@@ -137,8 +145,19 @@ public class AppConfig
             LocationEnabled = GetEnv("ALPHA_LOCATION_ENABLED") is ("1" or "true" or "True"),
             LocationPollSec = Math.Max(60, int.TryParse(GetEnv("ALPHA_LOCATION_POLL_SEC"), out var locPoll) ? locPoll : 300),
             LocationIpFallback = GetEnv("ALPHA_LOCATION_IP_FALLBACK") is ("1" or "true" or "True"),
+            StreamEnabled = IsEnvTruthy(GetEnv("ALPHA_STREAM_ENABLED")),
+            StreamFps = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_FPS"), out var streamFps) ? streamFps : 10, 1, 30),
+            StreamMaxWidth = Math.Max(320, int.TryParse(GetEnv("ALPHA_STREAM_MAX_WIDTH"), out var streamW) ? streamW : 1600),
+            StreamJpegQuality = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_JPEG_QUALITY"), out var streamQ) ? streamQ : 60, 10, 95),
         };
     }
+
+    private static bool IsEnvTruthy(string? value) =>
+        value is not null &&
+        (value.Equals("1", StringComparison.OrdinalIgnoreCase)
+         || value.Equals("true", StringComparison.OrdinalIgnoreCase)
+         || value.Equals("yes", StringComparison.OrdinalIgnoreCase)
+         || value.Equals("on", StringComparison.OrdinalIgnoreCase));
 
     private static string? FirstNonEmpty(params string?[] values)
     {

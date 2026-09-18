@@ -211,3 +211,39 @@ func (r *TimeAttendanceRepo) GetLastHeartbeat(ctx context.Context, employeeID st
 	}
 	return &parsed, nil
 }
+
+// ListLastHeartbeats returns employee_id → best "last seen" time for live-stream online.
+// Uses GREATEST(parsed heartbeat value, app_status.updated_at) so a successful sync
+// counts as alive even when the embedded value is already ~1 sync-interval old.
+func (r *TimeAttendanceRepo) ListLastHeartbeats(ctx context.Context) (map[string]time.Time, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT employee_id, value, updated_at
+		FROM app_status
+		WHERE key = 'last_heartbeat_at'
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list heartbeats: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[string]time.Time)
+	for rows.Next() {
+		var empID, value string
+		var updatedAt time.Time
+		if err := rows.Scan(&empID, &value, &updatedAt); err != nil {
+			return nil, fmt.Errorf("scan heartbeat: %w", err)
+		}
+		best := updatedAt.UTC()
+		if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+			if parsed.UTC().After(best) {
+				best = parsed.UTC()
+			}
+		} else if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+			if parsed.UTC().After(best) {
+				best = parsed.UTC()
+			}
+		}
+		out[empID] = best
+	}
+	return out, rows.Err()
+}

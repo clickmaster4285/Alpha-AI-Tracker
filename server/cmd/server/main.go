@@ -17,6 +17,7 @@ import (
 	"github.com/alpha-ai-tracker/server/internal/repository"
 	"github.com/alpha-ai-tracker/server/internal/router"
 	"github.com/alpha-ai-tracker/server/internal/services"
+	"github.com/alpha-ai-tracker/server/internal/stream"
 	"github.com/labstack/echo/v4"
 )
 
@@ -115,6 +116,25 @@ func main() {
 	termsConsentHandler := handlers.NewTermsConsentHandler(termsConsentRepo)
 	termsContentHandler := handlers.NewTermsContentHandler(termsContentRepo)
 
+	streamHub := stream.NewHub(stream.Config{
+		Enabled:                cfg.LiveStream.Enabled,
+		MaxFPS:                 cfg.LiveStream.MaxFPS,
+		FrameMaxBytes:          cfg.LiveStream.FrameMaxBytes,
+		MaxStreams:             cfg.LiveStream.MaxStreams,
+		MaxWatchersPerEmployee: cfg.LiveStream.MaxWatchersPerEmployee,
+		IdleSec:                cfg.LiveStream.IdleSec,
+		TestFrame:              cfg.LiveStream.TestFrame,
+	})
+	defer streamHub.Close()
+	streamHandler := handlers.NewStreamHandler(
+		streamHub, employeeRepo, termsConsentRepo, timeAttendanceRepo, cfg.CORS.AllowedOrigins,
+	)
+	if cfg.LiveStream.Enabled {
+		log.Printf("[server] live-stream hub enabled (maxStreams=%d maxFps=%d)", cfg.LiveStream.MaxStreams, cfg.LiveStream.MaxFPS)
+	} else {
+		log.Println("[server] live-stream hub disabled")
+	}
+
 	// ────────────────
 	// Seed RBAC catalog (modules, submodules, system role) — idempotent
 	// ────────────────
@@ -160,7 +180,7 @@ func main() {
 	e.HideBanner = true
 	e.HidePort = true
 
-	router.Setup(e, cfg, authService, deviceRepo, userRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler, rbacHandler, shiftHandler, timeAttendanceHandler, geofenceHandler, termsConsentHandler, termsContentHandler)
+	router.Setup(e, cfg, authService, deviceRepo, userRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler, rbacHandler, shiftHandler, timeAttendanceHandler, geofenceHandler, termsConsentHandler, termsContentHandler, streamHandler)
 
 	// ────────────────
 	// Graceful Shutdown
