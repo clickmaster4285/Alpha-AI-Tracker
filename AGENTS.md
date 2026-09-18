@@ -1,7 +1,12 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-09-11
+> **Last audited:** 2026-09-18
 > **Changelog:**
+>
+> - 2026-09-18: **Live stream Phase 1 (Windows) + app-items URL index fix.**
+>   - **Server:** WS JPEG relay hub (`LIVE_STREAM_*`); online window 3 min using heartbeat/`updated_at`; **migration 040** drops `idx_app_items_url`; **migration 041** replaces `idx_app_items_context(employee_id,item_type,identifier)` with `idx_app_items_emp_type` (same btree overflow on long identifiers/URLs → sync 500).
+>   - **Client:** DXGI + managed JPEG push socket (`ALPHA_STREAM_*`); retention delete children-before-parents for `app_items` self-FK; Windows installer `AlphaAITracker-Setup-1.1.6.exe` baked with stream config.
+>   - **Web:** `/live-stream` live preview (consent `live_view`). Linux/macOS capture still unavailable.
 >
 > - 2026-09-11: **Core + Web: app-session accuracy, per-row stagnation sweep, Windows shutdown finalizer, migrations 034/035.**
 >   - **Server:** `AggregateAppSessionsUsage` now projects `has_open_session = BOOL_OR(status='ACTIVE' AND ended_at IS NULL)` (I-01 — OFFLINE/STALE rows with `ended_at=NULL` no longer count as "Running") and `last_active_at = MAX(COALESCE(last_activity_at, last_sync_at, ended_at, started_at))`. A new **per-row stagnation sweep** (step 4 of `session_lifecycle_sweep.go`) advances any OFFLINE/STALE row whose OWN `last_sync_at` is ≥ CLOSE_AFTER old — even on a machine that is still alive — so a single abandoned session can never be stranded forever (I-02). **Migration 034** aligns historical rows that already carried `ended_at` to `CLOSED`; **migration 035** freezes stranded OFFLINE/STALE sessions (`status='CLOSED'`, `ended_at=COALESCE(last_activity_at,last_sync_at,started_at)`) older than 24h. 035 verified applied on the live DB (`OFFLINE & ended_at IS NULL = 0`).

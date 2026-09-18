@@ -242,6 +242,10 @@ if [ "$BUILD_WIN" = true ]; then
   bash "$SCRIPT_DIR/generate-windows-vars.sh"
   if command -v iscc &>/dev/null; then
     iscc "$SCRIPT_DIR/installer-windows.iss"
+  elif [ -f "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" ]; then
+    "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" "$SCRIPT_DIR/installer-windows.iss"
+  elif [ -f "/c/Program Files/Inno Setup 6/ISCC.exe" ]; then
+    "/c/Program Files/Inno Setup 6/ISCC.exe" "$SCRIPT_DIR/installer-windows.iss"
   elif command -v wine &>/dev/null && [ -f "/usr/share/wine/ISCC.exe" ]; then
     ISCC_PATH="/usr/share/wine/ISCC.exe"
     ISS_PATH=$(winepath -w "$SCRIPT_DIR/installer-windows.iss" 2>/dev/null || echo "$SCRIPT_DIR/installer-windows.iss")

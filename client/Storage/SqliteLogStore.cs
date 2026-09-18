@@ -2956,11 +2956,30 @@ public class SqliteLogStore : ILogStore, IDisposable
             var cutoffIso = cutoff.ToString("O");
             await using var tx = await _connection.BeginTransactionAsync(ct);
 
+            // Children first: app_items.parent_item_id self-FK fails if a parent
+            // row is deleted while a (possibly newer) child still references it.
+            var childItemsCmd = _connection.CreateCommand();
+            ((DbCommand)childItemsCmd).Transaction = tx;
+            childItemsCmd.CommandText = @"
+                DELETE FROM app_items
+                WHERE is_synced = 1
+                  AND opened_at < $cutoff
+                  AND parent_item_id IS NOT NULL";
+            childItemsCmd.Parameters.AddWithValue("$cutoff", cutoffIso);
+            var childrenDeleted = await childItemsCmd.ExecuteNonQueryAsync(ct);
+
             var itemsCmd = _connection.CreateCommand();
             ((DbCommand)itemsCmd).Transaction = tx;
-            itemsCmd.CommandText = "DELETE FROM app_items WHERE is_synced = 1 AND opened_at < $cutoff";
+            itemsCmd.CommandText = @"
+                DELETE FROM app_items
+                WHERE is_synced = 1
+                  AND opened_at < $cutoff
+                  AND NOT EXISTS (
+                      SELECT 1 FROM app_items child
+                      WHERE child.parent_item_id = app_items.id
+                  )";
             itemsCmd.Parameters.AddWithValue("$cutoff", cutoffIso);
-            var itemsDeleted = await itemsCmd.ExecuteNonQueryAsync(ct);
+            var itemsDeleted = childrenDeleted + await itemsCmd.ExecuteNonQueryAsync(ct);
 
             var sessionsCmd = _connection.CreateCommand();
             ((DbCommand)sessionsCmd).Transaction = tx;

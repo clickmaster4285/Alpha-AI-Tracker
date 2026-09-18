@@ -2,11 +2,11 @@
 
 | | |
 |---|---|
-| **Status** | Implementing — server hub + endpoints + web + Windows client landed |
+| **Status** | Phase 1 working (Windows `dotnet run` e2e); Windows installer parity next |
 | **Branch** | `feature/live_stream` |
 | **Created** | 2026-09-18 |
 | **Updated** | 2026-09-18 |
-| **Scope** | Windows capture first; Linux/macOS report unavailable |
+| **Scope** | Windows capture first; Linux/macOS report unavailable (no Linux machine for ship-test yet) |
 | **Privacy** | Preview only — no recording, no disk, no DB storage |
 
 **Driver:** Admin selects an employee → sees that employee's screen live.
@@ -281,11 +281,12 @@ Employee list is polled (~15 s); infinite scroll not required at current company
 | Web typecheck + build | `npx tsc --noEmit`, `npm run build` | ⬜ |
 | Client build | `dotnet build` (0/0) | ⬜ |
 | Health API | curl `GET /live-stream/employees` with web cookie | ⬜ |
-| End-to-end preview | Installed Windows client + web; second browser for fan-out | ⬜ |
-| Ephemeral guarantee | Close tab → client stops capture; nothing new on disk/Postgres | ⬜ |
-| Consent | Revoke `live_stream` → watch/push upgrade 403 | ⬜ |
+| Online via heartbeat | `GET /live-stream/employees` — online if heartbeat/`updated_at` within **3 min** (sync cadence ~60 s) | ✅ |
+| End-to-end preview | Windows client (`dotnet run`) + web watch | ✅ |
+| Ephemeral guarantee | Close tab → client stops capture; nothing new on disk/Postgres | ⬜ verify on installed build |
+| Consent | Revoke `live_view` → watch/push upgrade 403 | ⬜ |
 | Caps | Exceed `MAX_STREAMS` / frame bytes → rejected cleanly | ⬜ |
-| Installer | Installed Win streams; Linux shows unavailable | ⬜ |
+| Installer | Installed Win streams; Linux shows unavailable | ⬜ Windows-only for now |
 | Performance | Tracker collection loop unaffected; client CPU reasonable at 10 fps | ⬜ |
 
 ---

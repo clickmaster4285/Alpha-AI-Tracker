@@ -232,7 +232,7 @@ web/
             │
             ├── apps/               # Apps & Websites (mock data)
             ├── screenshots/        # Screenshots (mock data)
-            ├── live-stream/        # Live stream (mock/placeholder)
+            ├── live-stream/        # Live WS screen preview (Windows Phase 1)
             ├── emails/             # Emails & Alerts (mock data)
             ├── kpis/               # KPIs & KRAs (mock data)
             ├── roles/              # Roles (mock data)
@@ -372,7 +372,7 @@ in the `updateMutation`).
 | `/configuration/websites` | Websites classification | Server (`GET/POST/PATCH /monitoring/websites`) | ✅ |
 | `/configuration/categories` | Categories & Types CRUD | Server (`/monitoring/types`, `/monitoring/categories`) | ✅ |
 | `/screenshots` | Screenshots | Honest empty state (no endpoint) | ❌ |
-| `/live-stream` | Live stream | Honest empty state (no endpoint) | ❌ |
+| `/live-stream` | Live stream | Live WS JPEG preview (Windows clients; consent `live_view`) | ✅ |
 | `/kpis` | KPIs & KRAs | Hardcoded demo data (scaffolding) | ❌ |
 | `/shifts` | Shift management | Server (`/shifts` CRUD; IANA timezone field; new-shift defaults to browser zone) | ✅ |
 | `/timesheets` | Timesheets | Server (`/attendance/range`; times formatted in `record.timezone`) | ✅ |
