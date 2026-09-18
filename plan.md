@@ -1,244 +1,309 @@
 # Live Stream — Implementation Plan
 
-> **Status:** PLANNED (not started) · **Branch:** `feature/live_stream` · **Created:** 2026-09-18
-> **Driver requirement:** Admin selects an employee → sees that employee's screen live.
-> Preview only. **No recording, no persistence, no disk, no DB storage — frames are ephemeral.**
-> The employee has already accepted the T&C for this feature (`featureId = "live_stream"`), and the
-> server re-verifies consent server-side before any frame flows.
+| | |
+|---|---|
+| **Status** | Implementing — server hub + endpoints + web + Windows client landed |
+| **Branch** | `feature/live_stream` |
+| **Created** | 2026-09-18 |
+| **Updated** | 2026-09-18 |
+| **Scope** | Windows capture first; Linux/macOS report unavailable |
+| **Privacy** | Preview only — no recording, no disk, no DB storage |
+
+**Driver:** Admin selects an employee → sees that employee's screen live.
+Employee T&C consent (`featureId = "live_stream"`) is required and re-checked server-side before any frame flows.
 
 ---
 
-## 0. Summary
+## 0. Requirements
 
-| # | Requirement                                                                                | Where it lands                                                                                                                                                                                                        |
-| - | ------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1 | Left sidebar: all employees with **online \| offline** status via a client health API | Server:`GET /api/v1/live-stream/employees` (health derived from `last_heartbeat_at` in `app_status`, stale after 60 s — same threshold the client's own crash-recovery uses). Web: `/live-stream` left rail. |
-| 2 | Click employee → their screen appears on the right                                        | Web right pane: live`<canvas>` / `<img>` panel fed by a WebSocket from the server relay.                                                                                                                          |
-| 3 | **Live preview only — nothing recorded or saved**                                   | Server keeps at most the latest frame**in memory**; no disk writes, no DB table. Client pushes JPEG frames to the relay; only while an admin is watching. Stream stops when the last watcher leaves.            |
-
-**Transport decision (final):**
-
-| Protocol | Usage | Why |
-|----------|-------|-----|
-| **HTTP** | All existing sync (app_sessions, app_items, etc.) | Already works, battle-tested, no changes |
-| **WebSocket** | Live stream — client push + admin watch | New, only for live streaming |
-| **WebRTC** | Not used | Overkill for this use case |
-
-**Capture scope (user-selected): Windows-first.** Windows ships capture now (DXGI
-Desktop Duplication API); Linux/macOS report "stream unavailable" honestly in the sidebar and in the
-watch panel. PipeWire/portal capture is a follow-up phase.
+| # | Requirement | Delivery |
+|---|-------------|----------|
+| 1 | Left rail: employees with **online / offline** | `GET /api/v1/live-stream/employees` — online if `app_status.last_heartbeat_at` within 60 s (same threshold as client crash recovery). Web: `/live-stream` left rail. |
+| 2 | Click employee → live screen on the right | Web canvas fed by server WebSocket relay. |
+| 3 | Preview only — nothing recorded or saved | In-memory latest-frame mailbox only. Client pushes JPEG only while ≥1 admin is watching. Last watcher leaves → capture stops. |
 
 ---
 
-## 1. Project analysis (why the design looks like this)
+## 1. Transport decision: WebSocket now, WebRTC later
 
-Findings from the repo that constrain the design:
+### Decision (final for Phase 1)
 
-1. **No real-time infra exists.** ARCHITECTURE.md explicitly lists "no WebSocket, SSE, or polling
-   endpoints" as a current gap. This feature introduces the first one — it is greenfield on the
-   server, and the router/`main.go` wiring must be done cleanly.
-2. **The client is outbound-HTTP-only today.** Every client→server call is a REST sync under
-   `DeviceAuth`. There is no inbound connection to the client. So the client must be the one that
-   opens and owns the outbound WebSocket to the server; the server relays to web watchers.
-3. **Online/offline is already observable server-side.** The client writes `last_heartbeat_at`
-   into `app_status` every collection cycle and syncs it; `LogCollectorService` uses a 60 s
-   staleness threshold for its own crash recovery. `GET /live-stream/employees` reuses that exact
-   signal — no new client endpoint is needed for health (requirement 1).
-4. **Auth separation is a mandatory rule** (AGENTS.md §6, Client-vs-Web API Auth Separation Rule):
-   - client push socket → `DeviceAuth` semantics (the `syncGroup`),
-   - web view socket → `JWTAuth` semantics (the `protected` group, httpOnly-cookie web session).
-     This exact mis-wiring shipped once before (T&C endpoint under the wrong group 401'd clients).
-5. **Consent gate exists** — `terms_consent` (`featureId`, `action='accepted'`) with
-   `HasAccepted(employeeID, featureID)` already in `TermsConsentRepo`. The stream is gated on
-   `featureId = "live_stream"` server-side; the web UI shows a clear "consent missing" state when
-   it isn't granted.
-6. **Web proxy**: `web/src/lib/api.ts` uses relative `/api/v1` via Next rewrites
-   (`/api/:path*` → `http://localhost:8080/api/:path*`). **Next.js rewrites do not proxy
-   WebSockets reliably in all setups**, so the WS client in the browser must talk to the Go server
-   origin directly (`NEXT_PUBLIC_WS_URL`, default `ws://localhost:8080`) — documented as a new
-   env var, with cookie credentials attached.
-7. **Client conventions**: no `IHttpClientFactory`; services are singletons + hosted services;
-   platform code guarded by `OperatingSystem.IsWindows()` inside the method body (Cross-Platform
-   Analyzer Safety Rule); no hardcoded product names anywhere.
-8. **Installer parity** (mandatory): new capture code compiles into `client.dll`; the new env knobs
-   (`ALPHA_STREAM_*`) must be added to `.env` **before** `encrypt-config.sh` re-bakes `config.enc`,
-   and the feature must be ship-tested from an installed build before "done".
+| Protocol | Role |
+|----------|------|
+| **HTTP** | Existing sync APIs — unchanged |
+| **WebSocket** | Live stream control + JPEG frame relay (client push + admin watch) |
+| **WebRTC** | **Not used in Phase 1** — reserved for a later quality/scale phase |
+
+### Why not WebRTC in Phase 1?
+
+WebRTC is attractive for latency and bandwidth (H.264/VP8 + congestion control). For *this* product and stack it is the wrong first ship:
+
+| Concern | WebSocket JPEG relay | WebRTC |
+|---------|----------------------|--------|
+| Corporate NAT / firewall | Client opens outbound WS to server (already works for sync) | True P2P admin↔employee usually fails; needs **TURN** and/or an **SFU** |
+| Server role | Simple in-memory relay (fits “ephemeral, no storage”) | Need signaling + media path (pion SFU / LiveKit / mediasoup) — large new subsystem |
+| .NET client maturity | `ClientWebSocket` + DXGI + managed JPEG is proven | Headless DXGI → WebRTC encode on .NET is immature / heavy native deps |
+| Privacy model | Trivial: stop pushing frames | Media sessions, ICE state, TURN credentials, harder to reason about “nothing on disk” |
+| Time-to-ship | Days | Weeks of infra + ops |
+| Scale path | Enough for tens of concurrent previews | Better when you need 30+ fps HD or hundreds of concurrent streams |
+
+**Phase 1 ships the control plane and privacy model that WebRTC would still need** (consent, start/stop, employee list, auth split). A later Phase 2 can replace the JPEG payload path with WebRTC media while keeping the same hub semantics (`start` / `stop` / watcher count).
+
+### Scalability model (Phase 1)
+
+Designed so load grows without rewriting the product:
+
+- **Latest-frame-wins mailbox** — slow watchers never queue; memory is `O(active_employees)` frames, not `O(fps × watchers)`.
+- **Activity-gated capture** — zero encode CPU when watcher count is 0.
+- **Hard caps (env):** max concurrent streaming employees, max watchers per employee, max frame bytes, max FPS.
+- **Backpressure:** client drops frames if the WS send buffer is full; server drops oversized frames.
+- **Horizontal scale later:** sticky sessions or Redis pub/sub for mailbox fan-out (not required for v1 single-node). Hub interface stays `PushFrame` / `Subscribe` so the backend can swap.
+
+Capacity target (single server node, conservative):
+
+| Metric | Target |
+|--------|--------|
+| Concurrent streaming employees | 25 (configurable) |
+| Watchers per employee | 10 |
+| Frame size | ≤ 512 KB |
+| Bitrate per stream | ~0.4–1.2 Mbit/s at 10 fps / 1600 px / q≈60 |
 
 ---
 
-## 2. Architecture
+## 2. Why this design (repo constraints)
+
+1. **No real-time infra today** — first WebSocket surface; wire cleanly in router + `main.go`.
+2. **Client is outbound-only** — client opens the push socket; server never dials the employee PC.
+3. **Online signal already exists** — `last_heartbeat_at` in `app_status` (60 s stale). No new health endpoint on the client.
+4. **Auth separation (mandatory)** — push → `DeviceAuth` (sync group); watch + employees → `JWTAuth` (protected group).
+5. **Consent gate exists** — `TermsConsentRepo.HasAccepted(employeeID, "live_stream", …)`.
+6. **Next.js rewrites do not proxy WebSockets reliably** — browser uses `NEXT_PUBLIC_WS_URL` (direct Go origin). Reuse `CORS_ALLOWED_ORIGINS` for WS `CheckOrigin`.
+7. **Cross-platform analyzer safety** — `OperatingSystem.IsWindows()` guards inside method bodies; no `[SupportedOSPlatform]` on hosted-service graphs.
+8. **Installer parity** — `ALPHA_STREAM_*` in `.env` before `config.enc` bake; ship-test from installed Windows build.
+
+---
+
+## 3. Architecture
 
 ```
-┌─────────────┐  WS push (JPEG, ~10 fps)   ┌──────────────────────┐  WS (JPEG stream)   ┌─────────┐
-│ Client (Win)│ ──────────────────────────▶│ Server relay         │ ───────────────────▶│ Web     │
-│ ScreenCapture│  ws://server/api/v1/live-stream/push   │ (in-memory latest-  │ ws://server/api/v1/live-stream/watch │ (canvas)│
-└─────────────┘                             │  frame per employee, │                     └─────────┘
-                                            │  fan-out to N admins)│
-                                            └──────────────────────┘
+┌──────────────┐  WS binary JPEG + JSON ctrl   ┌─────────────────────┐  WS binary JPEG   ┌──────────┐
+│ Client (Win) │ ─────────────────────────────▶│ Server Hub          │ ─────────────────▶│ Web admin│
+│ DXGI capture │  /api/v1/live-stream/push     │ latest-frame mailbox│  /live-stream/watch│  canvas  │
+└──────────────┘                               │ fan-out to N admins │                   └──────────┘
+                                               └─────────────────────┘
 ```
 
-- **One outbound socket per logged-in client**, opened only while streaming is active.
-- **Server mailbox**: `map[employeeID] → { frame []byte, seq, ts }` guarded by a RWMutex.
-  `POST frame` overwrites; watchers read the mailbox at their own pace. **Nothing is ever written
-  to disk or Postgres.** Process restart clears everything (frames are ephemeral by design).
-- **Fan-out**: each watcher socket receives the latest frame on change (or on a slow keepalive
-  cadence). One employee can be watched by multiple admins simultaneously — the client does not
-  know or care how many watchers exist.
-- **Activity-gated capture**: the client pushes **only while the server tells it to**. The server
-  enables streaming for an employee when the first watcher attaches and sends a `stop` control
-  when the last watcher detaches. No watcher ⇒ no frames ⇒ zero capture while nobody looks.
-  (Optional idle timeout as defense-in-depth.)
-- **Capture rate**: 10 fps JPEG (q≈60, scaled to max 1600px wide). ~50–150 KB/frame → ~400–1200
-  kbit/s worst case per active stream. Tunable via env.
+### Connection lifecycle (committed)
 
-### Client performance strategy (no lag)
+1. Admin opens watch WS → server increments watcher count for `employeeId`.
+2. If count goes `0 → 1`, server marks stream **wanted** and waits for client.
+3. Client keeps a **persistent control connection** only while `ALPHA_STREAM_ENABLED=true` and logged in (lightweight; no frames). On `{"type":"start"}`, capture starts and frames flow. On `{"type":"stop"}` or last watcher gone, capture stops immediately; control socket stays up for the next `start`.
+4. Idle defense: if no frame and no watcher for `LIVE_STREAM_IDLE_SEC` (default 90), hub clears mailbox and sends `stop`.
+5. Client crash / network loss: gorilla ping/pong (~60 s) reaps sockets; watcher count decrements; last watcher path fires `stop`.
 
-| Component | Approach | Why |
-|---|---|---|
-| Screen capture | **DXGI Desktop Duplication API** (Windows 8+) | GPU-accelerated, captures at ~0.5ms per frame vs GDI's ~5-10ms. Zero CPU copy. |
-| JPEG encoding | **LibJPEG-turbo** (SIMD-optimized) | ~2-5ms per frame at 1600px vs System.Drawing's ~15-20ms |
-| Pipeline | **Dedicated background thread** | Capture + encode runs on its own thread, never touches the collection loop |
-| Frame delivery | **Channel<T>** to WebSocket sender | Backpressure if sender is slow — latest frame wins, old frames dropped |
+Rationale for persistent control WS (not connect-on-demand): start latency stays low when an admin clicks; reconnect storms are avoided; frame path remains strictly activity-gated.
 
-**Total per-frame cost target:** <10ms (capture ~0.5ms + encode ~3ms + resize ~1ms) — at 10 fps that's <10% of one CPU core.
+### Wire protocol
 
-**Adaptive throttling:**
-- If frame time >80% of interval → skip frame (never starve the main loop)
-- If CPU usage high → drop to 5 fps automatically
-- Server sends `stop` → zero capture overhead immediately
+**Client → server (push socket)**
 
----
+| Message | Format | Meaning |
+|---------|--------|---------|
+| `hello` | JSON `{"type":"hello","platform":"windows","streamAvailable":true,"version":"…"}` | Capability advertisement |
+| frame | Binary (raw JPEG bytes) | Latest preview frame |
+| `pong` | JSON (optional) | Respond to server ping |
 
-## 3. Server (Go) — new files & changes
+**Server → client (push socket)**
 
-| File                                           | Change                                                                                                                                                                                                                                                                                                                          |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `server/internal/stream/hub.go`              | **NEW.** `Hub` struct: `map[employeeID]*mailbox` + watcher registry per employee. Methods: `StartStream(empID)` (idempotent), `StopStream(empID)`, `PushFrame(empID, jpeg)`, `Subscribe(empID, ch)`, `Unsubscribe(...)`. Holds only the latest frame per employee in memory.                                |
-| `server/internal/stream/hub_test.go`         | **NEW.** Unit tests: push→subscribe ordering, stop clears mailbox, multi-watcher fan-out, concurrent push/read (race detector). *(Breaks the "no tests" streak for this feature.)*                                                                                                                                     |
-| `server/internal/handlers/stream_handler.go` | **NEW.** Two WebSocket endpoints + one REST endpoint:                                                                                                                                                                                                                                                                     |
-|                                                | `GET /api/v1/live-stream/push` — **client**, upgraded under DeviceAuth semantics (`Authorization: Device <device_token>`, employee-Bearer legacy fallback). Client pushes binary JPEG frames + JSON control messages. Rejects with 403 if `terms_consent` has no `accepted` row for `featureId="live_stream"`. |
-|                                                | `GET /api/v1/live-stream/watch?employeeId=` — **web**, upgraded under JWTAuth semantics (web-admin cookie). Validates consent + employee existence before upgrade. Sends binary frames from the mailbox; sends `{"type":"status","streaming":bool}` on start/stop.                                                   |
-|                                                | `GET /api/v1/live-stream/employees` — **web**, REST (JWTAuth): `{ employeeId, name, department, online, streaming }[]` — `online = last_heartbeat_at within 60 s` (single query joining `employees` LEFT JOIN `app_status` on `last_heartbeat_at`).                                                         |
-| `server/internal/router/router.go`           | Register`/live-stream/*` routes. Push under the sync group, watch + employees under `protected`. **Respect the auth-separation rule.**                                                                                                                                                                                |
-| `server/cmd/server/main.go`                  | Construct`stream.Hub`, pass into the handler; begin graceful-shutdown closing of all sockets.                                                                                                                                                                                                                                 |
-| WS library                                     | Add`github.com/gorilla/websocket` (industry default, Echo-compatible; check go.mod after `go get`).                                                                                                                                                                                                                         |
-| (optional, phase 2)                            | `server/internal/jobs/stream_idle_sweep.go` — close streams whose watcher left without a `stop` (leak guard).                                                                                                                                                                                                              |
+| Message | Meaning |
+|---------|---------|
+| `{"type":"start"}` | Begin capture + push frames |
+| `{"type":"stop"}` | Stop capture; keep control socket |
+| `{"type":"error","code":"…"}` | Fatal; client closes |
 
-**WS auth notes** (browsers can't set `Authorization` headers on `new WebSocket()`):
+**Server → web (watch socket)**
 
-- Watch socket: the httpOnly web cookie rides automatically (same-origin/direct-to-Go) — standard
-  JWTAuth middleware validates before upgrade.
-- Push socket (client is .NET, so it CAN set headers): `Authorization: Device <token>` validated
-  by the existing DeviceAuth logic extracted/reused for the upgrade path.
+| Message | Meaning |
+|---------|---------|
+| Binary JPEG | Frame |
+| `{"type":"status","streaming":bool,"streamAvailable":bool,"consentMissing":bool}` | State |
 
-**Server env knobs** (`.env` + `.env.example`): `LIVE_STREAM_ENABLED=true`,
-`LIVE_STREAM_MAX_FPS=10`, `LIVE_STREAM_FRAME_MAX_BYTES=524288` (drop oversized frames).
+### Capture pipeline (Windows)
 
-### Consent check (server-side, both sockets)
+| Stage | Approach | Notes |
+|-------|----------|-------|
+| Capture | DXGI Desktop Duplication | GPU path; primary monitor only in Phase 1 |
+| Encode | **Managed JPEG** (`System.Drawing` / ImageSharp) | No native LibJPEG-turbo in Phase 1 — avoids installer native packaging. Revisit if encode CPU exceeds budget. |
+| Resize | Max width `ALPHA_STREAM_MAX_WIDTH` (1600) | Preserve aspect ratio |
+| Threading | Dedicated capture loop + `Channel<byte[]>` (capacity 1, drop-oldest) | Never blocks collection / sync loops |
+| Rate | `ALPHA_STREAM_FPS` (default 10); adaptive drop to 5 if frame time > 80% of interval | |
 
-Reuse `TermsConsentRepo.HasAccepted(ctx, employeeID, "live_stream", "")` before upgrading either
-socket. Without consent: push socket → 403 (`consent_required`), watch socket → 200 REST but
-`consentMissing: true` in the employees payload + watch rejected with 403.
+**Per-frame budget:** &lt;15 ms average at 1600 px (DXGI + managed JPEG). If over budget, skip frame — never starve the tracker.
+
+Linux / macOS: services register but capture is a no-op; `hello.streamAvailable=false`; UI shows “unavailable”.
 
 ---
 
-## 4. Client (.NET) — new files & changes
+## 4. Server (Go)
 
-| File                                        | Change                                                                                                                                                                                                                                                                                                                                                                   |
-| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `client/Services/ScreenCaptureService.cs` | **NEW.** Hosted service. Windows-only body guarded by `OperatingSystem.IsWindows()`; Linux/macOS log once and stay parked. DXGI Desktop Duplication API for capture (hardware-accelerated, ~0.5ms/frame) → LibJPEG-turbo encoding (~3ms/frame) → downscale to ≤1600px wide. Runs on dedicated background thread at `ALPHA_STREAM_FPS`. Produces frames only while `_streamActive`. Adaptive throttling: skip frame if >80% of interval, drop to 5 fps if CPU high. |
-| `client/Services/LiveStreamClient.cs`     | **NEW.** Outbound WebSocket (ClientWebSocket) to `ws(s)://{ServerUrl}/api/v1/live-stream/push` with the `Authorization: Device` header (same header logic as TermsService's `ApplyAuthHeader`). Auto-reconnect with capped backoff; sends `{action:"hello"}` on connect; feeds JPEG frames from the capture service; closes cleanly on stop.               |
-| `client/Configuration/AppConfig.cs`       | Add:`ALPHA_STREAM_ENABLED` (default **false** — capture is opt-in per fleet, flipped by the server's start control anyway), `ALPHA_STREAM_FPS` (default 10), `ALPHA_STREAM_MAX_WIDTH` (1600), `ALPHA_STREAM_JPEG_QUALITY` (60). `--print-config` lines too.                                                                                              |
-| `.env` + `.env.example`                 | Add the four`ALPHA_STREAM_*` keys **before** the next `config.enc` bake (Installer-Parity item 5).                                                                                                                                                                                                                                                             |
-| `Program.cs`                              | Register the two services (singleton + hosted, same pattern as SyncService) —**inside the existing feature-gates section**, parked when `ALPHA_STREAM_ENABLED=false`.                                                                                                                                                                                           |
+| File | Change |
+|------|--------|
+| [`server/internal/stream/hub.go`](server/internal/stream/hub.go) | **NEW.** In-memory hub: per-employee mailbox + watcher registry + wanted/streaming flags. Methods: `WantStream`, `UnwantStream`, `PushFrame`, `Subscribe`, `Unsubscribe`, `SetCapability`, `SnapshotEmployees` helpers as needed. Caps from config. |
+| [`server/internal/stream/hub_test.go`](server/internal/stream/hub_test.go) | **NEW.** Ordering, multi-watcher fan-out, stop clears mailbox, concurrent push/subscribe (race detector), cap enforcement. |
+| [`server/internal/handlers/stream_handler.go`](server/internal/handlers/stream_handler.go) | **NEW.** Endpoints below. |
+| [`server/internal/router/router.go`](server/internal/router/router.go) | Push under sync/`DeviceAuth`; watch + employees under `protected`/`JWTAuth`. |
+| [`server/cmd/server/main.go`](server/cmd/server/main.go) | Construct `Hub`, inject handler, close all sockets on graceful shutdown. |
+| Dependency | `github.com/gorilla/websocket` |
 
-**Notes**
+### Endpoints
 
-- Screen capture on Windows via DXGI works from a headless service session (the tracker already
-  runs in the interactive user session; no UI needed for capture).
-- Linux/macOS builds compile the same services but the capture body returns immediately — the
-  push socket simply never sends frames; the sidebar shows those employees online with
-  `streamAvailable: false` (client advertises capability in its `hello` message; server stores it
-  in the mailbox entry and surfaces it in the employees + watch payloads).
-- Privacy default: even with `ALPHA_STREAM_ENABLED=true`, **frames flow only after a watcher
-  attaches** and the server issues `start`. Closing the web tab stops capture within seconds.
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| `GET` | `/api/v1/live-stream/push` | DeviceAuth | Client control + binary frames |
+| `GET` | `/api/v1/live-stream/watch?employeeId=` | JWTAuth | Admin frame feed |
+| `GET` | `/api/v1/live-stream/employees` | JWTAuth | Rail list (see DTO) |
 
----
+### Employees DTO (committed shape)
 
-## 5. Web (Next.js) — new files & changes
+```json
+{
+  "employeeId": "EMP-10001",
+  "name": "…",
+  "department": "…",
+  "online": true,
+  "streaming": false,
+  "streamAvailable": true,
+  "consentMissing": false
+}
+```
 
-| File                                                   | Change                                                                                                                                                                                                                                                                       |
-| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `web/src/lib/api.ts`                                 | Add`LiveStreamEmployee` interface + `liveStreamApi.employees()` REST call.                                                                                                                                                                                               |
-| `web/src/lib/useLiveStreamSocket.ts`                 | **NEW hook.** Connects to `ws(s)://${NEXT_PUBLIC_WS_URL}/api/v1/live-stream/watch?employeeId=…`, credentials `include`; decodes binary JPEG → `Image`/bitmap → draws to canvas; tracks `streaming` status + reconnect; closes on unmount / employee switch. |
-| `web/src/app/(app)/live-stream/page.tsx`             | **REWRITE** (currently an honest empty state). Two-pane layout:                                                                                                                                                                                                        |
-|                                                        | **Left rail** — all employees, search filter, green/gray dot `online \| offline` from `GET /live-stream/employees` (React Query, refetchInterval ~15 s). Rows sorted online-first, then name. Streaming indicator dot when active. Click → right pane.            |
-|                                                        | **Right pane** — live canvas. States: idle ("select an employee"), offline (grayed + explanation), consent-missing (explanatory), connecting, live (canvas + subtle LIVE badge + fps readout), unavailable (client online but capture not supported on its OS).       |
-|                                                        | Selected employeeId is kept in the URL (`?employeeId=…`, `useUrlQueryState`) per the URL-Synced Filters Rule, wrapped in `<Suspense>`.                                                                                                                                |
-|                                                        | Search box uses a local debounced mirror (no Clear button) — same pattern as other pages.                                                                                                                                                                                   |
-| `web/next.config.ts` / docs                          | `NEXT_PUBLIC_WS_URL` documented (`web/.env.example` if present, otherwise README/ARCHITECTURE note).                                                                                                                                                                     |
-| `web/ARCHITECTURE.md` + root `AGENTS.md` changelog | Update the live-stream row from "honest empty state" to the new live page; add the changelog entry when implemented.                                                                                                                                                         |
+- `online` — heartbeat within 60 s  
+- `streaming` — hub has active capture / recent frame  
+- `streamAvailable` — last `hello` from client (false for Linux/macOS / DXGI failure)  
+- `consentMissing` — no accepted `live_stream` consent  
 
-**UI conventions honored:** server-driven infinite scroll is not required here (the employees
-health list is small and polled — if it ever needs pagination, it converts to
-`useInfiniteQuery` + sentinel), URL-synced state, no localStorage, no hardcoded employee names.
+Consent: `HasAccepted(ctx, employeeID, "live_stream", "")` before upgrading push or watch. Push without consent → **403** `consent_required`. Watch without consent → **403**. List endpoint still returns the row with `consentMissing: true`.
 
----
+### Server env
 
-## 6. Data & privacy guarantees (requirement 3)
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `LIVE_STREAM_ENABLED` | `true` | Master switch |
+| `LIVE_STREAM_MAX_FPS` | `10` | Drop client frames faster than this |
+| `LIVE_STREAM_FRAME_MAX_BYTES` | `524288` | Drop oversized frames |
+| `LIVE_STREAM_MAX_STREAMS` | `25` | Concurrent streaming employees |
+| `LIVE_STREAM_MAX_WATCHERS_PER_EMPLOYEE` | `10` | Fan-out cap |
+| `LIVE_STREAM_IDLE_SEC` | `90` | Reap orphaned wanted/streaming state |
+| `LIVE_STREAM_TEST_FRAME` | `false` | Dev-only: synthetic frame when no client (web UI bring-up) |
 
-- **No DB table** is created. No migration. `git grep live_stream` on the server finds only the
-  consent `featureId` string and in-memory keys.
-- Frames live in a bounded in-memory map, overwritten in place; `StopStream` frees the buffer.
-- Server logs never include frame content; logs record start/stop/attach/detach events only.
-- The client writes nothing to its SQLite DB for this feature (no `app_items` rows, no sessions).
-- When the last watcher disconnects: server sends `stop` → client stops capture + closes socket →
-  mailbox entry deleted. Crash of either side leaves at most a stale socket that the hub reaps on
-  ping timeout (gorilla default pong-wait 60 s).
-- Consent is re-checked on every socket upgrade — revoking consent in the web T&C admin instantly
-  prevents new streams (existing sockets get closed by the hub on the next consent re-check tick,
-  phase-2 polish).
+WS `CheckOrigin` reuses `CORS_ALLOWED_ORIGINS` (already in [`server/internal/config/config.go`](server/internal/config/config.go)).
 
 ---
 
-## 7. Implementation order (PR-sized steps)
+## 5. Client (.NET)
 
-1. **Server hub + tests** (`stream/hub.go` + tests) — pure logic, no sockets. `go build`, `go vet`, `go test ./internal/stream/...`.
-2. **Server endpoints + router wiring** (gorilla dependency, WS upgrade, auth + consent checks, employees REST). Verify: `go build`, `go vet`, live curl of `/live-stream/employees` with a web cookie.
-3. **Web page** — left rail + right pane against the real REST endpoint; watch socket wired with a stub loopback test (server echoes a test frame when the client is offline: `LIVE_STREAM_TEST_FRAME=1` dev-only knob). `npx tsc --noEmit`, `next build`.
-4. **Client capture + push socket** (Windows first; `ALPHA_STREAM_ENABLED=false` default; `--print-config` lines). Verify: `dotnet build` 0/0, `--print-config`, live end-to-end with `dotnet run` on a Windows machine.
-5. **Installer parity** — `.env` keys → re-bake `config.enc`, `bash publish/build-installer.sh -b win`, install, verify streaming from the **installed** build; document the Linux/macOS "unavailable" behavior in the ship-test checklist.
-6. **Docs** — `AGENTS.md` changelog + §1/§5 rows, `server/ARCHITECTURE.md` API table, `client/ARCHITECTURE.md` services list, `web/ARCHITECTURE.md` page status flip.
+| File | Change |
+|------|--------|
+| [`client/Services/ScreenCaptureService.cs`](client/Services/ScreenCaptureService.cs) | **NEW.** Windows DXGI → resize → JPEG; parked on non-Windows. Active only while streaming. |
+| [`client/Services/LiveStreamClient.cs`](client/Services/LiveStreamClient.cs) | **NEW.** Persistent control `ClientWebSocket` to `/api/v1/live-stream/push`; `Authorization: Device` via same pattern as `TermsService.ApplyAuthHeader`; handles `start`/`stop`; capped reconnect backoff. |
+| [`client/Configuration/AppConfig.cs`](client/Configuration/AppConfig.cs) | `ALPHA_STREAM_*` + `--print-config`. |
+| `.env` / `.env.example` | Four keys before next `config.enc` bake. |
+| [`client/Program.cs`](client/Program.cs) | Register singleton + hosted; gated on `ALPHA_STREAM_ENABLED`. |
 
-## 8. Verification matrix
+### Client env
 
-| Check                  | Command / method                                                                                                                 | Status |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------ |
-| Server build/vet/tests | `go build`, `go vet`, `go test ./internal/stream/...`                                                                      | ⬜     |
-| Web typecheck + build  | `npx tsc --noEmit`, `npm run build`                                                                                          | ⬜     |
-| Client build           | `dotnet build` (0 warnings / 0 errors)                                                                                         | ⬜     |
-| Health API live        | curl`GET /api/v1/live-stream/employees` with web cookie                                                                        | ⬜     |
-| End-to-end preview     | Windows machine with installed client + web dashboard, second browser to verify fan-out                                          | ⬜     |
-| Ephemeral guarantee    | Watch stream → close tab → confirm client socket closes + no new frames captured (client log) and nothing new in Postgres/disk | ⬜     |
-| Consent enforcement    | Revoke`live_stream` consent → watch upgrade returns 403                                                                       | ⬜     |
-| Installer ship-test    | installed build streams (Windows) / reports unavailable (Linux dev PC)                                                           | ⬜     |
-| Performance            | Client PC CPU <10% during 10 fps streaming; no lag on collection loop                                                           | ⬜     |
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `ALPHA_STREAM_ENABLED` | `false` | Fleet opt-in (even when true, frames only after server `start`) |
+| `ALPHA_STREAM_FPS` | `10` | Capture cadence |
+| `ALPHA_STREAM_MAX_WIDTH` | `1600` | Downscale |
+| `ALPHA_STREAM_JPEG_QUALITY` | `60` | JPEG quality |
 
-## 9. Risks & honest gaps
+DXGI requires an interactive desktop session (not RDP-only / session 0). On failure: log once, `hello.streamAvailable=false`, no crash loop.
 
-- **Wayland/Linux capture is out of scope this phase** — sidebar will honestly show those
-  employees as online-but-unavailable rather than pretending.
-- **Next.js dev proxy does not relay WebSockets** — the browser must reach the Go origin directly
-  (`NEXT_PUBLIC_WS_URL`); in production both live behind the same reverse proxy, so this is a dev
-  ergonomics issue only. CORS: the Go server must accept the cross-origin WS upgrade with
-  credentials for the web origin (echo `Origin` allowlist from an env var).
-- **Multi-monitor**: phase 1 captures the primary screen only; "which monitor" selection is a
-  follow-up.
-- **No rate limiting infra exists** — the push socket is auth-gated, and frames are
-  size-capped; a full rate-limiting story remains a known project-wide gap.
-- **Security**: WS endpoints inherit the same "no server-side permission model" project gap —
-  any web-admin session can watch any consented employee. Acceptable within the current RBAC
-  posture (client-side gating), noted rather than hidden.
-- **DXGI Desktop Duplication**: requires Windows 8+ and a desktop session (no RDP). If the
-  employee is on RDP, capture fails gracefully — the client logs it and reports
-  `streamAvailable: false`.
+---
+
+## 6. Web (Next.js)
+
+| File | Change |
+|------|--------|
+| [`web/src/lib/api.ts`](web/src/lib/api.ts) | `LiveStreamEmployee` + `liveStreamApi.employees()`. |
+| [`web/src/lib/useLiveStreamSocket.ts`](web/src/lib/useLiveStreamSocket.ts) | **NEW.** Watch WS to `NEXT_PUBLIC_WS_URL`; credentials include; binary → canvas; status + reconnect; close on unmount / employee switch. |
+| [`web/src/app/(app)/live-stream/page.tsx`](web/src/app/(app)/live-stream/page.tsx) | **REWRITE** empty state → two-pane UI. |
+| Env / docs | Document `NEXT_PUBLIC_WS_URL` (default `ws://localhost:8080`). |
+| Architecture docs | Flip live-stream from empty state → live; changelog in `AGENTS.md`. |
+
+### UI states (right pane)
+
+`idle` → `connecting` → `live` | `offline` | `consentMissing` | `unavailable` | `error`
+
+Left rail: search (debounced, no Clear button), online-first sort, streaming indicator, `?employeeId=` via `useUrlQueryState` + `<Suspense>`.
+
+Employee list is polled (~15 s); infinite scroll not required at current company sizes. If the list grows large later, convert to `useInfiniteQuery` + sentinel per the Web Infinite-Scroll Rule.
+
+---
+
+## 7. Privacy guarantees
+
+- No migration, no Postgres table for frames.
+- Frames exist only in the hub mailbox; `stop` / idle reap frees buffers.
+- Logs: start/stop/attach/detach only — never frame bytes.
+- Client SQLite: no stream rows.
+- Consent re-checked on every socket upgrade; revoke blocks new streams immediately.
+- Phase-1 polish: optional periodic re-check on long-lived sockets (same idle ticker).
+
+---
+
+## 8. Implementation order
+
+1. **Hub + tests** — pure logic, no sockets. `go test ./internal/stream/...`
+2. **Endpoints + router** — gorilla, auth, consent, employees REST, idle reap. `go build` / `go vet` + curl employees.
+3. **Web UI** — rail + canvas against REST; watch socket with `LIVE_STREAM_TEST_FRAME=1`. `tsc` + `next build`.
+4. **Client** — DXGI + managed JPEG + control WS (`ALPHA_STREAM_ENABLED=false` default). `dotnet build` 0/0; Windows e2e with `dotnet run`.
+5. **Installer parity** — bake `config.enc`, Windows installer, ship-test installed build; document Linux unavailable.
+6. **Docs** — `AGENTS.md`, server/client/web `ARCHITECTURE.md`.
+
+### Phase 2 (explicitly out of scope now)
+
+- Linux PipeWire / portal capture  
+- Multi-monitor selection  
+- **WebRTC media path** (keep control plane; swap payload)  
+- Redis-backed hub for multi-node  
+- Server-side RBAC on which admins may watch whom  
+
+---
+
+## 9. Verification matrix
+
+| Check | Method | Status |
+|-------|--------|--------|
+| Server build / vet / hub tests | `go build`, `go vet`, `go test ./internal/stream/...` | ⬜ |
+| Web typecheck + build | `npx tsc --noEmit`, `npm run build` | ⬜ |
+| Client build | `dotnet build` (0/0) | ⬜ |
+| Health API | curl `GET /live-stream/employees` with web cookie | ⬜ |
+| End-to-end preview | Installed Windows client + web; second browser for fan-out | ⬜ |
+| Ephemeral guarantee | Close tab → client stops capture; nothing new on disk/Postgres | ⬜ |
+| Consent | Revoke `live_stream` → watch/push upgrade 403 | ⬜ |
+| Caps | Exceed `MAX_STREAMS` / frame bytes → rejected cleanly | ⬜ |
+| Installer | Installed Win streams; Linux shows unavailable | ⬜ |
+| Performance | Tracker collection loop unaffected; client CPU reasonable at 10 fps | ⬜ |
+
+---
+
+## 10. Risks
+
+| Risk | Mitigation |
+|------|------------|
+| DXGI fails (RDP, locked, no desktop) | Graceful `streamAvailable: false`; UI “unavailable” |
+| Cross-origin WS cookies in prod | Same reverse-proxy host in prod; dev uses `NEXT_PUBLIC_WS_URL` + `CORS_ALLOWED_ORIGINS` |
+| Managed JPEG CPU | Adaptive FPS; upgrade encoder only if measured hot |
+| Watcher disconnect without clean close | Ping/pong + `LIVE_STREAM_IDLE_SEC` |
+| Any admin can watch any consented employee | Matches current project RBAC posture (client-side gates); Phase 2 server checks |
+| Wayland/Linux out of scope | Honest unavailable state — no fake “loading” |
+
+---
+
+## 11. WebRTC FAQ (short)
+
+**Q: Should we use WebRTC instead?**  
+**A: Not for Phase 1.** Ship WebSocket JPEG relay first. It matches outbound-only clients, ephemeral privacy, and Go/Echo today. Revisit WebRTC when you need HD / higher FPS / many concurrent streams — the control plane (`start`/`stop`/consent/employees) stays the same; only the media transport changes.

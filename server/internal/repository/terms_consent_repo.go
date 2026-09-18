@@ -117,3 +117,30 @@ func (r *TermsConsentRepo) HasAccepted(ctx context.Context, employeeID, featureI
 	}
 	return action == "accepted" || action == "re_accepted", nil
 }
+
+// ListAcceptedEmployeeIDs returns employee IDs whose latest consent event for
+// featureID is accepted / re_accepted (one indexed scan — used by live-stream list).
+func (r *TermsConsentRepo) ListAcceptedEmployeeIDs(ctx context.Context, featureID string) (map[string]bool, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT DISTINCT ON (employee_id) employee_id, action
+		FROM terms_consent
+		WHERE feature_id = $1 AND deleted_at IS NULL
+		ORDER BY employee_id, created_at DESC
+	`, featureID)
+	if err != nil {
+		return nil, fmt.Errorf("list accepted consent: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[string]bool)
+	for rows.Next() {
+		var empID, action string
+		if err := rows.Scan(&empID, &action); err != nil {
+			return nil, fmt.Errorf("scan accepted consent: %w", err)
+		}
+		if action == "accepted" || action == "re_accepted" {
+			out[empID] = true
+		}
+	}
+	return out, rows.Err()
+}

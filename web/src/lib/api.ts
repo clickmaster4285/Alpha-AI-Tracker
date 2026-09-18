@@ -1311,4 +1311,28 @@ export const termsContentApi = {
     }),
 };
 
+// ──────────────────────────
+// Live Stream API
+// ──────────────────────────
+
+export interface LiveStreamEmployee {
+  employeeId: string;
+  name: string;
+  department: string;
+  online: boolean;
+  streaming: boolean;
+  streamAvailable: boolean;
+  clientConnected: boolean;
+  consentMissing: boolean;
+}
+
+export const liveStreamApi = {
+  employees: () =>
+    request<{ data: LiveStreamEmployee[]; total: number }>('/live-stream/employees'),
+  watchTicket: (employeeId: string) =>
+    request<{ ticket: string; expiresIn: number }>('/live-stream/watch-ticket', {
+      params: { employeeId },
+    }),
+};
+
 export { ApiError };

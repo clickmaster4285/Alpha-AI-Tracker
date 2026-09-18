@@ -28,6 +28,20 @@ type Config struct {
 	// carry the migration default UTC (and used as the create fallback when the
 	// client omits timezone). Empty = leave UTC unchanged.
 	DefaultShiftTimezone string
+
+	// LiveStream configures the ephemeral WebSocket JPEG preview hub.
+	LiveStream LiveStreamConfig
+}
+
+// LiveStreamConfig holds caps for the in-memory live-stream hub (no DB persistence).
+type LiveStreamConfig struct {
+	Enabled                bool
+	MaxFPS                 int
+	FrameMaxBytes          int
+	MaxStreams             int
+	MaxWatchersPerEmployee int
+	IdleSec                int
+	TestFrame              bool
 }
 
 type ServerConfig struct {
@@ -134,6 +148,16 @@ func Load() (*Config, error) {
 		LinkStaleDays: getEnvInt("LINK_STALE_DAYS", 7),
 
 		DefaultShiftTimezone: strings.TrimSpace(getEnv("DEFAULT_SHIFT_TIMEZONE", "")),
+
+		LiveStream: LiveStreamConfig{
+			Enabled:                getEnvBool("LIVE_STREAM_ENABLED", true),
+			MaxFPS:                 getEnvInt("LIVE_STREAM_MAX_FPS", 10),
+			FrameMaxBytes:          getEnvInt("LIVE_STREAM_FRAME_MAX_BYTES", 524288),
+			MaxStreams:             getEnvInt("LIVE_STREAM_MAX_STREAMS", 25),
+			MaxWatchersPerEmployee: getEnvInt("LIVE_STREAM_MAX_WATCHERS_PER_EMPLOYEE", 10),
+			IdleSec:                getEnvInt("LIVE_STREAM_IDLE_SEC", 90),
+			TestFrame:              getEnvBool("LIVE_STREAM_TEST_FRAME", false),
+		},
 	}
 
 	if cfg.Database.Password == "" {
@@ -160,6 +184,21 @@ func getEnvInt(key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }
 
 func getEnvDuration(key string, fallback time.Duration) time.Duration {

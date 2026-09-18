@@ -68,6 +68,10 @@ if (args.Contains("--print-config"))
     Console.WriteLine($"LocationEnabled={cfg.LocationEnabled}");
     Console.WriteLine($"LocationIpFallback={cfg.LocationIpFallback}");
     Console.WriteLine($"LocationPollSec={cfg.LocationPollSec}");
+    Console.WriteLine($"StreamEnabled={cfg.StreamEnabled}");
+    Console.WriteLine($"StreamFps={cfg.StreamFps}");
+    Console.WriteLine($"StreamMaxWidth={cfg.StreamMaxWidth}");
+    Console.WriteLine($"StreamJpegQuality={cfg.StreamJpegQuality}");
     return;
 }
 
@@ -240,6 +244,15 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.At
 // ────────────────────────────────────────────────────────────────────────────
 builder.Services.AddSingleton<client.Services.LocationSamplerService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.LocationSamplerService>());
+
+// ────────────────────────────────────────────────────────────────────────────
+// Live stream (Phase 1): ScreenCaptureService + LiveStreamClient push socket.
+// Parked when ALPHA_STREAM_ENABLED=false. Frames only after server "start".
+// ────────────────────────────────────────────────────────────────────────────
+builder.Services.AddSingleton<client.Services.ScreenCaptureService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.ScreenCaptureService>());
+builder.Services.AddSingleton<client.Services.LiveStreamClient>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.LiveStreamClient>());
 
 // HTTP Client
 builder.Services.AddSingleton<HttpClient>(sp =>
