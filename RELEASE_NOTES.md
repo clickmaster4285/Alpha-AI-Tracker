@@ -1,3 +1,82 @@
+# Release Notes — v1.2.1
+
+## Overview
+
+v1.2.1 is a **bugfix release** addressing two issues: an infinite orphan `app-items` sync loop on
+the client (32 poison rows re-sent every sync pass, never quarantined) and a 500 error on the
+employee update endpoint caused by a missing column projection in the `UPDATE…RETURNING` clause.
+
+Branch: `main`. Client version bump: **1.2.0 → 1.2.1**.
+
+---
+
+## 1. Client — Orphan App-Items Quarantine Fix
+
+**Root cause**: `OnAppItemsRejected` only incremented `_missingSessionRetryCount` when
+`_lastMissingSessionIds.Count > 0` — a stale guard left over from the pre-quarantine design. When
+the server refused 32 rows with missing parent sessions, the retry count never advanced, the
+quarantine threshold of 3 was never reached, and the same 32 rows were re-sent on every sync pass
+indefinitely.
+
+**Fix** (`client/Services/SyncService.cs`): removed the `_lastMissingSessionIds.Count > 0` guard
+so that every call to `OnAppItemsRejected` — regardless of whether the missing session list is
+populated — increments `_missingSessionRetryCount`. After 3 consecutive refusals the rows are
+quarantined in-memory and skipped by the drain until process restart. The SQLite rows stay
+`is_synced=0` (diagnostic evidence; retention only purges synced rows).
+
+---
+
+## 2. Server — Employee Update 500 Fix
+
+**Root cause**: `employee_repo.go` `Update` RETURNING clause projected 17 columns but `scanEmployeeRow`
+expects 18 — the `client_version` subquery was missing. Every `PUT /api/v1/employees/:id` returned
+SQLSTATE 42703 (undefined column) → 500.
+
+**Fix** (`server/internal/repository/employee_repo.go`): added the missing `client_version`
+subquery to the `UPDATE…RETURNING` clause:
+```sql
+(SELECT cv.client_version FROM employee_devices cv
+ WHERE cv.employee_id = e.employee_id
+ ORDER BY cv.updated_at DESC LIMIT 1) AS client_version
+```
+
+---
+
+## Bug Fixes Summary
+
+| # | Issue | Root cause | Fix |
+|---|-------|-----------|-----|
+| 1 | Infinite orphan `app-items` sync loop (32 poison rows every pass) | `_lastMissingSessionIds.Count > 0` guard prevented quarantine counter from advancing | Removed the guard; all refusals count toward the 3-pass quarantine threshold |
+| 2 | `PUT /api/v1/employees/:id` returns 500 | `UPDATE…RETURNING` missing `client_version` subquery; `scanEmployeeRow` expects 18 columns | Added the subquery to the RETURNING clause |
+
+---
+
+## Verification
+
+- ✅ `dotnet build` 0 errors (orphan quarantine fix)
+- ✅ `go build` / `go vet` clean (employee update fix)
+
+---
+
+## Deploy Sequence
+
+1. **Server first** — the employee update fix is server-only; no migration needed.
+2. **Client** — ships in the next installer build (the quarantine fix is in the compiled `client.dll`).
+
+---
+
+## Known Gaps / Follow-ups
+
+- The 32 quarantined orphan rows will persist in SQLite until process restart (they are
+  `is_synced=0` and never purged by retention). A future release could add a user-visible
+  "Quarantined rows" diagnostic badge.
+- Server-side permission enforcement (RBAC grants) is still not implemented in API middleware.
+- No rate limiting on login or sync endpoints.
+
+---
+
+---
+
 # Release Notes — v1.2.0
 
 ## Overview
