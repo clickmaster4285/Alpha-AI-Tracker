@@ -126,6 +126,9 @@ public sealed class LiveStreamClient : BackgroundService
         _logger.LogInformation("LiveStreamClient connecting to {Url}", wsUrl);
         await ws.ConnectAsync(new Uri(wsUrl), ct);
 
+        // Prefer WebRTC on Windows when capture works. Always advertise truthfully —
+        // a missing/false webrtcCapable with LIVE_STREAM_MEDIA=webrtc used to disable
+        // JPEG and produce no frames at all.
         var webrtcCapable = OperatingSystem.IsWindows() && _capture.StreamAvailable;
         await SendHelloAsync(ws, webrtcCapable, ct);
 
@@ -177,25 +180,44 @@ public sealed class LiveStreamClient : BackgroundService
                     if (doc.RootElement.TryGetProperty("media", out var mediaProp) &&
                         mediaProp.ValueKind == JsonValueKind.String)
                         media = mediaProp.GetString() ?? "jpeg";
-                    _logger.LogInformation("LiveStreamClient: start capture media={Media}", media);
+                    var iceServers = ParseIceServers(doc.RootElement);
+                    _logger.LogInformation(
+                        "LiveStreamClient: start capture media={Media} iceServers={Count} webrtcCapable={Cap}",
+                        media, iceServers.Count, webrtcCapable);
 
-                    _capture.SetStreamActive(true);
-                    sendJpeg = media is not "webrtc";
+                    // Always keep JPEG on until WebRTC has actually sent an offer.
+                    // With LIVE_STREAM_MEDIA=webrtc + webrtcCapable=false (or a native
+                    // encoder crash), disabling JPEG left the admin with a black pane
+                    // and looked like "stream not start".
+                    sendJpeg = true;
+                    publisher.Stop();
 
-                    if ((media is "webrtc" or "both") && webrtcCapable)
+                    var wantWebRtc = (media is "webrtc" or "both") && webrtcCapable;
+                    if (wantWebRtc)
                     {
                         try
                         {
-                            await publisher.StartAsync(SendTextAsync, _config.StreamFps, ct);
-                            if (media == "webrtc" && publisher.IsActive)
-                                sendJpeg = false;
+                            // Build peer connection BEFORE capture starts so OnRawFrame
+                            // cannot hit libvpx before formats are negotiated.
+                            await publisher.StartAsync(SendTextAsync, _config.StreamFps, iceServers, ct);
                         }
                         catch (Exception ex)
                         {
-                            _logger.LogWarning(ex, "WebRTC publisher failed — falling back to JPEG");
-                            sendJpeg = true;
+                            _logger.LogWarning(ex, "WebRTC publisher failed — JPEG only");
+                            publisher.Stop();
                         }
                     }
+                    else if (media == "webrtc" && !webrtcCapable)
+                    {
+                        _logger.LogWarning(
+                            "Server asked for webrtc but this client is not capable — using JPEG");
+                    }
+
+                    _capture.SetStreamActive(true);
+
+                    // Only drop JPEG when WebRTC offer is out (SFU path is live).
+                    if (media == "webrtc" && publisher.OfferSent)
+                        sendJpeg = false;
                 }
                 else if (type == "stop")
                 {
@@ -339,6 +361,55 @@ public sealed class LiveStreamClient : BackgroundService
         } while (!result.EndOfMessage);
 
         return (result.MessageType, ms.ToArray());
+    }
+
+    private static List<SIPSorcery.Net.RTCIceServer> ParseIceServers(JsonElement root)
+    {
+        var list = new List<SIPSorcery.Net.RTCIceServer>();
+        if (!root.TryGetProperty("iceServers", out var arr) || arr.ValueKind != JsonValueKind.Array)
+            return list;
+
+        foreach (var el in arr.EnumerateArray())
+        {
+            var urls = new List<string>();
+            if (el.TryGetProperty("urls", out var urlsEl))
+            {
+                if (urlsEl.ValueKind == JsonValueKind.String)
+                {
+                    var u = urlsEl.GetString();
+                    if (!string.IsNullOrWhiteSpace(u))
+                        urls.Add(u!);
+                }
+                else if (urlsEl.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var uEl in urlsEl.EnumerateArray())
+                    {
+                        var u = uEl.GetString();
+                        if (!string.IsNullOrWhiteSpace(u))
+                            urls.Add(u!);
+                    }
+                }
+            }
+
+            string? username = null;
+            string? credential = null;
+            if (el.TryGetProperty("username", out var userEl) && userEl.ValueKind == JsonValueKind.String)
+                username = userEl.GetString();
+            if (el.TryGetProperty("credential", out var credEl) && credEl.ValueKind == JsonValueKind.String)
+                credential = credEl.GetString();
+
+            foreach (var u in urls)
+            {
+                list.Add(new SIPSorcery.Net.RTCIceServer
+                {
+                    urls = u,
+                    username = username,
+                    credential = credential,
+                });
+            }
+        }
+
+        return list;
     }
 
     private static string? BuildWsUrl(string? serverUrl)

@@ -89,6 +89,16 @@ if (args.Contains("--terms"))
     return;
 }
 
+// ─── Live-stream worker (crash-isolated sibling, 2026-09-19) ───
+// `client.exe --live-stream` owns ONLY screen capture + push/WebRTC. Native vpx /
+// DXGI faults kill this process alone; the main tracker (journey / sync / T&A)
+// keeps running. Spawned by LiveStreamSupervisor — never by the user directly.
+if (args.Contains("--live-stream"))
+{
+    await RunLiveStreamWorkerAsync(args);
+    return;
+}
+
 var isBackground = args.Contains("--background");
 var isMinimized = args.Contains("--minimized");
 // A "user launch" is one without --background / --minimized — i.e. the user
@@ -246,13 +256,12 @@ builder.Services.AddSingleton<client.Services.LocationSamplerService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.LocationSamplerService>());
 
 // ────────────────────────────────────────────────────────────────────────────
-// Live stream (Phase 1): ScreenCaptureService + LiveStreamClient push socket.
-// Parked when ALPHA_STREAM_ENABLED=false. Frames only after server "start".
+// Live stream: crash-isolated worker. Main tracker NEVER loads ScreenCapture /
+// LiveStreamClient / SIPSorcery / vpxmd.dll — only LiveStreamSupervisor, which
+// spawns `client.exe --live-stream` after login. Parked when ALPHA_STREAM_ENABLED=false.
 // ────────────────────────────────────────────────────────────────────────────
-builder.Services.AddSingleton<client.Services.ScreenCaptureService>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.ScreenCaptureService>());
-builder.Services.AddSingleton<client.Services.LiveStreamClient>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.LiveStreamClient>());
+builder.Services.AddSingleton<client.Services.LiveStreamSupervisor>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.LiveStreamSupervisor>());
 
 // HTTP Client
 builder.Services.AddSingleton<HttpClient>(sp =>
@@ -484,6 +493,46 @@ static AppBuilder BuildAvaloniaApp()
         .WithInterFont()
         .LogToTrace();
 
+// ─── Live-stream worker (sibling process) ───
+// Minimal host: config + SQLite (read employee DeviceAuth) + ScreenCapture +
+// LiveStreamClient ONLY. No journey collector, sync drain, T&A, or Avalonia.
+// Own mutex so it runs next to the tracker without tripping the main guard.
+static async Task RunLiveStreamWorkerAsync(string[] args)
+{
+    using var workerMutex = new Mutex(
+        true,
+        client.Services.LiveStreamSupervisor.WorkerMutexName,
+        out var workerCreated);
+    if (!workerCreated)
+    {
+        Console.Error.WriteLine("Live-stream worker already running.");
+        return;
+    }
+
+    var config = client.Configuration.AppConfig.FromEnv();
+    var builder = Host.CreateApplicationBuilder(args);
+    builder.Logging.ClearProviders();
+    builder.Logging.AddConsole();
+    builder.Logging.AddFile(ResolveLogPath("live-stream-worker.log"));
+    builder.Logging.SetMinimumLevel(LogLevel.Information);
+
+    builder.Services.AddSingleton(config);
+    builder.Services.AddSingleton<ILogStore>(sp =>
+        new SqliteLogStore(ResolveDbPath(config.DbPath), config.DbEncryptionKey));
+    builder.Services.AddSingleton<client.Services.ScreenCaptureService>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.ScreenCaptureService>());
+    builder.Services.AddSingleton<client.Services.LiveStreamClient>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.LiveStreamClient>());
+
+    var host = builder.Build();
+
+    await host.Services.GetRequiredService<ILogStore>()
+        .InitializeAsync(CancellationToken.None);
+
+    Console.WriteLine("Live-stream worker started (capture + push only; no journey tracker).");
+    await host.RunAsync();
+}
+
 // ─── Terms agent (instance 3) ───
 // Minimal host: config + SQLite + HttpClient + TermsService ONLY. None of the
 // tracking/sync/inventory services are registered — this process is exclusively
@@ -617,16 +666,16 @@ static string ResolveDbPath(string dbPath)
 // /usr/share/alpha-ai-tracker), use the user-writable data dir instead so
 // the FileLoggerProvider never fails to open its file. The FileLoggerProvider
 // itself is also defensive — this just picks a good path up front.
-static string ResolveLogPath()
+static string ResolveLogPath(string fileName = "dotnetrunlog.txt")
 {
     var appDir = AppDomain.CurrentDomain.BaseDirectory;
     if (IsDirWritable(appDir))
-        return Path.Combine(appDir, "dotnetrunlog.txt");
+        return Path.Combine(appDir, fileName);
 
     var userDataDir = OperatingSystem.IsWindows()
         ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AlphaAITracker")
         : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share", "alpha-ai-tracker");
-    return Path.Combine(userDataDir, "dotnetrunlog.txt");
+    return Path.Combine(userDataDir, fileName);
 }
 
 static bool IsDirWritable(string dir)

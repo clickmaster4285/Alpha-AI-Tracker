@@ -35,12 +35,13 @@ func TestSFUPublisherSubscriberSignaling(t *testing.T) {
 	sfu.DetachPublisher("EMP-1")
 }
 
-func TestParseICEServers(t *testing.T) {
-	srvs := ParseICEServers("stun:stun.example:3478, turn:turn.example:3478", "u", "p")
-	if len(srvs) != 2 {
-		t.Fatalf("got %d servers", len(srvs))
+func TestToPublicICEServers(t *testing.T) {
+	srvs := ParseICEServers("stun:a,turn:b:3478", "u", "p")
+	pub := ToPublicICEServers(srvs)
+	if len(pub) != 2 {
+		t.Fatalf("got %d", len(pub))
 	}
-	if srvs[1].Username != "u" || srvs[1].Credential != "p" {
-		t.Fatalf("TURN creds not applied: %+v", srvs[1])
+	if pub[1].Username != "u" || pub[1].Credential != "p" {
+		t.Fatalf("creds: %+v", pub[1])
 	}
 }

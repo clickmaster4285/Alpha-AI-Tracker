@@ -165,7 +165,7 @@ func Load() (*Config, error) {
 			MaxWatchersPerEmployee: getEnvInt("LIVE_STREAM_MAX_WATCHERS_PER_EMPLOYEE", 10),
 			IdleSec:                getEnvInt("LIVE_STREAM_IDLE_SEC", 90),
 			TestFrame:              getEnvBool("LIVE_STREAM_TEST_FRAME", false),
-			Media:                  getEnv("LIVE_STREAM_MEDIA", "jpeg"),
+			Media:                  getEnv("LIVE_STREAM_MEDIA", "both"),
 			HubBackend:             getEnv("LIVE_STREAM_HUB", "memory"),
 			RedisPrefix:            getEnv("LIVE_STREAM_REDIS_PREFIX", "live_stream:"),
 			ICEServers:             getEnv("LIVE_STREAM_ICE_SERVERS", "stun:stun.l.google.com:19302"),

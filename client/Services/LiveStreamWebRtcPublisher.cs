@@ -8,8 +8,9 @@ namespace client.Services;
 
 /// <summary>
 /// Windows-only WebRTC publisher: feeds screen BGRA frames into a VP8 encoder and
-/// publishes via SIPSorcery RTCPeerConnection. Signaling (offer/answer/ice) rides the
-/// existing live-stream push WebSocket.
+/// publishes via SIPSorcery RTCPeerConnection. Signaling rides the push WebSocket.
+/// Native encode is gated until formats are negotiated — premature encode can AV-crash
+/// the whole process (vpxmd.dll).
 /// </summary>
 public sealed class LiveStreamWebRtcPublisher : IDisposable
 {
@@ -22,6 +23,7 @@ public sealed class LiveStreamWebRtcPublisher : IDisposable
     private Func<string, Task>? _sendJson;
     private bool _rawSubscribed;
     private bool _started;
+    private bool _encodeReady;
     private int _frameDurationMs = 100;
 
     public LiveStreamWebRtcPublisher(ScreenCaptureService capture, ILogger logger)
@@ -35,7 +37,14 @@ public sealed class LiveStreamWebRtcPublisher : IDisposable
         get { lock (_gate) return _started && _pc is not null; }
     }
 
-    public async Task StartAsync(Func<string, Task> sendJson, int fps, CancellationToken ct)
+    /// <summary>True after a local offer was sent successfully.</summary>
+    public bool OfferSent { get; private set; }
+
+    public async Task StartAsync(
+        Func<string, Task> sendJson,
+        int fps,
+        IReadOnlyList<RTCIceServer>? iceServers,
+        CancellationToken ct)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -44,20 +53,27 @@ public sealed class LiveStreamWebRtcPublisher : IDisposable
         }
 
         Stop();
+        OfferSent = false;
 
         _sendJson = sendJson ?? throw new ArgumentNullException(nameof(sendJson));
         _frameDurationMs = Math.Clamp(1000 / Math.Max(1, fps), 33, 200);
 
-        var config = new RTCConfiguration
-        {
-            iceServers = new List<RTCIceServer>
-            {
-                new() { urls = "stun:stun.l.google.com:19302" },
-            },
-        };
+        var servers = iceServers is { Count: > 0 }
+            ? iceServers.ToList()
+            : new List<RTCIceServer> { new() { urls = "stun:stun.l.google.com:19302" } };
 
-        var pc = new RTCPeerConnection(config);
-        var encoder = new VideoEncoderEndPoint();
+        RTCPeerConnection pc;
+        VideoEncoderEndPoint encoder;
+        try
+        {
+            pc = new RTCPeerConnection(new RTCConfiguration { iceServers = servers });
+            encoder = new VideoEncoderEndPoint();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "WebRTC publisher: failed to create peer/encoder (missing vpxmd.dll?)");
+            throw;
+        }
 
         var track = new MediaStreamTrack(encoder.GetVideoSourceFormats(), MediaStreamStatusEnum.SendOnly);
         pc.addTrack(track);
@@ -66,7 +82,11 @@ public sealed class LiveStreamWebRtcPublisher : IDisposable
         pc.OnVideoFormatsNegotiated += formats =>
         {
             if (formats is { Count: > 0 })
+            {
                 encoder.SetVideoSourceFormat(formats[0]);
+                lock (_gate) _encodeReady = true;
+                _logger.LogInformation("WebRTC publisher: video format negotiated → encode enabled");
+            }
         };
 
         pc.onicecandidate += async cand =>
@@ -99,9 +119,13 @@ public sealed class LiveStreamWebRtcPublisher : IDisposable
         pc.onconnectionstatechange += state =>
         {
             _logger.LogInformation("WebRTC publisher connection state → {State}", state);
-            if (state is RTCPeerConnectionState.failed or RTCPeerConnectionState.closed or RTCPeerConnectionState.disconnected)
+            if (state is RTCPeerConnectionState.failed or RTCPeerConnectionState.closed)
             {
-                // Keep object; LiveStreamClient stop/start owns lifecycle.
+                lock (_gate) _encodeReady = false;
+            }
+            else if (state == RTCPeerConnectionState.connected)
+            {
+                lock (_gate) _encodeReady = true;
             }
         };
 
@@ -109,6 +133,7 @@ public sealed class LiveStreamWebRtcPublisher : IDisposable
         {
             _pc = pc;
             _encoder = encoder;
+            _encodeReady = false;
             if (!_rawSubscribed)
             {
                 _capture.OnRawFrame += OnRawFrame;
@@ -122,7 +147,6 @@ public sealed class LiveStreamWebRtcPublisher : IDisposable
         var offer = pc.createOffer(null);
         await pc.setLocalDescription(offer);
 
-        // Wait briefly for ICE gathering so the initial offer is more complete.
         var deadline = DateTime.UtcNow.AddSeconds(2);
         while (pc.iceGatheringState != RTCIceGatheringState.complete && DateTime.UtcNow < deadline)
         {
@@ -144,6 +168,7 @@ public sealed class LiveStreamWebRtcPublisher : IDisposable
             sdp = local.sdp.ToString(),
         });
         await sendJson(offerJson);
+        OfferSent = true;
         _logger.LogInformation("WebRTC publisher: offer sent ({Bytes} bytes SDP)", offerJson.Length);
     }
 
@@ -171,6 +196,10 @@ public sealed class LiveStreamWebRtcPublisher : IDisposable
                     sdp = sdp,
                 });
                 _logger.LogInformation("WebRTC publisher: remote answer → {Result}", result);
+                if (result == SetDescriptionResultEnum.OK)
+                {
+                    lock (_gate) _encodeReady = true;
+                }
             }
             else if (type == "ice" && root.TryGetProperty("candidate", out var candEl))
             {
@@ -199,6 +228,7 @@ public sealed class LiveStreamWebRtcPublisher : IDisposable
         lock (_gate)
         {
             _started = false;
+            _encodeReady = false;
             pc = _pc;
             encoder = _encoder;
             _pc = null;
@@ -209,6 +239,7 @@ public sealed class LiveStreamWebRtcPublisher : IDisposable
                 _rawSubscribed = false;
             }
         }
+        OfferSent = false;
 
         try { encoder?.Dispose(); } catch { /* ignore */ }
         try { pc?.Close("stop"); } catch { /* ignore */ }
@@ -220,12 +251,22 @@ public sealed class LiveStreamWebRtcPublisher : IDisposable
         VideoEncoderEndPoint? encoder;
         lock (_gate)
         {
-            if (!_started)
+            if (!_started || !_encodeReady)
                 return;
             encoder = _encoder;
         }
-        if (encoder is null || bgra.Length == 0 || width <= 0 || height <= 0)
+        if (encoder is null || bgra.Length == 0 || width < 2 || height < 2)
             return;
+
+        // libvpx requires even dimensions — odd sizes can AV-crash the process.
+        var evenW = width & ~1;
+        var evenH = height & ~1;
+        if (evenW != width || evenH != height)
+        {
+            bgra = CropBgra(bgra, width, height, evenW, evenH);
+            width = evenW;
+            height = evenH;
+        }
 
         try
         {
@@ -240,6 +281,17 @@ public sealed class LiveStreamWebRtcPublisher : IDisposable
         {
             _logger.LogDebug(ex, "WebRTC encode frame failed");
         }
+    }
+
+    private static byte[] CropBgra(byte[] src, int srcW, int srcH, int dstW, int dstH)
+    {
+        var dst = new byte[dstW * dstH * 4];
+        var srcStride = srcW * 4;
+        var dstStride = dstW * 4;
+        var rows = Math.Min(dstH, srcH);
+        for (var y = 0; y < rows; y++)
+            Buffer.BlockCopy(src, y * srcStride, dst, y * dstStride, dstStride);
+        return dst;
     }
 
     public void Dispose() => Stop();

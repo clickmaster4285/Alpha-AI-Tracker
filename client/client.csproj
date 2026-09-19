@@ -65,4 +65,18 @@
     <None Include="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
     <None Remove="Platform/Linux/alpha_atspi.py" />
   </ItemGroup>
+
+  <!-- SIPSorceryMedia.Encoders ships vpxmd.dll via its .targets only when Platform is
+       x64/AnyCPU. RID-only publishes sometimes leave Platform empty and omit the native
+       DLL — then VideoEncoderEndPoint AV-crashes the whole tracker process on start.
+       Force-copy both arches; the process loads the matching one from the app dir. -->
+  <ItemGroup>
+    <Content Include="$(NuGetPackageRoot)sipsorcerymedia.encoders\10.0.4\build\x64\vpxmd.dll"
+             Condition="Exists('$(NuGetPackageRoot)sipsorcerymedia.encoders\10.0.4\build\x64\vpxmd.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Link>vpxmd.dll</Link>
+      <TargetPath>vpxmd.dll</TargetPath>
+    </Content>
+  </ItemGroup>
 </Project>

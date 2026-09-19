@@ -83,6 +83,7 @@ export function useLiveStreamSocket(
   const frameTimes = useRef<number[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
+  const iceServersRef = useRef<RTCIceServer[]>([{ urls: 'stun:stun.l.google.com:19302' }]);
   const canvasHolder = useRef(canvasRef);
   const videoHolder = useRef(videoRef);
   canvasHolder.current = canvasRef;
@@ -137,7 +138,7 @@ export function useLiveStreamSocket(
     const ensurePc = () => {
       if (pcRef.current) return pcRef.current;
       const pc = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+        iceServers: iceServersRef.current,
       });
       pc.onicecandidate = (ev) => {
         const ws = wsRef.current;
@@ -272,11 +273,23 @@ export function useLiveStreamSocket(
               monitors?: LiveStreamMonitor[];
               selectedMonitor?: number;
               mediaMode?: 'jpeg' | 'webrtc' | 'both';
+              iceServers?: Array<{
+                urls: string | string[];
+                username?: string;
+                credential?: string;
+              }>;
               sdp?: string;
               role?: string;
               candidate?: IcePayload;
             };
             if (msg.type === 'status') {
+              if (Array.isArray(msg.iceServers) && msg.iceServers.length > 0) {
+                iceServersRef.current = msg.iceServers.map((s) => ({
+                  urls: s.urls,
+                  username: s.username,
+                  credential: s.credential,
+                }));
+              }
               setState((s) => ({
                 ...s,
                 streaming: !!msg.streaming,

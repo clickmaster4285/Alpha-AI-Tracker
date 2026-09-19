@@ -362,8 +362,11 @@ public sealed class ScreenCaptureService : BackgroundService
             if (src.Width > maxW)
             {
                 var newH = (int)Math.Round(src.Height * (maxW / (double)src.Width));
+                // Even dimensions — libvpx AV-crashes on odd sizes.
+                maxW &= ~1;
+                newH = Math.Max(2, newH & ~1);
                 // Keep 32bpp so WebRTC gets BGRA without a second conversion.
-                scaled = new Bitmap(maxW, Math.Max(1, newH), PixelFormat.Format32bppArgb);
+                scaled = new Bitmap(maxW, newH, PixelFormat.Format32bppArgb);
                 using var g = Graphics.FromImage(scaled);
                 g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBilinear;
                 g.DrawImage(src, 0, 0, scaled.Width, scaled.Height);

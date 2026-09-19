@@ -29,6 +29,7 @@ const (
 type StreamHandler struct {
 	hub              *stream.Hub
 	sfu              *stream.SFU
+	iceServers       []stream.ICEServerInfo
 	employeeRepo     *repository.EmployeeRepo
 	termsConsentRepo *repository.TermsConsentRepo
 	taRepo           *repository.TimeAttendanceRepo
@@ -37,10 +38,11 @@ type StreamHandler struct {
 }
 
 // NewStreamHandler constructs the handler. allowedOrigins should match CORS_ALLOWED_ORIGINS.
-// sfu may be nil when LIVE_STREAM_MEDIA=jpeg.
+// sfu may be nil when LIVE_STREAM_MEDIA=jpeg. iceServers are advertised to peers for WebRTC.
 func NewStreamHandler(
 	hub *stream.Hub,
 	sfu *stream.SFU,
+	iceServers []stream.ICEServerInfo,
 	employeeRepo *repository.EmployeeRepo,
 	termsConsentRepo *repository.TermsConsentRepo,
 	taRepo *repository.TimeAttendanceRepo,
@@ -50,9 +52,13 @@ func NewStreamHandler(
 	for _, o := range allowedOrigins {
 		originSet[strings.TrimSpace(o)] = true
 	}
+	if len(iceServers) == 0 {
+		iceServers = stream.ToPublicICEServers(nil)
+	}
 	h := &StreamHandler{
 		hub:              hub,
 		sfu:              sfu,
+		iceServers:       iceServers,
 		employeeRepo:     employeeRepo,
 		termsConsentRepo: termsConsentRepo,
 		taRepo:           taRepo,
@@ -284,6 +290,7 @@ func (h *StreamHandler) Push(c echo.Context) error {
 				}
 				if ev.Type == "start" {
 					payload["media"] = string(h.hub.Config().Media)
+					payload["iceServers"] = h.iceServers
 				}
 				writeMu.Lock()
 				_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
@@ -378,7 +385,7 @@ func (h *StreamHandler) handlePushText(empID string, data []byte) {
 	}
 }
 
-func statusPayload(snap stream.EmployeeSnapshot, media stream.MediaMode) map[string]interface{} {
+func statusPayload(snap stream.EmployeeSnapshot, media stream.MediaMode, ice []stream.ICEServerInfo) map[string]interface{} {
 	return map[string]interface{}{
 		"type":            "status",
 		"streaming":       snap.Streaming,
@@ -388,6 +395,7 @@ func statusPayload(snap stream.EmployeeSnapshot, media stream.MediaMode) map[str
 		"monitors":        snap.Monitors,
 		"selectedMonitor": snap.SelectedMonitor,
 		"mediaMode":       string(media),
+		"iceServers":      ice,
 	}
 }
 
@@ -463,7 +471,7 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 
 	media := h.hub.Config().Media
 	snap := h.hub.Snapshot(empID)
-	_ = writeJSON(conn, statusPayload(snap, media))
+	_ = writeJSON(conn, statusPayload(snap, media, h.iceServers))
 
 	// Dev-only synthetic frames when no client is pushing.
 	var testStop chan struct{}
@@ -511,7 +519,7 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 				s := h.hub.Snapshot(empID)
 				writeMu.Lock()
 				_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
-				err := conn.WriteJSON(statusPayload(s, media))
+				err := conn.WriteJSON(statusPayload(s, media, h.iceServers))
 				writeMu.Unlock()
 				if err != nil {
 					return

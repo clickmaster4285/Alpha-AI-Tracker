@@ -130,15 +130,18 @@ func main() {
 
 	mediaMode := stream.ParseMediaMode(cfg.LiveStream.Media)
 	webrtcOn := mediaMode == stream.MediaWebRTC || mediaMode == stream.MediaBoth
+	iceList := stream.ParseICEServers(
+		cfg.LiveStream.ICEServers,
+		cfg.LiveStream.TURNUser,
+		cfg.LiveStream.TURNPass,
+	)
+	icePublic := stream.ToPublicICEServers(iceList)
+
 	var streamSFU *stream.SFU
 	if cfg.LiveStream.Enabled && webrtcOn {
 		streamSFU = stream.NewSFU(stream.SFUConfig{
-			Enabled: true,
-			ICEServers: stream.ParseICEServers(
-				cfg.LiveStream.ICEServers,
-				cfg.LiveStream.TURNUser,
-				cfg.LiveStream.TURNPass,
-			),
+			Enabled:    true,
+			ICEServers: iceList,
 		})
 		defer streamSFU.Close()
 	}
@@ -150,11 +153,11 @@ func main() {
 	}
 
 	streamHandler := handlers.NewStreamHandler(
-		streamHub, streamSFU, employeeRepo, termsConsentRepo, timeAttendanceRepo, cfg.CORS.AllowedOrigins,
+		streamHub, streamSFU, icePublic, employeeRepo, termsConsentRepo, timeAttendanceRepo, cfg.CORS.AllowedOrigins,
 	)
 	if cfg.LiveStream.Enabled {
-		log.Printf("[server] live-stream hub enabled (maxStreams=%d maxFps=%d media=%s webrtc=%v)",
-			cfg.LiveStream.MaxStreams, cfg.LiveStream.MaxFPS, mediaMode, webrtcOn)
+		log.Printf("[server] live-stream hub enabled (maxStreams=%d maxFps=%d media=%s webrtc=%v iceServers=%d)",
+			cfg.LiveStream.MaxStreams, cfg.LiveStream.MaxFPS, mediaMode, webrtcOn, len(icePublic))
 	} else {
 		log.Println("[server] live-stream hub disabled")
 	}

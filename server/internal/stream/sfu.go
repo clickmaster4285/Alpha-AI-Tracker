@@ -508,6 +508,43 @@ func (r *sfuRoom) closeLocked() {
 	r.subs = make(map[uint64]*peerState)
 }
 
+// ICEServerInfo is the JSON shape sent to desktop + web peers for RTCPeerConnection.
+type ICEServerInfo struct {
+	URLs       []string `json:"urls"`
+	Username   string   `json:"username,omitempty"`
+	Credential string   `json:"credential,omitempty"`
+}
+
+// ToPublicICEServers converts pion ICE servers into the wire DTO.
+func ToPublicICEServers(servers []webrtc.ICEServer) []ICEServerInfo {
+	out := make([]ICEServerInfo, 0, len(servers))
+	for _, s := range servers {
+		info := ICEServerInfo{
+			URLs:     append([]string(nil), s.URLs...),
+			Username: s.Username,
+		}
+		switch c := s.Credential.(type) {
+		case string:
+			info.Credential = c
+		case []byte:
+			info.Credential = string(c)
+		}
+		out = append(out, info)
+	}
+	if len(out) == 0 {
+		out = []ICEServerInfo{{URLs: []string{"stun:stun.l.google.com:19302"}}}
+	}
+	return out
+}
+
+// ICEServers returns the configured ICE list (for status/start payloads).
+func (s *SFU) ICEServers() []ICEServerInfo {
+	if s == nil {
+		return ToPublicICEServers(nil)
+	}
+	return ToPublicICEServers(s.cfg.ICEServers)
+}
+
 // ParseICEServers builds ICE server list from comma-separated URLs + optional TURN creds.
 func ParseICEServers(urlsCSV, turnUser, turnPass string) []webrtc.ICEServer {
 	var out []webrtc.ICEServer
