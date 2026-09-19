@@ -538,6 +538,9 @@ func (r *EmployeeRepo) Update(ctx context.Context, id string, updates map[string
 		          tracking_enabled, tracking_status, is_online,
 		          COALESCE(avatar, '') AS avatar, COALESCE(avatar_color, '') AS avatar_color,
 		          created_at, updated_at, deleted_at,
+		          COALESCE((SELECT ed.client_version FROM employee_devices ed
+		                    WHERE ed.employee_id = employees.employee_id AND ed.revoked_at IS NULL
+		                    ORDER BY ed.last_seen_at DESC LIMIT 1), '') AS client_version,
 		          EXISTS(SELECT 1 FROM users u
 		                 WHERE u.employee_id = employees.employee_id
 		                   AND u.deleted_at IS NULL) AS has_user_login

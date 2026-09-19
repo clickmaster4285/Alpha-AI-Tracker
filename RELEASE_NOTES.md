@@ -1,3 +1,205 @@
+# Release Notes — v1.2.1
+
+## Overview
+
+v1.2.1 is a **bugfix release** addressing two issues: an infinite orphan `app-items` sync loop on
+the client (32 poison rows re-sent every sync pass, never quarantined) and a 500 error on the
+employee update endpoint caused by a missing column projection in the `UPDATE…RETURNING` clause.
+
+Branch: `main`. Client version bump: **1.2.0 → 1.2.1**.
+
+---
+
+## 1. Client — Orphan App-Items Quarantine Fix
+
+**Root cause**: `OnAppItemsRejected` only incremented `_missingSessionRetryCount` when
+`_lastMissingSessionIds.Count > 0` — a stale guard left over from the pre-quarantine design. When
+the server refused 32 rows with missing parent sessions, the retry count never advanced, the
+quarantine threshold of 3 was never reached, and the same 32 rows were re-sent on every sync pass
+indefinitely.
+
+**Fix** (`client/Services/SyncService.cs`): removed the `_lastMissingSessionIds.Count > 0` guard
+so that every call to `OnAppItemsRejected` — regardless of whether the missing session list is
+populated — increments `_missingSessionRetryCount`. After 3 consecutive refusals the rows are
+quarantined in-memory and skipped by the drain until process restart. The SQLite rows stay
+`is_synced=0` (diagnostic evidence; retention only purges synced rows).
+
+---
+
+## 2. Server — Employee Update 500 Fix
+
+**Root cause**: `employee_repo.go` `Update` RETURNING clause projected 17 columns but `scanEmployeeRow`
+expects 18 — the `client_version` subquery was missing. Every `PUT /api/v1/employees/:id` returned
+SQLSTATE 42703 (undefined column) → 500.
+
+**Fix** (`server/internal/repository/employee_repo.go`): added the missing `client_version`
+subquery to the `UPDATE…RETURNING` clause:
+```sql
+(SELECT cv.client_version FROM employee_devices cv
+ WHERE cv.employee_id = e.employee_id
+ ORDER BY cv.updated_at DESC LIMIT 1) AS client_version
+```
+
+---
+
+## Bug Fixes Summary
+
+| # | Issue | Root cause | Fix |
+|---|-------|-----------|-----|
+| 1 | Infinite orphan `app-items` sync loop (32 poison rows every pass) | `_lastMissingSessionIds.Count > 0` guard prevented quarantine counter from advancing | Removed the guard; all refusals count toward the 3-pass quarantine threshold |
+| 2 | `PUT /api/v1/employees/:id` returns 500 | `UPDATE…RETURNING` missing `client_version` subquery; `scanEmployeeRow` expects 18 columns | Added the subquery to the RETURNING clause |
+
+---
+
+## Verification
+
+- ✅ `dotnet build` 0 errors (orphan quarantine fix)
+- ✅ `go build` / `go vet` clean (employee update fix)
+
+---
+
+## Deploy Sequence
+
+1. **Server first** — the employee update fix is server-only; no migration needed.
+2. **Client** — ships in the next installer build (the quarantine fix is in the compiled `client.dll`).
+
+---
+
+## Known Gaps / Follow-ups
+
+- The 32 quarantined orphan rows will persist in SQLite until process restart (they are
+  `is_synced=0` and never purged by retention). A future release could add a user-visible
+  "Quarantined rows" diagnostic badge.
+- Server-side permission enforcement (RBAC grants) is still not implemented in API middleware.
+- No rate limiting on login or sync endpoints.
+
+---
+
+---
+
+# Release Notes — v1.2.0
+
+## Overview
+
+v1.2.0 is the **Live Screen Preview** release. Admins open `/live-stream`, pick an online
+employee who has accepted the `live_view` terms, and watch that machine’s screen in real time.
+Frames are **preview-only** — never recorded, never written to disk or Postgres. Transport is a
+WebSocket JPEG relay (client push + admin watch) with activity-gated capture (encode only while
+someone is watching). Phase 1 ships Windows capture; Phase 2 multi-monitor selection (switch which
+display is previewed) is included and verified on a dual-monitor PC.
+
+Branch: `feature/live_stream`. Client version bump: **1.1.6 → 1.2.0**.
+
+---
+
+## 1. Server — Live Stream Hub + APIs
+
+- **In-memory hub** (`server/internal/stream/`) — latest-frame-wins mailbox, watcher fan-out,
+  start/stop control to the desktop push socket, idle reap, hard caps
+  (`LIVE_STREAM_MAX_STREAMS`, max watchers/employee, max frame bytes, max FPS).
+- **Auth split (Client-vs-Web API Auth Separation Rule):**
+  | Surface | Routes | Auth |
+  |---|---|---|
+  | Desktop push | `GET /api/v1/live-stream/push` (WS) | `DeviceAuth` |
+  | Admin list / ticket / watch | `GET /live-stream/employees`, `GET /live-stream/watch-ticket`, `GET /live-stream/watch` (WS) | JWT / short-lived watch ticket |
+- **Consent gate** — `terms_consent` feature `live_view` re-checked on push upgrade and watch
+  ticket mint (and again on watch connect).
+- **Online signal** — employee listed Online when `app_status.last_heartbeat_at` /
+  `updated_at` is within **3 minutes** (sync cadence ~60 s; a 60 s window was flapping Offline).
+- **Watch ticket** — REST mints a one-shot ticket so the browser can open the watch WebSocket
+  without relying on cross-port httpOnly cookies (`NEXT_PUBLIC_WS_URL` → Go origin).
+- **Env knobs** (`server/.env.example`): `LIVE_STREAM_ENABLED`, `LIVE_STREAM_MAX_FPS`,
+  `LIVE_STREAM_FRAME_MAX_BYTES`, `LIVE_STREAM_MAX_STREAMS`,
+  `LIVE_STREAM_MAX_WATCHERS_PER_EMPLOYEE`, `LIVE_STREAM_IDLE_SEC`, `LIVE_STREAM_TEST_FRAME`.
+
+### Migrations shipped with this release
+
+| Migration | What |
+|---|---|
+| **040** `040_fix_app_items_url_index.sql` | Drops `idx_app_items_url` — unbounded URL btree keys exceeded Postgres’ ~2704-byte limit (SQLSTATE 54000) and 500’d entire `app-items/sync` batches |
+| **041** `041_fix_app_items_context_index.sql` | Replaces `idx_app_items_context(employee_id, item_type, identifier)` with `idx_app_items_emp_type` — same overflow when `identifier` held a long URL |
+
+---
+
+## 2. Client — Windows Capture + Push Socket
+
+- **`ScreenCaptureService`** — Windows GDI `CopyFromScreen` → managed JPEG; parked on
+  Linux/macOS (`streamAvailable: false`). Adaptive FPS throttle under encode pressure.
+- **`LiveStreamClient`** — persistent outbound WS to `/live-stream/push` while
+  `ALPHA_STREAM_ENABLED=true` and logged in; frames only after server `{"type":"start"}`;
+  stops on `stop` / last watcher gone.
+- **Multi-monitor (Phase 2)** — `EnumDisplayMonitors` lists displays in `hello`; admin
+  `select_monitor` switches the capture target. Monitors are **re-scanned on every hello /
+  capture start** (fixed a bug where a one-shot startup scan left the web stuck on a single
+  display after a second monitor was attached).
+- **Config** (installer-parity): `ALPHA_STREAM_ENABLED` (default **off** in `.env.example`),
+  `ALPHA_STREAM_FPS`, `ALPHA_STREAM_MAX_WIDTH`, `ALPHA_STREAM_JPEG_QUALITY` — must be in
+  `.env` before `encrypt-config.sh` / installer bake.
+- **Retention fix** — local SQLite purge deletes child `app_items` before parents
+  (`parent_item_id` self-FK), stopping `FOREIGN KEY constraint failed` from aborting sync
+  passes after a clean drain.
+
+---
+
+## 3. Web — `/live-stream`
+
+- Two-pane UI: searchable employee rail (online-first) + live canvas.
+- States: connecting / live / offline / consent missing / unavailable / waiting for desktop
+  `hello`.
+- **Monitor dropdown** when the client reports displays (enabled when 2+); one preview at a
+  time — switch display, do not show all monitors side-by-side.
+- URL-synced `?employeeId=` / `?q=` via `useUrlQueryState` + `<Suspense>`.
+- Watch socket via `useLiveStreamSocket` + `NEXT_PUBLIC_WS_URL` (Next rewrites do not proxy WS).
+
+---
+
+## Bug Fixes Summary
+
+| # | Issue | Root cause | Fix |
+|---|-------|-----------|-----|
+| 1 | Live-stream rail showed Offline while client was syncing | Online window was 60 s; heartbeats arrive on ~60 s sync | 3-minute window + use `GREATEST(value, updated_at)` |
+| 2 | `app-items/sync` 500 — `idx_app_items_url` | Long URLs overflow btree key limit | Migration **040** drop index |
+| 3 | `app-items/sync` 500 — `idx_app_items_context` | Long `identifier` (often URL) in composite btree | Migration **041** replace with `(employee_id, item_type)` |
+| 4 | Sync pass warn — SQLite FK on retention | Deleting parent `app_items` while children still referenced them | Delete children-with-parent first, then roots without children |
+| 5 | Dual-monitor PC, web only showed one display | Monitors enumerated once at process start | Re-scan on hello / start capture; pin enum callback; use callback rect |
+| 6 | Consent / feature id mismatch during early wiring | Seeded feature is `live_view`, not `live_stream` | Hub `FeatureID = "live_view"` end-to-end |
+
+---
+
+## Verification
+
+- ✅ Dual-monitor preview switch confirmed on the web (admin picker → correct display).
+- ✅ End-to-end Windows preview (`dotnet` / debug client) + server hub hello with `monitors=2`.
+- ✅ Hub unit tests (`go test ./internal/stream/...`) including `select_monitor`.
+- ✅ `go build` · `dotnet build` 0/0 · `npx tsc --noEmit`.
+- ⚠️ **Installer ship-test** — re-bake `config.enc` with `ALPHA_STREAM_*`, build
+  `AlphaAITracker-Setup-1.2.0.exe`, verify live preview from the **installed** client
+  (Installer-Parity Rule). Old installed 1.1.x builds will not have the monitor re-scan fix
+  until reinstalled.
+
+---
+
+## Deploy Sequence
+
+1. **Server first** — applies migrations **040–041**; enables live-stream hub env as needed.
+2. **Web** — deploy with `NEXT_PUBLIC_WS_URL` pointing at the Go host (e.g.
+   `ws://192.168.88.35:8080`); ensure that origin is in `CORS_ALLOWED_ORIGINS`.
+3. **Client** — installer **1.2.0** with `ALPHA_STREAM_ENABLED=true` baked only for fleets that
+   should offer preview (default in `.env.example` remains `false`).
+
+---
+
+## Known Gaps / Follow-ups (Phase 2+)
+
+- Linux / macOS screen capture still reports unavailable (no Linux ship-test machine yet).
+- WebRTC media path, Redis multi-node hub, and **server-side who-can-watch RBAC** not in this
+  release (any admin with the live-stream module can watch any consented employee).
+- Side-by-side multi-monitor mosaic is out of scope — one selected display per stream.
+- Ephemeral / consent-revoke / cap stress checks still worth a formal installed-build pass.
+
+---
+---
+
 # Release Notes — v1.1.6
 
 ## Overview
