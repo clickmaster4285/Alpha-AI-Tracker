@@ -795,9 +795,10 @@ public class SyncService : BackgroundService
     /// Quarantine bookkeeping for the app-items drain: refused ids advance their
     /// consecutive-refusal counter (≥ threshold ⇒ skipped by future drains until
     /// restart); accepted ids are FORGIVEN so a self-healed row starts fresh if it
-    /// is ever orphaned again. Items whose parent session is being re-queued (the
-    /// server reported missingSessionIds) are NOT counted toward quarantine — the
-    /// refusal is transient and will resolve on the next pass.
+    /// is ever orphaned again. All refusals count — even when the server reports
+    /// missingSessionIds, a repeated refusal after multiple re-queue attempts means
+    /// the parent session is genuinely gone (deleted by retention, never synced, etc.)
+    /// and retrying forever wastes bandwidth and fills server logs.
     /// </summary>
     private void OnAppItemsRejected(IReadOnlyList<string> rejectedIds, IReadOnlyList<string> acceptedIds)
     {
@@ -805,13 +806,6 @@ public class SyncService : BackgroundService
             _appItemRejectCounts.Remove(id);
         foreach (var id in rejectedIds)
         {
-            // Skip quarantine for items whose parent session is being re-queued —
-            // the refusal is expected and transient (Bug #9 follow-up).
-            if (_lastMissingSessionIds.Count > 0)
-            {
-                _appItemRejectCounts.Remove(id);
-                continue;
-            }
             _appItemRejectCounts[id] = _appItemRejectCounts.GetValueOrDefault(id) + 1;
             if (_appItemRejectCounts[id] == QuarantineRetries)
                 _logger.LogWarning(
