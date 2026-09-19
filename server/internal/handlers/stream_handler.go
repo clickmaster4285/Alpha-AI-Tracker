@@ -28,6 +28,7 @@ const (
 // StreamHandler serves live-stream WebSocket + REST endpoints.
 type StreamHandler struct {
 	hub              *stream.Hub
+	sfu              *stream.SFU
 	employeeRepo     *repository.EmployeeRepo
 	termsConsentRepo *repository.TermsConsentRepo
 	taRepo           *repository.TimeAttendanceRepo
@@ -36,8 +37,10 @@ type StreamHandler struct {
 }
 
 // NewStreamHandler constructs the handler. allowedOrigins should match CORS_ALLOWED_ORIGINS.
+// sfu may be nil when LIVE_STREAM_MEDIA=jpeg.
 func NewStreamHandler(
 	hub *stream.Hub,
+	sfu *stream.SFU,
 	employeeRepo *repository.EmployeeRepo,
 	termsConsentRepo *repository.TermsConsentRepo,
 	taRepo *repository.TimeAttendanceRepo,
@@ -49,6 +52,7 @@ func NewStreamHandler(
 	}
 	h := &StreamHandler{
 		hub:              hub,
+		sfu:              sfu,
 		employeeRepo:     employeeRepo,
 		termsConsentRepo: termsConsentRepo,
 		taRepo:           taRepo,
@@ -244,6 +248,7 @@ func (h *StreamHandler) Push(c echo.Context) error {
 		return nil
 	}
 	defer h.hub.UnregisterClient(empID)
+	defer h.sfuDetachPublisher(empID)
 
 	log.Printf("[live-stream] push connected employee=%s", empID)
 
@@ -251,6 +256,16 @@ func (h *StreamHandler) Push(c echo.Context) error {
 	done := make(chan struct{})
 	var once sync.Once
 	closeDone := func() { once.Do(func() { close(done) }) }
+
+	writeSignal := func(msg stream.SignalMessage) {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+		_ = conn.WriteJSON(msg)
+	}
+	if h.sfu != nil && h.sfu.Enabled() {
+		h.sfu.AttachPublisherSink(empID, writeSignal)
+	}
 
 	// Control → client
 	go func() {
@@ -266,6 +281,9 @@ func (h *StreamHandler) Push(c echo.Context) error {
 				payload := map[string]interface{}{"type": ev.Type}
 				if ev.Type == "select_monitor" {
 					payload["index"] = ev.MonitorIndex
+				}
+				if ev.Type == "start" {
+					payload["media"] = string(h.hub.Config().Media)
 				}
 				writeMu.Lock()
 				_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
@@ -305,6 +323,11 @@ func (h *StreamHandler) Push(c echo.Context) error {
 
 		switch msgType {
 		case websocket.BinaryMessage:
+			// JPEG path (Phase 1 / fallback). Ignored only when media=webrtc-only and
+			// a WebRTC track is already publishing — still accept for dual mode.
+			if h.hub.Config().Media == stream.MediaWebRTC {
+				// Prefer WebRTC; keep JPEG as soft fallback while client encoder lands.
+			}
 			if err := h.hub.PushFrame(empID, data); err != nil && err != stream.ErrNotWanted {
 				if err == stream.ErrFrameTooLarge {
 					log.Printf("[live-stream] drop oversized frame employee=%s size=%d", empID, len(data))
@@ -318,19 +341,27 @@ func (h *StreamHandler) Push(c echo.Context) error {
 	}
 }
 
+func (h *StreamHandler) sfuDetachPublisher(empID string) {
+	if h.sfu != nil {
+		h.sfu.DetachPublisher(empID)
+	}
+}
+
 func (h *StreamHandler) handlePushText(empID string, data []byte) {
 	var msg struct {
-		Type             string               `json:"type"`
-		Platform         string               `json:"platform"`
-		StreamAvailable  bool                 `json:"streamAvailable"`
-		Version          string               `json:"version"`
-		SelectedMonitor  int                  `json:"selectedMonitor"`
-		Monitors         []stream.MonitorInfo `json:"monitors"`
+		Type            string               `json:"type"`
+		Platform        string               `json:"platform"`
+		StreamAvailable bool                 `json:"streamAvailable"`
+		Version         string               `json:"version"`
+		SelectedMonitor int                  `json:"selectedMonitor"`
+		Monitors        []stream.MonitorInfo `json:"monitors"`
+		WebRTCCapable   bool                 `json:"webrtcCapable"`
 	}
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return
 	}
-	if msg.Type == "hello" {
+	switch msg.Type {
+	case "hello":
 		h.hub.SetCapability(empID, stream.Capability{
 			Platform:        msg.Platform,
 			StreamAvailable: msg.StreamAvailable,
@@ -338,20 +369,25 @@ func (h *StreamHandler) handlePushText(empID string, data []byte) {
 			Monitors:        msg.Monitors,
 			SelectedMonitor: msg.SelectedMonitor,
 		})
-		log.Printf("[live-stream] hello employee=%s platform=%s available=%v monitors=%d selected=%d",
-			empID, msg.Platform, msg.StreamAvailable, len(msg.Monitors), msg.SelectedMonitor)
+		log.Printf("[live-stream] hello employee=%s platform=%s available=%v webrtc=%v monitors=%d selected=%d",
+			empID, msg.Platform, msg.StreamAvailable, msg.WebRTCCapable, len(msg.Monitors), msg.SelectedMonitor)
+	case "offer", "answer", "ice":
+		if h.sfu != nil {
+			h.sfu.HandlePublisherSignal(empID, data)
+		}
 	}
 }
 
-func statusPayload(snap stream.EmployeeSnapshot) map[string]interface{} {
+func statusPayload(snap stream.EmployeeSnapshot, media stream.MediaMode) map[string]interface{} {
 	return map[string]interface{}{
-		"type":             "status",
-		"streaming":        snap.Streaming,
-		"streamAvailable":  snap.StreamAvailable,
-		"clientConnected":  snap.ClientConnected,
-		"consentMissing":   false,
-		"monitors":         snap.Monitors,
-		"selectedMonitor":  snap.SelectedMonitor,
+		"type":            "status",
+		"streaming":       snap.Streaming,
+		"streamAvailable": snap.StreamAvailable,
+		"clientConnected": snap.ClientConnected,
+		"consentMissing":  false,
+		"monitors":        snap.Monitors,
+		"selectedMonitor": snap.SelectedMonitor,
+		"mediaMode":       string(media),
 	}
 }
 
@@ -419,11 +455,15 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 		return nil
 	}
 	defer h.hub.Unsubscribe(empID, watcherID)
+	if h.sfu != nil {
+		defer h.sfu.DetachSubscriber(empID, watcherID)
+	}
 
 	log.Printf("[live-stream] watch connected employee=%s watcher=%d", empID, watcherID)
 
+	media := h.hub.Config().Media
 	snap := h.hub.Snapshot(empID)
-	_ = writeJSON(conn, statusPayload(snap))
+	_ = writeJSON(conn, statusPayload(snap, media))
 
 	// Dev-only synthetic frames when no client is pushing.
 	var testStop chan struct{}
@@ -437,6 +477,16 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 	done := make(chan struct{})
 	var once sync.Once
 	closeDone := func() { once.Do(func() { close(done) }) }
+
+	writeSignal := func(msg stream.SignalMessage) {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+		_ = conn.WriteJSON(msg)
+	}
+	if h.sfu != nil && h.sfu.Enabled() {
+		h.sfu.AttachSubscriberSink(empID, watcherID, writeSignal)
+	}
 
 	go func() {
 		defer closeDone()
@@ -461,7 +511,7 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 				s := h.hub.Snapshot(empID)
 				writeMu.Lock()
 				_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
-				err := conn.WriteJSON(statusPayload(s))
+				err := conn.WriteJSON(statusPayload(s, media))
 				writeMu.Unlock()
 				if err != nil {
 					return
@@ -504,9 +554,14 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 		if json.Unmarshal(data, &msg) != nil {
 			continue
 		}
-		if msg.Type == "select_monitor" {
+		switch msg.Type {
+		case "select_monitor":
 			h.hub.SelectMonitor(empID, msg.Index)
 			log.Printf("[live-stream] select_monitor employee=%s index=%d", empID, msg.Index)
+		case "answer", "ice", "offer":
+			if h.sfu != nil {
+				h.sfu.HandleSubscriberSignal(empID, watcherID, data)
+			}
 		}
 	}
 }

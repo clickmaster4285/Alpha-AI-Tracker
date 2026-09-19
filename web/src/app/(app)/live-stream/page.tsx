@@ -63,13 +63,16 @@ function LiveStreamInner() {
 
   const selected = employees.find((e) => e.employeeId === filters.employeeId) ?? null;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const canWatch =
     !!selected &&
     selected.online &&
     !selected.consentMissing;
-  const socket = useLiveStreamSocket(filters.employeeId || null, canvasRef, {
+  const socket = useLiveStreamSocket(filters.employeeId || null, canvasRef, videoRef, {
     enabled: canWatch,
   });
+  const showVideo = socket.mediaTransport === 'webrtc' && socket.status === 'live';
+  const showCanvas = socket.mediaTransport === 'jpeg' && socket.status === 'live';
 
   return (
     <div className="flex gap-4 h-[calc(100vh-8rem)] min-h-[480px] animate-fade-in">
@@ -161,18 +164,25 @@ function LiveStreamInner() {
                   <Circle className="w-2 h-2 fill-current" />
                   LIVE
                 </span>
-                <span className="text-muted-foreground">{socket.fps} fps</span>
+                <span className="text-muted-foreground">
+                  {socket.mediaTransport === 'webrtc' ? 'WebRTC' : `${socket.fps} fps`}
+                </span>
               </div>
             )}
           </div>
         </div>
 
         <div className="flex-1 relative bg-muted/30 flex items-center justify-center overflow-hidden">
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className={`max-w-full max-h-full object-contain ${showVideo ? 'block' : 'hidden'}`}
+          />
           <canvas
             ref={canvasRef}
-            className={`max-w-full max-h-full object-contain ${
-              selected && socket.status === 'live' ? 'block' : 'hidden'
-            }`}
+            className={`max-w-full max-h-full object-contain ${showCanvas ? 'block' : 'hidden'}`}
           />
           <WatchOverlay selected={selected} socket={socket} />
         </div>

@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -39,6 +40,7 @@ type Config struct {
 	MaxWatchersPerEmployee int
 	IdleSec                int
 	TestFrame              bool
+	Media                  MediaMode
 }
 
 // DefaultConfig returns Phase-1 defaults from the plan.
@@ -51,6 +53,7 @@ func DefaultConfig() Config {
 		MaxWatchersPerEmployee: 10,
 		IdleSec:                90,
 		TestFrame:              false,
+		Media:                  MediaJPEG,
 	}
 }
 
@@ -121,6 +124,7 @@ type Hub struct {
 	boxes          map[string]*mailbox
 	streamingCount int
 	tickets        map[string]watchTicket
+	presence       *PresenceStore
 
 	stopIdle chan struct{}
 	wg       sync.WaitGroup
@@ -143,6 +147,9 @@ func NewHub(cfg Config) *Hub {
 	if cfg.IdleSec <= 0 {
 		cfg.IdleSec = 90
 	}
+	if cfg.Media == "" {
+		cfg.Media = MediaJPEG
+	}
 
 	h := &Hub{
 		cfg:      cfg,
@@ -153,6 +160,31 @@ func NewHub(cfg Config) *Hub {
 	h.wg.Add(1)
 	go h.idleLoop()
 	return h
+}
+
+// SetPresence attaches an optional Redis presence mirror (multi-node list hints).
+func (h *Hub) SetPresence(p *PresenceStore) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.presence = p
+}
+
+func (h *Hub) syncPresenceLocked(empID string, m *mailbox) {
+	if h.presence == nil {
+		return
+	}
+	snap := EmployeeSnapshot{
+		Wanted:          m.wanted,
+		Streaming:       m.wanted && len(m.frame) > 0,
+		StreamAvailable: m.cap.StreamAvailable,
+		WatcherCount:    len(m.watchers),
+		ClientConnected: m.clientConnected,
+		Seq:             m.seq,
+		LastFrameAt:     m.lastFrameAt,
+		Monitors:        append([]MonitorInfo(nil), m.cap.Monitors...),
+		SelectedMonitor: m.cap.SelectedMonitor,
+	}
+	go h.presence.Put(context.Background(), empID, snap)
 }
 
 // Config returns a copy of the hub config.
@@ -285,6 +317,7 @@ func (h *Hub) SelectMonitor(empID string, index int) {
 	m.cap.SelectedMonitor = index
 	m.lastActivity = time.Now()
 	h.sendCtrlEventLocked(m, ControlEvent{Type: "select_monitor", MonitorIndex: index})
+	h.syncPresenceLocked(empID, m)
 }
 
 func (h *Hub) markStreamLocked(m *mailbox) error {
@@ -335,6 +368,7 @@ func (h *Hub) RegisterClient(empID string) (<-chan ControlEvent, bool) {
 	if m.wanted {
 		h.sendCtrlLocked(m, "start")
 	}
+	h.syncPresenceLocked(empID, m)
 	return m.ctrl, true
 }
 
@@ -352,9 +386,11 @@ func (h *Hub) UnregisterClient(empID string) {
 	if m.wanted {
 		// Keep wanted + stream slot — next reconnect gets start. Clear frame so UI reconnects.
 		m.frame = nil
+		h.syncPresenceLocked(empID, m)
 		return
 	}
 	h.unmarkStreamLocked(m)
+	h.syncPresenceLocked(empID, m)
 }
 
 // SetCapability stores the client's hello advertisement.
@@ -364,6 +400,7 @@ func (h *Hub) SetCapability(empID string, cap Capability) {
 	m := h.getOrCreateLocked(empID)
 	m.cap = cap
 	m.lastActivity = time.Now()
+	h.syncPresenceLocked(empID, m)
 }
 
 // PushFrame stores the latest JPEG and fans out to watchers (latest-wins per watcher).
@@ -417,6 +454,7 @@ func (h *Hub) PushFrame(empID string, jpeg []byte) error {
 			}
 		}
 	}
+	h.syncPresenceLocked(empID, m)
 	return nil
 }
 
@@ -460,6 +498,10 @@ func (h *Hub) Subscribe(empID string) (watcherID uint64, frames <-chan Frame, er
 		}
 	}
 
+	h.syncPresenceLocked(empID, m)
+	if !wasWanted && h.presence != nil {
+		go h.presence.PublishControl(context.Background(), empID, "start")
+	}
 	return id, ch, nil
 }
 
@@ -483,7 +525,13 @@ func (h *Hub) Unsubscribe(empID string, watcherID uint64) {
 		h.sendCtrlLocked(m, "stop")
 		h.unmarkStreamLocked(m)
 		m.frame = nil
+		h.syncPresenceLocked(empID, m)
+		if h.presence != nil {
+			go h.presence.PublishControl(context.Background(), empID, "stop")
+		}
+		return
 	}
+	h.syncPresenceLocked(empID, m)
 }
 
 // Snapshot returns hub state for one employee (zero value if unknown).

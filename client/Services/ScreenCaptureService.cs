@@ -45,6 +45,11 @@ public sealed class ScreenCaptureService : BackgroundService
     private volatile bool _streamActive;
     private bool _loggedUnavailable;
 
+    /// <summary>
+    /// Raw BGRA frame for WebRTC encode (width, height, pixels). Fired on the capture thread.
+    /// </summary>
+    public event Action<int, int, byte[]>? OnRawFrame;
+
     public ScreenCaptureService(AppConfig config, ILogger<ScreenCaptureService> logger)
     {
         _config = config;
@@ -153,9 +158,20 @@ public sealed class ScreenCaptureService : BackgroundService
             var sw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
-                var jpeg = CaptureFrame();
-                if (jpeg is { Length: > 0 })
-                    _frames.Writer.TryWrite(jpeg);
+                var frame = CaptureFrame();
+                if (frame.Jpeg is { Length: > 0 })
+                    _frames.Writer.TryWrite(frame.Jpeg);
+                if (frame.Bgra is { Length: > 0 } && frame.Width > 0 && frame.Height > 0)
+                {
+                    try
+                    {
+                        OnRawFrame?.Invoke(frame.Width, frame.Height, frame.Bgra);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "OnRawFrame subscriber failed");
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -314,10 +330,12 @@ public sealed class ScreenCaptureService : BackgroundService
         _captureBounds = _boundsByIndex[_selectedIndex];
     }
 
-    private byte[]? CaptureFrame()
+    private readonly record struct CapturedFrame(byte[]? Jpeg, byte[]? Bgra, int Width, int Height);
+
+    private CapturedFrame CaptureFrame()
     {
         if (!OperatingSystem.IsWindows())
-            return null;
+            return default;
 
 #pragma warning disable CA1416 // guarded by IsWindows above
         Rectangle bounds;
@@ -328,7 +346,7 @@ public sealed class ScreenCaptureService : BackgroundService
             bounds = _captureBounds;
         }
         if (bounds.Width <= 0 || bounds.Height <= 0)
-            return null;
+            return default;
 
         using var src = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format32bppArgb);
         using (var g = Graphics.FromImage(src))
@@ -344,12 +362,17 @@ public sealed class ScreenCaptureService : BackgroundService
             if (src.Width > maxW)
             {
                 var newH = (int)Math.Round(src.Height * (maxW / (double)src.Width));
-                scaled = new Bitmap(maxW, Math.Max(1, newH), PixelFormat.Format24bppRgb);
+                // Keep 32bpp so WebRTC gets BGRA without a second conversion.
+                scaled = new Bitmap(maxW, Math.Max(1, newH), PixelFormat.Format32bppArgb);
                 using var g = Graphics.FromImage(scaled);
                 g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBilinear;
                 g.DrawImage(src, 0, 0, scaled.Width, scaled.Height);
                 toEncode = scaled;
             }
+
+            byte[]? bgra = null;
+            if (OnRawFrame is not null)
+                bgra = BitmapToBgra(toEncode);
 
             using var ms = new MemoryStream();
             var quality = Math.Clamp(_config.StreamJpegQuality, 10, 95);
@@ -364,11 +387,39 @@ public sealed class ScreenCaptureService : BackgroundService
                 ep.Param[0] = new EncoderParameter(Encoder.Quality, (long)quality);
                 toEncode.Save(ms, encoder, ep);
             }
-            return ms.ToArray();
+            return new CapturedFrame(ms.ToArray(), bgra, toEncode.Width, toEncode.Height);
         }
         finally
         {
             scaled?.Dispose();
+        }
+#pragma warning restore CA1416
+    }
+
+    private static byte[] BitmapToBgra(Bitmap bmp)
+    {
+#pragma warning disable CA1416
+        var rect = new Rectangle(0, 0, bmp.Width, bmp.Height);
+        var data = bmp.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+        try
+        {
+            var bytes = Math.Abs(data.Stride) * data.Height;
+            var buf = new byte[bytes];
+            Marshal.Copy(data.Scan0, buf, 0, bytes);
+            // System.Drawing 32bppArgb is BGRA in memory on little-endian Windows.
+            if (data.Stride != bmp.Width * 4)
+            {
+                // Compact rows if stride has padding.
+                var compact = new byte[bmp.Width * bmp.Height * 4];
+                for (var y = 0; y < bmp.Height; y++)
+                    Buffer.BlockCopy(buf, y * data.Stride, compact, y * bmp.Width * 4, bmp.Width * 4);
+                return compact;
+            }
+            return buf;
+        }
+        finally
+        {
+            bmp.UnlockBits(data);
         }
 #pragma warning restore CA1416
     }

@@ -14,6 +14,7 @@ namespace client.Services;
 /// Outbound WebSocket to GET /api/v1/live-stream/push (DeviceAuth).
 /// Keeps a persistent control connection while enabled + logged in; captures only
 /// after the server sends {"type":"start"} and stops on {"type":"stop"}.
+/// When start.media is webrtc/both, publishes VP8 via WebRTC in parallel with JPEG.
 /// </summary>
 public sealed class LiveStreamClient : BackgroundService
 {
@@ -125,56 +126,83 @@ public sealed class LiveStreamClient : BackgroundService
         _logger.LogInformation("LiveStreamClient connecting to {Url}", wsUrl);
         await ws.ConnectAsync(new Uri(wsUrl), ct);
 
-        var monitors = _capture.GetMonitors();
-        var hello = JsonSerializer.Serialize(new
-        {
-            type = "hello",
-            platform = OperatingSystem.IsWindows() ? "windows"
-                : OperatingSystem.IsLinux() ? "linux" : "macos",
-            streamAvailable = _capture.StreamAvailable,
-            version = AppInfo.Version,
-            selectedMonitor = _capture.SelectedMonitorIndex,
-            monitors = monitors.Select(m => new
-            {
-                index = m.Index,
-                name = m.Name,
-                width = m.Width,
-                height = m.Height,
-                isPrimary = m.IsPrimary,
-            }).ToArray(),
-        }, JsonOpts);
-        var helloBytes = Encoding.UTF8.GetBytes(hello);
-        await ws.SendAsync(helloBytes, WebSocketMessageType.Text, true, ct);
+        var webrtcCapable = OperatingSystem.IsWindows() && _capture.StreamAvailable;
+        await SendHelloAsync(ws, webrtcCapable, ct);
 
         using var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var sendPump = Task.Run(() => SendFramesAsync(ws, sessionCts.Token), sessionCts.Token);
+        using var publisher = new LiveStreamWebRtcPublisher(_capture, _logger);
+        var sendJpeg = true; // false only when media=webrtc and publisher is active
+        var wsSendGate = new SemaphoreSlim(1, 1);
+        var sendPump = Task.Run(
+            () => SendFramesAsync(ws, () => sendJpeg, wsSendGate, sessionCts.Token),
+            sessionCts.Token);
 
-        var buffer = new byte[64 * 1024];
+        async Task SendTextAsync(string json)
+        {
+            var bytes = Encoding.UTF8.GetBytes(json);
+            await wsSendGate.WaitAsync(ct);
+            try
+            {
+                if (ws.State == WebSocketState.Open)
+                    await ws.SendAsync(bytes, WebSocketMessageType.Text, true, ct);
+            }
+            finally
+            {
+                wsSendGate.Release();
+            }
+        }
+
+        var buffer = new byte[256 * 1024];
         try
         {
             while (ws.State == WebSocketState.Open && !ct.IsCancellationRequested)
             {
-                var result = await ws.ReceiveAsync(buffer, ct);
-                if (result.MessageType == WebSocketMessageType.Close)
+                var result = await ReceiveFullMessageAsync(ws, buffer, ct);
+                if (result is null)
                     break;
 
-                if (result.MessageType != WebSocketMessageType.Text)
+                if (result.Value.MessageType == WebSocketMessageType.Close)
+                    break;
+                if (result.Value.MessageType != WebSocketMessageType.Text)
                     continue;
 
-                var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                var json = Encoding.UTF8.GetString(result.Value.Payload);
                 using var doc = JsonDocument.Parse(json);
                 if (!doc.RootElement.TryGetProperty("type", out var typeProp))
                     continue;
                 var type = typeProp.GetString();
                 if (type == "start")
                 {
-                    _logger.LogInformation("LiveStreamClient: start capture");
+                    var media = "jpeg";
+                    if (doc.RootElement.TryGetProperty("media", out var mediaProp) &&
+                        mediaProp.ValueKind == JsonValueKind.String)
+                        media = mediaProp.GetString() ?? "jpeg";
+                    _logger.LogInformation("LiveStreamClient: start capture media={Media}", media);
+
                     _capture.SetStreamActive(true);
+                    sendJpeg = media is not "webrtc";
+
+                    if ((media is "webrtc" or "both") && webrtcCapable)
+                    {
+                        try
+                        {
+                            await publisher.StartAsync(SendTextAsync, _config.StreamFps, ct);
+                            if (media == "webrtc" && publisher.IsActive)
+                                sendJpeg = false;
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "WebRTC publisher failed — falling back to JPEG");
+                            sendJpeg = true;
+                        }
+                    }
                 }
                 else if (type == "stop")
                 {
                     _logger.LogInformation("LiveStreamClient: stop capture");
+                    publisher.Stop();
                     _capture.SetStreamActive(false);
+                    sendJpeg = true;
                 }
                 else if (type == "select_monitor")
                 {
@@ -184,25 +212,11 @@ public sealed class LiveStreamClient : BackgroundService
                         idx = idxProp.GetInt32();
                     var applied = _capture.SetSelectedMonitor(idx);
                     _logger.LogInformation("LiveStreamClient: select_monitor → {Index}", applied);
-                    // Re-advertise so watchers' status picks up the new selection.
-                    var ack = JsonSerializer.Serialize(new
-                    {
-                        type = "hello",
-                        platform = OperatingSystem.IsWindows() ? "windows"
-                            : OperatingSystem.IsLinux() ? "linux" : "macos",
-                        streamAvailable = _capture.StreamAvailable,
-                        version = AppInfo.Version,
-                        selectedMonitor = _capture.SelectedMonitorIndex,
-                        monitors = _capture.GetMonitors().Select(m => new
-                        {
-                            index = m.Index,
-                            name = m.Name,
-                            width = m.Width,
-                            height = m.Height,
-                            isPrimary = m.IsPrimary,
-                        }).ToArray(),
-                    }, JsonOpts);
-                    await ws.SendAsync(Encoding.UTF8.GetBytes(ack), WebSocketMessageType.Text, true, ct);
+                    await SendHelloAsync(ws, webrtcCapable, ct, wsSendGate);
+                }
+                else if (type is "offer" or "answer" or "ice")
+                {
+                    publisher.HandleRemoteSignal(doc.RootElement);
                 }
                 else if (type == "error")
                 {
@@ -213,6 +227,7 @@ public sealed class LiveStreamClient : BackgroundService
         }
         finally
         {
+            publisher.Stop();
             sessionCts.Cancel();
             _capture.SetStreamActive(false);
             try { await sendPump; } catch { /* ignored */ }
@@ -227,7 +242,55 @@ public sealed class LiveStreamClient : BackgroundService
         }
     }
 
-    private async Task SendFramesAsync(ClientWebSocket ws, CancellationToken ct)
+    private async Task SendHelloAsync(
+        ClientWebSocket ws,
+        bool webrtcCapable,
+        CancellationToken ct,
+        SemaphoreSlim? gate = null)
+    {
+        var hello = JsonSerializer.Serialize(new
+        {
+            type = "hello",
+            platform = OperatingSystem.IsWindows() ? "windows"
+                : OperatingSystem.IsLinux() ? "linux" : "macos",
+            streamAvailable = _capture.StreamAvailable,
+            version = AppInfo.Version,
+            selectedMonitor = _capture.SelectedMonitorIndex,
+            webrtcCapable,
+            mediaModes = webrtcCapable ? new[] { "jpeg", "webrtc" } : new[] { "jpeg" },
+            monitors = _capture.GetMonitors().Select(m => new
+            {
+                index = m.Index,
+                name = m.Name,
+                width = m.Width,
+                height = m.Height,
+                isPrimary = m.IsPrimary,
+            }).ToArray(),
+        }, JsonOpts);
+        var bytes = Encoding.UTF8.GetBytes(hello);
+        if (gate is not null)
+        {
+            await gate.WaitAsync(ct);
+            try
+            {
+                await ws.SendAsync(bytes, WebSocketMessageType.Text, true, ct);
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+        else
+        {
+            await ws.SendAsync(bytes, WebSocketMessageType.Text, true, ct);
+        }
+    }
+
+    private async Task SendFramesAsync(
+        ClientWebSocket ws,
+        Func<bool> sendJpeg,
+        SemaphoreSlim sendGate,
+        CancellationToken ct)
     {
         try
         {
@@ -235,9 +298,20 @@ public sealed class LiveStreamClient : BackgroundService
             {
                 if (ws.State != WebSocketState.Open)
                     break;
+                if (!sendJpeg())
+                    continue;
                 try
                 {
-                    await ws.SendAsync(frame, WebSocketMessageType.Binary, true, ct);
+                    await sendGate.WaitAsync(ct);
+                    try
+                    {
+                        if (ws.State == WebSocketState.Open)
+                            await ws.SendAsync(frame, WebSocketMessageType.Binary, true, ct);
+                    }
+                    finally
+                    {
+                        sendGate.Release();
+                    }
                 }
                 catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
@@ -247,6 +321,24 @@ public sealed class LiveStreamClient : BackgroundService
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+    }
+
+    private static async Task<(WebSocketMessageType MessageType, byte[] Payload)?> ReceiveFullMessageAsync(
+        ClientWebSocket ws,
+        byte[] buffer,
+        CancellationToken ct)
+    {
+        using var ms = new MemoryStream();
+        WebSocketReceiveResult result;
+        do
+        {
+            result = await ws.ReceiveAsync(buffer, ct);
+            if (result.MessageType == WebSocketMessageType.Close)
+                return (WebSocketMessageType.Close, Array.Empty<byte>());
+            ms.Write(buffer, 0, result.Count);
+        } while (!result.EndOfMessage);
+
+        return (result.MessageType, ms.ToArray());
     }
 
     private static string? BuildWsUrl(string? serverUrl)

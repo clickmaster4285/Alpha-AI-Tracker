@@ -124,13 +124,37 @@ func main() {
 		MaxWatchersPerEmployee: cfg.LiveStream.MaxWatchersPerEmployee,
 		IdleSec:                cfg.LiveStream.IdleSec,
 		TestFrame:              cfg.LiveStream.TestFrame,
+		Media:                  stream.ParseMediaMode(cfg.LiveStream.Media),
 	})
 	defer streamHub.Close()
+
+	mediaMode := stream.ParseMediaMode(cfg.LiveStream.Media)
+	webrtcOn := mediaMode == stream.MediaWebRTC || mediaMode == stream.MediaBoth
+	var streamSFU *stream.SFU
+	if cfg.LiveStream.Enabled && webrtcOn {
+		streamSFU = stream.NewSFU(stream.SFUConfig{
+			Enabled: true,
+			ICEServers: stream.ParseICEServers(
+				cfg.LiveStream.ICEServers,
+				cfg.LiveStream.TURNUser,
+				cfg.LiveStream.TURNPass,
+			),
+		})
+		defer streamSFU.Close()
+	}
+
+	if cfg.LiveStream.HubBackend == "redis" && redisClient != nil {
+		presence := stream.NewPresenceStore(redisClient.Underlying(), cfg.LiveStream.RedisPrefix)
+		streamHub.SetPresence(presence)
+		log.Printf("[live-stream] redis presence mirror enabled prefix=%s", cfg.LiveStream.RedisPrefix)
+	}
+
 	streamHandler := handlers.NewStreamHandler(
-		streamHub, employeeRepo, termsConsentRepo, timeAttendanceRepo, cfg.CORS.AllowedOrigins,
+		streamHub, streamSFU, employeeRepo, termsConsentRepo, timeAttendanceRepo, cfg.CORS.AllowedOrigins,
 	)
 	if cfg.LiveStream.Enabled {
-		log.Printf("[server] live-stream hub enabled (maxStreams=%d maxFps=%d)", cfg.LiveStream.MaxStreams, cfg.LiveStream.MaxFPS)
+		log.Printf("[server] live-stream hub enabled (maxStreams=%d maxFps=%d media=%s webrtc=%v)",
+			cfg.LiveStream.MaxStreams, cfg.LiveStream.MaxFPS, mediaMode, webrtcOn)
 	} else {
 		log.Println("[server] live-stream hub disabled")
 	}

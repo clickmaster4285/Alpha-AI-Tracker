@@ -72,3 +72,12 @@ func (c *Client) DeleteSecret(ctx context.Context, employeeID string) error {
 func (c *Client) Close() error {
 	return c.client.Close()
 }
+
+// Underlying returns the go-redis client for features that need raw access
+// (e.g. live-stream presence). Nil-safe: returns nil if c is nil.
+func (c *Client) Underlying() *goredis.Client {
+	if c == nil {
+		return nil
+	}
+	return c.client
+}

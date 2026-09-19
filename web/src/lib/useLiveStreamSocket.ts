@@ -30,6 +30,8 @@ export interface LiveStreamSocketState {
   error: string | null;
   monitors: LiveStreamMonitor[];
   selectedMonitor: number;
+  mediaMode: 'jpeg' | 'webrtc' | 'both';
+  mediaTransport: 'none' | 'jpeg' | 'webrtc';
   selectMonitor: (index: number) => void;
 }
 
@@ -46,14 +48,21 @@ function resolveWsBase(): string {
   return 'ws://localhost:8080';
 }
 
+type IcePayload = {
+  candidate?: string;
+  sdpMid?: string | null;
+  sdpMLineIndex?: number | null;
+  usernameFragment?: string | null;
+};
+
 /**
  * Opens the watch WebSocket after minting a short-lived ticket over REST.
- * Cookies work on REST; browsers often omit them on cross-port WS, so we never
- * rely on the auth cookie for the upgrade itself.
+ * Supports Phase-1 JPEG binary frames and Phase-2 WebRTC signaling (offer/answer/ice).
  */
 export function useLiveStreamSocket(
   employeeId: string | null,
   canvasRef: React.RefObject<HTMLCanvasElement | null>,
+  videoRef: React.RefObject<HTMLVideoElement | null>,
   opts?: { enabled?: boolean },
 ): LiveStreamSocketState {
   const enabled = opts?.enabled !== false;
@@ -67,12 +76,33 @@ export function useLiveStreamSocket(
     error: null,
     monitors: [],
     selectedMonitor: 0,
+    mediaMode: 'jpeg',
+    mediaTransport: 'none',
   });
 
   const frameTimes = useRef<number[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
+  const pcRef = useRef<RTCPeerConnection | null>(null);
   const canvasHolder = useRef(canvasRef);
+  const videoHolder = useRef(videoRef);
   canvasHolder.current = canvasRef;
+  videoHolder.current = videoRef;
+
+  const teardownPc = useCallback(() => {
+    const pc = pcRef.current;
+    pcRef.current = null;
+    if (pc) {
+      try {
+        pc.close();
+      } catch {
+        /* ignore */
+      }
+    }
+    const video = videoHolder.current.current;
+    if (video) {
+      video.srcObject = null;
+    }
+  }, []);
 
   const selectMonitor = useCallback((index: number) => {
     const ws = wsRef.current;
@@ -83,6 +113,7 @@ export function useLiveStreamSocket(
 
   useEffect(() => {
     if (!employeeId || !enabled) {
+      teardownPc();
       setState({
         status: 'idle',
         streaming: false,
@@ -93,6 +124,8 @@ export function useLiveStreamSocket(
         error: null,
         monitors: [],
         selectedMonitor: 0,
+        mediaMode: 'jpeg',
+        mediaTransport: 'none',
       });
       return;
     }
@@ -101,9 +134,87 @@ export function useLiveStreamSocket(
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
 
+    const ensurePc = () => {
+      if (pcRef.current) return pcRef.current;
+      const pc = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      });
+      pc.onicecandidate = (ev) => {
+        const ws = wsRef.current;
+        if (!ws || ws.readyState !== WebSocket.OPEN || !ev.candidate) return;
+        const c = ev.candidate;
+        ws.send(
+          JSON.stringify({
+            type: 'ice',
+            role: 'subscriber',
+            candidate: {
+              candidate: c.candidate,
+              sdpMid: c.sdpMid,
+              sdpMLineIndex: c.sdpMLineIndex,
+              usernameFragment: c.usernameFragment,
+            } satisfies IcePayload,
+          }),
+        );
+      };
+      pc.ontrack = (ev) => {
+        const video = videoHolder.current.current;
+        if (video && ev.streams[0]) {
+          video.srcObject = ev.streams[0];
+          void video.play().catch(() => undefined);
+        }
+        setState((s) => ({
+          ...s,
+          status: 'live',
+          streaming: true,
+          mediaTransport: 'webrtc',
+        }));
+      };
+      pcRef.current = pc;
+      return pc;
+    };
+
+    const handleSignal = async (msg: {
+      type?: string;
+      sdp?: string;
+      role?: string;
+      candidate?: IcePayload;
+    }) => {
+      if (msg.type === 'offer' && msg.sdp) {
+        const pc = ensurePc();
+        await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        const ws = wsRef.current;
+        if (ws && ws.readyState === WebSocket.OPEN && pc.localDescription) {
+          ws.send(
+            JSON.stringify({
+              type: 'answer',
+              role: 'subscriber',
+              sdp: pc.localDescription.sdp,
+            }),
+          );
+        }
+        return;
+      }
+      if (msg.type === 'ice' && msg.candidate?.candidate) {
+        const pc = pcRef.current ?? ensurePc();
+        try {
+          await pc.addIceCandidate({
+            candidate: msg.candidate.candidate,
+            sdpMid: msg.candidate.sdpMid ?? undefined,
+            sdpMLineIndex: msg.candidate.sdpMLineIndex ?? undefined,
+            usernameFragment: msg.candidate.usernameFragment ?? undefined,
+          });
+        } catch {
+          /* ignore late candidates */
+        }
+      }
+    };
+
     const connect = async () => {
       if (cancelled) return;
-      setState((s) => ({ ...s, status: 'connecting', error: null }));
+      teardownPc();
+      setState((s) => ({ ...s, status: 'connecting', error: null, mediaTransport: 'none' }));
 
       let ticket: string;
       try {
@@ -160,6 +271,10 @@ export function useLiveStreamSocket(
               code?: string;
               monitors?: LiveStreamMonitor[];
               selectedMonitor?: number;
+              mediaMode?: 'jpeg' | 'webrtc' | 'both';
+              sdp?: string;
+              role?: string;
+              candidate?: IcePayload;
             };
             if (msg.type === 'status') {
               setState((s) => ({
@@ -171,9 +286,10 @@ export function useLiveStreamSocket(
                 monitors: Array.isArray(msg.monitors) ? msg.monitors : s.monitors,
                 selectedMonitor:
                   typeof msg.selectedMonitor === 'number' ? msg.selectedMonitor : s.selectedMonitor,
+                mediaMode: msg.mediaMode ?? s.mediaMode,
                 status: msg.consentMissing
                   ? 'consentMissing'
-                  : msg.streaming
+                  : msg.streaming || s.mediaTransport === 'webrtc'
                     ? 'live'
                     : !msg.clientConnected
                       ? 'connecting'
@@ -181,6 +297,8 @@ export function useLiveStreamSocket(
                         ? 'unavailable'
                         : 'connecting',
               }));
+            } else if (msg.type === 'offer' || msg.type === 'ice' || msg.type === 'answer') {
+              void handleSignal(msg);
             } else if (msg.type === 'error') {
               const code = msg.code || 'error';
               setState((s) => ({
@@ -219,6 +337,7 @@ export function useLiveStreamSocket(
             status: 'live',
             streaming: true,
             fps: frameTimes.current.length,
+            mediaTransport: s.mediaTransport === 'webrtc' ? 'webrtc' : 'jpeg',
           }));
         };
         img.onerror = () => URL.revokeObjectURL(objUrl);
@@ -233,12 +352,14 @@ export function useLiveStreamSocket(
 
       ws.onclose = () => {
         wsRef.current = null;
+        teardownPc();
         if (cancelled) return;
         attempt += 1;
         const delay = Math.min(10_000, 1000 * Math.pow(2, Math.min(attempt, 4)));
         setState((s) => ({
           ...s,
           streaming: false,
+          mediaTransport: 'none',
           status: s.status === 'consentMissing' ? 'consentMissing' : 'connecting',
         }));
         reconnectTimer = setTimeout(() => {
@@ -256,9 +377,10 @@ export function useLiveStreamSocket(
         wsRef.current.close();
         wsRef.current = null;
       }
+      teardownPc();
       frameTimes.current = [];
     };
-  }, [employeeId, enabled]);
+  }, [employeeId, enabled, teardownPc]);
 
   return { ...state, selectMonitor };
 }

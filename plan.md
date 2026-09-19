@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Phase 1 COMPLETE (Windows).** **Phase 2 ACTIVE** — WebRTC media + Redis hub |
+| **Status** | **Phase 1 COMPLETE.** **Phase 2 IN PROGRESS** — SFU + client VP8 publish landed; TURN/prod soak next |
 | **Branch** | `feature/live_stream` |
 | **Created** | 2026-09-18 |
 | **Updated** | 2026-09-19 |
@@ -173,12 +173,13 @@ In-memory hub is single-node. Multiple API replicas break watcher counts and “
 | Track | Status | Notes |
 |-------|--------|-------|
 | Multi-monitor (from earlier) | ✅ Done | |
-| WebRTC — spike SFU | ⬜ **Next** | pion localhost |
-| WebRTC — signaling on push/watch | ⬜ | |
-| WebRTC — Windows publish | ⬜ | |
-| WebRTC — web `<video>` + JPEG fallback | ⬜ | |
-| TURN / prod networking | ⬜ | |
-| Redis hub | ⬜ | After or parallel to signaling |
+| WebRTC — pion SFU rooms | ✅ Landed | `server/internal/stream/sfu.go` |
+| WebRTC — signaling on push/watch | ✅ Landed | offer / answer / ice |
+| WebRTC — web `<video>` + JPEG fallback | ✅ Landed | `useLiveStreamSocket` dual path |
+| Redis presence mirror | ✅ Landed | `LIVE_STREAM_HUB=redis` |
+| WebRTC — Windows publish/encode | ✅ Landed | SIPSorcery VP8 + BGRA from GDI; `webrtcCapable=true` on Windows |
+| TURN / prod networking | ⬜ **Next** | Set `LIVE_STREAM_ICE_SERVERS` + TURN; soak with `LIVE_STREAM_MEDIA=both` |
+| Default `LIVE_STREAM_MEDIA=webrtc` | ⬜ | Keep `jpeg` or use `both` until prod soak |
 | Linux capture | **Skipped** | |
 | Who-can-watch RBAC | **N/A** | |
 
@@ -231,4 +232,5 @@ Client: keep `ALPHA_STREAM_*`; add encoder / WebRTC flags when spike chooses the
 **A: Not by itself.** Rail Online can later prefer `client_connected` from the hub/Redis; independent of media codec.
 
 **Q: Start where?**  
-**A: Next concrete step = WebRTC SFU spike (pion, one publisher + one subscriber on localhost), then wire signaling onto existing sockets.**
+**A: Client can publish VP8 now.** For local soak set server `LIVE_STREAM_MEDIA=both` (JPEG + WebRTC). Web shows `<video>` when WebRTC connects, else canvas JPEG. Next: TURN for corporate NAT, then default `webrtc`.  
+Note: `SIPSorcery` 8.0.23 has NuGet advisory warnings — plan a package upgrade after soak.

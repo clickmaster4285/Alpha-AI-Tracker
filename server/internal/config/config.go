@@ -42,6 +42,14 @@ type LiveStreamConfig struct {
 	MaxWatchersPerEmployee int
 	IdleSec                int
 	TestFrame              bool
+
+	// Phase 2 — WebRTC + Redis presence
+	Media      string // jpeg | webrtc | both (default jpeg)
+	HubBackend string // memory | redis (default memory; redis = presence mirror)
+	RedisPrefix string
+	ICEServers  string // comma-separated stun:/turn: URLs
+	TURNUser    string
+	TURNPass    string
 }
 
 type ServerConfig struct {
@@ -157,6 +165,12 @@ func Load() (*Config, error) {
 			MaxWatchersPerEmployee: getEnvInt("LIVE_STREAM_MAX_WATCHERS_PER_EMPLOYEE", 10),
 			IdleSec:                getEnvInt("LIVE_STREAM_IDLE_SEC", 90),
 			TestFrame:              getEnvBool("LIVE_STREAM_TEST_FRAME", false),
+			Media:                  getEnv("LIVE_STREAM_MEDIA", "jpeg"),
+			HubBackend:             getEnv("LIVE_STREAM_HUB", "memory"),
+			RedisPrefix:            getEnv("LIVE_STREAM_REDIS_PREFIX", "live_stream:"),
+			ICEServers:             getEnv("LIVE_STREAM_ICE_SERVERS", "stun:stun.l.google.com:19302"),
+			TURNUser:               getEnv("LIVE_STREAM_TURN_USER", ""),
+			TURNPass:               getEnv("LIVE_STREAM_TURN_PASS", ""),
 		},
 	}
 
