@@ -42,6 +42,14 @@ public class SyncService : BackgroundService
     // instantly instead of waiting for the next idle poll.
     private readonly SemaphoreSlim _syncSignal = new(0, 1);
 
+    // Sticky "server is reachable" signal for WsClient (and any future always-on
+    // channel). Set on the first HTTP 2xx from a real sync POST — never on an
+    // empty drain pass (no network call). Cleared when credentials die so the
+    // control channel does not keep hammering a server that rejects auth.
+    private volatile bool _serverReachable;
+    private TaskCompletionSource _serverReachableTcs =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
     private string? _employeeId;
     private string? _employeeName;
     private string? _token;
@@ -118,6 +126,55 @@ public class SyncService : BackgroundService
         {
             // A pass is already pending — one drain covers it.
         }
+    }
+
+    /// <summary>
+    /// True after at least one sync POST returned HTTP 2xx in this process lifetime
+    /// (cleared if credentials are declared dead). Used by <c>WsClient</c> to avoid
+    /// opening the control socket while the server is known-unreachable.
+    /// </summary>
+    public bool IsServerReachable => _serverReachable;
+
+    /// <summary>
+    /// Waits until <see cref="IsServerReachable"/> is true, or <paramref name="timeout"/>
+    /// elapses (returns without throwing on timeout — callers may still attempt connect
+    /// as the idle-employee fallback when nothing was synced).
+    /// </summary>
+    public async Task WaitUntilServerReachableAsync(TimeSpan timeout, CancellationToken ct)
+    {
+        if (_serverReachable)
+            return;
+
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        linked.CancelAfter(timeout);
+        try
+        {
+            await _serverReachableTcs.Task.WaitAsync(linked.Token);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // Timeout — caller proceeds (WsClient reconnect fallback).
+        }
+    }
+
+    private void MarkServerReachable()
+    {
+        _serverReachable = true;
+        _serverReachableTcs.TrySetResult();
+    }
+
+    private void ClearServerReachable()
+    {
+        if (!_serverReachable && !_serverReachableTcs.Task.IsCompleted)
+            return;
+
+        _serverReachable = false;
+        // Replace the TCS so subsequent waits block until the next 2xx.
+        var previous = _serverReachableTcs;
+        _serverReachableTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        // Leave a completed previous TCS alone — waiters already released.
+        if (!previous.Task.IsCompleted)
+            previous.TrySetCanceled();
     }
 
     // Built once — the per-table closures capture `this` (fields are read at call time,
@@ -895,6 +952,7 @@ public class SyncService : BackgroundService
                 // is still live on the server — clear the "auth looks dead" state if a
                 // previous 401 trip had set it.
                 _authLooksDead = false;
+                MarkServerReachable();
                 var body = await response.Content.ReadAsStringAsync(ct);
                 return (true, body);
             }
@@ -994,6 +1052,7 @@ public class SyncService : BackgroundService
             if (!_authLooksDead)
             {
                 _authLooksDead = true;
+                ClearServerReachable();
                 _logger.LogWarning(
                     "Both Device token and Bearer JWT rejected for {Endpoint} within {Window}s — credentials are dead. " +
                     "Open the GUI and log in again.",

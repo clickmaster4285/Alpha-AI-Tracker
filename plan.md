@@ -1,7 +1,7 @@
 # Plan — Client "ws" instance: long-lived WebSocket connection to the server
 
-**Status:** APPROVED — connectivity is gated on `SyncService` sync-success (user-approved design) + ws
-built-in reconnect fallback. Implementation in progress.
+**Status:** IMPLEMENTED — connectivity gated on `SyncService` sync-success (sticky 2xx) +
+timeout/reconnect fallback for idle employees. Dedicated `GET /api/v1/ws` under DeviceAuth.
 **Scope:** client-focused (new `ws` service) + the tiny server WS endpoint it needs.
 **Does NOT include:** screen-preview streaming (existing `LiveStreamClient`), web changes, or any
 payload protocol beyond a keep-alive control channel.
@@ -154,10 +154,10 @@ No SQLite schema change, no web change, no branding/version change, no new third
 
 ---
 
-## 7. Definition of done (blocks below are NOT started — awaiting confirmation)
+## 7. Definition of done
 
-1. `WsClient` gated on `SyncService` sync-success + long-lived WS connection implemented and registered.
-2. Config knobs in `AppConfig.cs`, `.env.example`, and shipped `config.enc`.
-3. Server `/api/v1/ws` DeviceAuth endpoint keeps the connection alive.
-4. `dotnet build` clean; `go build`/`go vet` clean; installer built & ship-tested.
-5. No unrelated changes; no commit/push (only on your explicit request).
+1. ✅ `WsClient` gated on `SyncService` sync-success + long-lived WS connection implemented and registered.
+2. ✅ Config knobs in `AppConfig.cs`, `.env.example` (ship `config.enc` before installer bake).
+3. ✅ Server `/api/v1/ws` DeviceAuth endpoint keeps the connection alive (`PRESENCE_WS_*`).
+4. ⬜ `dotnet build` clean; `go build`/`go vet` clean; installer built & ship-tested.
+5. ✅ No unrelated changes; no commit/push (only on your explicit request).

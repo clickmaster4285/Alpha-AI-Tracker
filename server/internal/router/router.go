@@ -30,6 +30,7 @@ func Setup(
 	termsConsentHandler *handlers.TermsConsentHandler,
 	termsContentHandler *handlers.TermsContentHandler,
 	streamHandler *handlers.StreamHandler,
+	wsHandler *handlers.WsHandler,
 ) {
 	// ─────────────────────────────
 	// Global Middleware
@@ -111,6 +112,11 @@ func Setup(
 	// Live stream — client push socket (DeviceAuth). Web watch/employees live under JWTAuth.
 	if streamHandler != nil {
 		syncGroup.GET("/live-stream/push", streamHandler.Push)
+	}
+
+	// Control / presence WebSocket (DeviceAuth) — keep-alive channel, not frame streaming.
+	if wsHandler != nil {
+		syncGroup.GET("/ws", wsHandler.Connect)
 	}
 
 	// ─────────────────────────────

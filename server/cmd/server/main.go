@@ -18,6 +18,7 @@ import (
 	"github.com/alpha-ai-tracker/server/internal/router"
 	"github.com/alpha-ai-tracker/server/internal/services"
 	"github.com/alpha-ai-tracker/server/internal/stream"
+	"github.com/alpha-ai-tracker/server/internal/ws"
 	"github.com/labstack/echo/v4"
 )
 
@@ -135,6 +136,18 @@ func main() {
 		log.Println("[server] live-stream hub disabled")
 	}
 
+	presenceHub := ws.NewHub(ws.Config{
+		Enabled:        cfg.PresenceWS.Enabled,
+		MaxConnections: cfg.PresenceWS.MaxConnections,
+	})
+	defer presenceHub.Close()
+	wsHandler := handlers.NewWsHandler(presenceHub, cfg.CORS.AllowedOrigins)
+	if cfg.PresenceWS.Enabled {
+		log.Printf("[server] presence ws enabled (maxConnections=%d)", cfg.PresenceWS.MaxConnections)
+	} else {
+		log.Println("[server] presence ws disabled")
+	}
+
 	// ────────────────
 	// Seed RBAC catalog (modules, submodules, system role) — idempotent
 	// ────────────────
@@ -180,7 +193,7 @@ func main() {
 	e.HideBanner = true
 	e.HidePort = true
 
-	router.Setup(e, cfg, authService, deviceRepo, userRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler, rbacHandler, shiftHandler, timeAttendanceHandler, geofenceHandler, termsConsentHandler, termsContentHandler, streamHandler)
+	router.Setup(e, cfg, authService, deviceRepo, userRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler, rbacHandler, shiftHandler, timeAttendanceHandler, geofenceHandler, termsConsentHandler, termsContentHandler, streamHandler, wsHandler)
 
 	// ────────────────
 	// Graceful Shutdown

@@ -31,6 +31,10 @@ type Config struct {
 
 	// LiveStream configures the ephemeral WebSocket JPEG preview hub.
 	LiveStream LiveStreamConfig
+
+	// PresenceWS configures the long-lived control / keep-alive WebSocket hub
+	// (GET /api/v1/ws) — independent of LiveStream.
+	PresenceWS PresenceWSConfig
 }
 
 // LiveStreamConfig holds caps for the in-memory live-stream hub (no DB persistence).
@@ -42,6 +46,12 @@ type LiveStreamConfig struct {
 	MaxWatchersPerEmployee int
 	IdleSec                int
 	TestFrame              bool
+}
+
+// PresenceWSConfig holds caps for the in-memory control-channel presence hub.
+type PresenceWSConfig struct {
+	Enabled        bool
+	MaxConnections int
 }
 
 type ServerConfig struct {
@@ -157,6 +167,10 @@ func Load() (*Config, error) {
 			MaxWatchersPerEmployee: getEnvInt("LIVE_STREAM_MAX_WATCHERS_PER_EMPLOYEE", 10),
 			IdleSec:                getEnvInt("LIVE_STREAM_IDLE_SEC", 90),
 			TestFrame:              getEnvBool("LIVE_STREAM_TEST_FRAME", false),
+		},
+		PresenceWS: PresenceWSConfig{
+			Enabled:        getEnvBool("PRESENCE_WS_ENABLED", true),
+			MaxConnections: getEnvInt("PRESENCE_WS_MAX_CONNECTIONS", 10000),
 		},
 	}
 

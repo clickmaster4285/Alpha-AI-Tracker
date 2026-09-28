@@ -90,6 +90,13 @@ public class AppConfig
     public int StreamMaxWidth { get; init; } = 1600;
     public int StreamJpegQuality { get; init; } = 60;
 
+    // ─── Control WebSocket (presence / keep-alive channel) ───
+    // Long-lived outbound WS to GET /api/v1/ws (DeviceAuth). Independent of
+    // LiveStreamClient. Default OFF — fleet opt-in + config.enc bake required.
+    public bool WsEnabled { get; init; } = false;
+    public int WsPingSec { get; init; } = 30;
+    public int WsReconnectBaseSec { get; init; } = 2;
+
     // ─── Self-update (GitHub Releases) ───
     // The client checks https://github.com/{UpdateRepo}/releases/latest for an
     // installer newer than the running VERSION, downloads it into the user data dir
@@ -149,6 +156,9 @@ public class AppConfig
             StreamFps = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_FPS"), out var streamFps) ? streamFps : 10, 1, 30),
             StreamMaxWidth = Math.Max(320, int.TryParse(GetEnv("ALPHA_STREAM_MAX_WIDTH"), out var streamW) ? streamW : 1600),
             StreamJpegQuality = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_JPEG_QUALITY"), out var streamQ) ? streamQ : 60, 10, 95),
+            WsEnabled = IsEnvTruthy(GetEnv("ALPHA_WS_ENABLED")),
+            WsPingSec = Math.Clamp(int.TryParse(GetEnv("ALPHA_WS_PING_SEC"), out var wsPing) ? wsPing : 30, 5, 300),
+            WsReconnectBaseSec = Math.Clamp(int.TryParse(GetEnv("ALPHA_WS_RECONNECT_BASE_SEC"), out var wsRecon) ? wsRecon : 2, 1, 60),
         };
     }
 
