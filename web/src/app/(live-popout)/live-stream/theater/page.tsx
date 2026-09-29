@@ -13,21 +13,25 @@ import {
   toggleLiveStreamId,
 } from '@/components/live-stream/live-stream-selection';
 
-export default function LiveStreamPage() {
+/**
+ * Full-window multi-monitor theater opened via ExternalLink from /live-stream.
+ * Own route + layout (no app chrome). Selection synced via ?ids=.
+ */
+export default function LiveStreamTheaterPage() {
   return (
     <Suspense
       fallback={
-        <div className="flex items-center justify-center min-h-[400px]">
+        <div className="flex items-center justify-center h-screen">
           <Loader2 className="w-8 h-8 animate-spin text-primary" />
         </div>
       }
     >
-      <LiveStreamInner />
+      <LiveStreamTheaterInner />
     </Suspense>
   );
 }
 
-function LiveStreamInner() {
+function LiveStreamTheaterInner() {
   const [filters, setFilters] = useUrlQueryState(
     { ids: {}, q: {} },
     { ids: '', q: '' },
@@ -52,8 +56,6 @@ function LiveStreamInner() {
   const { data, isLoading, isError } = useQuery({
     queryKey: ['live-stream-employees'],
     queryFn: () => liveStreamApi.employees(),
-    // Presence WS flips instantly server-side — poll fast so Online/Offline
-    // and "WS connected" update within ~1s of client start/stop.
     refetchInterval: 1_000,
     staleTime: 0,
   });
@@ -89,22 +91,10 @@ function LiveStreamInner() {
     setFilters({ ids: selectedIds.filter((id) => id !== employeeId).join(',') });
   };
 
-  const openTheater = () => {
-    const params = new URLSearchParams();
-    if (selectedIds.length) params.set('ids', selectedIds.join(','));
-    if (filters.q.trim()) params.set('q', filters.q.trim());
-    const qs = params.toString();
-    window.open(
-      `/live-stream/theater${qs ? `?${qs}` : ''}`,
-      '_blank',
-      'noopener,noreferrer',
-    );
-  };
-
   const tileCount = selectedIds.length;
 
   return (
-    <div className="flex gap-4 h-[calc(100vh-8rem)] min-h-[480px] animate-fade-in">
+    <div className="flex gap-3 h-full p-3 min-h-0">
       <LiveStreamEmployeeSidebar
         employees={employees}
         selectedIds={selectedIds}
@@ -114,25 +104,28 @@ function LiveStreamInner() {
         isLoading={isLoading}
         isError={isError}
         onToggle={toggleEmployee}
+        title="Theater"
+        subtitle={`Watch wall · up to ${LIVE_STREAM_MAX_TILES} (${selectedIds.length}/${LIVE_STREAM_MAX_TILES})`}
       />
 
       <section className="flex-1 bg-card rounded-xl border border-border flex flex-col overflow-hidden min-w-0">
         <div className="px-4 py-3 border-b border-border flex items-center justify-between gap-3">
-          <p className="text-sm text-muted-foreground">
-            {tileCount === 0
-              ? 'Select employees to open live WebRTC previews'
-              : `Watching ${tileCount} employee${tileCount === 1 ? '' : 's'}`}
-          </p>
-          <button
-            type="button"
-            onClick={openTheater}
-            disabled={tileCount === 0}
-            className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground hover:text-primary hover:bg-muted/60 transition-colors disabled:opacity-40 disabled:pointer-events-none"
-            title="Open selected screens in a new tab"
+          <div>
+            <p className="text-sm font-medium text-foreground">Screen preview</p>
+            <p className="text-xs text-muted-foreground">
+              {tileCount === 0
+                ? 'Select employees from the sidebar'
+                : `Watching ${tileCount} employee${tileCount === 1 ? '' : 's'}`}
+            </p>
+          </div>
+          <a
+            href="/live-stream"
+            className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-primary transition-colors"
+            title="Back to Live Stream (this window)"
           >
-            <ExternalLink className="w-4 h-4" />
-            <span className="hidden sm:inline">Open theater</span>
-          </button>
+            <ExternalLink className="w-3.5 h-3.5" />
+            Main console
+          </a>
         </div>
 
         <LiveStreamPreviewGrid
