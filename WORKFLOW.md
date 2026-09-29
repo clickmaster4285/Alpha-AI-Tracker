@@ -4,7 +4,7 @@ How work actually moves through this repo — the loops you run daily, and the g
 
 Rules live in [AGENTS.md](./AGENTS.md) §6; this file is the *procedure* for obeying them. File locations: [FILE_HIERARCHY.md](./FILE_HIERARCHY.md).
 
-*Last audited: 2026-09-29 — live stream WebRTC SFU V2 (`ALPHA_STREAM_*` / `ALPHA_WS_*` / `LIVE_STREAM_*` / `WEBRTC_*` / `PRESENCE_WS_*`). Commands verified against `client/publish/*.sh`, `server/Makefile`, `web/package.json`.*
+*Last audited: 2026-09-29 — live stream WebRTC SFU V2 + theater popout (`ALPHA_STREAM_*` / `ALPHA_WS_*` / `LIVE_STREAM_*` / `WEBRTC_*` / `PRESENCE_WS_*`). Commands verified against `client/publish/*.sh`, `server/Makefile`, `web/package.json`.*
 
 ---
 
@@ -24,6 +24,8 @@ When changing stream or presence knobs, update **both** `client/.env` (dev) **an
 | Server | `LIVE_STREAM_*`, `WEBRTC_MAX_BITRATE_KBPS`, `WEBRTC_STUN_URLS`, optional TURN, `PRESENCE_WS_*` |
 
 Media encode bitrate is decided on the **client** (`ScreenVp8Encoder`). Server `WEBRTC_MAX_BITRATE_KBPS` is ops/advertise only.
+
+**Web theater:** `/live-stream` → **Open theater** opens `/live-stream/theater?ids=` in a new tab (full-bleed; no app chrome). Same max-4 tile selection. Browsers always show some address bar chrome.
 
 ---
 

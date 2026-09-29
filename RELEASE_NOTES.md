@@ -28,9 +28,11 @@ Branch: `feature/live_streamV2.0`. Client version: **1.2.2**.
 - `WsClient` — presence keep-alive (`ALPHA_WS_*`), independent of stream.
 - Env (re-bake `config.enc`): `ALPHA_STREAM_*`, `ALPHA_WS_*`.
 
-## 3. Web — `<video>` viewer + URL fix
+## 3. Web — `<video>` viewer + theater + FPS
 
 - `useLiveStreamSocket` + multi-tile `?ids=` (max 4).
+- Per-tile decoded **FPS** badge (`use-video-fps`).
+- Shared `components/live-stream/*`; **Open theater** → `/live-stream/theater` (full-bleed `(live-popout)` layout).
 - `useUrlQueryState`: never call `router.replace` inside a `setState` updater (React 19 LinkComponent warning).
 
 ## Deploy sequence

@@ -4,7 +4,7 @@ Annotated node tree for the whole monorepo. Every directory that holds source is
 
 **How to read it:** ⭐ marks an entry point or a single-source-of-truth file — start there. 🔒 marks a file with a rule attached; changing it without reading the rule breaks something in the field. Generated / vendored trees are marked and should never be edited by hand.
 
-*Last audited: 2026-09-29 (live stream WebRTC SFU V2 + presence WS). Companion docs: [AGENTS.md](./AGENTS.md) (rules + completion state), [WORKFLOW.md](./WORKFLOW.md) (how work moves through the tree), [client/ARCHITECTURE.md](./client/ARCHITECTURE.md), [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md), [server/ARCHITECTURE.md](./server/ARCHITECTURE.md), [web/ARCHITECTURE.md](./web/ARCHITECTURE.md).*
+*Last audited: 2026-09-29 (live stream theater + per-tile FPS + WebRTC SFU V2). Companion docs: [AGENTS.md](./AGENTS.md) (rules + completion state), [WORKFLOW.md](./WORKFLOW.md) (how work moves through the tree), [client/ARCHITECTURE.md](./client/ARCHITECTURE.md), [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md), [server/ARCHITECTURE.md](./server/ARCHITECTURE.md), [web/ARCHITECTURE.md](./web/ARCHITECTURE.md).*
 
 ---
 
@@ -226,13 +226,17 @@ web/
     │       ├── attendance · shifts · timesheets · hours-insights
     │       ├── goals · kpis · projects · productivity-scoring
     │       ├── dlp-alerts · dlp-rules · audit-log · emails
-    │       ├── screenshots · live-stream (WebRTC SFU; multi-tile ?ids=) · gps-location
+    │       ├── screenshots · live-stream (WebRTC SFU; FPS; Open theater → /live-stream/theater) · gps-location
     │       └── settings (billing · compliance · notifications · security ·
     │                     tracking · user-management · terms-and-conditions · profile)
+    │
+    │   (live-popout)/                 full-bleed theater shell (no AppSidebar)
+    │       └── live-stream/theater/   /live-stream/theater?ids= watch wall
     │
     ├── components/
     │   ├── layout/                AppLayout · AppSidebar (Device Specs + Employee Journey are
     │   │                          collapsible sections) · TopBar · ProtectedRoute
+    │   ├── live-stream/           WatchTile (FPS) · EmployeeSidebar · PreviewGrid · selection helpers
     │   ├── EmployeeSelector.tsx   searchable employee picker (shared query with EmployeePage)
     │   ├── employees/             EmployeePage shell · InventoryTable · EmptyState · DeviceClassIcon
     │   ├── journey/               FocusTime (foreground/background stacked bar) · ActivityFilters (search + date presets)
@@ -242,6 +246,7 @@ web/
     │
     ├── hooks/
     │   ├── use-url-query-state.ts    ⭐ URL-synced filters (never router.* inside setState updater)
+    │   ├── use-video-fps.ts          decoded FPS for live-stream <video> tiles
     │   └── use-url-activity-filter.ts · use-employee-detail.ts …
     │
     ├── lib/

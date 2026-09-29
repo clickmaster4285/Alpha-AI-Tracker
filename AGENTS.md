@@ -3,6 +3,15 @@
 > **Last audited:** 2026-09-29
 > **Changelog:**
 >
+> - 2026-09-29: **Web live-stream — per-tile FPS + full-bleed theater popout.**
+>   - Shared components under `web/src/components/live-stream/` (`LiveStreamWatchTile`,
+>     `LiveStreamEmployeeSidebar`, `LiveStreamPreviewGrid`, selection helpers).
+>   - Each live tile shows decoded **FPS** (`hooks/use-video-fps.ts` via `requestVideoFrameCallback`).
+>   - **Open theater** opens `/live-stream/theater?ids=` in a new browser tab (route group
+>     `(live-popout)` — ProtectedRoute + RouteGuard, **no** AppSidebar/TopBar). Same employee
+>     sidebar + multi-tile preview (max 4). Note: browsers always show some address chrome on
+>     new tabs/windows; a fully URL-less window is not allowed for web apps.
+>
 > - 2026-09-29: **Live stream V2 — JPEG relay → WebRTC SFU (VP8) + dedicated presence WS + encode quality fix.**
 >   Branch `feature/live_streamV2.0` (client **1.2.2**). Preview remains **ephemeral** (never stored in DB/disk).
 >   - **Server:** Pion **SFU** (`server/internal/stream/sfu.go`) RTP-forwards publisher → watchers; hub keeps signaling/consent/`select_monitor`/idle reap (JPEG frame mailbox removed). Env: `LIVE_STREAM_*`, `WEBRTC_MAX_BITRATE_KBPS` / `WEBRTC_STUN_URLS` / optional TURN, `PRESENCE_WS_*`. Routes unchanged shape: DeviceAuth `GET /live-stream/push` + **`GET /ws`** (presence); JWT `GET /live-stream/employees`, `watch-ticket`, `watch`.
@@ -1091,7 +1100,7 @@ flowchart LR
 - **Device Specs module** (2026-08-18) — four real-API pages over the aggregate `GET /employees/:id/detail`: Hardware Overview, Installed Software (Applications/Packages tabs + search), Peripherals, Permissions. This replaced the old `/users/[id]` single-page detail view (deleted)
 - Shared building blocks: `EmployeePage` shell (header + picker + loading/error/no-selection states, optional `fetchDetail`), `hooks/use-employee-detail.ts`, `lib/format.ts`, `EmployeeSelector`, `EmptyState`/`InventoryTable`/`FocusTime`/`DeviceClassIcon`
 - **Web Infinite-Scroll Rule** + **URL-Synced Filters Rule** — see §6. `useUrlQueryState` must never call `router.push`/`replace` inside a `setState` updater (updates Next `LinkComponent` while another component is rendering).
-- **Live stream (WebRTC SFU, 2026-09-29)** — `/live-stream` multi-tile preview (`?ids=`, max 4); `useLiveStreamSocket` + `<video>`; consent `live_view`; Windows publisher only
+- **Live stream (WebRTC SFU, 2026-09-29)** — `/live-stream` multi-tile preview (`?ids=`, max 4); per-tile **FPS** badge; **Open theater** → `/live-stream/theater` (full-bleed popout, no app chrome); shared `components/live-stream/*`; `useLiveStreamSocket` + `<video>`; consent `live_view`; Windows publisher only
 - Departments page — real API calls (CRUD)
 - Logs/Comprehensive page — real API calls (now using new app_sessions API)
 - Dashboard — fully live-API stat tiles (employees total + tracked/untracked split, departments count, app sessions ·24h, web pages ·24h) since the 2026-08-25 mock purge; analytics cards link the journey modules until chart endpoints exist

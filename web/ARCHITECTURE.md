@@ -1,7 +1,13 @@
 # Web Architecture — Alpha AI Tracker Dashboard
 
-> **Last audited:** 2026-09-29 (live stream WebRTC SFU + URL query setState fix)
+> **Last audited:** 2026-09-29 (live stream theater + per-tile FPS)
 > **Changelog:**
+> - 2026-09-29: **Live stream theater popout + per-tile FPS.**
+>   Shared UI in `components/live-stream/` (`LiveStreamWatchTile`, `LiveStreamEmployeeSidebar`,
+>   `LiveStreamPreviewGrid`, `live-stream-selection.ts`). Each LIVE tile shows decoded FPS
+>   (`hooks/use-video-fps.ts`). **Open theater** on `/live-stream` opens `/live-stream/theater?ids=`
+>   in a new tab under route group `(live-popout)` — auth/RBAC only, no AppSidebar/TopBar.
+>   Theater reuses the same sidebar + grid (max 4). Browsers always show some address chrome.
 > - 2026-09-29: **Live stream V2 — WebRTC SFU viewer + multi-tile `?ids=` + `useUrlQueryState` fix.**
 >   `/live-stream` uses `<video>` + `lib/useLiveStreamSocket.ts` (RTCPeerConnection; one offer on
 >   open, one renegotiate on `track_ready`, never on periodic `status`). Multi-select up to 4
@@ -170,12 +176,16 @@ web/
     ├── hooks/
     │   ├── use-mobile.tsx       # Responsive detection hook
     │   ├── use-toast.ts         # Toast notification hook (shadcn/ui)
+    │   ├── use-video-fps.ts     # Decoded FPS for live-stream <video> tiles
     │   └── use-employee-detail.ts  # Query for GET /employees/:id/detail (enabled once an employee is picked)
     │
     ├── components/
     │   ├── providers.tsx        # Root provider: Redux + QueryClient + Tooltip + Toasts + Auth + Permissions
     │   ├── NavLink.tsx          # Active nav link component
     │   ├── EmployeeSelector.tsx # Searchable employee picker (shared by Journey/Device-Specs pages)
+    │   ├── live-stream/         # Shared live-stream UI (main page + theater)
+    │   │   ├── LiveStreamWatchTile.tsx · LiveStreamEmployeeSidebar.tsx · LiveStreamPreviewGrid.tsx
+    │   │   └── live-stream-selection.ts  # MAX_TILES + parse/toggle ids
     │   ├── employees/           # Shared employee-page building blocks
     │   │   ├── EmployeePage.tsx #   Page shell: header + picker + loading/error/no-selection
     │   │   ├── InventoryTable.tsx  EmptyState.tsx  DeviceClassIcon.tsx
@@ -206,9 +216,13 @@ web/
         │   └── page.tsx         # Animated hero + email/password form
         ├── forgot-password/     # Placeholder page
         ├── reset-password/      # Placeholder page
-        └── mfa/                 # Placeholder page
+        ├── mfa/                 # Placeholder page
         │
-        └── (app)/               # Authenticated route group
+        ├── (live-popout)/       # Full-bleed live-stream theater (no AppSidebar/TopBar)
+        │   ├── layout.tsx       # ProtectedRoute + RouteGuard only
+        │   └── live-stream/theater/  # /live-stream/theater?ids= — watch wall
+        │
+        └── (app)/               # Authenticated route group (AppSidebar + TopBar)
             ├── layout.tsx       # Wraps children with ProtectedRoute + AppLayout
             │
             ├── dashboard/       # Dashboard: stats cards, best performer, chart (mock data)
@@ -241,7 +255,7 @@ web/
             │
             ├── apps/               # Apps & Websites (mock data)
             ├── screenshots/        # Screenshots (mock data)
-            ├── live-stream/        # WebRTC SFU screen preview (Windows publisher; multi-tile ?ids=)
+            ├── live-stream/        # WebRTC SFU screen preview (Windows; multi-tile ?ids=; FPS; Open theater)
             ├── emails/             # Emails & Alerts (mock data)
             ├── kpis/               # KPIs & KRAs (mock data)
             ├── roles/              # Roles (mock data)
@@ -315,7 +329,8 @@ web/
 
 | Surface | Mechanism |
 |---|---|
-| **`/live-stream`** | WebRTC SFU via `useLiveStreamSocket` (watch ticket WS + RTCPeerConnection → `<video>`). Requires `NEXT_PUBLIC_WS_URL` (Next rewrites do not proxy WS). Multi-tile `?ids=` (max 4). |
+| **`/live-stream`** | WebRTC SFU via `useLiveStreamSocket` (watch ticket WS + RTCPeerConnection → `<video>`). Requires `NEXT_PUBLIC_WS_URL` (Next rewrites do not proxy WS). Multi-tile `?ids=` (max 4). Per-tile FPS. **Open theater** → `/live-stream/theater`. |
+| **`/live-stream/theater`** | Full-bleed watch wall (`(live-popout)` layout — no app chrome). Same employee sidebar + tiles; selection via `?ids=`. |
 | **Everything else** | No polling / SSE. Pages show data at fetch time (TanStack Query). |
 
 ### URL-Synced Filters (mandatory)
@@ -388,7 +403,8 @@ in the `updateMutation`).
 | `/configuration/websites` | Websites classification | Server (`GET/POST/PATCH /monitoring/websites`) | ✅ |
 | `/configuration/categories` | Categories & Types CRUD | Server (`/monitoring/types`, `/monitoring/categories`) | ✅ |
 | `/screenshots` | Screenshots | Honest empty state (no endpoint) | ❌ |
-| `/live-stream` | Live stream | WebRTC SFU VP8 preview (Windows clients; consent `live_view`; `useLiveStreamSocket` + `<video>`; multi-tile `?ids=`) | ✅ |
+| `/live-stream` | Live stream | WebRTC SFU VP8 preview (Windows; consent `live_view`; FPS badge; multi-tile `?ids=`; Open theater) | ✅ |
+| `/live-stream/theater` | Live stream theater | Full-bleed popout (no AppSidebar); employee sidebar + same tiles; `(live-popout)` layout | ✅ |
 | `/kpis` | KPIs & KRAs | Hardcoded demo data (scaffolding) | ❌ |
 | `/shifts` | Shift management | Server (`/shifts` CRUD; IANA timezone field; new-shift defaults to browser zone) | ✅ |
 | `/timesheets` | Timesheets | Server (`/attendance/range`; times formatted in `record.timezone`) | ✅ |
