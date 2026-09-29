@@ -117,24 +117,26 @@ func main() {
 	termsConsentHandler := handlers.NewTermsConsentHandler(termsConsentRepo)
 	termsContentHandler := handlers.NewTermsContentHandler(termsContentRepo)
 
+	iceServers := make([]stream.ICEServerConfig, 0, 2)
+	if len(cfg.LiveStream.STUNURLs) > 0 {
+		iceServers = append(iceServers, stream.ICEServerConfig{URLs: cfg.LiveStream.STUNURLs})
+	}
+	if len(cfg.LiveStream.TURNURLs) > 0 {
+		iceServers = append(iceServers, stream.ICEServerConfig{
+			URLs:       cfg.LiveStream.TURNURLs,
+			Username:   cfg.LiveStream.TURNUser,
+			Credential: cfg.LiveStream.TURNPass,
+		})
+	}
 	streamHub := stream.NewHub(stream.Config{
 		Enabled:                cfg.LiveStream.Enabled,
-		MaxFPS:                 cfg.LiveStream.MaxFPS,
-		FrameMaxBytes:          cfg.LiveStream.FrameMaxBytes,
 		MaxStreams:             cfg.LiveStream.MaxStreams,
 		MaxWatchersPerEmployee: cfg.LiveStream.MaxWatchersPerEmployee,
 		IdleSec:                cfg.LiveStream.IdleSec,
-		TestFrame:              cfg.LiveStream.TestFrame,
+		MaxBitrateKbps:         cfg.LiveStream.MaxBitrateKbps,
+		ICEServers:             iceServers,
 	})
 	defer streamHub.Close()
-	streamHandler := handlers.NewStreamHandler(
-		streamHub, employeeRepo, termsConsentRepo, timeAttendanceRepo, cfg.CORS.AllowedOrigins,
-	)
-	if cfg.LiveStream.Enabled {
-		log.Printf("[server] live-stream hub enabled (maxStreams=%d maxFps=%d)", cfg.LiveStream.MaxStreams, cfg.LiveStream.MaxFPS)
-	} else {
-		log.Println("[server] live-stream hub disabled")
-	}
 
 	presenceHub := ws.NewHub(ws.Config{
 		Enabled:        cfg.PresenceWS.Enabled,
@@ -146,6 +148,15 @@ func main() {
 		log.Printf("[server] presence ws enabled (maxConnections=%d)", cfg.PresenceWS.MaxConnections)
 	} else {
 		log.Println("[server] presence ws disabled")
+	}
+
+	streamHandler := handlers.NewStreamHandler(
+		streamHub, presenceHub, employeeRepo, termsConsentRepo, timeAttendanceRepo, cfg.CORS.AllowedOrigins,
+	)
+	if cfg.LiveStream.Enabled {
+		log.Printf("[server] live-stream webrtc sfu enabled (maxStreams=%d bitrate=%dkbps)", cfg.LiveStream.MaxStreams, cfg.LiveStream.MaxBitrateKbps)
+	} else {
+		log.Println("[server] live-stream hub disabled")
 	}
 
 	// ────────────────

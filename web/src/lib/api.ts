@@ -1320,19 +1320,29 @@ export interface LiveStreamEmployee {
   name: string;
   department: string;
   online: boolean;
+  /** Presence control socket GET /api/v1/ws — independent of live-stream push. */
+  wsConnected: boolean;
   streaming: boolean;
   streamAvailable: boolean;
+  /** Live-stream WebRTC push signaling socket. */
   clientConnected: boolean;
   consentMissing: boolean;
+}
+
+export interface IceServerConfig {
+  urls: string | string[];
+  username?: string;
+  credential?: string;
 }
 
 export const liveStreamApi = {
   employees: () =>
     request<{ data: LiveStreamEmployee[]; total: number }>('/live-stream/employees'),
   watchTicket: (employeeId: string) =>
-    request<{ ticket: string; expiresIn: number }>('/live-stream/watch-ticket', {
-      params: { employeeId },
-    }),
+    request<{ ticket: string; expiresIn: number; iceServers?: IceServerConfig[] }>(
+      '/live-stream/watch-ticket',
+      { params: { employeeId } },
+    ),
 };
 
 export { ApiError };

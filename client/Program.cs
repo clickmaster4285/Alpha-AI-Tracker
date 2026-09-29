@@ -71,7 +71,8 @@ if (args.Contains("--print-config"))
     Console.WriteLine($"StreamEnabled={cfg.StreamEnabled}");
     Console.WriteLine($"StreamFps={cfg.StreamFps}");
     Console.WriteLine($"StreamMaxWidth={cfg.StreamMaxWidth}");
-    Console.WriteLine($"StreamJpegQuality={cfg.StreamJpegQuality}");
+    Console.WriteLine($"StreamMaxBitrateKbps={cfg.StreamMaxBitrateKbps}");
+    Console.WriteLine($"StreamKeyframeIntervalSec={cfg.StreamKeyframeIntervalSec}");
     Console.WriteLine($"WsEnabled={cfg.WsEnabled}");
     Console.WriteLine($"WsPingSec={cfg.WsPingSec}");
     Console.WriteLine($"WsReconnectBaseSec={cfg.WsReconnectBaseSec}");

@@ -1,7 +1,6 @@
 package stream
 
 import (
-	"sync"
 	"testing"
 	"time"
 )
@@ -12,17 +11,17 @@ func testHub() *Hub {
 	return NewHub(cfg)
 }
 
-func TestPushSubscribeOrdering(t *testing.T) {
+func TestSubscribeSendsStartOnRegister(t *testing.T) {
 	h := testHub()
 	defer h.Close()
 
-	id, ch, err := h.Subscribe("EMP-1")
+	id, err := h.Subscribe("EMP-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer h.Unsubscribe("EMP-1", id)
 
-	ctrl, ok := h.RegisterClient("EMP-1")
+	ctrl, _, ok := h.RegisterClient("EMP-1")
 	if !ok {
 		t.Fatal("register failed")
 	}
@@ -34,38 +33,18 @@ func TestPushSubscribeOrdering(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("expected start after register with existing watcher")
 	}
-
-	jpeg := []byte{0xff, 0xd8, 0xff, 0xd9} // minimal JPEG-ish
-	if err := h.PushFrame("EMP-1", jpeg); err != nil {
-		t.Fatal(err)
-	}
-
-	select {
-	case fr := <-ch:
-		if len(fr.JPEG) != len(jpeg) || fr.Seq != 1 {
-			t.Fatalf("bad frame: seq=%d len=%d", fr.Seq, len(fr.JPEG))
-		}
-	case <-time.After(time.Second):
-		t.Fatal("expected frame")
-	}
 }
 
-func TestStopClearsMailbox(t *testing.T) {
+func TestStopOnLastUnsubscribe(t *testing.T) {
 	h := testHub()
 	defer h.Close()
 
-	id, _, err := h.Subscribe("EMP-2")
+	id, err := h.Subscribe("EMP-2")
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctrl, _ := h.RegisterClient("EMP-2")
+	ctrl, _, _ := h.RegisterClient("EMP-2")
 	<-ctrl // start
-
-	_ = h.PushFrame("EMP-2", []byte("frame-a"))
-	snap := h.Snapshot("EMP-2")
-	if !snap.Streaming || snap.Seq != 1 {
-		t.Fatalf("expected streaming seq=1, got %+v", snap)
-	}
 
 	h.Unsubscribe("EMP-2", id)
 	select {
@@ -77,172 +56,76 @@ func TestStopClearsMailbox(t *testing.T) {
 		t.Fatal("expected stop")
 	}
 
-	snap = h.Snapshot("EMP-2")
-	if snap.Wanted || snap.Streaming || snap.Seq != 1 {
-		// seq may remain; streaming/wanted must be false; frame cleared so Streaming false
-	}
+	snap := h.Snapshot("EMP-2")
 	if snap.Wanted || snap.Streaming {
-		t.Fatalf("expected stopped snapshot, got %+v", snap)
+		t.Fatalf("expected not wanted after last unsubscribe, got %+v", snap)
 	}
 }
 
-func TestMultiWatcherFanOut(t *testing.T) {
-	h := testHub()
-	defer h.Close()
-
-	id1, ch1, err := h.Subscribe("EMP-3")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer h.Unsubscribe("EMP-3", id1)
-	id2, ch2, err := h.Subscribe("EMP-3")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer h.Unsubscribe("EMP-3", id2)
-
-	h.RegisterClient("EMP-3")
-	jpeg := []byte("hello-jpeg")
-	if err := h.PushFrame("EMP-3", jpeg); err != nil {
-		t.Fatal(err)
-	}
-
-	got := 0
-	deadline := time.After(time.Second)
-	for got < 2 {
-		select {
-		case <-ch1:
-			got++
-			ch1 = nil
-		case <-ch2:
-			got++
-			ch2 = nil
-		case <-deadline:
-			t.Fatalf("fan-out incomplete, got %d", got)
-		}
-	}
-}
-
-func TestConcurrentPushSubscribe(t *testing.T) {
-	h := testHub()
-	defer h.Close()
-
-	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func(n int) {
-			defer wg.Done()
-			emp := "EMP-C"
-			id, ch, err := h.Subscribe(emp)
-			if err != nil {
-				return
-			}
-			defer h.Unsubscribe(emp, id)
-			h.RegisterClient(emp)
-			_ = h.PushFrame(emp, []byte{byte(n)})
-			select {
-			case <-ch:
-			case <-time.After(200 * time.Millisecond):
-			}
-		}(i)
-	}
-	wg.Wait()
-}
-
-func TestWatcherCap(t *testing.T) {
+func TestMaxWatchers(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MaxWatchersPerEmployee = 2
 	h := NewHub(cfg)
 	defer h.Close()
 
-	id1, _, err := h.Subscribe("EMP-CAP")
+	id1, err := h.Subscribe("EMP-3")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer h.Unsubscribe("EMP-CAP", id1)
-	id2, _, err := h.Subscribe("EMP-CAP")
+	id2, err := h.Subscribe("EMP-3")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer h.Unsubscribe("EMP-CAP", id2)
-
-	_, _, err = h.Subscribe("EMP-CAP")
+	_, err = h.Subscribe("EMP-3")
 	if err != ErrTooManyWatchers {
 		t.Fatalf("want ErrTooManyWatchers, got %v", err)
 	}
+	h.Unsubscribe("EMP-3", id1)
+	h.Unsubscribe("EMP-3", id2)
 }
 
-func TestFrameTooLarge(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.FrameMaxBytes = 4
-	h := NewHub(cfg)
-	defer h.Close()
-
-	id, _, _ := h.Subscribe("EMP-BIG")
-	defer h.Unsubscribe("EMP-BIG", id)
-	h.RegisterClient("EMP-BIG")
-
-	err := h.PushFrame("EMP-BIG", []byte("12345"))
-	if err != ErrFrameTooLarge {
-		t.Fatalf("want ErrFrameTooLarge, got %v", err)
-	}
-}
-
-func TestPushWithoutWatchersRejected(t *testing.T) {
-	h := testHub()
-	defer h.Close()
-	h.RegisterClient("EMP-X")
-	if err := h.PushFrame("EMP-X", []byte("x")); err != ErrNotWanted {
-		t.Fatalf("want ErrNotWanted, got %v", err)
-	}
-}
-
-func TestCapability(t *testing.T) {
-	h := testHub()
-	defer h.Close()
-	h.SetCapability("EMP-W", Capability{Platform: "windows", StreamAvailable: true, Version: "1.0.0"})
-	cap, ok := h.CapabilityOf("EMP-W")
-	if !ok || !cap.StreamAvailable || cap.Platform != "windows" {
-		t.Fatalf("bad capability: ok=%v %+v", ok, cap)
-	}
-}
-
-func TestSelectMonitor(t *testing.T) {
+func TestWatchTicketRoundTrip(t *testing.T) {
 	h := testHub()
 	defer h.Close()
 
-	ctrl, ok := h.RegisterClient("EMP-M")
-	if !ok {
-		t.Fatal("register failed")
+	ticket, exp, err := h.IssueWatchTicket("user-1", "EMP-9")
+	if err != nil || ticket == "" || exp <= 0 {
+		t.Fatalf("issue: ticket=%q exp=%d err=%v", ticket, exp, err)
 	}
-	h.SetCapability("EMP-M", Capability{
-		Platform:        "windows",
-		StreamAvailable: true,
-		Monitors: []MonitorInfo{
-			{Index: 0, Name: "Primary", Width: 1920, Height: 1080, IsPrimary: true},
-			{Index: 1, Name: "Secondary", Width: 1280, Height: 720, IsPrimary: false},
-		},
-		SelectedMonitor: 0,
-	})
-
-	// Drain any unexpected events.
-	select {
-	case <-ctrl:
-	default:
+	uid, err := h.ConsumeWatchTicket(ticket, "EMP-9")
+	if err != nil || uid != "user-1" {
+		t.Fatalf("consume: uid=%q err=%v", uid, err)
 	}
+	if _, err := h.ConsumeWatchTicket(ticket, "EMP-9"); err != ErrInvalidTicket {
+		t.Fatalf("replay should fail, got %v", err)
+	}
+}
 
-	h.SelectMonitor("EMP-M", 1)
-	select {
-	case ev := <-ctrl:
-		if ev.Type != "select_monitor" || ev.MonitorIndex != 1 {
-			t.Fatalf("want select_monitor index=1, got %+v", ev)
+func TestConcurrentSubscribe(t *testing.T) {
+	h := testHub()
+	defer h.Close()
+
+	const n = 8
+	ids := make([]uint64, n)
+	errs := make([]error, n)
+	done := make(chan struct{})
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			ids[i], errs[i] = h.Subscribe("EMP-C")
+			done <- struct{}{}
+		}(i)
+	}
+	for i := 0; i < n; i++ {
+		<-done
+	}
+	ok := 0
+	for i := 0; i < n; i++ {
+		if errs[i] == nil {
+			ok++
+			h.Unsubscribe("EMP-C", ids[i])
 		}
-	case <-time.After(time.Second):
-		t.Fatal("expected select_monitor control event")
 	}
-
-	snap := h.Snapshot("EMP-M")
-	if snap.SelectedMonitor != 1 || len(snap.Monitors) != 2 {
-		t.Fatalf("bad snapshot after select: %+v", snap)
+	if ok == 0 {
+		t.Fatal("expected some successful subscribes")
 	}
 }

@@ -29,7 +29,7 @@ type Config struct {
 	// client omits timezone). Empty = leave UTC unchanged.
 	DefaultShiftTimezone string
 
-	// LiveStream configures the ephemeral WebSocket JPEG preview hub.
+	// LiveStream configures the WebRTC SFU live preview hub.
 	LiveStream LiveStreamConfig
 
 	// PresenceWS configures the long-lived control / keep-alive WebSocket hub
@@ -37,15 +37,17 @@ type Config struct {
 	PresenceWS PresenceWSConfig
 }
 
-// LiveStreamConfig holds caps for the in-memory live-stream hub (no DB persistence).
+// LiveStreamConfig holds caps for the in-memory WebRTC SFU (no DB persistence).
 type LiveStreamConfig struct {
 	Enabled                bool
-	MaxFPS                 int
-	FrameMaxBytes          int
 	MaxStreams             int
 	MaxWatchersPerEmployee int
 	IdleSec                int
-	TestFrame              bool
+	MaxBitrateKbps         int
+	STUNURLs               []string
+	TURNURLs               []string
+	TURNUser               string
+	TURNPass               string
 }
 
 // PresenceWSConfig holds caps for the in-memory control-channel presence hub.
@@ -161,12 +163,14 @@ func Load() (*Config, error) {
 
 		LiveStream: LiveStreamConfig{
 			Enabled:                getEnvBool("LIVE_STREAM_ENABLED", true),
-			MaxFPS:                 getEnvInt("LIVE_STREAM_MAX_FPS", 10),
-			FrameMaxBytes:          getEnvInt("LIVE_STREAM_FRAME_MAX_BYTES", 524288),
 			MaxStreams:             getEnvInt("LIVE_STREAM_MAX_STREAMS", 25),
 			MaxWatchersPerEmployee: getEnvInt("LIVE_STREAM_MAX_WATCHERS_PER_EMPLOYEE", 10),
 			IdleSec:                getEnvInt("LIVE_STREAM_IDLE_SEC", 90),
-			TestFrame:              getEnvBool("LIVE_STREAM_TEST_FRAME", false),
+			MaxBitrateKbps:         getEnvInt("WEBRTC_MAX_BITRATE_KBPS", 8000),
+			STUNURLs:               getEnvSlice("WEBRTC_STUN_URLS", []string{"stun:stun.l.google.com:19302"}),
+			TURNURLs:               getEnvSlice("WEBRTC_TURN_URLS", []string{}),
+			TURNUser:               getEnv("WEBRTC_TURN_USER", ""),
+			TURNPass:               getEnv("WEBRTC_TURN_PASS", ""),
 		},
 		PresenceWS: PresenceWSConfig{
 			Enabled:        getEnvBool("PRESENCE_WS_ENABLED", true),

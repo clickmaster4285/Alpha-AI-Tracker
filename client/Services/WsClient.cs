@@ -77,12 +77,12 @@ public sealed class WsClient : BackgroundService
                 continue;
             }
 
-            // Primary gate: wait for a proven sync 2xx. Idle employees (nothing to
-            // sync) time out and fall through — the reconnect loop below is the
-            // safety net that still brings the socket up.
+            // Primary gate: wait briefly for a proven sync 2xx. Idle employees
+            // (nothing to sync) time out fast and fall through — presence must
+            // come up within seconds of login, not after a full sync interval.
             if (!_sync.IsServerReachable)
             {
-                var wait = TimeSpan.FromSeconds(Math.Max(60, _config.SyncIntervalSec));
+                var wait = TimeSpan.FromSeconds(8);
                 _logger.LogDebug("WsClient waiting up to {Sec}s for SyncService reachability", wait.TotalSeconds);
                 try
                 {

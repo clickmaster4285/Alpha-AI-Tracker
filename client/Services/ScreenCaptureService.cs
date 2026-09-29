@@ -8,9 +8,7 @@ using client.Configuration;
 
 namespace client.Services;
 
-/// <summary>
-/// One physical/virtual display the capture service can target.
-/// </summary>
+/// <summary>One physical/virtual display the capture service can target.</summary>
 public sealed class StreamMonitorInfo
 {
     public int Index { get; init; }
@@ -20,16 +18,25 @@ public sealed class StreamMonitorInfo
     public bool IsPrimary { get; init; }
 }
 
+/// <summary>One BGRA screen frame for WebRTC encode (latest-wins channel).</summary>
+public sealed class ScreenFrame
+{
+    public required byte[] Bgra { get; init; }
+    public int Width { get; init; }
+    public int Height { get; init; }
+    public long TimestampMs { get; init; }
+}
+
 /// <summary>
-/// Captures a selected monitor to JPEG while streaming is active.
-/// Windows: GDI CopyFromScreen over EnumDisplayMonitors bounds. Non-Windows: parked.
-/// Frames are latest-wins via a capacity-1 channel — never blocks the tracker loops.
+/// Captures a selected monitor to BGRA while streaming is active (Windows).
+/// Frames are latest-wins via a capacity-1 channel — never blocks tracker loops.
+/// Encoding to VP8/H264 is done by <see cref="LiveStreamClient"/> for WebRTC.
 /// </summary>
 public sealed class ScreenCaptureService : BackgroundService
 {
     private readonly AppConfig _config;
     private readonly ILogger<ScreenCaptureService> _logger;
-    private readonly Channel<byte[]> _frames = Channel.CreateBounded<byte[]>(
+    private readonly Channel<ScreenFrame> _frames = Channel.CreateBounded<ScreenFrame>(
         new BoundedChannelOptions(1)
         {
             FullMode = BoundedChannelFullMode.DropOldest,
@@ -39,11 +46,13 @@ public sealed class ScreenCaptureService : BackgroundService
 
     private readonly object _monitorGate = new();
     private List<StreamMonitorInfo> _monitors = new();
+    private List<Rectangle> _boundsByIndex = new();
     private Rectangle _captureBounds = Rectangle.Empty;
     private int _selectedIndex;
 
     private volatile bool _streamActive;
     private bool _loggedUnavailable;
+    private MonitorEnumProc? _enumProc;
 
     public ScreenCaptureService(AppConfig config, ILogger<ScreenCaptureService> logger)
     {
@@ -54,17 +63,14 @@ public sealed class ScreenCaptureService : BackgroundService
             RefreshMonitors();
     }
 
-    /// <summary>True when this OS can capture (Windows desktop session).</summary>
     public bool StreamAvailable { get; private set; }
 
-    public ChannelReader<byte[]> Frames => _frames.Reader;
+    public ChannelReader<ScreenFrame> Frames => _frames.Reader;
 
     public IReadOnlyList<StreamMonitorInfo> GetMonitors()
     {
         lock (_monitorGate)
         {
-            // Always re-scan — monitors can be plugged/unplugged after process start,
-            // and a one-shot constructor scan can race the desktop session.
             RefreshMonitorsUnlocked();
             return _monitors.ToList();
         }
@@ -82,7 +88,6 @@ public sealed class ScreenCaptureService : BackgroundService
         _streamActive = active;
     }
 
-    /// <summary>Switch capture target. Invalid index is ignored; returns the applied index.</summary>
     public int SetSelectedMonitor(int index)
     {
         if (!OperatingSystem.IsWindows())
@@ -113,12 +118,9 @@ public sealed class ScreenCaptureService : BackgroundService
             if (!_loggedUnavailable)
             {
                 _loggedUnavailable = true;
-                _logger.LogInformation("Screen capture parked — Windows-only in Phase 1/2");
+                _logger.LogInformation("Screen capture parked — Windows-only for WebRTC live stream");
             }
-            try
-            {
-                await Task.Delay(Timeout.Infinite, stoppingToken);
-            }
+            try { await Task.Delay(Timeout.Infinite, stoppingToken); }
             catch (OperationCanceledException) { }
             return;
         }
@@ -126,8 +128,8 @@ public sealed class ScreenCaptureService : BackgroundService
         StreamAvailable = true;
         RefreshMonitors();
         _logger.LogInformation(
-            "Screen capture ready (fps={Fps}, maxWidth={MaxWidth}, quality={Q}, monitors={Count})",
-            _config.StreamFps, _config.StreamMaxWidth, _config.StreamJpegQuality, GetMonitors().Count);
+            "Screen capture ready (fps={Fps}, maxWidth={MaxWidth}, monitors={Count})",
+            _config.StreamFps, _config.StreamMaxWidth, GetMonitors().Count);
 
         var fps = Math.Clamp(_config.StreamFps, 1, 30);
         var interval = TimeSpan.FromMilliseconds(1000.0 / fps);
@@ -139,62 +141,50 @@ public sealed class ScreenCaptureService : BackgroundService
             {
                 adaptiveFps = fps;
                 interval = TimeSpan.FromMilliseconds(1000.0 / adaptiveFps);
-                try
-                {
-                    await Task.Delay(200, stoppingToken);
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
+                try { await Task.Delay(200, stoppingToken); }
+                catch (OperationCanceledException) { break; }
                 continue;
             }
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
-                var jpeg = CaptureFrame();
-                if (jpeg is { Length: > 0 })
-                    _frames.Writer.TryWrite(jpeg);
+                var frame = CaptureFrame();
+                if (frame is not null)
+                    _frames.Writer.TryWrite(frame);
             }
             catch (Exception ex)
             {
                 StreamAvailable = false;
                 _logger.LogWarning(ex, "Screen capture failed — reporting unavailable");
                 _streamActive = false;
-                try
-                {
-                    await Task.Delay(5000, stoppingToken);
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
+                try { await Task.Delay(5000, stoppingToken); }
+                catch (OperationCanceledException) { break; }
                 StreamAvailable = OperatingSystem.IsWindows();
                 RefreshMonitors();
                 continue;
             }
 
             sw.Stop();
-            var budget = interval.TotalMilliseconds * 0.8;
-            if (sw.ElapsedMilliseconds > budget && adaptiveFps > 5)
+            // Don't tank quality by dropping to 5 fps under brief load — keep ≥8.
+            var budget = interval.TotalMilliseconds * 0.9;
+            if (sw.ElapsedMilliseconds > budget && adaptiveFps > 8)
             {
-                adaptiveFps = 5;
+                adaptiveFps = Math.Max(8, adaptiveFps - 2);
                 interval = TimeSpan.FromMilliseconds(1000.0 / adaptiveFps);
                 _logger.LogDebug("Screen capture adaptive throttle → {Fps} fps", adaptiveFps);
+            }
+            else if (sw.ElapsedMilliseconds < budget * 0.5 && adaptiveFps < fps)
+            {
+                adaptiveFps = Math.Min(fps, adaptiveFps + 1);
+                interval = TimeSpan.FromMilliseconds(1000.0 / adaptiveFps);
             }
 
             var delay = interval - sw.Elapsed;
             if (delay > TimeSpan.Zero)
             {
-                try
-                {
-                    await Task.Delay(delay, stoppingToken);
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
+                try { await Task.Delay(delay, stoppingToken); }
+                catch (OperationCanceledException) { break; }
             }
         }
     }
@@ -205,16 +195,12 @@ public sealed class ScreenCaptureService : BackgroundService
             RefreshMonitorsUnlocked();
     }
 
-    private MonitorEnumProc? _enumProc; // keep alive across the native EnumDisplayMonitors call
-
     private void RefreshMonitorsUnlocked()
     {
 #pragma warning disable CA1416
         var list = new List<(Rectangle Bounds, string Name, bool Primary)>();
         _enumProc = (IntPtr hMonitor, IntPtr hdc, ref RECT lprc, IntPtr __) =>
         {
-            // Prefer the rect the OS passes to the callback — always present even if
-            // GetMonitorInfo fails on odd driver setups.
             var bounds = Rectangle.FromLTRB(lprc.Left, lprc.Top, lprc.Right, lprc.Bottom);
             var primary = false;
             var name = $"Display {list.Count + 1}";
@@ -252,7 +238,6 @@ public sealed class ScreenCaptureService : BackgroundService
                 list.Count, reported);
         }
 
-        // Stable order: primary first, then left-to-right / top-to-bottom.
         list.Sort((a, b) =>
         {
             if (a.Primary != b.Primary) return a.Primary ? -1 : 1;
@@ -260,7 +245,6 @@ public sealed class ScreenCaptureService : BackgroundService
             return cmp != 0 ? cmp : a.Bounds.Top.CompareTo(b.Bounds.Top);
         });
 
-        // If nothing was marked primary, mark the first.
         if (list.Count > 0 && !list.Exists(m => m.Primary))
         {
             var first = list[0];
@@ -281,17 +265,11 @@ public sealed class ScreenCaptureService : BackgroundService
         if (_selectedIndex < 0 || _selectedIndex >= _monitors.Count)
             _selectedIndex = 0;
         ApplySelectedBoundsUnlocked();
-
-        _logger.LogInformation(
-            "Screen capture monitors refreshed: {Count} ({Summary})",
-            _monitors.Count,
-            string.Join(", ", _monitors.Select(m => $"{m.Index}:{m.Name} {m.Width}x{m.Height}")));
 #pragma warning restore CA1416
     }
 
     private static string FriendlyMonitorName(string raw, int index)
     {
-        // "\\.\DISPLAY2" → "Display 2"
         if (raw.StartsWith(@"\\.\DISPLAY", StringComparison.OrdinalIgnoreCase) &&
             int.TryParse(raw.AsSpan(@"\\.\DISPLAY".Length), out var n))
             return $"Display {n}";
@@ -299,8 +277,6 @@ public sealed class ScreenCaptureService : BackgroundService
             return $"Display {index + 1}";
         return raw;
     }
-
-    private List<Rectangle> _boundsByIndex = new();
 
     private void ApplySelectedBoundsUnlocked()
     {
@@ -314,12 +290,12 @@ public sealed class ScreenCaptureService : BackgroundService
         _captureBounds = _boundsByIndex[_selectedIndex];
     }
 
-    private byte[]? CaptureFrame()
+    private ScreenFrame? CaptureFrame()
     {
         if (!OperatingSystem.IsWindows())
             return null;
 
-#pragma warning disable CA1416 // guarded by IsWindows above
+#pragma warning disable CA1416
         Rectangle bounds;
         lock (_monitorGate)
         {
@@ -337,47 +313,64 @@ public sealed class ScreenCaptureService : BackgroundService
         }
 
         var maxW = Math.Max(320, _config.StreamMaxWidth);
-        Bitmap toEncode = src;
+        Bitmap toCopy = src;
         Bitmap? scaled = null;
         try
         {
             if (src.Width > maxW)
             {
                 var newH = (int)Math.Round(src.Height * (maxW / (double)src.Width));
-                scaled = new Bitmap(maxW, Math.Max(1, newH), PixelFormat.Format24bppRgb);
+                // Even dimensions help most encoders.
+                newH = Math.Max(2, newH & ~1);
+                var newW = maxW & ~1;
+                scaled = new Bitmap(newW, newH, PixelFormat.Format32bppArgb);
                 using var g = Graphics.FromImage(scaled);
-                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBilinear;
+                // HighQualityBicubic keeps UI/text sharper than Bilinear when downscaling.
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
                 g.DrawImage(src, 0, 0, scaled.Width, scaled.Height);
-                toEncode = scaled;
+                toCopy = scaled;
             }
 
-            using var ms = new MemoryStream();
-            var quality = Math.Clamp(_config.StreamJpegQuality, 10, 95);
-            var encoder = GetJpegEncoder();
-            if (encoder is null)
+            var w = toCopy.Width & ~1;
+            var h = toCopy.Height & ~1;
+            if (w < 2 || h < 2)
+                return null;
+
+            var rect = new Rectangle(0, 0, w, h);
+            var data = toCopy.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            try
             {
-                toEncode.Save(ms, ImageFormat.Jpeg);
+                var stride = Math.Abs(data.Stride);
+                var bgra = new byte[stride * h];
+                Marshal.Copy(data.Scan0, bgra, 0, bgra.Length);
+                // If stride != w*4, pack tightly.
+                if (stride != w * 4)
+                {
+                    var packed = new byte[w * h * 4];
+                    for (var y = 0; y < h; y++)
+                        Buffer.BlockCopy(bgra, y * stride, packed, y * w * 4, w * 4);
+                    bgra = packed;
+                }
+
+                return new ScreenFrame
+                {
+                    Bgra = bgra,
+                    Width = w,
+                    Height = h,
+                    TimestampMs = Environment.TickCount64,
+                };
             }
-            else
+            finally
             {
-                using var ep = new EncoderParameters(1);
-                ep.Param[0] = new EncoderParameter(Encoder.Quality, (long)quality);
-                toEncode.Save(ms, encoder, ep);
+                toCopy.UnlockBits(data);
             }
-            return ms.ToArray();
         }
         finally
         {
             scaled?.Dispose();
         }
-#pragma warning restore CA1416
-    }
-
-    private static ImageCodecInfo? GetJpegEncoder()
-    {
-#pragma warning disable CA1416
-        return ImageCodecInfo.GetImageEncoders()
-            .FirstOrDefault(c => c.FormatID == ImageFormat.Jpeg.Guid);
 #pragma warning restore CA1416
     }
 
