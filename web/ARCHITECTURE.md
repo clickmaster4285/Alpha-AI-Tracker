@@ -2,6 +2,10 @@
 
 > **Last audited:** 2026-09-29 (live stream theater + per-tile FPS)
 > **Changelog:**
+> - 2026-09-29: **Live stream theater UX — collapsible sidebar, cols-per-row, scrollable wall.**
+>   Theater navbar: sidebar toggle, **1–4 screens/row** (`?cols=`), online-only filter, clear,
+>   fullscreen, link to console. Sidebar collapses to a thin rail (`?sidebar=0`). Preview scrolls
+>   with aspect-video tiles; theater max **16** concurrent (main console stays max 4).
 > - 2026-09-29: **Live stream theater popout + per-tile FPS.**
 >   Shared UI in `components/live-stream/` (`LiveStreamWatchTile`, `LiveStreamEmployeeSidebar`,
 >   `LiveStreamPreviewGrid`, `live-stream-selection.ts`). Each LIVE tile shows decoded FPS
@@ -330,7 +334,7 @@ web/
 | Surface | Mechanism |
 |---|---|
 | **`/live-stream`** | WebRTC SFU via `useLiveStreamSocket` (watch ticket WS + RTCPeerConnection → `<video>`). Requires `NEXT_PUBLIC_WS_URL` (Next rewrites do not proxy WS). Multi-tile `?ids=` (max 4). Per-tile FPS. **Open theater** → `/live-stream/theater`. |
-| **`/live-stream/theater`** | Full-bleed watch wall (`(live-popout)` layout — no app chrome). Same employee sidebar + tiles; selection via `?ids=`. |
+| **`/live-stream/theater`** | Full-bleed watch wall (`(live-popout)`). Collapsible sidebar; navbar cols 1–4; scrollable aspect tiles (max 16); URL `?ids=&cols=&sidebar=&online=`. |
 | **Everything else** | No polling / SSE. Pages show data at fetch time (TanStack Query). |
 
 ### URL-Synced Filters (mandatory)

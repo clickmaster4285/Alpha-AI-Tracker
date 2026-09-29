@@ -21,7 +21,7 @@ export function LiveStreamWatchTile({
   const fps = useVideoFps(videoRef, socket.status === 'live');
 
   return (
-    <div className="relative min-h-0 rounded-lg border border-border bg-black/80 overflow-hidden flex flex-col">
+    <div className="relative h-full w-full min-h-0 rounded-lg border border-border bg-black/80 overflow-hidden flex flex-col">
       <div className="absolute top-2 left-2 right-2 z-10 flex items-start justify-between gap-2 pointer-events-none">
         <div className="min-w-0 rounded-md bg-black/60 px-2 py-1 pointer-events-auto">
           <p className="text-xs font-medium text-white truncate">
