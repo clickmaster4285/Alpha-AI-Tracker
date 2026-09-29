@@ -121,6 +121,11 @@ export function useUrlQueryState<T extends Record<string, string>>(
     ...initial,
     ...readFromUrl(searchParams, schema),
   }));
+  // Keep a ref so flush can compute the next value WITHOUT calling
+  // router.* inside a setState updater (that updates LinkComponent while
+  // LiveStreamInner is still rendering → React "setState in render" error).
+  const valueRef = useRef(value);
+  valueRef.current = value;
 
   // When the URL changes from outside the page (back/forward, manual edit,
   // a programmatic push from a sibling component OR from a sibling
@@ -142,6 +147,7 @@ export function useUrlQueryState<T extends Record<string, string>>(
     const serialized = JSON.stringify(carry);
     if (serialized !== lastSerialized.current) {
       lastSerialized.current = serialized;
+      valueRef.current = carry;
       setValueState(carry);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -156,45 +162,35 @@ export function useUrlQueryState<T extends Record<string, string>>(
     pendingPatch.current = null;
     if (!patch) return;
 
-    setValueState(prev => {
-      const nextResolved = typeof patch === 'function' ? patch(prev) : { ...prev, ...patch };
-      // Merge with initial defaults so the URL only carries keys we manage.
-      //
-      // Read the FRESHEST search string, NOT the `searchParams` captured
-      // in this `flush` closure. When two URL hooks write in the same
-      // React batch (e.g. a row click sets `employeeId` AND the user
-      // changes a filter chip in the same tick), both `setValue`s fire
-      // before either `router.replace` resolves; the closure's
-      // `searchParams` still reflects the URL *before* the first write,
-      // so the second flush would erase the first hook's key. We chain
-      // writes through a module-level "last URL we wrote" slot: each
-      // flush reads the previous flush's result, merges its own keys,
-      // and updates the slot. `window.location.search` is also updated
-      // by Next's router (synchronously via history.replaceState) — fall
-      // back to it when the chain slot is empty (first flush ever).
-      const baseSearch =
-        (typeof window !== 'undefined' && latestWrittenSearch.current)
-          || (typeof window !== 'undefined' ? window.location.search : '')
-          || searchParams.toString();
-      const urlParams = new URLSearchParams(baseSearch);
-      // Remove all keys managed by this hook (we'll re-add the current ones).
-      for (const key of Object.keys(schema) as (keyof T)[]) {
-        urlParams.delete(String(key));
-      }
-      const merged: Record<string, string> = {
-        ...stripEmpty(urlParams as unknown as Record<string, unknown>),
-        ...stripEmpty(nextResolved as unknown as Record<string, unknown>),
-      };
-      const qs = new URLSearchParams(merged).toString();
-      // Record what we're about to write so the next sibling hook's flush
-      // (in the same React batch) sees this hook's keys instead of the
-      // pre-write URL.
-      latestWrittenSearch.current = qs ? `?${qs}` : '';
-      lastSerialized.current = JSON.stringify(nextResolved);
-      const url = qs ? `${pathname}?${qs}` : pathname;
-      if (history === 'push') router.push(url); else router.replace(url);
-      return nextResolved;
-    });
+    const prev = valueRef.current;
+    const nextResolved = typeof patch === 'function' ? patch(prev) : { ...prev, ...patch };
+    valueRef.current = nextResolved;
+
+    // Merge with keys we don't own so sibling hooks in the same batch keep
+    // their writes. Prefer the module-level chain slot over stale
+    // `searchParams` / fall back to `window.location.search`.
+    const baseSearch =
+      (typeof window !== 'undefined' && latestWrittenSearch.current)
+        || (typeof window !== 'undefined' ? window.location.search : '')
+        || searchParams.toString();
+    const urlParams = new URLSearchParams(
+      baseSearch.startsWith('?') ? baseSearch.slice(1) : baseSearch,
+    );
+    for (const key of Object.keys(schema) as (keyof T)[]) {
+      urlParams.delete(String(key));
+    }
+    for (const [k, v] of Object.entries(stripEmpty(nextResolved as unknown as Record<string, unknown>))) {
+      urlParams.set(k, v);
+    }
+    const qs = urlParams.toString();
+    latestWrittenSearch.current = qs ? `?${qs}` : '';
+    lastSerialized.current = JSON.stringify(nextResolved);
+    const url = qs ? `${pathname}?${qs}` : pathname;
+
+    setValueState(nextResolved);
+    // Navigation MUST stay outside setState — never inside an updater.
+    if (history === 'push') router.push(url);
+    else router.replace(url);
   }, [pathname, router, searchParams, schema, history]);
 
   const setValue = useCallback(
