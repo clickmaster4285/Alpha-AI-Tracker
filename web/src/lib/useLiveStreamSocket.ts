@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { liveStreamApi } from '@/lib/api';
+import { liveStreamApi, type IceServerConfig, ApiError } from '@/lib/api';
 
 export type LiveStreamSocketStatus =
   | 'idle'
@@ -26,7 +26,6 @@ export interface LiveStreamSocketState {
   streamAvailable: boolean;
   clientConnected: boolean;
   consentMissing: boolean;
-  fps: number;
   error: string | null;
   monitors: LiveStreamMonitor[];
   selectedMonitor: number;
@@ -46,14 +45,29 @@ function resolveWsBase(): string {
   return 'ws://localhost:8080';
 }
 
+function toRtcIceServers(servers: IceServerConfig[] | undefined): RTCIceServer[] {
+  if (!servers?.length) {
+    return [{ urls: 'stun:stun.l.google.com:19302' }];
+  }
+  return servers.map((s) => ({
+    urls: s.urls,
+    username: s.username,
+    credential: s.credential,
+  }));
+}
+
 /**
- * Opens the watch WebSocket after minting a short-lived ticket over REST.
- * Cookies work on REST; browsers often omit them on cross-port WS, so we never
- * rely on the auth cookie for the upgrade itself.
+ * Opens a watch WebSocket + RTCPeerConnection for one employee (WebRTC SFU).
+ * Attach the remote MediaStream to a <video> via videoRef.
+ *
+ * Negotiation rules:
+ * - One offer on socket open.
+ * - One fresh offer on `track_ready` (publisher arrived after empty answer).
+ * - NEVER re-offer on periodic `status` ticks (that caused stuck/pixelated video).
  */
 export function useLiveStreamSocket(
   employeeId: string | null,
-  canvasRef: React.RefObject<HTMLCanvasElement | null>,
+  videoRef: React.RefObject<HTMLVideoElement | null>,
   opts?: { enabled?: boolean },
 ): LiveStreamSocketState {
   const enabled = opts?.enabled !== false;
@@ -63,16 +77,20 @@ export function useLiveStreamSocket(
     streamAvailable: false,
     clientConnected: false,
     consentMissing: false,
-    fps: 0,
     error: null,
     monitors: [],
     selectedMonitor: 0,
   });
 
-  const frameTimes = useRef<number[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
-  const canvasHolder = useRef(canvasRef);
-  canvasHolder.current = canvasRef;
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const videoHolder = useRef(videoRef);
+  videoHolder.current = videoRef;
+  const iceServersRef = useRef<RTCIceServer[]>([
+    { urls: 'stun:stun.l.google.com:19302' },
+  ]);
+  const makingOffer = useRef(false);
+  const liveRef = useRef(false);
 
   const selectMonitor = useCallback((index: number) => {
     const ws = wsRef.current;
@@ -83,13 +101,13 @@ export function useLiveStreamSocket(
 
   useEffect(() => {
     if (!employeeId || !enabled) {
+      liveRef.current = false;
       setState({
         status: 'idle',
         streaming: false,
         streamAvailable: false,
         clientConnected: false,
         consentMissing: false,
-        fps: 0,
         error: null,
         monitors: [],
         selectedMonitor: 0,
@@ -101,18 +119,97 @@ export function useLiveStreamSocket(
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
 
+    const cleanupPc = () => {
+      const pc = pcRef.current;
+      pcRef.current = null;
+      if (pc) {
+        try {
+          pc.close();
+        } catch {
+          /* ignored */
+        }
+      }
+      const video = videoHolder.current.current;
+      if (video) video.srcObject = null;
+    };
+
+    const attachPcHandlers = (pc: RTCPeerConnection, ws: WebSocket) => {
+      pc.addTransceiver('video', { direction: 'recvonly' });
+
+      pc.ontrack = (ev) => {
+        const stream = ev.streams[0] ?? new MediaStream([ev.track]);
+        const video = videoHolder.current.current;
+        if (video) {
+          video.srcObject = stream;
+          void video.play().catch(() => undefined);
+        }
+        liveRef.current = true;
+        setState((s) => ({ ...s, status: 'live', streaming: true }));
+      };
+
+      pc.onicecandidate = (ev) => {
+        if (!ev.candidate || ws.readyState !== WebSocket.OPEN) return;
+        ws.send(
+          JSON.stringify({
+            type: 'ice',
+            candidate: ev.candidate.candidate,
+            sdpMid: ev.candidate.sdpMid,
+            sdpMLineIndex: ev.candidate.sdpMLineIndex,
+          }),
+        );
+      };
+
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+          liveRef.current = false;
+          setState((s) => ({
+            ...s,
+            streaming: false,
+            status: s.status === 'consentMissing' ? 'consentMissing' : 'connecting',
+          }));
+        }
+      };
+    };
+
+    const createOffer = async (ws: WebSocket, recreate: boolean) => {
+      if (makingOffer.current || ws.readyState !== WebSocket.OPEN || cancelled) return;
+      makingOffer.current = true;
+      try {
+        if (recreate) cleanupPc();
+        let pc = pcRef.current;
+        if (!pc) {
+          pc = new RTCPeerConnection({ iceServers: iceServersRef.current });
+          pcRef.current = pc;
+          attachPcHandlers(pc, ws);
+        }
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'offer', sdp: offer.sdp }));
+        }
+      } catch (err) {
+        console.warn('[live-stream] createOffer failed', err);
+      } finally {
+        makingOffer.current = false;
+      }
+    };
+
     const connect = async () => {
       if (cancelled) return;
-      setState((s) => ({ ...s, status: 'connecting', error: null }));
+      cleanupPc();
+      liveRef.current = false;
+      setState((s) => ({ ...s, status: 'connecting', error: null, streaming: false }));
 
       let ticket: string;
       try {
         const res = await liveStreamApi.watchTicket(employeeId);
         ticket = res.ticket;
+        iceServersRef.current = toRtcIceServers(res.iceServers);
       } catch (err) {
         if (cancelled) return;
         const msg = err instanceof Error ? err.message : 'ticket_failed';
-        const consent = /consent/i.test(msg);
+        const detail = err instanceof ApiError ? `${err.message} ${err.detail ?? ''}` : msg;
+        const consent = /consent_required/i.test(detail);
         setState((s) => ({
           ...s,
           status: consent ? 'consentMissing' : 'error',
@@ -122,7 +219,7 @@ export function useLiveStreamSocket(
         }));
         if (!consent) {
           attempt += 1;
-          const delay = Math.min(10_000, 1000 * Math.pow(2, Math.min(attempt, 4)));
+          const delay = Math.min(15_000, 1500 * Math.pow(2, Math.min(attempt, 4)));
           reconnectTimer = setTimeout(() => {
             void connect();
           }, delay);
@@ -137,92 +234,113 @@ export function useLiveStreamSocket(
         `?employeeId=${encodeURIComponent(employeeId)}` +
         `&ticket=${encodeURIComponent(ticket)}`;
       const ws = new WebSocket(url);
-      ws.binaryType = 'arraybuffer';
       wsRef.current = ws;
 
       ws.onopen = () => {
         attempt = 0;
         if (!cancelled) {
           setState((s) => ({ ...s, status: 'connecting', error: null }));
+          // Small delay so the server can deliver `start` to the employee
+          // before we offer — SFU then waits for the track and answers with media.
+          window.setTimeout(() => {
+            void createOffer(ws, false);
+          }, 300);
         }
       };
 
       ws.onmessage = (ev) => {
-        if (cancelled) return;
-        if (typeof ev.data === 'string') {
-          try {
-            const msg = JSON.parse(ev.data) as {
-              type?: string;
-              streaming?: boolean;
-              streamAvailable?: boolean;
-              clientConnected?: boolean;
-              consentMissing?: boolean;
-              code?: string;
-              monitors?: LiveStreamMonitor[];
-              selectedMonitor?: number;
-            };
-            if (msg.type === 'status') {
-              setState((s) => ({
-                ...s,
-                streaming: !!msg.streaming,
-                streamAvailable: !!msg.streamAvailable,
-                clientConnected: !!msg.clientConnected,
-                consentMissing: !!msg.consentMissing,
-                monitors: Array.isArray(msg.monitors) ? msg.monitors : s.monitors,
-                selectedMonitor:
-                  typeof msg.selectedMonitor === 'number' ? msg.selectedMonitor : s.selectedMonitor,
-                status: msg.consentMissing
-                  ? 'consentMissing'
-                  : msg.streaming
-                    ? 'live'
-                    : !msg.clientConnected
-                      ? 'connecting'
-                      : msg.streamAvailable === false
-                        ? 'unavailable'
-                        : 'connecting',
-              }));
-            } else if (msg.type === 'error') {
-              const code = msg.code || 'error';
-              setState((s) => ({
-                ...s,
-                status: code.includes('consent') ? 'consentMissing' : 'error',
-                error: code,
-                consentMissing: code.includes('consent'),
-              }));
-            }
-          } catch {
-            /* ignore */
-          }
-          return;
-        }
+        if (cancelled || typeof ev.data !== 'string') return;
+        try {
+          const msg = JSON.parse(ev.data) as {
+            type?: string;
+            sdp?: string;
+            candidate?: string;
+            sdpMid?: string;
+            sdpMLineIndex?: number;
+            streaming?: boolean;
+            streamAvailable?: boolean;
+            clientConnected?: boolean;
+            consentMissing?: boolean;
+            code?: string;
+            monitors?: LiveStreamMonitor[];
+            selectedMonitor?: number;
+            iceServers?: IceServerConfig[];
+          };
 
-        const buf = ev.data as ArrayBuffer;
-        const blob = new Blob([buf], { type: 'image/jpeg' });
-        const objUrl = URL.createObjectURL(blob);
-        const img = new Image();
-        img.onload = () => {
-          URL.revokeObjectURL(objUrl);
-          const canvas = canvasHolder.current.current;
-          if (!canvas || cancelled) return;
-          if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
-            canvas.width = img.naturalWidth;
-            canvas.height = img.naturalHeight;
+          if (msg.type === 'ice_servers' && msg.iceServers) {
+            iceServersRef.current = toRtcIceServers(msg.iceServers);
+            return;
           }
-          const ctx = canvas.getContext('2d');
-          if (!ctx) return;
-          ctx.drawImage(img, 0, 0);
-          const now = performance.now();
-          frameTimes.current.push(now);
-          frameTimes.current = frameTimes.current.filter((t) => now - t < 1000);
-          setState((s) => ({
-            ...s,
-            status: 'live',
-            streaming: true,
-            fps: frameTimes.current.length,
-          }));
-        };
-        img.onerror = () => URL.revokeObjectURL(objUrl);
-        img.src = objUrl;
+
+          if (msg.type === 'status') {
+            setState((s) => ({
+              ...s,
+              streaming: liveRef.current || !!msg.streaming,
+              streamAvailable: !!msg.streamAvailable,
+              clientConnected: !!msg.clientConnected,
+              consentMissing: !!msg.consentMissing,
+              monitors: Array.isArray(msg.monitors) ? msg.monitors : s.monitors,
+              selectedMonitor:
+                typeof msg.selectedMonitor === 'number' ? msg.selectedMonitor : s.selectedMonitor,
+              status: msg.consentMissing
+                ? 'consentMissing'
+                : liveRef.current
+                  ? 'live'
+                  : !msg.clientConnected
+                    ? 'connecting'
+                    : msg.streamAvailable === false
+                      ? 'unavailable'
+                      : 'connecting',
+            }));
+            // Do NOT renegotiate on status — that used to fire every 2s and
+            // tore down working PeerConnections (blank / pixelated / stuck).
+            return;
+          }
+
+          if (msg.type === 'track_ready') {
+            // Only renegotiate if the first answer had no media (not live yet).
+            if (!liveRef.current && !makingOffer.current) {
+              void createOffer(ws, true);
+            }
+            return;
+          }
+
+          if (msg.type === 'answer' && msg.sdp) {
+            const pc = pcRef.current;
+            if (pc && pc.signalingState === 'have-local-offer') {
+              void pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp }).catch((err) => {
+                console.warn('[live-stream] setRemoteDescription failed', err);
+              });
+            }
+            return;
+          }
+
+          if (msg.type === 'ice' && msg.candidate) {
+            const pc = pcRef.current;
+            if (pc) {
+              void pc.addIceCandidate({
+                candidate: msg.candidate,
+                sdpMid: msg.sdpMid ?? undefined,
+                sdpMLineIndex: msg.sdpMLineIndex,
+              });
+            }
+            return;
+          }
+
+          if (msg.type === 'error') {
+            const code = msg.code || 'error';
+            // Never treat offer/ICE failures as consent — that was a false UI state.
+            const consent = code === 'consent_required';
+            setState((s) => ({
+              ...s,
+              status: consent ? 'consentMissing' : 'error',
+              error: code,
+              consentMissing: consent,
+            }));
+          }
+        } catch {
+          /* ignore */
+        }
       };
 
       ws.onerror = () => {
@@ -233,9 +351,11 @@ export function useLiveStreamSocket(
 
       ws.onclose = () => {
         wsRef.current = null;
+        cleanupPc();
+        liveRef.current = false;
         if (cancelled) return;
         attempt += 1;
-        const delay = Math.min(10_000, 1000 * Math.pow(2, Math.min(attempt, 4)));
+        const delay = Math.min(15_000, 1500 * Math.pow(2, Math.min(attempt, 4)));
         setState((s) => ({
           ...s,
           streaming: false,
@@ -256,7 +376,8 @@ export function useLiveStreamSocket(
         wsRef.current.close();
         wsRef.current = null;
       }
-      frameTimes.current = [];
+      cleanupPc();
+      liveRef.current = false;
     };
   }, [employeeId, enabled]);
 

@@ -1,7 +1,19 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-09-04 (browser window-key collapse for multi-tab chrome)
+> **Last audited:** 2026-09-29 (live stream WebRTC SFU + presence WS)
 > **Changelog:**
+> - 2026-09-29: **Live stream V2 — WebRTC VP8 publisher + presence WS + ScreenVp8Encoder.**
+>   Replaces the JPEG push path. `LiveStreamClient` opens DeviceAuth WS `GET /api/v1/live-stream/push`,
+>   publishes SIPSorcery WebRTC VP8 after server `{"type":"start"}`, stops on `stop`. Capture remains
+>   Windows GDI via `ScreenCaptureService` (max width hard-capped 1920). **`Services/Streaming/ScreenVp8Encoder.cs`**
+>   is required: SIPSorceryMedia `Vp8Codec.InitialiseEncoder` set `RcTargetBitrate` then called
+>   `VpxCodecEncConfigDefault` (wiping bitrate → ~256 kbps). Our encoder applies defaults first, then
+>   bitrate/VBR/timebase/`KfMaxDist`, with ~1s forced keyframes (`ALPHA_STREAM_KEYFRAME_INTERVAL_SEC`).
+>   **`WsClient`** is a separate hosted service → `GET /api/v1/ws` (`ALPHA_WS_*`) for Online/Offline;
+>   never mixed with the media socket. Env (re-bake `config.enc`): `ALPHA_STREAM_ENABLED` (default off),
+>   `ALPHA_STREAM_FPS`, `ALPHA_STREAM_MAX_WIDTH`, `ALPHA_STREAM_MAX_BITRATE_KBPS` (cap 15000),
+>   `ALPHA_STREAM_KEYFRAME_INTERVAL_SEC`, `ALPHA_WS_ENABLED`, `ALPHA_WS_PING_SEC`, `ALPHA_WS_RECONNECT_BASE_SEC`.
+>   NuGet: `SIPSorcery` + `SIPSorceryMedia.Encoders` (native `vpxmd`). Linux capture still deferred.
 > - 2026-09-05: **Core: Windows `power_off` event now fires on shutdown/restart — `SystemEventWatcher` subscribes to `SystemEvents.SessionEnding`.**
 >   The Windows half of `SystemEventWatcher` was missing `SystemEvents.SessionEnding`, so shutdown/restart never emitted `power_off` (sleep/resume via `PowerModeChanged` worked; lock/unlock via `SessionSwitch` worked; power_on worked via `LogCollectorService` on boot). `SessionEnding` with `SessionEndReasons.SystemShutdown` is now subscribed in `SubscribeWindows()` (fire-and-forget, mirrors Linux's synchronous `PrepareForShutdown` handler), with matching unsubscription in `UnsubscribeWindows()`. `Logoff` is intentionally skipped to avoid duplicating the existing `SessionSwitch` → `os_logout` path. `ShutdownSentinel` remains as fallback. This makes Windows match Linux's two-layer power-off detection pattern. Verified: `dotnet build` 0/0, 0 warnings. Real-world test requires a Windows shutdown/restart cycle against an installed build.
 >   The accessibility reader returns a fresh `WindowKey` per tab; the old title-only collapse rule let
@@ -269,6 +281,11 @@ client/
 │   ├── LogCollectorService.cs      # ⭐ main BackgroundService: collect → resolve → sessions/items → heartbeat (no network I/O since 2026-08-11)
 │   ├── SyncService.cs              # ⭐ dedicated sync engine: drains unsent rows in byte-bounded chunks (gzip, polite pauses, exponential backoff)
 │   ├── AppUpdateService.cs         # ⭐ self-updater (2026-08-12): GitHub latest-release check → platform asset → download to user data dir → pkexec dpkg / silent Inno / dmg; ObservableObject state bound by the GUI; 24h auto-check loop
+│   ├── LiveStreamClient.cs         # ⭐ WebRTC VP8 publisher → GET /live-stream/push (DeviceAuth); capture only after server start
+│   ├── ScreenCaptureService.cs     # Windows GDI monitor capture → BGRA frames (DropOldest channel)
+│   ├── WsClient.cs                 # Presence / keep-alive WS → GET /api/v1/ws (independent of LiveStreamClient)
+│   ├── Streaming/
+│   │   └── ScreenVp8Encoder.cs     # libvpx wrapper that honors TargetKbps (fixes SIPSorcery ConfigDefault wipe)
 │   ├── DesktopEventService.cs      # ⭐ orchestrates file-explorer watchers → coordinator → JourneyEngine
 │   ├── BackgroundGuardService.cs   # watchdog: re-installs auto-start/systemd unit if removed (60s)
 │   ├── AutoStartService.cs         # Run key / ~/.config/autostart .desktop / launchd plist
@@ -707,9 +724,19 @@ Watchers (IObservableEventSource)          EventCoordinator                 Jour
 | `ALPHA_UPDATE_ENABLED` | true | master switch for self-update (background checks + auto-install + GUI) |
 | `ALPHA_UPDATE_AUTO_CHECK_HOURS` | 24 | min hours between quiet background update checks (persisted `update_last_check_at` in app_status) |
 | `ALPHA_UPDATE_AUTO_INSTALL` | true | auto-download+install when a check finds a newer version (Linux still shows the polkit password dialog) |
+| `ALPHA_STREAM_ENABLED` | false | master switch for WebRTC live-stream publisher |
+| `ALPHA_STREAM_FPS` | 12 | capture / encode cadence (1–30) |
+| `ALPHA_STREAM_MAX_WIDTH` | 1920 | scale cap (hard-clamped 320–1920) |
+| `ALPHA_STREAM_MAX_BITRATE_KBPS` | 12000 | VP8 target kbps via `ScreenVp8Encoder` (cap 15000) |
+| `ALPHA_STREAM_KEYFRAME_INTERVAL_SEC` | 1 | seconds between forced keyframes (≥1; all-I-frame starves bitrate) |
+| `ALPHA_WS_ENABLED` | false | presence WebSocket (`GET /api/v1/ws`) |
+| `ALPHA_WS_PING_SEC` | 30 | application ping interval |
+| `ALPHA_WS_RECONNECT_BASE_SEC` | 2 | initial reconnect backoff (doubles, cap 60s) |
 
 > `client/.env.example` carries a `REPO=` key; the client self-updater reads it as a fallback when
 > `ALPHA_UPDATE_REPO` is unset (the web dashboard separately owns its GitHub download link via `NEXT_PUBLIC_GITHUB_REPO`).
+>
+> **Installer-Parity:** any change to `ALPHA_STREAM_*` / `ALPHA_WS_*` requires `.env` → `encrypt-config.sh` → new installer so `config.enc` carries the knobs.
 
 ### Loading order (`EnvLoader.Load`)
 
@@ -975,3 +1002,27 @@ the grouping; `DrainSessionEventsAsync` marks every source row `is_synced` after
   APIs with infinite scroll. First/last active times use `record.timezone` from the server (shift
   IANA zone) — operators must set `DEFAULT_SHIFT_TIMEZONE` or per-shift timezone on the server so
   late/present matches wall-clock. `gps-location` UI is gated Coming Soon (`LOCATION_UI_ENABLED`).
+
+---
+
+## 20. Live stream (WebRTC SFU) + presence WebSocket
+
+### Live stream (preview only — never persisted)
+
+| Piece | Role |
+|---|---|
+| `ScreenCaptureService` | Windows GDI `CopyFromScreen` → BGRA; bounded channel `DropOldest(1)`; EnumDisplayMonitors + `select_monitor` |
+| `ScreenVp8Encoder` | libvpx via `vpxmd`; **ConfigDefault then** `RcTargetBitrate` / VBR / timebase `1/fps` / `KfMaxDist` |
+| `LiveStreamClient` | DeviceAuth WS push signaling; SIPSorcery `RTCPeerConnection` + VP8 track; encode only after `start` |
+
+Flow: login → push WS `hello` → idle until admin watches → server `start` → offer/answer/ICE → media pump → `stop` tears down PC/encoder.
+
+### Presence (`WsClient`)
+
+Long-lived DeviceAuth socket to `GET /api/v1/ws`. Independent of `LiveStreamClient` (same pattern as Terms vs tracking). Drives admin Online/`wsConnected` without opening a media path.
+
+### Quality notes
+
+- Do **not** force a keyframe every frame — starves the bitrate budget (blocky UI text).
+- Do **not** use stock `VpxVideoEncoder` alone — SIPSorcery wiped `TargetKbps` until `ScreenVp8Encoder`.
+- Hall-of-mirrors (watching yourself) stacks compression; judge quality on sharp desktop UI outside the admin browser.

@@ -1,3 +1,69 @@
+# Release Notes — v1.2.2
+
+## Overview
+
+v1.2.2 is the **Live Stream WebRTC SFU** release. The Phase 1 JPEG WebSocket relay is replaced by
+a Pion SFU that RTP-forwards VP8 from the Windows desktop publisher to admin watchers. Preview
+remains ephemeral (never stored). A dedicated presence WebSocket drives Online/Offline without
+opening media. Encode quality is fixed by `ScreenVp8Encoder` (SIPSorcery had been wiping the
+configured bitrate). The admin web console gains a full-bleed **theater popout** with a
+professional watch-wall UX (collapsible sidebar, cols-per-row, scrollable multi-screen wall).
+
+Branch: `feature/live_streamV2.0`. Client version: **1.2.2**.
+
+---
+
+## 1. Server — WebRTC SFU + presence
+
+- `internal/stream/sfu.go` — Pion SFU (publisher → watchers); JPEG mailbox removed.
+- Hub keeps signaling, consent (`live_view`), `select_monitor`, idle reap, caps.
+- DeviceAuth: `GET /live-stream/push`, `GET /ws` (presence).
+- JWT: `GET /live-stream/employees`, `watch-ticket`; ticketed `GET /live-stream/watch`.
+- Env: `LIVE_STREAM_*`, `WEBRTC_MAX_BITRATE_KBPS`, `WEBRTC_STUN_URLS`, optional TURN, `PRESENCE_WS_*`.
+
+## 2. Client — VP8 publisher + ScreenVp8Encoder + WsClient
+
+- `LiveStreamClient` — WebRTC offer/answer/ICE; encode only after server `start`.
+- `ScreenCaptureService` — Windows GDI; max width hard-capped at 1920.
+- `ScreenVp8Encoder` — applies `RcTargetBitrate` **after** `VpxCodecEncConfigDefault` (fixes ~256 kbps default); VBR + ~1s keyframes.
+- `WsClient` — presence keep-alive (`ALPHA_WS_*`), independent of stream.
+- Env (re-bake `config.enc`): `ALPHA_STREAM_*`, `ALPHA_WS_*`.
+
+## 3. Web — `<video>` viewer + theater popout UX + FPS
+
+### Main console (`/live-stream`)
+
+- `useLiveStreamSocket` + multi-tile `?ids=` (max **4**).
+- Per-tile decoded **FPS** badge (`hooks/use-video-fps.ts`).
+- Shared `components/live-stream/*` (WatchTile, EmployeeSidebar, PreviewGrid, selection helpers).
+- **Open theater** opens `/live-stream/theater?ids=` in a new browser tab.
+- `useUrlQueryState`: never call `router.replace` inside a `setState` updater (React 19 LinkComponent warning).
+
+### Theater popout (`/live-stream/theater` — `(live-popout)` layout)
+
+Full-bleed watch wall (no AppSidebar / TopBar). Auth + RBAC still apply.
+
+- **Collapsible employee sidebar** — full list or thin rail (`?sidebar=0|1`); search; selection cap banner.
+- **Toolbar navbar** — sidebar toggle; **screens per row** 1 / 2 / 3 / 4 (`?cols=`); online-only filter (`?online=1`); clear all; fullscreen; link back to main console.
+- **Scrollable wall** — aspect-video tiles in a column grid; vertical scroll when many screens are open (theater max **16**, vs console max 4).
+- URL-synced layout: `?ids=&q=&cols=&sidebar=&online=` (shareable / refresh-safe).
+
+## Deploy sequence
+
+1. **Server** — restart with new SFU env (no new migration required for the SFU swap).
+2. **Web** — deploy Next app.
+3. **Client** — installer **1.2.2** with stream/presence knobs in `config.enc`.
+
+## Known gaps
+
+- Linux screen capture still deferred.
+- Software VP8 (no hardware H.264 yet); fine UI text is better than JPEG-era soft bitrate but not Meet-class.
+- Watching your own stream (hall of mirrors) stacks compression — judge quality on sharp desktop UI.
+
+---
+
+---
+
 # Release Notes — v1.2.1
 
 ## Overview

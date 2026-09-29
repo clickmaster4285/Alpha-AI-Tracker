@@ -9,17 +9,13 @@ import (
 )
 
 // FeatureID is the terms_consent feature key for live preview.
-// Must match the seeded featured term in terms_content_seeder.go ("live_view").
 const FeatureID = "live_view"
 
-// Errs returned to handlers (mapped to HTTP status).
 var (
-	ErrDisabled          = errors.New("live stream disabled")
-	ErrTooManyStreams    = errors.New("too many concurrent streams")
-	ErrTooManyWatchers   = errors.New("too many watchers for employee")
-	ErrFrameTooLarge     = errors.New("frame exceeds max bytes")
-	ErrNotWanted         = errors.New("no watchers for employee")
-	ErrInvalidTicket     = errors.New("invalid or expired watch ticket")
+	ErrDisabled        = errors.New("live stream disabled")
+	ErrTooManyStreams  = errors.New("too many concurrent streams")
+	ErrTooManyWatchers = errors.New("too many watchers for employee")
+	ErrInvalidTicket   = errors.New("invalid or expired watch ticket")
 )
 
 const watchTicketTTL = 60 * time.Second
@@ -30,37 +26,37 @@ type watchTicket struct {
 	ExpiresAt  time.Time
 }
 
-// Config holds runtime caps for the in-memory hub.
+// Config holds runtime caps for the live-stream hub + SFU.
 type Config struct {
 	Enabled                bool
-	MaxFPS                 int
-	FrameMaxBytes          int
 	MaxStreams             int
 	MaxWatchersPerEmployee int
 	IdleSec                int
-	TestFrame              bool
+	MaxBitrateKbps         int
+	ICEServers             []ICEServerConfig
 }
 
-// DefaultConfig returns Phase-1 defaults from the plan.
+// DefaultConfig returns defaults for WebRTC live stream.
 func DefaultConfig() Config {
 	return Config{
 		Enabled:                true,
-		MaxFPS:                 10,
-		FrameMaxBytes:          524288,
 		MaxStreams:             25,
 		MaxWatchersPerEmployee: 10,
 		IdleSec:                90,
-		TestFrame:              false,
+		MaxBitrateKbps:         8000,
+		ICEServers: []ICEServerConfig{
+			{URLs: []string{"stun:stun.l.google.com:19302"}},
+		},
 	}
 }
 
 // Capability is advertised by the desktop client in its hello message.
 type Capability struct {
-	Platform         string
-	StreamAvailable  bool
-	Version          string
-	Monitors         []MonitorInfo
-	SelectedMonitor  int
+	Platform        string
+	StreamAvailable bool
+	Version         string
+	Monitors        []MonitorInfo
+	SelectedMonitor int
 }
 
 // MonitorInfo is one display the client can capture.
@@ -72,50 +68,39 @@ type MonitorInfo struct {
 	IsPrimary bool   `json:"isPrimary"`
 }
 
-// Frame is one JPEG preview (latest-wins).
-type Frame struct {
-	JPEG []byte
-	Seq  uint64
-	At   time.Time
-}
-
 // ControlEvent is sent to the push-socket handler (start/stop/select_monitor).
 type ControlEvent struct {
 	Type         string // "start" | "stop" | "select_monitor"
-	MonitorIndex int    // for select_monitor
+	MonitorIndex int
 }
 
 // EmployeeSnapshot is hub-side state for the employees REST list / watch status.
 type EmployeeSnapshot struct {
-	Wanted           bool
-	Streaming        bool
-	StreamAvailable  bool
-	WatcherCount     int
-	ClientConnected  bool
-	Seq              uint64
-	LastFrameAt      time.Time
-	Monitors         []MonitorInfo
-	SelectedMonitor  int
+	Wanted          bool
+	Streaming       bool
+	StreamAvailable bool
+	WatcherCount    int
+	ClientConnected bool
+	Monitors        []MonitorInfo
+	SelectedMonitor int
 }
 
 type mailbox struct {
-	frame           []byte
-	seq             uint64
-	lastFrameAt     time.Time
 	lastActivity    time.Time
-	lastPushAt      time.Time
 	wanted          bool
 	clientConnected bool
+	clientGen       uint64
 	cap             Capability
-	watchers        map[uint64]chan Frame
+	watchers        map[uint64]struct{}
 	nextWatcherID   uint64
 	ctrl            chan ControlEvent
 	countsAsStream  bool
 }
 
-// Hub is an in-memory latest-frame mailbox + watcher fan-out. Nothing is persisted.
+// Hub tracks watchers/control + owns the Pion SFU. No JPEG frames.
 type Hub struct {
 	cfg Config
+	sfu *SFU
 
 	mu             sync.RWMutex
 	boxes          map[string]*mailbox
@@ -126,14 +111,8 @@ type Hub struct {
 	wg       sync.WaitGroup
 }
 
-// NewHub creates a hub and starts the idle reaper.
+// NewHub creates a hub + SFU and starts the idle reaper.
 func NewHub(cfg Config) *Hub {
-	if cfg.MaxFPS <= 0 {
-		cfg.MaxFPS = 10
-	}
-	if cfg.FrameMaxBytes <= 0 {
-		cfg.FrameMaxBytes = 524288
-	}
 	if cfg.MaxStreams <= 0 {
 		cfg.MaxStreams = 25
 	}
@@ -143,9 +122,13 @@ func NewHub(cfg Config) *Hub {
 	if cfg.IdleSec <= 0 {
 		cfg.IdleSec = 90
 	}
+	if cfg.MaxBitrateKbps <= 0 {
+		cfg.MaxBitrateKbps = 8000
+	}
 
 	h := &Hub{
 		cfg:      cfg,
+		sfu:      NewSFU(cfg.ICEServers),
 		boxes:    make(map[string]*mailbox),
 		tickets:  make(map[string]watchTicket),
 		stopIdle: make(chan struct{}),
@@ -155,12 +138,18 @@ func NewHub(cfg Config) *Hub {
 	return h
 }
 
+// SFU returns the embedded Pion SFU.
+func (h *Hub) SFU() *SFU { return h.sfu }
+
 // Config returns a copy of the hub config.
-func (h *Hub) Config() Config {
-	return h.cfg
+func (h *Hub) Config() Config { return h.cfg }
+
+// ICEServers returns ICE config for clients.
+func (h *Hub) ICEServers() []ICEServerConfig {
+	return h.sfu.ICEServersJSON()
 }
 
-// Close stops the idle loop. Call on server shutdown.
+// Close stops the idle loop and SFU.
 func (h *Hub) Close() {
 	select {
 	case <-h.stopIdle:
@@ -168,6 +157,7 @@ func (h *Hub) Close() {
 		close(h.stopIdle)
 	}
 	h.wg.Wait()
+	h.sfu.Close()
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -205,20 +195,15 @@ func (h *Hub) reapIdle() {
 			continue
 		}
 		if m.wanted {
-			// Watchers gone but wanted stuck — force stop.
 			m.wanted = false
 			h.sendCtrlLocked(m, "stop")
 			h.unmarkStreamLocked(m)
-			m.frame = nil
+			h.sfu.ClosePublisher(empID)
 			continue
 		}
-		if !m.clientConnected && len(m.frame) == 0 && now.Sub(m.lastActivity) > idleFor {
+		if !m.clientConnected && now.Sub(m.lastActivity) > idleFor {
+			h.sfu.CloseRoom(empID)
 			delete(h.boxes, empID)
-			continue
-		}
-		if len(m.frame) > 0 && now.Sub(m.lastActivity) > idleFor && !m.clientConnected {
-			m.frame = nil
-			m.seq = 0
 		}
 	}
 
@@ -235,12 +220,10 @@ func (h *Hub) getOrCreateLocked(empID string) *mailbox {
 		return m
 	}
 	m = &mailbox{
-		watchers:     make(map[uint64]chan Frame),
+		watchers:     make(map[uint64]struct{}),
 		ctrl:         make(chan ControlEvent, 4),
 		lastActivity: time.Now(),
-		cap: Capability{
-			StreamAvailable: false,
-		},
+		cap:          Capability{StreamAvailable: false},
 	}
 	h.boxes[empID] = m
 	return m
@@ -268,7 +251,7 @@ func (h *Hub) sendCtrlEventLocked(m *mailbox, ev ControlEvent) {
 	}
 }
 
-// SelectMonitor asks the push client to switch capture target (Phase 2 multi-monitor).
+// SelectMonitor asks the push client to switch capture target.
 func (h *Hub) SelectMonitor(empID string, index int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -310,48 +293,50 @@ func (h *Hub) unmarkStreamLocked(m *mailbox) {
 }
 
 func (h *Hub) clearMailboxLocked(m *mailbox) {
-	for id, ch := range m.watchers {
-		close(ch)
-		delete(m.watchers, id)
-	}
-	m.frame = nil
+	m.watchers = make(map[uint64]struct{})
 	m.wanted = false
 	h.unmarkStreamLocked(m)
 }
 
 // RegisterClient attaches the push-socket control channel for an employee.
-// Returns a receive-only control channel; call UnregisterClient on disconnect.
-func (h *Hub) RegisterClient(empID string) (<-chan ControlEvent, bool) {
+// Replaces any prior ctrl channel so a stale Push handler cannot steal start/stop.
+// Returns a generation token that UnregisterClient must pass.
+func (h *Hub) RegisterClient(empID string) (ctrl <-chan ControlEvent, gen uint64, ok bool) {
 	if !h.cfg.Enabled {
-		return nil, false
+		return nil, 0, false
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	m := h.getOrCreateLocked(empID)
+	if m.ctrl != nil {
+		close(m.ctrl)
+	}
+	m.ctrl = make(chan ControlEvent, 4)
+	m.clientGen++
+	gen = m.clientGen
 	m.clientConnected = true
 	m.lastActivity = time.Now()
 
 	if m.wanted {
 		h.sendCtrlLocked(m, "start")
 	}
-	return m.ctrl, true
+	return m.ctrl, gen, true
 }
 
-// UnregisterClient marks the push client gone and stops streaming accounting.
-func (h *Hub) UnregisterClient(empID string) {
+// UnregisterClient marks the push client gone (generation-scoped).
+func (h *Hub) UnregisterClient(empID string, gen uint64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	m, ok := h.boxes[empID]
-	if !ok {
+	if !ok || m.clientGen != gen {
 		return
 	}
 	m.clientConnected = false
 	m.lastActivity = time.Now()
+	h.sfu.ClosePublisher(empID)
 	if m.wanted {
-		// Keep wanted + stream slot — next reconnect gets start. Clear frame so UI reconnects.
-		m.frame = nil
 		return
 	}
 	h.unmarkStreamLocked(m)
@@ -366,64 +351,10 @@ func (h *Hub) SetCapability(empID string, cap Capability) {
 	m.lastActivity = time.Now()
 }
 
-// PushFrame stores the latest JPEG and fans out to watchers (latest-wins per watcher).
-func (h *Hub) PushFrame(empID string, jpeg []byte) error {
-	if !h.cfg.Enabled {
-		return ErrDisabled
-	}
-	if len(jpeg) == 0 {
-		return nil
-	}
-	if len(jpeg) > h.cfg.FrameMaxBytes {
-		return ErrFrameTooLarge
-	}
-
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	m, ok := h.boxes[empID]
-	if !ok || !m.wanted {
-		return ErrNotWanted
-	}
-
-	minInterval := time.Second / time.Duration(h.cfg.MaxFPS)
-	if !m.lastPushAt.IsZero() && time.Since(m.lastPushAt) < minInterval {
-		return nil // drop — over FPS budget
-	}
-
-	// Copy so callers can reuse their buffer.
-	buf := make([]byte, len(jpeg))
-	copy(buf, jpeg)
-	m.seq++
-	m.frame = buf
-	m.lastFrameAt = time.Now()
-	m.lastPushAt = m.lastFrameAt
-	m.lastActivity = m.lastFrameAt
-	_ = h.markStreamLocked(m)
-
-	fr := Frame{JPEG: buf, Seq: m.seq, At: m.lastFrameAt}
-	for _, ch := range m.watchers {
-		select {
-		case ch <- fr:
-		default:
-			// Drop stale frame in channel, then send latest.
-			select {
-			case <-ch:
-			default:
-			}
-			select {
-			case ch <- fr:
-			default:
-			}
-		}
-	}
-	return nil
-}
-
 // Subscribe attaches a watcher. First watcher marks the stream wanted and may send start.
-func (h *Hub) Subscribe(empID string) (watcherID uint64, frames <-chan Frame, err error) {
+func (h *Hub) Subscribe(empID string) (watcherID uint64, err error) {
 	if !h.cfg.Enabled {
-		return 0, nil, ErrDisabled
+		return 0, ErrDisabled
 	}
 
 	h.mu.Lock()
@@ -431,13 +362,13 @@ func (h *Hub) Subscribe(empID string) (watcherID uint64, frames <-chan Frame, er
 
 	m := h.getOrCreateLocked(empID)
 	if len(m.watchers) >= h.cfg.MaxWatchersPerEmployee {
-		return 0, nil, ErrTooManyWatchers
+		return 0, ErrTooManyWatchers
 	}
 
 	wasWanted := m.wanted
 	if !wasWanted {
 		if err := h.markStreamLocked(m); err != nil {
-			return 0, nil, err
+			return 0, err
 		}
 		m.wanted = true
 		if m.clientConnected {
@@ -447,24 +378,15 @@ func (h *Hub) Subscribe(empID string) (watcherID uint64, frames <-chan Frame, er
 
 	m.nextWatcherID++
 	id := m.nextWatcherID
-	ch := make(chan Frame, 1)
-	m.watchers[id] = ch
+	m.watchers[id] = struct{}{}
 	m.lastActivity = time.Now()
-
-	// Seed with latest frame if present.
-	if len(m.frame) > 0 {
-		fr := Frame{JPEG: m.frame, Seq: m.seq, At: m.lastFrameAt}
-		select {
-		case ch <- fr:
-		default:
-		}
-	}
-
-	return id, ch, nil
+	return id, nil
 }
 
-// Unsubscribe detaches a watcher. Last watcher sends stop and clears the mailbox frame.
+// Unsubscribe detaches a watcher. Last watcher sends stop.
 func (h *Hub) Unsubscribe(empID string, watcherID uint64) {
+	h.sfu.RemoveSubscriber(empID, watcherID)
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -472,21 +394,18 @@ func (h *Hub) Unsubscribe(empID string, watcherID uint64) {
 	if !ok {
 		return
 	}
-	if ch, ok := m.watchers[watcherID]; ok {
-		delete(m.watchers, watcherID)
-		close(ch)
-	}
+	delete(m.watchers, watcherID)
 	m.lastActivity = time.Now()
 
 	if len(m.watchers) == 0 && m.wanted {
 		m.wanted = false
 		h.sendCtrlLocked(m, "stop")
 		h.unmarkStreamLocked(m)
-		m.frame = nil
+		h.sfu.ClosePublisher(empID)
 	}
 }
 
-// Snapshot returns hub state for one employee (zero value if unknown).
+// Snapshot returns hub state for one employee.
 func (h *Hub) Snapshot(empID string) EmployeeSnapshot {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -494,20 +413,19 @@ func (h *Hub) Snapshot(empID string) EmployeeSnapshot {
 	if !ok {
 		return EmployeeSnapshot{}
 	}
+	streaming := m.wanted && h.sfu.PublisherActive(empID)
 	return EmployeeSnapshot{
 		Wanted:          m.wanted,
-		Streaming:       m.wanted && len(m.frame) > 0,
+		Streaming:       streaming,
 		StreamAvailable: m.cap.StreamAvailable,
 		WatcherCount:    len(m.watchers),
 		ClientConnected: m.clientConnected,
-		Seq:             m.seq,
-		LastFrameAt:     m.lastFrameAt,
 		Monitors:        append([]MonitorInfo(nil), m.cap.Monitors...),
 		SelectedMonitor: m.cap.SelectedMonitor,
 	}
 }
 
-// CapabilityOf returns the last advertised capability (ok=false if never set).
+// CapabilityOf returns the last advertised capability.
 func (h *Hub) CapabilityOf(empID string) (Capability, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -526,23 +444,7 @@ func (h *Hub) IsWanted(empID string) bool {
 	return ok && m.wanted
 }
 
-// InjectTestFrame pushes a synthetic JPEG when LIVE_STREAM_TEST_FRAME is on (dev only).
-func (h *Hub) InjectTestFrame(empID string, jpeg []byte) error {
-	if !h.cfg.TestFrame {
-		return ErrDisabled
-	}
-	h.mu.Lock()
-	m := h.getOrCreateLocked(empID)
-	if !m.wanted {
-		h.mu.Unlock()
-		return ErrNotWanted
-	}
-	h.mu.Unlock()
-	return h.PushFrame(empID, jpeg)
-}
-
-// IssueWatchTicket mints a one-time ticket so the browser can open the watch
-// WebSocket without relying on cross-port cookies (httpOnly JWT stays on REST).
+// IssueWatchTicket mints a one-time ticket for the admin watch WebSocket.
 func (h *Hub) IssueWatchTicket(userID, employeeID string) (ticket string, expiresInSec int, err error) {
 	if !h.cfg.Enabled {
 		return "", 0, ErrDisabled
@@ -563,7 +465,7 @@ func (h *Hub) IssueWatchTicket(userID, employeeID string) (ticket string, expire
 	return ticket, int(watchTicketTTL.Seconds()), nil
 }
 
-// ConsumeWatchTicket validates and burns a ticket. employeeID must match.
+// ConsumeWatchTicket validates and burns a ticket.
 func (h *Hub) ConsumeWatchTicket(ticket, employeeID string) (userID string, err error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

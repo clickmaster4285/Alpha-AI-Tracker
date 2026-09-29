@@ -89,7 +89,13 @@ Follow the full definitions in `AGENTS.md`. In particular:
   manual URL edit re-fires the same query. Use `useUrlQueryState` for ad-hoc shapes and
   `useUrlActivityFilter` for `ActivityFilter`. Search inputs keep a local debounced mirror (~400 ms);
   date modals and search inputs have no Clear button — the only way to clear is select a default
-  preset or empty the input. `useSearchParams` requires a `<Suspense>` boundary.
+  preset or empty the input. `useSearchParams` requires a `<Suspense>` boundary. **Never call
+  `router.push`/`replace` inside a React `setState` updater** (updates Next `LinkComponent` mid-render).
+- **Live stream (WebRTC SFU):** preview-only VP8 via Pion SFU + SIPSorcery publisher; presence is a
+  separate DeviceAuth WS (`/api/v1/ws`). Client encode must use `ScreenVp8Encoder` (stock SIPSorcery
+  wiped `TargetKbps`). Re-bake `config.enc` for any `ALPHA_STREAM_*` / `ALPHA_WS_*` change. Web:
+  per-tile FPS; `/live-stream/theater` full-bleed popout with collapsible sidebar, cols-per-row
+  (`?cols=1|2|3|4`), scrollable wall (max 16), toolbar settings (online filter / clear / fullscreen).
 - **Cross-platform analyzer safety:** guard platform method bodies with
   `OperatingSystem.IsWindows/Linux/MacOS()`. Do not propagate `[SupportedOSPlatform]` through
   cross-platform partial/background-service graphs, and never globally disable analyzers.

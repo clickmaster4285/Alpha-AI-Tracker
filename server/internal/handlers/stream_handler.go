@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -11,23 +12,24 @@ import (
 	"github.com/alpha-ai-tracker/server/internal/dto"
 	"github.com/alpha-ai-tracker/server/internal/repository"
 	"github.com/alpha-ai-tracker/server/internal/stream"
+	"github.com/alpha-ai-tracker/server/internal/ws"
 	"github.com/gorilla/websocket"
 	"github.com/labstack/echo/v4"
+	"github.com/pion/webrtc/v4"
 )
 
 const (
-	// Heartbeat is written every collect cycle (~30s) but only reaches the server on
-	// SyncService cadence (~60s). A 60s online window therefore flaps Offline between
-	// syncs. Use 3 minutes so a healthy syncing client stays Online.
+	// Heartbeat fallback only — primary online is the presence WS (/api/v1/ws).
 	liveStreamOnlineWindow = 3 * time.Minute
 	wsWriteWait            = 10 * time.Second
-	wsPongWait             = 60 * time.Second
+	wsPongWait             = 90 * time.Second
 	wsPingPeriod           = 30 * time.Second
 )
 
-// StreamHandler serves live-stream WebSocket + REST endpoints.
+// StreamHandler serves live-stream WebRTC signaling + REST endpoints.
 type StreamHandler struct {
 	hub              *stream.Hub
+	presence         *ws.Hub // optional — instant online via GET /api/v1/ws
 	employeeRepo     *repository.EmployeeRepo
 	termsConsentRepo *repository.TermsConsentRepo
 	taRepo           *repository.TimeAttendanceRepo
@@ -35,9 +37,10 @@ type StreamHandler struct {
 	upgrader         websocket.Upgrader
 }
 
-// NewStreamHandler constructs the handler. allowedOrigins should match CORS_ALLOWED_ORIGINS.
+// NewStreamHandler constructs the handler. presence may be nil (falls back to heartbeat online).
 func NewStreamHandler(
 	hub *stream.Hub,
+	presence *ws.Hub,
 	employeeRepo *repository.EmployeeRepo,
 	termsConsentRepo *repository.TermsConsentRepo,
 	taRepo *repository.TimeAttendanceRepo,
@@ -49,18 +52,18 @@ func NewStreamHandler(
 	}
 	h := &StreamHandler{
 		hub:              hub,
+		presence:         presence,
 		employeeRepo:     employeeRepo,
 		termsConsentRepo: termsConsentRepo,
 		taRepo:           taRepo,
 		allowedOrigins:   originSet,
 	}
 	h.upgrader = websocket.Upgrader{
-		ReadBufferSize:  1024,
-		WriteBufferSize: 64 * 1024,
+		ReadBufferSize:  4096,
+		WriteBufferSize: 4096,
 		CheckOrigin: func(r *http.Request) bool {
 			origin := r.Header.Get("Origin")
 			if origin == "" {
-				// Non-browser clients (desktop push socket) omit Origin.
 				return true
 			}
 			if len(h.allowedOrigins) == 0 {
@@ -69,7 +72,7 @@ func NewStreamHandler(
 			if h.allowedOrigins[origin] {
 				return true
 			}
-			log.Printf("[live-stream] CheckOrigin rejected origin=%q allowed=%v", origin, allowedOrigins)
+			log.Printf("[live-stream] CheckOrigin rejected origin=%q", origin)
 			return false
 		},
 	}
@@ -82,9 +85,10 @@ type LiveStreamEmployee struct {
 	Name            string `json:"name"`
 	Department      string `json:"department"`
 	Online          bool   `json:"online"`
+	WsConnected     bool   `json:"wsConnected"` // presence socket GET /api/v1/ws
 	Streaming       bool   `json:"streaming"`
 	StreamAvailable bool   `json:"streamAvailable"`
-	ClientConnected bool   `json:"clientConnected"`
+	ClientConnected bool   `json:"clientConnected"` // live-stream push signaling socket
 	ConsentMissing  bool   `json:"consentMissing"`
 }
 
@@ -98,56 +102,52 @@ func (h *StreamHandler) ListEmployees(c echo.Context) error {
 
 	employees, err := h.employeeRepo.ListAll(c.Request().Context())
 	if err != nil {
-		log.Printf("[live-stream] ListEmployees employees: %v", err)
 		return c.JSON(http.StatusInternalServerError, dto.APIError{
 			Code: http.StatusInternalServerError, Message: "Failed to list employees", Detail: err.Error(),
 		})
 	}
-
 	heartbeats, err := h.taRepo.ListLastHeartbeats(c.Request().Context())
 	if err != nil {
-		log.Printf("[live-stream] ListEmployees heartbeats: %v", err)
 		return c.JSON(http.StatusInternalServerError, dto.APIError{
 			Code: http.StatusInternalServerError, Message: "Failed to load heartbeats", Detail: err.Error(),
 		})
 	}
-
 	accepted, err := h.termsConsentRepo.ListAcceptedEmployeeIDs(c.Request().Context(), stream.FeatureID)
 	if err != nil {
-		log.Printf("[live-stream] ListEmployees consent: %v", err)
 		return c.JSON(http.StatusInternalServerError, dto.APIError{
 			Code: http.StatusInternalServerError, Message: "Failed to load consent", Detail: err.Error(),
 		})
 	}
 
 	now := time.Now().UTC()
+	presenceOn := h.presence != nil && h.presence.Config().Enabled
 	out := make([]LiveStreamEmployee, 0, len(employees))
 	for _, e := range employees {
 		snap := h.hub.Snapshot(e.EmployeeID)
+		wsConnected := presenceOn && h.presence.IsConnected(e.EmployeeID)
 		hb, hasHB := heartbeats[e.EmployeeID]
-		online := hasHB && now.Sub(hb.UTC()) <= liveStreamOnlineWindow
-		hasConsent := accepted[e.EmployeeID]
+		hbOnline := hasHB && now.Sub(hb.UTC()) <= liveStreamOnlineWindow
+		online := wsConnected
+		if !presenceOn {
+			online = hbOnline
+		}
 		out = append(out, LiveStreamEmployee{
 			EmployeeID:      e.EmployeeID,
 			Name:            e.Name,
 			Department:      e.Department,
 			Online:          online,
+			WsConnected:     wsConnected,
 			Streaming:       snap.Streaming,
 			StreamAvailable: snap.StreamAvailable,
 			ClientConnected: snap.ClientConnected,
-			ConsentMissing:  !hasConsent,
+			ConsentMissing:  !accepted[e.EmployeeID],
 		})
 	}
-
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"data":  out,
-		"total": len(out),
-	})
+	return c.JSON(http.StatusOK, map[string]interface{}{"data": out, "total": len(out)})
 }
 
-// IssueWatchTicket handles GET /api/v1/live-stream/watch-ticket?employeeId= (JWTAuth).
-// Browsers cannot reliably send httpOnly cookies on cross-port WebSockets, so the
-// page fetches a short-lived ticket over REST (cookies work) then opens WS with it.
+// IssueWatchTicket handles GET /api/v1/live-stream/watch-ticket?employeeId=.
+// Response includes ICE servers for the browser RTCPeerConnection.
 func (h *StreamHandler) IssueWatchTicket(c echo.Context) error {
 	if !h.hub.Config().Enabled {
 		return c.JSON(http.StatusServiceUnavailable, dto.APIError{
@@ -161,23 +161,19 @@ func (h *StreamHandler) IssueWatchTicket(c echo.Context) error {
 			Code: http.StatusBadRequest, Message: "employeeId is required",
 		})
 	}
-
 	userID, _ := c.Get("user_id").(string)
 	if userID == "" {
 		return c.JSON(http.StatusUnauthorized, dto.APIError{
 			Code: http.StatusUnauthorized, Message: "Authentication required",
 		})
 	}
-
 	if existing, err := h.employeeRepo.GetByEmployeeID(c.Request().Context(), empID); err != nil || existing == nil {
 		return c.JSON(http.StatusNotFound, dto.APIError{
 			Code: http.StatusNotFound, Message: "Employee not found",
 		})
 	}
-
 	accepted, err := h.termsConsentRepo.HasAccepted(c.Request().Context(), empID, stream.FeatureID, "")
 	if err != nil {
-		log.Printf("[live-stream] watch-ticket consent: %v", err)
 		return c.JSON(http.StatusInternalServerError, dto.APIError{
 			Code: http.StatusInternalServerError, Message: "Consent check failed",
 		})
@@ -197,34 +193,47 @@ func (h *StreamHandler) IssueWatchTicket(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"ticket":    ticket,
-		"expiresIn": expiresIn,
+		"ticket":     ticket,
+		"expiresIn":  expiresIn,
+		"iceServers": h.hub.ICEServers(),
 	})
 }
 
-// Push handles GET /api/v1/live-stream/push (DeviceAuth) — client control + JPEG frames.
+type signalMsg struct {
+	Type             string               `json:"type"`
+	SDP              string               `json:"sdp,omitempty"`
+	Candidate        string               `json:"candidate,omitempty"`
+	SDPMLineIndex    *uint16              `json:"sdpMLineIndex,omitempty"`
+	SDPMid           *string              `json:"sdpMid,omitempty"`
+	Index            int                  `json:"index,omitempty"`
+	Platform         string               `json:"platform,omitempty"`
+	StreamAvailable  bool                 `json:"streamAvailable,omitempty"`
+	Version          string               `json:"version,omitempty"`
+	SelectedMonitor  int                  `json:"selectedMonitor,omitempty"`
+	Monitors         []stream.MonitorInfo `json:"monitors,omitempty"`
+}
+
+// Push handles GET /api/v1/live-stream/push (DeviceAuth) — WebRTC publisher signaling.
 func (h *StreamHandler) Push(c echo.Context) error {
 	if !h.hub.Config().Enabled {
 		return c.JSON(http.StatusServiceUnavailable, dto.APIError{
 			Code: http.StatusServiceUnavailable, Message: "Live stream is disabled",
 		})
 	}
-
 	empID, ok := c.Get("employee_id").(string)
 	if !ok || empID == "" {
 		return c.JSON(http.StatusUnauthorized, dto.APIError{
 			Code: http.StatusUnauthorized, Message: "Unauthorized employee context",
 		})
 	}
-
 	accepted, err := h.termsConsentRepo.HasAccepted(c.Request().Context(), empID, stream.FeatureID, "")
 	if err != nil {
-		log.Printf("[live-stream] Push consent check: %v", err)
 		return c.JSON(http.StatusInternalServerError, dto.APIError{
 			Code: http.StatusInternalServerError, Message: "Consent check failed",
 		})
 	}
 	if !accepted {
+		log.Printf("[live-stream] push refused employee=%s reason=consent_required", empID)
 		return c.JSON(http.StatusForbidden, dto.APIError{
 			Code: http.StatusForbidden, Message: "consent_required",
 			Detail: "Employee must accept live_view terms before streaming",
@@ -238,21 +247,33 @@ func (h *StreamHandler) Push(c echo.Context) error {
 	}
 	defer conn.Close()
 
-	ctrl, ok := h.hub.RegisterClient(empID)
+	ctrl, gen, ok := h.hub.RegisterClient(empID)
 	if !ok {
 		_ = writeJSON(conn, map[string]string{"type": "error", "code": "disabled"})
 		return nil
 	}
-	defer h.hub.UnregisterClient(empID)
+	defer h.hub.UnregisterClient(empID, gen)
 
-	log.Printf("[live-stream] push connected employee=%s", empID)
+	log.Printf("[live-stream] push connected employee=%s (webrtc)", empID)
 
 	var writeMu sync.Mutex
+	write := func(v interface{}) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+		return conn.WriteJSON(v)
+	}
+
+	// Advertise ICE servers to the publisher.
+	_ = write(map[string]interface{}{
+		"type":       "ice_servers",
+		"iceServers": h.hub.ICEServers(),
+	})
+
 	done := make(chan struct{})
 	var once sync.Once
 	closeDone := func() { once.Do(func() { close(done) }) }
 
-	// Control → client
 	go func() {
 		defer closeDone()
 		ticker := time.NewTicker(wsPingPeriod)
@@ -267,11 +288,7 @@ func (h *StreamHandler) Push(c echo.Context) error {
 				if ev.Type == "select_monitor" {
 					payload["index"] = ev.MonitorIndex
 				}
-				writeMu.Lock()
-				_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
-				err := conn.WriteJSON(payload)
-				writeMu.Unlock()
-				if err != nil {
+				if err := write(payload); err != nil {
 					return
 				}
 			case <-ticker.C:
@@ -295,7 +312,7 @@ func (h *StreamHandler) Push(c echo.Context) error {
 	})
 
 	for {
-		msgType, data, err := conn.ReadMessage()
+		_, data, err := conn.ReadMessage()
 		if err != nil {
 			closeDone()
 			log.Printf("[live-stream] push disconnected employee=%s: %v", empID, err)
@@ -303,61 +320,70 @@ func (h *StreamHandler) Push(c echo.Context) error {
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(wsPongWait))
 
-		switch msgType {
-		case websocket.BinaryMessage:
-			if err := h.hub.PushFrame(empID, data); err != nil && err != stream.ErrNotWanted {
-				if err == stream.ErrFrameTooLarge {
-					log.Printf("[live-stream] drop oversized frame employee=%s size=%d", empID, len(data))
-					continue
-				}
-				log.Printf("[live-stream] PushFrame employee=%s: %v", empID, err)
-			}
-		case websocket.TextMessage:
-			h.handlePushText(empID, data)
+		var msg signalMsg
+		if json.Unmarshal(data, &msg) != nil {
+			continue
 		}
-	}
-}
-
-func (h *StreamHandler) handlePushText(empID string, data []byte) {
-	var msg struct {
-		Type             string               `json:"type"`
-		Platform         string               `json:"platform"`
-		StreamAvailable  bool                 `json:"streamAvailable"`
-		Version          string               `json:"version"`
-		SelectedMonitor  int                  `json:"selectedMonitor"`
-		Monitors         []stream.MonitorInfo `json:"monitors"`
-	}
-	if err := json.Unmarshal(data, &msg); err != nil {
-		return
-	}
-	if msg.Type == "hello" {
-		h.hub.SetCapability(empID, stream.Capability{
-			Platform:        msg.Platform,
-			StreamAvailable: msg.StreamAvailable,
-			Version:         msg.Version,
-			Monitors:        msg.Monitors,
-			SelectedMonitor: msg.SelectedMonitor,
-		})
-		log.Printf("[live-stream] hello employee=%s platform=%s available=%v monitors=%d selected=%d",
-			empID, msg.Platform, msg.StreamAvailable, len(msg.Monitors), msg.SelectedMonitor)
+		switch msg.Type {
+		case "hello":
+			h.hub.SetCapability(empID, stream.Capability{
+				Platform:        msg.Platform,
+				StreamAvailable: msg.StreamAvailable,
+				Version:         msg.Version,
+				Monitors:        msg.Monitors,
+				SelectedMonitor: msg.SelectedMonitor,
+			})
+			log.Printf("[live-stream] hello employee=%s platform=%s available=%v monitors=%d",
+				empID, msg.Platform, msg.StreamAvailable, len(msg.Monitors))
+		case "offer":
+			answer, err := h.hub.SFU().AcceptPublisherOffer(empID, msg.SDP, func(c webrtc.ICECandidateInit) {
+				payload := map[string]interface{}{
+					"type":      "ice",
+					"candidate": c.Candidate,
+				}
+				if c.SDPMLineIndex != nil {
+					payload["sdpMLineIndex"] = *c.SDPMLineIndex
+				}
+				if c.SDPMid != nil {
+					payload["sdpMid"] = *c.SDPMid
+				}
+				_ = write(payload)
+			})
+			if err != nil {
+				log.Printf("[live-stream] publisher offer employee=%s: %v", empID, err)
+				_ = write(map[string]string{"type": "error", "code": "offer_failed"})
+				continue
+			}
+			log.Printf("[live-stream] publisher offer accepted employee=%s", empID)
+			_ = write(map[string]string{"type": "answer", "sdp": answer})
+		case "ice":
+			cand := webrtc.ICECandidateInit{Candidate: msg.Candidate}
+			if msg.SDPMLineIndex != nil {
+				cand.SDPMLineIndex = msg.SDPMLineIndex
+			}
+			if msg.SDPMid != nil {
+				cand.SDPMid = msg.SDPMid
+			}
+			if err := h.hub.SFU().AddPublisherICE(empID, cand); err != nil {
+				log.Printf("[live-stream] publisher ice employee=%s: %v", empID, err)
+			}
+		}
 	}
 }
 
 func statusPayload(snap stream.EmployeeSnapshot) map[string]interface{} {
 	return map[string]interface{}{
-		"type":             "status",
-		"streaming":        snap.Streaming,
-		"streamAvailable":  snap.StreamAvailable,
-		"clientConnected":  snap.ClientConnected,
-		"consentMissing":   false,
-		"monitors":         snap.Monitors,
-		"selectedMonitor":  snap.SelectedMonitor,
+		"type":            "status",
+		"streaming":       snap.Streaming,
+		"streamAvailable": snap.StreamAvailable,
+		"clientConnected": snap.ClientConnected,
+		"consentMissing":  false,
+		"monitors":        snap.Monitors,
+		"selectedMonitor": snap.SelectedMonitor,
 	}
 }
 
-// Watch handles GET /api/v1/live-stream/watch?employeeId=&ticket= (ticket auth).
-// Auth is via a one-time ticket from IssueWatchTicket — not JWT middleware — because
-// browsers often omit httpOnly cookies on cross-port WebSocket handshakes.
+// Watch handles GET /api/v1/live-stream/watch?employeeId=&ticket= — WebRTC subscriber signaling.
 func (h *StreamHandler) Watch(c echo.Context) error {
 	if !h.hub.Config().Enabled {
 		return c.JSON(http.StatusServiceUnavailable, dto.APIError{
@@ -372,23 +398,18 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 			Code: http.StatusBadRequest, Message: "employeeId and ticket are required",
 		})
 	}
-
 	if _, err := h.hub.ConsumeWatchTicket(ticket, empID); err != nil {
 		return c.JSON(http.StatusUnauthorized, dto.APIError{
 			Code: http.StatusUnauthorized, Message: "invalid_or_expired_ticket",
 		})
 	}
-
 	if existing, err := h.employeeRepo.GetByEmployeeID(c.Request().Context(), empID); err != nil || existing == nil {
 		return c.JSON(http.StatusNotFound, dto.APIError{
 			Code: http.StatusNotFound, Message: "Employee not found",
 		})
 	}
-
-	// Consent already checked when minting the ticket; re-check so a revoke mid-flight blocks.
 	accepted, err := h.termsConsentRepo.HasAccepted(c.Request().Context(), empID, stream.FeatureID, "")
 	if err != nil {
-		log.Printf("[live-stream] Watch consent check: %v", err)
 		return c.JSON(http.StatusInternalServerError, dto.APIError{
 			Code: http.StatusInternalServerError, Message: "Consent check failed",
 		})
@@ -396,7 +417,6 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 	if !accepted {
 		return c.JSON(http.StatusForbidden, dto.APIError{
 			Code: http.StatusForbidden, Message: "consent_required",
-			Detail: "Employee has not accepted live_view terms",
 		})
 	}
 
@@ -407,37 +427,35 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 	}
 	defer conn.Close()
 
-	watcherID, frames, err := h.hub.Subscribe(empID)
+	watcherID, err := h.hub.Subscribe(empID)
 	if err != nil {
-		code := http.StatusConflict
-		msg := err.Error()
-		if err == stream.ErrTooManyStreams || err == stream.ErrTooManyWatchers {
-			code = http.StatusTooManyRequests
-		}
-		// Connection already upgraded — send error JSON then close.
-		_ = writeJSON(conn, map[string]interface{}{"type": "error", "code": msg, "httpStatus": code})
+		_ = writeJSON(conn, map[string]interface{}{"type": "error", "code": err.Error()})
 		return nil
 	}
 	defer h.hub.Unsubscribe(empID, watcherID)
 
-	log.Printf("[live-stream] watch connected employee=%s watcher=%d", empID, watcherID)
-
-	snap := h.hub.Snapshot(empID)
-	_ = writeJSON(conn, statusPayload(snap))
-
-	// Dev-only synthetic frames when no client is pushing.
-	var testStop chan struct{}
-	if h.hub.Config().TestFrame {
-		testStop = make(chan struct{})
-		go h.testFrameLoop(empID, testStop)
-		defer close(testStop)
-	}
+	log.Printf("[live-stream] watch connected employee=%s watcher=%d (webrtc)", empID, watcherID)
 
 	var writeMu sync.Mutex
+	write := func(v interface{}) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+		return conn.WriteJSON(v)
+	}
+
+	_ = write(map[string]interface{}{
+		"type":       "ice_servers",
+		"iceServers": h.hub.ICEServers(),
+	})
+	_ = write(statusPayload(h.hub.Snapshot(empID)))
+
 	done := make(chan struct{})
 	var once sync.Once
 	closeDone := func() { once.Do(func() { close(done) }) }
 
+	// Late-track renegotiation: registered only when an answer went out without media.
+	trackNotify := make(chan struct{}, 1)
 	go func() {
 		defer closeDone()
 		ticker := time.NewTicker(wsPingPeriod)
@@ -446,24 +464,12 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 		defer statusTicker.Stop()
 		for {
 			select {
-			case fr, ok := <-frames:
-				if !ok {
-					return
-				}
-				writeMu.Lock()
-				_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
-				err := conn.WriteMessage(websocket.BinaryMessage, fr.JPEG)
-				writeMu.Unlock()
-				if err != nil {
+			case <-trackNotify:
+				if err := write(map[string]string{"type": "track_ready"}); err != nil {
 					return
 				}
 			case <-statusTicker.C:
-				s := h.hub.Snapshot(empID)
-				writeMu.Lock()
-				_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
-				err := conn.WriteJSON(statusPayload(s))
-				writeMu.Unlock()
-				if err != nil {
+				if err := write(statusPayload(h.hub.Snapshot(empID))); err != nil {
 					return
 				}
 			case <-ticker.C:
@@ -487,74 +493,74 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 	})
 
 	for {
-		msgType, data, err := conn.ReadMessage()
+		_, data, err := conn.ReadMessage()
 		if err != nil {
 			closeDone()
 			log.Printf("[live-stream] watch disconnected employee=%s watcher=%d", empID, watcherID)
 			return nil
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(wsPongWait))
-		if msgType != websocket.TextMessage {
-			continue
-		}
-		var msg struct {
-			Type  string `json:"type"`
-			Index int    `json:"index"`
-		}
+
+		var msg signalMsg
 		if json.Unmarshal(data, &msg) != nil {
 			continue
 		}
-		if msg.Type == "select_monitor" {
+		switch msg.Type {
+		case "select_monitor":
 			h.hub.SelectMonitor(empID, msg.Index)
-			log.Printf("[live-stream] select_monitor employee=%s index=%d", empID, msg.Index)
-		}
-	}
-}
-
-func (h *StreamHandler) testFrameLoop(empID string, stop <-chan struct{}) {
-	// Minimal valid 1x1 JPEG
-	jpeg := []byte{
-		0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01,
-		0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xff, 0xdb, 0x00, 0x43,
-		0x00, 0x08, 0x06, 0x06, 0x07, 0x06, 0x05, 0x08, 0x07, 0x07, 0x07, 0x09,
-		0x09, 0x08, 0x0a, 0x0c, 0x14, 0x0d, 0x0c, 0x0b, 0x0b, 0x0c, 0x19, 0x12,
-		0x13, 0x0f, 0x14, 0x1d, 0x1a, 0x1f, 0x1e, 0x1d, 0x1a, 0x1c, 0x1c, 0x20,
-		0x24, 0x2e, 0x27, 0x20, 0x22, 0x2c, 0x23, 0x1c, 0x1c, 0x28, 0x37, 0x29,
-		0x2c, 0x30, 0x31, 0x34, 0x34, 0x34, 0x1f, 0x27, 0x39, 0x3d, 0x38, 0x32,
-		0x3c, 0x2e, 0x33, 0x34, 0x32, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x01,
-		0x00, 0x01, 0x01, 0x01, 0x11, 0x00, 0xff, 0xc4, 0x00, 0x1f, 0x00, 0x00,
-		0x01, 0x05, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-		0x09, 0x0a, 0x0b, 0xff, 0xc4, 0x00, 0xb5, 0x10, 0x00, 0x02, 0x01, 0x03,
-		0x03, 0x02, 0x04, 0x03, 0x05, 0x05, 0x04, 0x04, 0x00, 0x00, 0x01, 0x7d,
-		0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12, 0x21, 0x31, 0x41, 0x06,
-		0x13, 0x51, 0x61, 0x07, 0x22, 0x71, 0x14, 0x32, 0x81, 0x91, 0xa1, 0x08,
-		0x23, 0x42, 0xb1, 0xc1, 0x15, 0x52, 0xd1, 0xf0, 0x24, 0x33, 0x62, 0x72,
-		0x82, 0x09, 0x0a, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x25, 0x26, 0x27, 0x28,
-		0x29, 0x2a, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x43, 0x44, 0x45,
-		0x46, 0x47, 0x48, 0x49, 0x4a, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59,
-		0x5a, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x73, 0x74, 0x75,
-		0x76, 0x77, 0x78, 0x79, 0x7a, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89,
-		0x8a, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0xa2, 0xa3,
-		0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6,
-		0xb7, 0xb8, 0xb9, 0xba, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9,
-		0xca, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xe1, 0xe2,
-		0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xf1, 0xf2, 0xf3, 0xf4,
-		0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xff, 0xda, 0x00, 0x08, 0x01, 0x01,
-		0x00, 0x00, 0x3f, 0x00, 0x7b, 0xdf, 0xff, 0xd9,
-	}
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-stop:
-			return
-		case <-ticker.C:
-			snap := h.hub.Snapshot(empID)
-			if snap.ClientConnected {
-				continue // real client is pushing
+		case "offer":
+			sdp := msg.SDP
+			go func() {
+				h.hub.SFU().UnwatchTrackReady(empID, watcherID)
+				answer, withTrack, err := h.hub.SFU().AcceptSubscriberOffer(empID, watcherID, sdp, func(c webrtc.ICECandidateInit) {
+					payload := map[string]interface{}{
+						"type":      "ice",
+						"candidate": c.Candidate,
+					}
+					if c.SDPMLineIndex != nil {
+						payload["sdpMLineIndex"] = *c.SDPMLineIndex
+					}
+					if c.SDPMid != nil {
+						payload["sdpMid"] = *c.SDPMid
+					}
+					_ = write(payload)
+				})
+				if err != nil {
+					if errors.Is(err, stream.ErrSuperseded) {
+						log.Printf("[live-stream] subscriber offer superseded employee=%s watcher=%d", empID, watcherID)
+						return
+					}
+					log.Printf("[live-stream] subscriber offer employee=%s: %v", empID, err)
+					_ = write(map[string]string{"type": "error", "code": "offer_failed"})
+					return
+				}
+				_ = write(map[string]string{"type": "answer", "sdp": answer})
+				if withTrack {
+					return
+				}
+				// Answer had no media — wait for publisher track, then one renegotiate.
+				ready := h.hub.SFU().WatchTrackReady(empID, watcherID)
+				go func() {
+					select {
+					case <-ready:
+						select {
+						case trackNotify <- struct{}{}:
+						default:
+						}
+					case <-done:
+					}
+					h.hub.SFU().UnwatchTrackReady(empID, watcherID)
+				}()
+			}()
+		case "ice":
+			cand := webrtc.ICECandidateInit{Candidate: msg.Candidate}
+			if msg.SDPMLineIndex != nil {
+				cand.SDPMLineIndex = msg.SDPMLineIndex
 			}
-			_ = h.hub.InjectTestFrame(empID, jpeg)
+			if msg.SDPMid != nil {
+				cand.SDPMid = msg.SDPMid
+			}
+			_ = h.hub.SFU().AddSubscriberICE(empID, watcherID, cand)
 		}
 	}
 }

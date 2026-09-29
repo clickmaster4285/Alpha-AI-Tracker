@@ -4,7 +4,7 @@ Annotated node tree for the whole monorepo. Every directory that holds source is
 
 **How to read it:** ⭐ marks an entry point or a single-source-of-truth file — start there. 🔒 marks a file with a rule attached; changing it without reading the rule breaks something in the field. Generated / vendored trees are marked and should never be edited by hand.
 
-*Last audited: 2026-09-04. Companion docs: [AGENTS.md](./AGENTS.md) (rules + completion state), [WORKFLOW.md](./WORKFLOW.md) (how work moves through the tree), [client/ARCHITECTURE.md](./client/ARCHITECTURE.md), [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md), [server/ARCHITECTURE.md](./server/ARCHITECTURE.md), [web/ARCHITECTURE.md](./web/ARCHITECTURE.md).*
+*Last audited: 2026-09-29 (live stream theater + per-tile FPS + WebRTC SFU V2). Companion docs: [AGENTS.md](./AGENTS.md) (rules + completion state), [WORKFLOW.md](./WORKFLOW.md) (how work moves through the tree), [client/ARCHITECTURE.md](./client/ARCHITECTURE.md), [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md), [server/ARCHITECTURE.md](./server/ARCHITECTURE.md), [web/ARCHITECTURE.md](./web/ARCHITECTURE.md).*
 
 ---
 
@@ -75,6 +75,12 @@ client/
 │
 ├── Services/                        long-running hosted services and OS integration
 │   ├── LogCollectorService.cs    ⭐ the heartbeat: collect → persist → sync loop
+│   ├── SyncService.cs               dedicated sync drain (byte-bounded, gzip, backoff)
+│   ├── LiveStreamClient.cs          WebRTC VP8 publisher → /live-stream/push (DeviceAuth)
+│   ├── ScreenCaptureService.cs      Windows GDI monitor capture → BGRA (DropOldest)
+│   ├── WsClient.cs                  presence WS → /api/v1/ws (Online/Offline; not media)
+│   ├── Streaming/
+│   │   └── ScreenVp8Encoder.cs      libvpx wrapper that honors TargetKbps
 │   ├── DesktopEventService.cs       hosts the event bus
 │   ├── HardwareDeviceWatcherService.cs  plug/unplug tracking
 │   ├── AutoStartService.cs          per-OS auto-start registration
@@ -82,7 +88,7 @@ client/
 │   ├── FileLoggerProvider.cs        file sink → ~/.config/<pkg>/ (never the install dir)
 │   └── Watchers/                    ATSPIEventWatcher · FileSystemEventWatcher · RecentFilesWatcher ·
 │                                    WindowsExplorerWatcher · IExplorerWindowProvider
-│
+│                                    · SystemEventWatcher · InstalledSoftwareWatcher · IdleDetector …
 ├── Platform/                        one ProcessCollector.cs per OS — the only place OS branching lives
 │   ├── Linux/  Windows/  MacOS/
 │
@@ -177,16 +183,16 @@ server/
 │   │                            device_hardware_info · employee_app_link · device ·
 │   │                            status_tables · rbac · refresh_token
 │   ├── dto/                     wire shapes: user_dto · employee_dto · new_schema_dto · rbac_dto
-│   └── jobs/                    staleness_sweep.go (stale catalog links)
-│                                · retention_sweep.go (hourly data purge, RETENTION_DAYS)
-│                                · session_lifecycle_sweep.go (1-min ACTIVE→STALE→CLOSED sweep, SESSION_STALE_AFTER_MINUTES / SESSION_CLOSE_AFTER_HOURS)
+│   ├── jobs/                    staleness_sweep.go (stale catalog links)
+│   │                            · retention_sweep.go (hourly data purge, RETENTION_DAYS)
+│   │                            · session_lifecycle_sweep.go (1-min ACTIVE→STALE→CLOSED sweep)
+│   └── stream/                  live preview WebRTC SFU — hub.go + sfu.go (preview only; no DB frames)
 │
-├── migrations/               ⭐ 33 sequential SQL files, 001_init → 032_app_sessions_usage_index (composite index for /app-sessions/usage).
-│                                Append-only: never edit a migration that has been applied.
+├── migrations/               ⭐ sequential SQL files (001…). Append-only: never edit applied migrations.
 └── bin/                      ⚠️ build output
 ```
 
-**The `new_schema_*` triple** (`handler` / `service` / `repo` / `dto`) is the client-facing ingest path — that is where a client-side contract change lands on the server, not in the employee/user files.
+**The `new_schema_*` triple** (`handler` / `service` / `repo` / `dto`) is the client-facing ingest path — that is where a client-side contract change lands on the server, not in the employee/user files. Live-stream signaling lands in `internal/stream/` + the stream handler from `router.go`.
 
 ---
 
@@ -220,13 +226,17 @@ web/
     │       ├── attendance · shifts · timesheets · hours-insights
     │       ├── goals · kpis · projects · productivity-scoring
     │       ├── dlp-alerts · dlp-rules · audit-log · emails
-    │       ├── screenshots · live-stream · gps-location
+    │       ├── screenshots · live-stream (WebRTC SFU; FPS; Open theater → /live-stream/theater) · gps-location
     │       └── settings (billing · compliance · notifications · security ·
-    │                     tracking · user-management)  ← legacy permissions page deleted 2026-08-25
+    │                     tracking · user-management · terms-and-conditions · profile)
+    │
+    │   (live-popout)/                 full-bleed theater shell (no AppSidebar)
+    │       └── live-stream/theater/   /live-stream/theater?ids= watch wall
     │
     ├── components/
     │   ├── layout/                AppLayout · AppSidebar (Device Specs + Employee Journey are
     │   │                          collapsible sections) · TopBar · ProtectedRoute
+    │   ├── live-stream/           WatchTile (FPS) · EmployeeSidebar · PreviewGrid · selection helpers
     │   ├── EmployeeSelector.tsx   searchable employee picker (shared query with EmployeePage)
     │   ├── employees/             EmployeePage shell · InventoryTable · EmptyState · DeviceClassIcon
     │   ├── journey/               FocusTime (foreground/background stacked bar) · ActivityFilters (search + date presets)
@@ -234,8 +244,14 @@ web/
     │   ├── NavLink.tsx · providers.tsx
     │   └── ui/                    ~50 shadcn primitives — generated; regenerate rather than hand-edit
     │
+    ├── hooks/
+    │   ├── use-url-query-state.ts    ⭐ URL-synced filters (never router.* inside setState updater)
+    │   ├── use-video-fps.ts          decoded FPS for live-stream <video> tiles
+    │   └── use-url-activity-filter.ts · use-employee-detail.ts …
+    │
     ├── lib/
     │   ├── api.ts              ⭐ every server call goes through here — the client-side contract
+    │   ├── useLiveStreamSocket.ts  WebRTC watch PC + watch WS for /live-stream
     │   ├── format.ts              shared formatters (duration · seconds · MB · dates)
     │   ├── auth.tsx               session context
     │   ├── permissions.tsx        SERVER-driven RBAC gating (submodule keys from user.permissions)

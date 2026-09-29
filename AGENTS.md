@@ -1,7 +1,23 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-09-18
+> **Last audited:** 2026-09-29
 > **Changelog:**
+>
+> - 2026-09-29: **Web live-stream — per-tile FPS + full-bleed theater popout.**
+>   - Shared components under `web/src/components/live-stream/` (`LiveStreamWatchTile`,
+>     `LiveStreamEmployeeSidebar`, `LiveStreamPreviewGrid`, selection helpers).
+>   - Each live tile shows decoded **FPS** (`hooks/use-video-fps.ts` via `requestVideoFrameCallback`).
+>   - **Open theater** opens `/live-stream/theater?ids=` in a new browser tab (route group
+>     `(live-popout)` — ProtectedRoute + RouteGuard, **no** AppSidebar/TopBar). Same employee
+>     sidebar + multi-tile preview (max 4). Note: browsers always show some address chrome on
+>     new tabs/windows; a fully URL-less window is not allowed for web apps.
+>
+> - 2026-09-29: **Live stream V2 — JPEG relay → WebRTC SFU (VP8) + dedicated presence WS + encode quality fix.**
+>   Branch `feature/live_streamV2.0` (client **1.2.2**). Preview remains **ephemeral** (never stored in DB/disk).
+>   - **Server:** Pion **SFU** (`server/internal/stream/sfu.go`) RTP-forwards publisher → watchers; hub keeps signaling/consent/`select_monitor`/idle reap (JPEG frame mailbox removed). Env: `LIVE_STREAM_*`, `WEBRTC_MAX_BITRATE_KBPS` / `WEBRTC_STUN_URLS` / optional TURN, `PRESENCE_WS_*`. Routes unchanged shape: DeviceAuth `GET /live-stream/push` + **`GET /ws`** (presence); JWT `GET /live-stream/employees`, `watch-ticket`, `watch`.
+>   - **Client:** `LiveStreamClient` publishes SIPSorcery WebRTC **VP8** after server `start`; capture still GDI/`ScreenCaptureService` (Windows). **`ScreenVp8Encoder`** replaces SIPSorcery `VpxVideoEncoder` — upstream `Vp8Codec.InitialiseEncoder` set `RcTargetBitrate` then called `VpxCodecEncConfigDefault` (wiping bitrate → ~256 kbps). Fixed order + VBR + ~1s keyframes (`ALPHA_STREAM_KEYFRAME_INTERVAL_SEC`). New **`WsClient`** → `GET /api/v1/ws` for Online/Offline (`ALPHA_WS_*`, independent of stream). Env: `ALPHA_STREAM_ENABLED/FPS/MAX_WIDTH/MAX_BITRATE_KBPS/KEYFRAME_INTERVAL_SEC`, `ALPHA_WS_*` — re-bake `config.enc` for installers.
+>   - **Web:** `/live-stream` uses `<video>` + `useLiveStreamSocket` (RTCPeerConnection); multi-tile `?ids=` (max 4); monitor dropdown unchanged. **`useUrlQueryState`:** never call `router.replace` inside a `setState` updater (was updating `LinkComponent` while `LiveStreamInner` rendered).
+>   - Linux capture still deferred. Verified: `dotnet build` 0/0; live encode logs show ~50–270 KB I-frames at 1680×1050 with `ScreenVp8Encoder`.
 >
 > - 2026-09-18: **Live stream Phase 1 (Windows) + Phase 2 multi-monitor + app-items index fixes.**
 >   - **Server:** WS JPEG relay hub (`LIVE_STREAM_*`); online window 3 min; migrations **040/041** drop unsafe btree indexes on long `url`/`identifier`; Phase 2 `select_monitor` + monitors on hello/status.
@@ -893,22 +909,25 @@ Alpha AI Tracker is an employee monitoring and productivity analytics system con
 
 ```mermaid
 flowchart LR
-    EMP[Employee Machine\nDesktop Client\n.NET 10 / Avalonia UI] -->|REST / JSON\nPOST /api/v1/{device-hardware,\ninstalled-apps,\ninstalled-packages,network-info,\nsession-events,app-sessions,app-items}/sync| SRV[Go Server\nEcho v4 / PostgreSQL\nPort 8080]
-    EMP -->|POST /api/v1/auth/employee-login| SRV
+ EMP[Employee Machine\nDesktop Client\n.NET 10 / Avalonia UI] -->|REST / JSON\nPOST /api/v1/{device-hardware,\ninstalled-apps,\ninstalled-packages,network-info,\nsession-events,app-sessions,app-items}/sync| SRV[Go Server\nEcho v4 / PostgreSQL\nPort 8080]
+ EMP -->|POST /api/v1/auth/employee-login| SRV
+ EMP -->|WS DeviceAuth\n/live-stream/push + WebRTC VP8| SRV
+ EMP -->|WS DeviceAuth\n/ws presence| SRV
 
-    SRV -->|Query / Store| PG[(PostgreSQL)]
-    SRV -->|Store/Validate\nOne-Time Secrets| RD[(Redis\n5-min TTL)]
+ SRV -->|Query / Store| PG[(PostgreSQL)]
+ SRV -->|Store/Validate\nOne-Time Secrets| RD[(Redis\n5-min TTL)]
 
-    WEB[Web Dashboard\nNext.js 15 / React 18\nPort 3000] -->|REST / JSON\nhttpOnly Cookie Auth\nvia Next.js Rewrites proxy| SRV
+ WEB[Web Dashboard\nNext.js 15 / React 18\nPort 3000] -->|REST / JSON\nhttpOnly Cookie Auth\nvia Next.js Rewrites proxy| SRV
+ WEB -->|WS JWT watch-ticket\n/live-stream/watch + WebRTC| SRV
 
-    note_ws[⚠️ WebSocket / SSE / polling:\nNOT IMPLEMENTED\nWeb dashboard polls no API\nfor real-time updates]
-  
-    style EMP fill:#2d2a4e,color:#fff
-    style SRV fill:#1a3a4a,color:#fff
-    style WEB fill:#3a2a1a,color:#fff
-    style PG fill:#2d4a2d,color:#fff
-    style RD fill:#4a2d2d,color:#fff
-    style note_ws fill:#5a3a3a,color:#fff,stroke-dasharray: 5 5
+ note_ws[WebRTC SFU live preview\n+ presence WS (Online/Offline).\nMost other dashboards still poll.]
+ 
+ style EMP fill:#2d2a4e,color:#fff
+ style SRV fill:#1a3a4a,color:#fff
+ style WEB fill:#3a2a1a,color:#fff
+ style PG fill:#2d4a2d,color:#fff
+ style RD fill:#4a2d2d,color:#fff
+ style note_ws fill:#3a4a5a,color:#fff
 ```
 
 > All 11 sync endpoints exist on the server (7 original + app-status/hardware-devices/permission-status/storage-devices, 2026-08-11). `activity-logs/sync` and `shell-commands/sync` were removed from the product entirely (client + server).
@@ -954,6 +973,8 @@ flowchart LR
 | Hardware devices sync (client → server)    | REST POST`/api/v1/hardware-devices/sync`    | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
 | Permission status sync (client → server)   | REST POST`/api/v1/permission-status/sync`   | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
 | Storage devices sync (client → server)     | REST POST`/api/v1/storage-devices/sync`     | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
+| Live stream push (client → SFU)            | WS `GET /api/v1/live-stream/push` + WebRTC VP8 | `Authorization: Device <token>`    | Signaling JSON (`hello`/`offer`/`ice`/`start`/`stop`/`select_monitor`); media via WebRTC |
+| Presence keep-alive (client → server)      | WS `GET /api/v1/ws`                         | `Authorization: Device <token>`       | Ping/pong; drives Online/`wsConnected` on `/live-stream` |
 
 ### Server ↔ Web
 
@@ -961,6 +982,7 @@ flowchart LR
 | ----------------- | -------------------------------------------- | ----------------------------------- | ---------------------------------------- |
 | Web admin login   | REST POST`/api/v1/auth/login`              | email + password → httpOnly cookie | JSON`{email, password}` → sets cookie |
 | All web API calls | REST via Next.js rewrites (`/api/*` proxy) | httpOnly cookie (auto-sent)         | JSON request/response                    |
+| Live stream watch (web → SFU) | WS `GET /api/v1/live-stream/watch` + WebRTC | Short-lived watch ticket (JWT `watch-ticket`) | Signaling + remote MediaStream on `<video>` |
 
 ### Contract Documentation
 
@@ -1050,6 +1072,7 @@ flowchart LR
 - **Single-instance activation** — a second user launch signals the running instance (named pipe `alpha-ai-tracker-activation`) to raise its window; `--background`/`--minimized` relaunches exit quietly
 - **Six-page GUI** (2026-08-10) — `MainWindow` is a router over four exclusive states; pages live in `Views/Pages/`: Splash (boot checklist), Login, PermissionSetup (stepper), and behind the nav rail Dashboard (identity + status tiles + pipeline health + attached devices), System Specs (machine/compute/network/storage/peripherals) and Installed Applications (searchable apps + packages inventory, virtualized). One VM per page, all Transient in DI. Details: [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md)
 - **Runtime branding from a single source** — `Core/AppInfo.cs` resolves the product name, tagline, initials, publisher, copyright and version from the embedded `APP_IDENTIFIERS` + `VERSION`; no XAML or C# literal names anywhere in the UI. Editing either file re-brands both the app and the installers (§6 → *Branding-Single-Source Rule*)
+- **Live stream WebRTC publisher (2026-09-29, Windows)** — `LiveStreamClient` + `ScreenCaptureService` + `ScreenVp8Encoder` (fixes SIPSorcery bitrate wipe); gated on `ALPHA_STREAM_*`; media only while an admin watches. **`WsClient`** presence socket (`ALPHA_WS_*`) independent of stream
 
 **What's missing:**
 
@@ -1076,6 +1099,8 @@ flowchart LR
 - **Employee Journey module** (2026-08-18) — Session Timeline, App Usage, and Web Activity are live-API; **Screenshots** and **Location Trail** show Coming Soon (`LOCATION_UI_ENABLED=false` in `web/src/lib/locationUi.ts`; live code in `LocationTrailLive.tsx`)
 - **Device Specs module** (2026-08-18) — four real-API pages over the aggregate `GET /employees/:id/detail`: Hardware Overview, Installed Software (Applications/Packages tabs + search), Peripherals, Permissions. This replaced the old `/users/[id]` single-page detail view (deleted)
 - Shared building blocks: `EmployeePage` shell (header + picker + loading/error/no-selection states, optional `fetchDetail`), `hooks/use-employee-detail.ts`, `lib/format.ts`, `EmployeeSelector`, `EmptyState`/`InventoryTable`/`FocusTime`/`DeviceClassIcon`
+- **Web Infinite-Scroll Rule** + **URL-Synced Filters Rule** — see §6. `useUrlQueryState` must never call `router.push`/`replace` inside a `setState` updater (updates Next `LinkComponent` while another component is rendering).
+- **Live stream (WebRTC SFU, 2026-09-29)** — `/live-stream` multi-tile preview (`?ids=`, max 4); per-tile **FPS** badge; **Open theater** → `/live-stream/theater` (full-bleed popout, no app chrome); shared `components/live-stream/*`; `useLiveStreamSocket` + `<video>`; consent `live_view`; Windows publisher only
 - Departments page — real API calls (CRUD)
 - Logs/Comprehensive page — real API calls (now using new app_sessions API)
 - Dashboard — fully live-API stat tiles (employees total + tracked/untracked split, departments count, app sessions ·24h, web pages ·24h) since the 2026-08-25 mock purge; analytics cards link the journey modules until chart endpoints exist
@@ -1085,10 +1110,11 @@ flowchart LR
 - **~35 of ~50 pages are scaffolding** — no backend endpoint exists yet; the former localStorage mocks were removed 2026-08-25 and those pages now render honest empty states instead
 - **Server-side permission enforcement** — RBAC grants are enforced only in the web client (sidebar + RouteGuard); API middleware has no role checks
 - **No error boundaries** — uncaught React errors crash the page
-- **No real-time updates** — no polling, WebSocket, or SSE
+- **No real-time updates on most pages** — live-stream + presence WS are real-time; other dashboards still poll or are static
 - **No accessibility testing** — many interactive elements lack aria attributes
 - **No unit tests** — 0 test files
 - **GitHub release download** fetches from `clickmaster4285/Alpha-AI-Tracker`, not the org repo
+- **Live stream Linux capture** — still deferred (Windows GDI only)
 
 ---
 
@@ -1161,6 +1187,7 @@ server in the same query that returns the row — never built client-side from a
 **How to apply:**
 
 - Use `useUrlQueryState<T>` in `web/src/hooks/use-url-query-state.ts` for ad-hoc filter shapes. It returns `[value, setValue]`; `value` is a typed `Record<keyof T, string>` and `setValue(patch)` writes only the supplied keys (preserves unrelated query keys). Empty / null / undefined values are stripped from the URL.
+- **Never call `router.push` / `router.replace` inside a React `setState` updater** — compute the next URL outside the updater (use a `valueRef` for merges). Calling the router from an updater updates sibling Next components (`LinkComponent`) while the page is still rendering and throws in React 19.
 - Use `useUrlActivityFilter` in `web/src/hooks/use-url-activity-filter.ts` for the rich `{ search, preset, dateFrom, dateTo }` shape consumed by `ActivityFilters`. Presets are encoded as short keys (`today`, `7d`, `all`, `custom`); custom ranges are stored as `from=YYYY-MM-DD&to=YYYY-MM-DD`.
 - For search inputs, keep a LOCAL debounced mirror (~400 ms) of the URL value — the URL holds the canonical value, the mirror drives the `<input>` so rapid keystrokes don't spam `router.replace` + re-fetch.
 - React Query / `useQueries` keys MUST be derived from the URL state, not from local `useState`. The key changes when the URL changes; that's the trigger for the re-fetch.

@@ -1,7 +1,18 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-09-14 (per-feature Terms & Conditions consent framework — migration 036)
+> **Last audited:** 2026-09-29 (live stream WebRTC SFU + presence WS)
 > **Changelog:**
+> - 2026-09-29: **Live stream V2 — JPEG relay → Pion WebRTC SFU + dedicated presence WS.**
+>   `internal/stream/sfu.go` RTP-forwards publisher tracks to watchers (no re-encode, no frame
+>   storage). Hub keeps DeviceAuth push + JWT watch-ticket signaling, consent (`live_view`),
+>   `select_monitor`, idle reap, caps. JPEG mailbox / `LIVE_STREAM_MAX_FPS` / frame-byte caps
+>   removed. Env: `LIVE_STREAM_ENABLED`, `LIVE_STREAM_MAX_STREAMS`,
+>   `LIVE_STREAM_MAX_WATCHERS_PER_EMPLOYEE`, `LIVE_STREAM_IDLE_SEC`, `WEBRTC_MAX_BITRATE_KBPS`
+>   (ops advertise; client encode uses `ALPHA_STREAM_MAX_BITRATE_KBPS`), `WEBRTC_STUN_URLS`,
+>   optional `WEBRTC_TURN_*`, `PRESENCE_WS_ENABLED`, `PRESENCE_WS_MAX_CONNECTIONS`.
+>   Routes: DeviceAuth `GET /live-stream/push`, `GET /ws`; JWT `GET /live-stream/employees`,
+>   `GET /live-stream/watch-ticket`; ticketed `GET /live-stream/watch`. Client-vs-Web Auth
+>   Separation Rule unchanged. Verified: `go build`/`go vet` clean.
 > - 2026-09-14: **Per-feature T&C consent audit trail.** Migration 036 creates append-only `terms_consent` table (`employee_id`, `feature_id`, `terms_version`, `action`, `created_at`). Migration 037 adds `terms_content` table (editable T&C content with `is_system` flag for featured vs user-created terms). New `terms_consent_repo` + `terms_content_repo` with full CRUD. `terms_consent_handler` (POST sync, GET list, GET check) + `terms_content_handler` (GET/PUT/POST/DELETE `/terms-content`). Verified: `go build`/`go vet` clean.
 > - 2026-09-11: **App-session usage accuracy, per-row stagnation sweep + migrations 034/035.**
 >   - `AggregateAppSessionsUsage` projects `has_open_session` via `BOOL_OR(status='ACTIVE' AND ended_at IS NULL)` — OFFLINE/STALE rows with `ended_at=NULL` no longer count as open — and `last_active_at = MAX(COALESCE(last_activity_at, last_sync_at, ended_at, started_at))` (new `AppSessionUsageRow.LastActiveAt` + DTO field `lastActiveAt`, consumed by `/employee-journey/apps`).
@@ -79,8 +90,12 @@
 - Any frontend rendering (served by the Next.js web app)
 - Shell command storage or API (**removed from the product** — client no longer collects or sends shell commands, migration 007 drops the legacy table)
 - Activity log storage (**removed** — replaced by relational `app_sessions`/`app_items`, migration 006 drops the legacy table)
-- Real-time data delivery (no WebSocket, SSE, or polling endpoints)
+- Recording / archival of live-stream media (WebRTC SFU is preview-only; no Postgres/disk frames)
 - Rate limiting (none implemented)
+
+**Does own (real-time, 2026-09-29):**
+- WebRTC SFU live-stream signaling + RTP forward (`internal/stream`)
+- Presence WebSocket `GET /api/v1/ws` for Online/Offline
 
 ---
 
@@ -154,6 +169,10 @@ server/
     ├── jobs/staleness_sweep.go  # Hourly background job deactivating stale employee↔catalog links
     ├── jobs/retention_sweep.go  # Hourly purge of stale app_items and ended app_sessions (RETENTION_DAYS)
     ├── jobs/session_lifecycle_sweep.go # 1-min sweep: ACTIVE→STALE→CLOSED by last_sync_at; honors SESSION_STALE_AFTER_MINUTES / SESSION_CLOSE_AFTER_HOURS
+    └── stream/                 # Live preview WebRTC SFU (2026-09-29)
+        ├── hub.go                 # Signaling, consent, select_monitor, idle reap, caps
+        ├── sfu.go                 # Pion RTP forward publisher → watchers
+        └── (handlers wired from router / stream_handler)
     │
     ├── models/                  # Database models (structs with db/json tags)
     │   ├── user.go              # User + UserPublic (safe for API)
@@ -410,6 +429,20 @@ Employee token is carried in the request body (`{employeeId, token, entries: [..
 
 > **Two term types.** Featured terms (`is_system=true`) are seeded by migration 037 and cannot
 > be deleted. Custom terms (`is_system=false`) can be created and deleted by the admin.
+
+### Live stream + presence (WebRTC SFU, 2026-09-29)
+
+Preview-only — no frame storage in Postgres or on disk. Auth split follows the Client-vs-Web API Auth Separation Rule.
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/live-stream/push` | DeviceAuth (WS) | Desktop publisher signaling (`hello`/`offer`/`answer`/`ice`/`start`/`stop`/`select_monitor`) |
+| GET | `/ws` | DeviceAuth (WS) | Presence / keep-alive (Online/`wsConnected`); not media |
+| GET | `/live-stream/employees` | JWT | Admin list + online/consent/wsConnected flags |
+| GET | `/live-stream/watch-ticket` | JWT | Short-lived ticket for watch WS |
+| GET | `/live-stream/watch` | Watch ticket (WS) | Admin subscriber signaling + WebRTC receive |
+
+SFU implementation: `internal/stream/sfu.go` (Pion) + `hub.go` (rooms, idle reap, caps).
 
 ### Missing Endpoints (sync-only tables with no standalone listing API)
 
@@ -857,6 +890,20 @@ The server is **mostly stateless**:
 |---|---|---|
 | `LINK_STALE_DAYS` | `7` | Catalog junction staleness window |
 | `DEFAULT_SHIFT_TIMEZONE` | *(empty)* | Company IANA zone applied to legacy `UTC` shifts at boot; create-shift fallback when timezone omitted |
+
+**Environment (live stream + presence, 2026-09-29):**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LIVE_STREAM_ENABLED` | `true` | Master switch for SFU routes |
+| `LIVE_STREAM_MAX_STREAMS` | `25` | Concurrent publisher rooms |
+| `LIVE_STREAM_MAX_WATCHERS_PER_EMPLOYEE` | `10` | Watchers per employee room |
+| `LIVE_STREAM_IDLE_SEC` | `90` | Idle reap (no watchers → stop publisher) |
+| `WEBRTC_MAX_BITRATE_KBPS` | `12000` | Ops/advertise cap only — client encode uses `ALPHA_STREAM_MAX_BITRATE_KBPS` |
+| `WEBRTC_STUN_URLS` | Google STUN | Comma-separated STUN |
+| `WEBRTC_TURN_*` | empty | Optional TURN for restrictive NATs |
+| `PRESENCE_WS_ENABLED` | `true` | Accept `GET /api/v1/ws` |
+| `PRESENCE_WS_MAX_CONNECTIONS` | `10000` | Cap on simultaneous presence sockets |
 
 **Still missing (data jobs):**
 - No data-pruning job — app_sessions/app_items/device_hardware/etc. grow unbounded

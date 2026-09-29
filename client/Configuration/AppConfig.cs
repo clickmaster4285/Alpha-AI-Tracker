@@ -82,13 +82,30 @@ public class AppConfig
     /// <summary>When false, only OS GPS/WiFi fixes are stored — no coarse IP geolocation.</summary>
     public bool LocationIpFallback { get; init; } = false;
 
-    // ─── Live stream (Phase 1 — Windows screen preview) ───
-    // Outbound WS to /live-stream/push. Frames flow only after the server sends start
-    // (an admin is watching). Default OFF — fleet opt-in + config.enc bake required.
+    // ─── Live stream (WebRTC SFU screen preview) ───
+    // Outbound signaling WS to /live-stream/push + WebRTC publish. Media flows
+    // only after the server sends start (an admin is watching). Default OFF.
     public bool StreamEnabled { get; init; } = false;
-    public int StreamFps { get; init; } = 10;
-    public int StreamMaxWidth { get; init; } = 1600;
-    public int StreamJpegQuality { get; init; } = 60;
+    public int StreamFps { get; init; } = 12;
+    /// <summary>Capture scale cap. Hard-capped at 1920 — 4K burns bits without looking sharper on VP8.</summary>
+    public int StreamMaxWidth { get; init; } = 1920;
+    /// <summary>
+    /// VP8 target bitrate. With ~1s keyframes (P-frames between), 6–8 Mbps
+    /// is enough for sharp Full-HD screen text. Cap 15000.
+    /// </summary>
+    public int StreamMaxBitrateKbps { get; init; } = 12000;
+    /// <summary>
+    /// Seconds between forced VP8 keyframes. Default 1. Do NOT set to 0 —
+    /// all-I-frame encode starves the bitrate budget and looks blocky.
+    /// </summary>
+    public int StreamKeyframeIntervalSec { get; init; } = 1;
+
+    // ─── Control WebSocket (presence / keep-alive channel) ───
+    // Long-lived outbound WS to GET /api/v1/ws (DeviceAuth). Independent of
+    // LiveStreamClient. Default OFF — fleet opt-in + config.enc bake required.
+    public bool WsEnabled { get; init; } = false;
+    public int WsPingSec { get; init; } = 30;
+    public int WsReconnectBaseSec { get; init; } = 2;
 
     // ─── Self-update (GitHub Releases) ───
     // The client checks https://github.com/{UpdateRepo}/releases/latest for an
@@ -146,9 +163,13 @@ public class AppConfig
             LocationPollSec = Math.Max(60, int.TryParse(GetEnv("ALPHA_LOCATION_POLL_SEC"), out var locPoll) ? locPoll : 300),
             LocationIpFallback = GetEnv("ALPHA_LOCATION_IP_FALLBACK") is ("1" or "true" or "True"),
             StreamEnabled = IsEnvTruthy(GetEnv("ALPHA_STREAM_ENABLED")),
-            StreamFps = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_FPS"), out var streamFps) ? streamFps : 10, 1, 30),
-            StreamMaxWidth = Math.Max(320, int.TryParse(GetEnv("ALPHA_STREAM_MAX_WIDTH"), out var streamW) ? streamW : 1600),
-            StreamJpegQuality = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_JPEG_QUALITY"), out var streamQ) ? streamQ : 60, 10, 95),
+            StreamFps = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_FPS"), out var streamFps) ? streamFps : 12, 1, 30),
+            StreamMaxWidth = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_MAX_WIDTH"), out var streamW) ? streamW : 1920, 320, 1920),
+            StreamMaxBitrateKbps = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_MAX_BITRATE_KBPS"), out var streamBr) ? streamBr : 12000, 500, 15000),
+            StreamKeyframeIntervalSec = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_KEYFRAME_INTERVAL_SEC"), out var streamKf) ? streamKf : 1, 1, 10),
+            WsEnabled = IsEnvTruthy(GetEnv("ALPHA_WS_ENABLED")),
+            WsPingSec = Math.Clamp(int.TryParse(GetEnv("ALPHA_WS_PING_SEC"), out var wsPing) ? wsPing : 30, 5, 300),
+            WsReconnectBaseSec = Math.Clamp(int.TryParse(GetEnv("ALPHA_WS_RECONNECT_BASE_SEC"), out var wsRecon) ? wsRecon : 2, 1, 60),
         };
     }
 

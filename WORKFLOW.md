@@ -4,7 +4,7 @@ How work actually moves through this repo — the loops you run daily, and the g
 
 Rules live in [AGENTS.md](./AGENTS.md) §6; this file is the *procedure* for obeying them. File locations: [FILE_HIERARCHY.md](./FILE_HIERARCHY.md).
 
-*Last audited: 2026-09-02 — commands verified against `client/publish/*.sh`, `server/Makefile`, `web/package.json`. New 3-state session lifecycle env knobs `SESSION_STALE_AFTER_MINUTES` / `SESSION_CLOSE_AFTER_HOURS` (server only) live alongside `DEFAULT_SHIFT_TIMEZONE` in `server/.env`.*
+*Last audited: 2026-09-29 — live stream WebRTC SFU V2 + theater popout (`ALPHA_STREAM_*` / `ALPHA_WS_*` / `LIVE_STREAM_*` / `WEBRTC_*` / `PRESENCE_WS_*`). Commands verified against `client/publish/*.sh`, `server/Makefile`, `web/package.json`.*
 
 ---
 
@@ -13,6 +13,19 @@ Rules live in [AGENTS.md](./AGENTS.md) §6; this file is the *procedure* for obe
 > **`dotnet run` is not a release test.** It compiles from the source tree, so it can never catch a packaging gap. The installed app runs from a root-owned directory with only what the `publish/*` scripts bundled. **A client change is not done until it works from an installed build.**
 
 Everything in §1 is the fast loop. Everything in §5 is the loop that decides whether the change is real.
+
+### Live stream / presence config (Installer-Parity)
+
+When changing stream or presence knobs, update **both** `client/.env` (dev) **and** bake `config.enc` before shipping:
+
+| Side | Keys |
+|---|---|
+| Client | `ALPHA_STREAM_ENABLED`, `ALPHA_STREAM_FPS`, `ALPHA_STREAM_MAX_WIDTH`, `ALPHA_STREAM_MAX_BITRATE_KBPS`, `ALPHA_STREAM_KEYFRAME_INTERVAL_SEC`, `ALPHA_WS_ENABLED`, `ALPHA_WS_PING_SEC`, `ALPHA_WS_RECONNECT_BASE_SEC` |
+| Server | `LIVE_STREAM_*`, `WEBRTC_MAX_BITRATE_KBPS`, `WEBRTC_STUN_URLS`, optional TURN, `PRESENCE_WS_*` |
+
+Media encode bitrate is decided on the **client** (`ScreenVp8Encoder`). Server `WEBRTC_MAX_BITRATE_KBPS` is ops/advertise only.
+
+**Web theater:** `/live-stream` → **Open theater** opens `/live-stream/theater?ids=` in a new tab (full-bleed; no app chrome). Same max-4 tile selection. Browsers always show some address bar chrome.
 
 ---
 

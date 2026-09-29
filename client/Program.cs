@@ -71,7 +71,11 @@ if (args.Contains("--print-config"))
     Console.WriteLine($"StreamEnabled={cfg.StreamEnabled}");
     Console.WriteLine($"StreamFps={cfg.StreamFps}");
     Console.WriteLine($"StreamMaxWidth={cfg.StreamMaxWidth}");
-    Console.WriteLine($"StreamJpegQuality={cfg.StreamJpegQuality}");
+    Console.WriteLine($"StreamMaxBitrateKbps={cfg.StreamMaxBitrateKbps}");
+    Console.WriteLine($"StreamKeyframeIntervalSec={cfg.StreamKeyframeIntervalSec}");
+    Console.WriteLine($"WsEnabled={cfg.WsEnabled}");
+    Console.WriteLine($"WsPingSec={cfg.WsPingSec}");
+    Console.WriteLine($"WsReconnectBaseSec={cfg.WsReconnectBaseSec}");
     return;
 }
 
@@ -302,6 +306,12 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<LogCollectorServic
 // IMMEDIATE drain the moment credentials are persisted (RequestImmediateSync).
 builder.Services.AddSingleton<SyncService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<SyncService>());
+
+// Control WebSocket (presence / keep-alive). Parked when ALPHA_WS_ENABLED=false.
+// Connects only after SyncService proves a 2xx (idle timeout fallback + reconnect).
+// Registered after SyncService so the sync loop is running before we wait on it.
+builder.Services.AddSingleton<client.Services.WsClient>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.WsClient>());
 
 // Self-updater — checks GitHub Releases for a newer installer, downloads it into the
 // user data dir and installs via the OS installer (pkexec dpkg / Inno / dmg). Always
