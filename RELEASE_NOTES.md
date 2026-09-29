@@ -6,7 +6,8 @@ v1.2.2 is the **Live Stream WebRTC SFU** release. The Phase 1 JPEG WebSocket rel
 a Pion SFU that RTP-forwards VP8 from the Windows desktop publisher to admin watchers. Preview
 remains ephemeral (never stored). A dedicated presence WebSocket drives Online/Offline without
 opening media. Encode quality is fixed by `ScreenVp8Encoder` (SIPSorcery had been wiping the
-configured bitrate).
+configured bitrate). The admin web console gains a full-bleed **theater popout** with a
+professional watch-wall UX (collapsible sidebar, cols-per-row, scrollable multi-screen wall).
 
 Branch: `feature/live_streamV2.0`. Client version: **1.2.2**.
 
@@ -28,12 +29,24 @@ Branch: `feature/live_streamV2.0`. Client version: **1.2.2**.
 - `WsClient` — presence keep-alive (`ALPHA_WS_*`), independent of stream.
 - Env (re-bake `config.enc`): `ALPHA_STREAM_*`, `ALPHA_WS_*`.
 
-## 3. Web — `<video>` viewer + theater + FPS
+## 3. Web — `<video>` viewer + theater popout UX + FPS
 
-- `useLiveStreamSocket` + multi-tile `?ids=` (max 4).
-- Per-tile decoded **FPS** badge (`use-video-fps`).
-- Shared `components/live-stream/*`; **Open theater** → `/live-stream/theater` (full-bleed `(live-popout)` layout).
+### Main console (`/live-stream`)
+
+- `useLiveStreamSocket` + multi-tile `?ids=` (max **4**).
+- Per-tile decoded **FPS** badge (`hooks/use-video-fps.ts`).
+- Shared `components/live-stream/*` (WatchTile, EmployeeSidebar, PreviewGrid, selection helpers).
+- **Open theater** opens `/live-stream/theater?ids=` in a new browser tab.
 - `useUrlQueryState`: never call `router.replace` inside a `setState` updater (React 19 LinkComponent warning).
+
+### Theater popout (`/live-stream/theater` — `(live-popout)` layout)
+
+Full-bleed watch wall (no AppSidebar / TopBar). Auth + RBAC still apply.
+
+- **Collapsible employee sidebar** — full list or thin rail (`?sidebar=0|1`); search; selection cap banner.
+- **Toolbar navbar** — sidebar toggle; **screens per row** 1 / 2 / 3 / 4 (`?cols=`); online-only filter (`?online=1`); clear all; fullscreen; link back to main console.
+- **Scrollable wall** — aspect-video tiles in a column grid; vertical scroll when many screens are open (theater max **16**, vs console max 4).
+- URL-synced layout: `?ids=&q=&cols=&sidebar=&online=` (shareable / refresh-safe).
 
 ## Deploy sequence
 
