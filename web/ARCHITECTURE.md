@@ -1,7 +1,16 @@
 # Web Architecture — Alpha AI Tracker Dashboard
 
-> **Last audited:** 2026-09-14 (per-feature Terms & Conditions consent — `/settings/privacy` page)
+> **Last audited:** 2026-09-29 (live stream WebRTC SFU + URL query setState fix)
 > **Changelog:**
+> - 2026-09-29: **Live stream V2 — WebRTC SFU viewer + multi-tile `?ids=` + `useUrlQueryState` fix.**
+>   `/live-stream` uses `<video>` + `lib/useLiveStreamSocket.ts` (RTCPeerConnection; one offer on
+>   open, one renegotiate on `track_ready`, never on periodic `status`). Multi-select up to 4
+>   employees via URL `?ids=EMP-1,EMP-2` (replaces single `employeeId` for tiles). Monitor
+>   dropdown when client reports 2+ displays. Consent feature id remains `live_view`.
+>   **`useUrlQueryState`:** move `router.replace`/`push` **outside** the `setState` updater
+>   (calling the router inside an updater updated Next `LinkComponent` while `LiveStreamInner`
+>   rendered — React 19 "Cannot update a component while rendering a different component").
+>   Verified: warning gone on `/live-stream` selection; `npx tsc` / page load clean.
 > - 2026-09-14: **Per-feature T&C content management page.** New `/settings/terms-and-conditions` page with editable per-feature T&C cards (featured terms with `isSystem` flag cannot be deleted, custom terms can be created via a dialog and deleted). Uses `termsContentApi` (list/get/update/create/delete) from `lib/api.ts`. Verified: `npx tsc --noEmit` clean, `next build` passes (`/settings/terms-and-conditions` 8.3 kB).
 > - 2026-09-14: **T&C page restructure — tabbed list + dedicated view/create/edit routes.** `/settings/terms-and-conditions` is now a tabbed **list** (Featured Terms / Custom Terms tabs, active tab URL-synced via `?tab=featured|custom`). Clicking a card opens the new **view detail** route `/settings/terms-and-conditions/view/[id]` (read-only content + Edit/Delete actions). Create and edit are dedicated routes: `/settings/terms-and-conditions/create` and `/settings/terms-and-conditions/edit/[id]`. Shared components extracted to `web/src/components/terms/terms-view.tsx` + `terms-editor.tsx` (reuse the existing `RichTextEditor`, `termsContentApi` list/get/create/update/delete — no server change). Edit navigates forward to the created/edited term's view; featured terms remain non-deletable. Verified: `npx tsc --noEmit` clean, `next build` passes (routes: `/settings/terms-and-conditions` 2.37 kB, `/create` 280 B, `/edit/[id]` 306 B, `/view/[id]` 2.96 kB).
 > - 2026-09-05: **Web Activity (`/employee-journey/web`) groups search-engine queries and shows expandable dropdown arrows.**
@@ -232,7 +241,7 @@ web/
             │
             ├── apps/               # Apps & Websites (mock data)
             ├── screenshots/        # Screenshots (mock data)
-            ├── live-stream/        # Live WS screen preview (Windows Phase 1)
+            ├── live-stream/        # WebRTC SFU screen preview (Windows publisher; multi-tile ?ids=)
             ├── emails/             # Emails & Alerts (mock data)
             ├── kpis/               # KPIs & KRAs (mock data)
             ├── roles/              # Roles (mock data)
@@ -304,7 +313,14 @@ web/
 
 ### Real-Time Updates
 
-**Not implemented.** No polling, no WebSocket, no Server-Sent Events. The web dashboard only shows data at the moment of page load — it never updates automatically.
+| Surface | Mechanism |
+|---|---|
+| **`/live-stream`** | WebRTC SFU via `useLiveStreamSocket` (watch ticket WS + RTCPeerConnection → `<video>`). Requires `NEXT_PUBLIC_WS_URL` (Next rewrites do not proxy WS). Multi-tile `?ids=` (max 4). |
+| **Everything else** | No polling / SSE. Pages show data at fetch time (TanStack Query). |
+
+### URL-Synced Filters (mandatory)
+
+See AGENTS.md §6. **Never call `router.push`/`replace` inside a React `setState` updater** — it updates Next `LinkComponent` while another component is rendering (React 19). `useUrlQueryState` navigates outside the updater.
 
 ### Web Infinite-Scroll Rule (mandatory)
 
@@ -372,7 +388,7 @@ in the `updateMutation`).
 | `/configuration/websites` | Websites classification | Server (`GET/POST/PATCH /monitoring/websites`) | ✅ |
 | `/configuration/categories` | Categories & Types CRUD | Server (`/monitoring/types`, `/monitoring/categories`) | ✅ |
 | `/screenshots` | Screenshots | Honest empty state (no endpoint) | ❌ |
-| `/live-stream` | Live stream | Live WS JPEG preview (Windows clients; consent `live_view`) | ✅ |
+| `/live-stream` | Live stream | WebRTC SFU VP8 preview (Windows clients; consent `live_view`; `useLiveStreamSocket` + `<video>`; multi-tile `?ids=`) | ✅ |
 | `/kpis` | KPIs & KRAs | Hardcoded demo data (scaffolding) | ❌ |
 | `/shifts` | Shift management | Server (`/shifts` CRUD; IANA timezone field; new-shift defaults to browser zone) | ✅ |
 | `/timesheets` | Timesheets | Server (`/attendance/range`; times formatted in `record.timezone`) | ✅ |
