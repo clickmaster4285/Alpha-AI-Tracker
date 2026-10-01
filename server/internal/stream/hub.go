@@ -11,14 +11,18 @@ import (
 // FeatureID is the terms_consent feature key for live preview.
 const FeatureID = "live_view"
 
+const (
+	watchTicketTTL   = 60 * time.Second
+	maxPendingTickets = 2000
+)
+
 var (
 	ErrDisabled        = errors.New("live stream disabled")
 	ErrTooManyStreams  = errors.New("too many concurrent streams")
 	ErrTooManyWatchers = errors.New("too many watchers for employee")
 	ErrInvalidTicket   = errors.New("invalid or expired watch ticket")
+	ErrTooManyTickets  = errors.New("too many pending watch tickets")
 )
-
-const watchTicketTTL = 60 * time.Second
 
 type watchTicket struct {
 	EmployeeID string
@@ -68,9 +72,9 @@ type MonitorInfo struct {
 	IsPrimary bool   `json:"isPrimary"`
 }
 
-// ControlEvent is sent to the push-socket handler (start/stop/select_monitor).
+// ControlEvent is sent to the push-socket handler (start/stop/select_monitor/force_keyframe).
 type ControlEvent struct {
-	Type         string // "start" | "stop" | "select_monitor"
+	Type         string // "start" | "stop" | "select_monitor" | "force_keyframe"
 	MonitorIndex int
 }
 
@@ -128,11 +132,20 @@ func NewHub(cfg Config) *Hub {
 
 	h := &Hub{
 		cfg:      cfg,
-		sfu:      NewSFU(cfg.ICEServers),
+		sfu:      NewSFU(cfg.ICEServers, cfg.MaxBitrateKbps),
 		boxes:    make(map[string]*mailbox),
 		tickets:  make(map[string]watchTicket),
 		stopIdle: make(chan struct{}),
 	}
+	h.sfu.SetPublisherPLIHook(func(empID string) {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		m, ok := h.boxes[empID]
+		if !ok || !m.clientConnected {
+			return
+		}
+		h.sendCtrlLocked(m, "force_keyframe")
+	})
 	h.wg.Add(1)
 	go h.idleLoop()
 	return h
@@ -351,6 +364,30 @@ func (h *Hub) SetCapability(empID string, cap Capability) {
 	m.lastActivity = time.Now()
 }
 
+// CanSubscribe reports whether Subscribe would succeed without mutating state.
+// Used to return HTTP 429 before WebSocket Upgrade.
+func (h *Hub) CanSubscribe(empID string) error {
+	if !h.cfg.Enabled {
+		return ErrDisabled
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	m := h.boxes[empID]
+	if m != nil && len(m.watchers) >= h.cfg.MaxWatchersPerEmployee {
+		return ErrTooManyWatchers
+	}
+	// First watcher would call markStreamLocked
+	if m == nil || !m.wanted {
+		if m == nil || !m.countsAsStream {
+			if h.streamingCount >= h.cfg.MaxStreams {
+				return ErrTooManyStreams
+			}
+		}
+	}
+	return nil
+}
+
 // Subscribe attaches a watcher. First watcher marks the stream wanted and may send start.
 func (h *Hub) Subscribe(empID string) (watcherID uint64, err error) {
 	if !h.cfg.Enabled {
@@ -457,6 +494,9 @@ func (h *Hub) IssueWatchTicket(userID, employeeID string) (ticket string, expire
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if len(h.tickets) >= maxPendingTickets {
+		return "", 0, ErrTooManyTickets
+	}
 	h.tickets[ticket] = watchTicket{
 		EmployeeID: employeeID,
 		UserID:     userID,

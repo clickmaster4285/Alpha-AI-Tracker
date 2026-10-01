@@ -46,8 +46,10 @@ func NewWsHandler(hub *ws.Hub, allowedOrigins []string) *WsHandler {
 				// Non-browser clients (desktop) omit Origin.
 				return true
 			}
+			// Fail closed: empty allow-list must not accept arbitrary browser Origins (CSWSH).
 			if len(h.allowedOrigins) == 0 {
-				return true
+				log.Printf("[ws] CheckOrigin rejected origin=%q (no CORS_ALLOWED_ORIGINS configured)", origin)
+				return false
 			}
 			if h.allowedOrigins[origin] {
 				return true

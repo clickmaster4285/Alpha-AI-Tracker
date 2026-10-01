@@ -150,6 +150,12 @@ func main() {
 		log.Println("[server] presence ws disabled")
 	}
 
+	if len(cfg.LiveStream.TURNURLs) == 0 {
+		log.Println("[server] WARNING: WEBRTC_TURN_URLS is empty — remote clients behind CGNAT/firewall will fail ICE. Provision coturn (or equivalent) on/near this VPS domain before calling live-stream production. TURN doubles media bandwidth on the relayed path.")
+	} else {
+		log.Printf("[server] webrtc TURN configured (%d url(s))", len(cfg.LiveStream.TURNURLs))
+	}
+
 	streamHandler := handlers.NewStreamHandler(
 		streamHub, presenceHub, employeeRepo, termsConsentRepo, timeAttendanceRepo, cfg.CORS.AllowedOrigins,
 	)

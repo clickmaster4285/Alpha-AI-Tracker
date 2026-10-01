@@ -73,6 +73,8 @@ if (args.Contains("--print-config"))
     Console.WriteLine($"StreamMaxWidth={cfg.StreamMaxWidth}");
     Console.WriteLine($"StreamMaxBitrateKbps={cfg.StreamMaxBitrateKbps}");
     Console.WriteLine($"StreamKeyframeIntervalSec={cfg.StreamKeyframeIntervalSec}");
+    Console.WriteLine($"StreamMinUplinkKbps={cfg.StreamMinUplinkKbps}");
+    Console.WriteLine($"StreamVp8LagFrames={cfg.StreamVp8LagFrames}");
     Console.WriteLine($"WsEnabled={cfg.WsEnabled}");
     Console.WriteLine($"WsPingSec={cfg.WsPingSec}");
     Console.WriteLine($"WsReconnectBaseSec={cfg.WsReconnectBaseSec}");
@@ -255,6 +257,7 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.Lo
 // ────────────────────────────────────────────────────────────────────────────
 builder.Services.AddSingleton<client.Services.ScreenCaptureService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.ScreenCaptureService>());
+builder.Services.AddSingleton<client.Services.NetProbeService>();
 builder.Services.AddSingleton<client.Services.LiveStreamClient>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.LiveStreamClient>());
 

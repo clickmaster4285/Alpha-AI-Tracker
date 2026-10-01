@@ -24,6 +24,9 @@ const (
 	wsWriteWait            = 10 * time.Second
 	wsPongWait             = 90 * time.Second
 	wsPingPeriod           = 30 * time.Second
+	wsMaxSocketLife        = 4 * time.Hour
+	maxConcurrentOffers    = 32
+	uplinkProbeMaxBytes    = 512 * 1024
 )
 
 // StreamHandler serves live-stream WebRTC signaling + REST endpoints.
@@ -35,6 +38,7 @@ type StreamHandler struct {
 	taRepo           *repository.TimeAttendanceRepo
 	allowedOrigins   map[string]bool
 	upgrader         websocket.Upgrader
+	offerSem         chan struct{}
 }
 
 // NewStreamHandler constructs the handler. presence may be nil (falls back to heartbeat online).
@@ -57,6 +61,7 @@ func NewStreamHandler(
 		termsConsentRepo: termsConsentRepo,
 		taRepo:           taRepo,
 		allowedOrigins:   originSet,
+		offerSem:         make(chan struct{}, maxConcurrentOffers),
 	}
 	h.upgrader = websocket.Upgrader{
 		ReadBufferSize:  4096,
@@ -64,10 +69,13 @@ func NewStreamHandler(
 		CheckOrigin: func(r *http.Request) bool {
 			origin := r.Header.Get("Origin")
 			if origin == "" {
+				// Non-browser clients (desktop) omit Origin.
 				return true
 			}
+			// Fail closed: empty allow-list must not accept arbitrary browser Origins (CSWSH).
 			if len(h.allowedOrigins) == 0 {
-				return true
+				log.Printf("[live-stream] CheckOrigin rejected origin=%q (no CORS_ALLOWED_ORIGINS configured)", origin)
+				return false
 			}
 			if h.allowedOrigins[origin] {
 				return true
@@ -199,6 +207,30 @@ func (h *StreamHandler) IssueWatchTicket(c echo.Context) error {
 	})
 }
 
+// UplinkProbe handles POST /api/v1/live-stream/uplink-probe (DeviceAuth).
+// Discards up to 512 KiB so the client can time a small upload benchmark.
+func (h *StreamHandler) UplinkProbe(c echo.Context) error {
+	if !h.hub.Config().Enabled {
+		return c.JSON(http.StatusServiceUnavailable, dto.APIError{
+			Code: http.StatusServiceUnavailable, Message: "Live stream is disabled",
+		})
+	}
+	r := c.Request().Body
+	if r == nil {
+		return c.NoContent(http.StatusNoContent)
+	}
+	defer r.Close()
+	limited := http.MaxBytesReader(c.Response(), r, uplinkProbeMaxBytes)
+	buf := make([]byte, 32*1024)
+	for {
+		_, err := limited.Read(buf)
+		if err != nil {
+			break
+		}
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
 type signalMsg struct {
 	Type             string               `json:"type"`
 	SDP              string               `json:"sdp,omitempty"`
@@ -311,6 +343,12 @@ func (h *StreamHandler) Push(c echo.Context) error {
 		return nil
 	})
 
+	lifeTimer := time.AfterFunc(wsMaxSocketLife, func() {
+		log.Printf("[live-stream] push max lifetime employee=%s — closing", empID)
+		_ = conn.Close()
+	})
+	defer lifeTimer.Stop()
+
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
@@ -398,7 +436,8 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 			Code: http.StatusBadRequest, Message: "employeeId and ticket are required",
 		})
 	}
-	if _, err := h.hub.ConsumeWatchTicket(ticket, empID); err != nil {
+	watcherUserID, err := h.hub.ConsumeWatchTicket(ticket, empID)
+	if err != nil {
 		return c.JSON(http.StatusUnauthorized, dto.APIError{
 			Code: http.StatusUnauthorized, Message: "invalid_or_expired_ticket",
 		})
@@ -420,6 +459,16 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 		})
 	}
 
+	if err := h.hub.CanSubscribe(empID); err != nil {
+		status := http.StatusServiceUnavailable
+		if errors.Is(err, stream.ErrTooManyWatchers) || errors.Is(err, stream.ErrTooManyStreams) {
+			status = http.StatusTooManyRequests
+		}
+		return c.JSON(status, dto.APIError{
+			Code: status, Message: err.Error(),
+		})
+	}
+
 	conn, err := h.upgrader.Upgrade(c.Response(), c.Request(), nil)
 	if err != nil {
 		log.Printf("[live-stream] Watch upgrade: %v", err)
@@ -434,7 +483,7 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 	}
 	defer h.hub.Unsubscribe(empID, watcherID)
 
-	log.Printf("[live-stream] watch connected employee=%s watcher=%d (webrtc)", empID, watcherID)
+	log.Printf("[live-stream] watch connected employee=%s watcher=%d user=%s (webrtc)", empID, watcherID, watcherUserID)
 
 	var writeMu sync.Mutex
 	write := func(v interface{}) error {
@@ -492,6 +541,12 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 		return nil
 	})
 
+	lifeTimer := time.AfterFunc(wsMaxSocketLife, func() {
+		log.Printf("[live-stream] watch max lifetime employee=%s watcher=%d — closing", empID, watcherID)
+		_ = conn.Close()
+	})
+	defer lifeTimer.Stop()
+
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
@@ -510,7 +565,14 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 			h.hub.SelectMonitor(empID, msg.Index)
 		case "offer":
 			sdp := msg.SDP
+			select {
+			case h.offerSem <- struct{}{}:
+			default:
+				_ = write(map[string]string{"type": "error", "code": "too_many_offers"})
+				continue
+			}
 			go func() {
+				defer func() { <-h.offerSem }()
 				h.hub.SFU().UnwatchTrackReady(empID, watcherID)
 				answer, withTrack, err := h.hub.SFU().AcceptSubscriberOffer(empID, watcherID, sdp, func(c webrtc.ICECandidateInit) {
 					payload := map[string]interface{}{

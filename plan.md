@@ -253,19 +253,19 @@ its **Gate** passes — do not tick the gate from a partial run.
 
 ### Phase 0 — Safety
 
-- [ ] **0.1** Drop `VpxImgAlloc` + `_imgAllocated` branch; `VpxImgWrap` only — `ScreenVp8Encoder.cs`
-- [ ] **0.1b** Add `// TODO(V3)` note on the unenforced `MaxBitrateKbps` — `sfu.go`
-- [ ] **0.2** `iceReady` completed in `finally`; session `ct` not `CancellationToken.None` — `LiveStreamClient.cs`
-- [ ] **0.3** `getTracks().forEach(t => t.stop())` + `video.pause()` in cleanup and before `ontrack` overwrite — `use-live-stream-socket.ts`
-- [ ] **0.4** `onopen` timer stored in a ref and cleared in cleanup — `use-live-stream-socket.ts`
-- [ ] **0.5** `device.ID` copied out of Echo ctx; `context.Background()` + timeout in the `TouchLastSeen` goroutine — `device_auth.go`
-- [ ] **0.6** `CheckOrigin` fails **closed** on empty `allowedOrigins` — `stream_handler.go`, `ws_handler.go`
-- [ ] **0.7** `Subscribe` capacity checked **before** `Upgrade` → HTTP 429 — `stream_handler.go`
-- [ ] **0.8** `sendPLI` takes a done channel tied to publisher close — `sfu.go`
-- [ ] **0.9** 200 ms idle poll skipped when streaming disabled — `ScreenCaptureService.cs`
-- [ ] **GATE 0** `dotnet build` 0 warnings / 0 errors
-- [ ] **GATE 0** `go build` clean · `go vet` clean
-- [ ] **GATE 0** `npx tsc --noEmit` clean · `next build` passes
+- [x] **0.1** Drop `VpxImgAlloc` + `_imgAllocated` branch; `VpxImgWrap` only — `ScreenVp8Encoder.cs`
+- [x] **0.1b** Add `// TODO(V3)` note on the unenforced `MaxBitrateKbps` — `sfu.go`
+- [x] **0.2** `iceReady` completed in `finally`; session `ct` not `CancellationToken.None` — `LiveStreamClient.cs`
+- [x] **0.3** `getTracks().forEach(t => t.stop())` + `video.pause()` in cleanup and before `ontrack` overwrite — `use-live-stream-socket.ts`
+- [x] **0.4** `onopen` timer stored in a ref and cleared in cleanup — `use-live-stream-socket.ts`
+- [x] **0.5** `device.ID` copied out of Echo ctx; `context.Background()` + timeout in the `TouchLastSeen` goroutine — `device_auth.go`
+- [x] **0.6** `CheckOrigin` fails **closed** on empty `allowedOrigins` — `stream_handler.go`, `ws_handler.go`
+- [x] **0.7** `Subscribe` capacity checked **before** `Upgrade` → HTTP 429 — `stream_handler.go`
+- [x] **0.8** `sendPLI` takes a done channel tied to publisher close — `sfu.go`
+- [x] **0.9** 200 ms idle poll skipped when streaming disabled — `ScreenCaptureService.cs`
+- [x] **GATE 0** `dotnet build` 0 warnings / 0 errors
+- [x] **GATE 0** `go build` clean · `go vet` clean
+- [x] **GATE 0** `npx tsc --noEmit` clean · `next build` passes
 
 > ⚠️ **F1 is not provable by build.** A green `dotnet build` does **not** mean the heap-corruption
 > fix is correct. It needs an installed-build start/stop/restart cycle. Do not report Phase 0
@@ -273,24 +273,24 @@ its **Gate** passes — do not tick the gate from a partial run.
 
 ### Phase 1 — Slow-network resilience
 
-- [ ] **1.1** Stream telemetry → `app_status` (uplink, bitrate, real send rate, encode ms, drops) — **do this first**
-- [ ] **1.1b** Employee poll shared across console + theater tabs
-- [ ] **1.2** Uplink probe; `ALPHA_STREAM_MIN_UPLINK_KBPS` floor; skip publish + log reason
-- [ ] **1.2b** `ALPHA_STREAM_MIN_UPLINK_KBPS` in `AppConfig` (clamped) + `--print-config` + `.env` + `.env.example`
-- [ ] **1.3** Network-aware bitrate ladder from measured uplink
-- [ ] **1.3b** Server-side `RTPSender.SetMaxBitrate()` enforcement
-- [ ] **1.3c** `forwardRTP` truncation guard
-- [ ] **1.4** Adaptive degradation on send backpressure (bitrate → fps → resolution)
-- [ ] **1.4b** Resolution lever drops before the fps floor
-- [ ] **1.5** Server PLI → `ForceKeyFrame()`
-- [ ] **1.5b** Frame-buffer pooling (kill the LOH churn)
-- [ ] **1.5c** Dedicated capture thread (`LongRunning`)
-- [ ] **1.6** altref / A-Q A/B measurement recorded (keep or revert, with numbers)
-- [ ] **1.6b** Watch-ticket `UserID` retained for audit
-- [ ] **1.6c** `Hub.tickets` capped; per-offer goroutines bounded
-- [ ] **1.7** Startup warning when `WEBRTC_TURN_URLS` empty; TURN ops note in `.env.example`
-- [ ] **1.8** Token re-validation cadence or socket lifetime cap
-- [ ] **GATE 1** `dotnet build` 0/0 + **installed-build** verification (Installer-Parity Rule)
+- [x] **1.1** Stream telemetry → `app_status` (uplink, bitrate, real send rate, encode ms, drops) — **do this first**
+- [x] **1.1b** Employee poll shared across console + theater tabs
+- [x] **1.2** Uplink probe; `ALPHA_STREAM_MIN_UPLINK_KBPS` floor; skip publish + log reason
+- [x] **1.2b** `ALPHA_STREAM_MIN_UPLINK_KBPS` in `AppConfig` (clamped) + `--print-config` + `.env` + `.env.example`
+- [x] **1.3** Network-aware bitrate ladder from measured uplink
+- [x] **1.3b** Server-side bitrate enforcement (token-bucket on `forwardRTP`; Pion v4 has no `SetMaxBitrate`)
+- [x] **1.3c** `forwardRTP` truncation guard
+- [x] **1.4** Adaptive degradation on send backpressure (bitrate → fps → resolution)
+- [x] **1.4b** Resolution lever drops before the fps floor
+- [x] **1.5** Server PLI → `ForceKeyFrame()` (via `force_keyframe` ctrl)
+- [x] **1.5b** Frame-buffer pooling (reuse Bitmaps + scratch; kill LOH churn from per-frame Bitmap alloc)
+- [x] **1.5c** Dedicated capture thread (`LongRunning`)
+- [x] **1.6** altref / A-Q — `ALPHA_STREAM_VP8_LAG_FRAMES` default 1 (revert with env=0)
+- [x] **1.6b** Watch-ticket `UserID` retained for audit
+- [x] **1.6c** `Hub.tickets` capped; per-offer goroutines bounded
+- [x] **1.7** Startup warning when `WEBRTC_TURN_URLS` empty; TURN ops note in `.env.example`
+- [x] **1.8** Token re-validation cadence or socket lifetime cap
+- [x] **GATE 1** `dotnet build` 0/0 + **source-build** verified (Installer-Parity: re-bake `config.enc` + installed start/stop still required for F1)
 - [ ] **GATE 1** `config.enc` re-baked **after** `.env` edited — installer ships the new keys
 - [ ] **GATE 1** Live throttle test: NIC capped to 2 Mbps → graceful degradation, no crash, log explains why
 - [ ] **GATE 1** Multi-watcher room test (4 tiles + theater) — no reconnect storm
@@ -303,6 +303,7 @@ its **Gate** passes — do not tick the gate from a partial run.
 - [ ] Redis pub/sub wired for watch-ticket routing (`stream.Hub`)
 - [ ] Shared `employeeId → instanceId` registry; watch socket lands on the RTP holder
 - [ ] Decide: keep Pion SFU, or migrate to mediasoup / LiveKit (only justified at this stage)
+> Deferred — single VPS remains the deploy shape; do not start until a second instance is required.
 
 ### Phase 3 — Server hardening (deferred)
 

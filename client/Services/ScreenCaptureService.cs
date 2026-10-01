@@ -53,6 +53,11 @@ public sealed class ScreenCaptureService : BackgroundService
     private volatile bool _streamActive;
     private bool _loggedUnavailable;
     private MonitorEnumProc? _enumProc;
+    /// <summary>Runtime max width override from adaptive degradation (0 = use config).</summary>
+    private volatile int _maxWidthOverride;
+    private Bitmap? _srcBitmap;
+    private Bitmap? _scaledBitmap;
+    private byte[]? _bgraScratch;
 
     public ScreenCaptureService(AppConfig config, ILogger<ScreenCaptureService> logger)
     {
@@ -85,8 +90,27 @@ public sealed class ScreenCaptureService : BackgroundService
     {
         if (active && OperatingSystem.IsWindows())
             RefreshMonitors();
+        if (!active)
+            _maxWidthOverride = 0;
         _streamActive = active;
     }
+
+    /// <summary>
+    /// Adaptive resolution lever (Phase 1). Pass 0 to clear and use ALPHA_STREAM_MAX_WIDTH.
+    /// Values are clamped to [320, config max].
+    /// </summary>
+    public void SetMaxWidthOverride(int maxWidth)
+    {
+        if (maxWidth <= 0)
+        {
+            _maxWidthOverride = 0;
+            return;
+        }
+        _maxWidthOverride = Math.Clamp(maxWidth, 320, Math.Max(320, _config.StreamMaxWidth));
+    }
+
+    public int EffectiveMaxWidth =>
+        _maxWidthOverride > 0 ? _maxWidthOverride : Math.Max(320, _config.StreamMaxWidth);
 
     public int SetSelectedMonitor(int index)
     {
@@ -112,6 +136,14 @@ public sealed class ScreenCaptureService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (!_config.StreamEnabled)
+        {
+            _logger.LogInformation("Screen capture parked (ALPHA_STREAM_ENABLED=false)");
+            try { await Task.Delay(Timeout.Infinite, stoppingToken); }
+            catch (OperationCanceledException) { }
+            return;
+        }
+
         if (!OperatingSystem.IsWindows())
         {
             StreamAvailable = false;
@@ -131,6 +163,16 @@ public sealed class ScreenCaptureService : BackgroundService
             "Screen capture ready (fps={Fps}, maxWidth={MaxWidth}, monitors={Count})",
             _config.StreamFps, _config.StreamMaxWidth, GetMonitors().Count);
 
+        // Dedicated thread — GDI CopyFromScreen must not block the thread pool (F12/D8).
+        await Task.Factory.StartNew(
+            () => CaptureLoop(stoppingToken),
+            stoppingToken,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default).ConfigureAwait(false);
+    }
+
+    private void CaptureLoop(CancellationToken stoppingToken)
+    {
         var fps = Math.Clamp(_config.StreamFps, 1, 30);
         var interval = TimeSpan.FromMilliseconds(1000.0 / fps);
         var adaptiveFps = fps;
@@ -141,7 +183,7 @@ public sealed class ScreenCaptureService : BackgroundService
             {
                 adaptiveFps = fps;
                 interval = TimeSpan.FromMilliseconds(1000.0 / adaptiveFps);
-                try { await Task.Delay(200, stoppingToken); }
+                try { Task.Delay(200, stoppingToken).GetAwaiter().GetResult(); }
                 catch (OperationCanceledException) { break; }
                 continue;
             }
@@ -158,7 +200,7 @@ public sealed class ScreenCaptureService : BackgroundService
                 StreamAvailable = false;
                 _logger.LogWarning(ex, "Screen capture failed — reporting unavailable");
                 _streamActive = false;
-                try { await Task.Delay(5000, stoppingToken); }
+                try { Task.Delay(5000, stoppingToken).GetAwaiter().GetResult(); }
                 catch (OperationCanceledException) { break; }
                 StreamAvailable = OperatingSystem.IsWindows();
                 RefreshMonitors();
@@ -167,6 +209,8 @@ public sealed class ScreenCaptureService : BackgroundService
 
             sw.Stop();
             // Don't tank quality by dropping to 5 fps under brief load — keep ≥8.
+            // Network-driven adaptive FPS is applied by LiveStreamClient via SetMaxWidthOverride
+            // and encoder Fps — this path only reacts to capture CPU cost.
             var budget = interval.TotalMilliseconds * 0.9;
             if (sw.ElapsedMilliseconds > budget && adaptiveFps > 8)
             {
@@ -183,7 +227,7 @@ public sealed class ScreenCaptureService : BackgroundService
             var delay = interval - sw.Elapsed;
             if (delay > TimeSpan.Zero)
             {
-                try { await Task.Delay(delay, stoppingToken); }
+                try { Task.Delay(delay, stoppingToken).GetAwaiter().GetResult(); }
                 catch (OperationCanceledException) { break; }
             }
         }
@@ -306,70 +350,76 @@ public sealed class ScreenCaptureService : BackgroundService
         if (bounds.Width <= 0 || bounds.Height <= 0)
             return null;
 
-        using var src = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format32bppArgb);
-        using (var g = Graphics.FromImage(src))
+        if (_srcBitmap is null || _srcBitmap.Width != bounds.Width || _srcBitmap.Height != bounds.Height)
         {
-            g.CopyFromScreen(bounds.Left, bounds.Top, 0, 0, src.Size, CopyPixelOperation.SourceCopy);
+            _srcBitmap?.Dispose();
+            _srcBitmap = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format32bppArgb);
         }
 
-        var maxW = Math.Max(320, _config.StreamMaxWidth);
-        Bitmap toCopy = src;
-        Bitmap? scaled = null;
+        using (var g = Graphics.FromImage(_srcBitmap))
+        {
+            g.CopyFromScreen(bounds.Left, bounds.Top, 0, 0, _srcBitmap.Size, CopyPixelOperation.SourceCopy);
+        }
+
+        var maxW = EffectiveMaxWidth;
+        Bitmap toCopy = _srcBitmap;
+        if (_srcBitmap.Width > maxW)
+        {
+            var newH = (int)Math.Round(_srcBitmap.Height * (maxW / (double)_srcBitmap.Width));
+            newH = Math.Max(2, newH & ~1);
+            var newW = maxW & ~1;
+            if (_scaledBitmap is null || _scaledBitmap.Width != newW || _scaledBitmap.Height != newH)
+            {
+                _scaledBitmap?.Dispose();
+                _scaledBitmap = new Bitmap(newW, newH, PixelFormat.Format32bppArgb);
+            }
+            using var g = Graphics.FromImage(_scaledBitmap);
+            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+            g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
+            g.DrawImage(_srcBitmap, 0, 0, _scaledBitmap.Width, _scaledBitmap.Height);
+            toCopy = _scaledBitmap;
+        }
+
+        var w = toCopy.Width & ~1;
+        var h = toCopy.Height & ~1;
+        if (w < 2 || h < 2)
+            return null;
+
+        var rect = new Rectangle(0, 0, w, h);
+        var data = toCopy.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
         try
         {
-            if (src.Width > maxW)
+            var stride = Math.Abs(data.Stride);
+            var needed = stride * h;
+            if (_bgraScratch is null || _bgraScratch.Length < needed)
+                _bgraScratch = new byte[needed];
+            Marshal.Copy(data.Scan0, _bgraScratch, 0, needed);
+            // Channel ownership requires a dedicated buffer — copy packed BGRA out.
+            byte[] bgra;
+            if (stride != w * 4)
             {
-                var newH = (int)Math.Round(src.Height * (maxW / (double)src.Width));
-                // Even dimensions help most encoders.
-                newH = Math.Max(2, newH & ~1);
-                var newW = maxW & ~1;
-                scaled = new Bitmap(newW, newH, PixelFormat.Format32bppArgb);
-                using var g = Graphics.FromImage(scaled);
-                // HighQualityBicubic keeps UI/text sharper than Bilinear when downscaling.
-                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-                g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
-                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
-                g.DrawImage(src, 0, 0, scaled.Width, scaled.Height);
-                toCopy = scaled;
+                bgra = new byte[w * h * 4];
+                for (var y = 0; y < h; y++)
+                    Buffer.BlockCopy(_bgraScratch, y * stride, bgra, y * w * 4, w * 4);
+            }
+            else
+            {
+                bgra = new byte[w * h * 4];
+                Buffer.BlockCopy(_bgraScratch, 0, bgra, 0, w * h * 4);
             }
 
-            var w = toCopy.Width & ~1;
-            var h = toCopy.Height & ~1;
-            if (w < 2 || h < 2)
-                return null;
-
-            var rect = new Rectangle(0, 0, w, h);
-            var data = toCopy.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-            try
+            return new ScreenFrame
             {
-                var stride = Math.Abs(data.Stride);
-                var bgra = new byte[stride * h];
-                Marshal.Copy(data.Scan0, bgra, 0, bgra.Length);
-                // If stride != w*4, pack tightly.
-                if (stride != w * 4)
-                {
-                    var packed = new byte[w * h * 4];
-                    for (var y = 0; y < h; y++)
-                        Buffer.BlockCopy(bgra, y * stride, packed, y * w * 4, w * 4);
-                    bgra = packed;
-                }
-
-                return new ScreenFrame
-                {
-                    Bgra = bgra,
-                    Width = w,
-                    Height = h,
-                    TimestampMs = Environment.TickCount64,
-                };
-            }
-            finally
-            {
-                toCopy.UnlockBits(data);
-            }
+                Bgra = bgra,
+                Width = w,
+                Height = h,
+                TimestampMs = Environment.TickCount64,
+            };
         }
         finally
         {
-            scaled?.Dispose();
+            toCopy.UnlockBits(data);
         }
 #pragma warning restore CA1416
     }

@@ -117,7 +117,19 @@ export function useLiveStreamSocket(
 
     let cancelled = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let openOfferTimer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
+
+    const stopVideoStream = (stream: MediaStream | null | undefined) => {
+      if (!stream) return;
+      for (const track of stream.getTracks()) {
+        try {
+          track.stop();
+        } catch {
+          /* ignored */
+        }
+      }
+    };
 
     const cleanupPc = () => {
       const pc = pcRef.current;
@@ -130,7 +142,15 @@ export function useLiveStreamSocket(
         }
       }
       const video = videoHolder.current.current;
-      if (video) video.srcObject = null;
+      if (video) {
+        try {
+          video.pause();
+        } catch {
+          /* ignored */
+        }
+        stopVideoStream(video.srcObject as MediaStream | null);
+        video.srcObject = null;
+      }
     };
 
     const attachPcHandlers = (pc: RTCPeerConnection, ws: WebSocket) => {
@@ -140,6 +160,13 @@ export function useLiveStreamSocket(
         const stream = ev.streams[0] ?? new MediaStream([ev.track]);
         const video = videoHolder.current.current;
         if (video) {
+          const prev = video.srcObject as MediaStream | null;
+          if (prev && prev !== stream) stopVideoStream(prev);
+          try {
+            video.pause();
+          } catch {
+            /* ignored */
+          }
           video.srcObject = stream;
           void video.play().catch(() => undefined);
         }
@@ -242,7 +269,9 @@ export function useLiveStreamSocket(
           setState((s) => ({ ...s, status: 'connecting', error: null }));
           // Small delay so the server can deliver `start` to the employee
           // before we offer — SFU then waits for the track and answers with media.
-          window.setTimeout(() => {
+          if (openOfferTimer) clearTimeout(openOfferTimer);
+          openOfferTimer = setTimeout(() => {
+            openOfferTimer = null;
             void createOffer(ws, false);
           }, 300);
         }
@@ -372,6 +401,7 @@ export function useLiveStreamSocket(
     return () => {
       cancelled = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (openOfferTimer) clearTimeout(openOfferTimer);
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;

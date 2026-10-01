@@ -1,7 +1,24 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-09-29
+> **Last audited:** 2026-10-01
 > **Changelog:**
+>
+> - 2026-10-01: **Live stream V3.0 — safety + slow-network resilience (VPS/public internet).**
+>   Implements [plan.md](./plan.md) Phase 0 + Phase 1 against the V2 WebRTC SFU. Deploy assumes
+>   API on a public VPS domain (not LAN).
+>   - **Phase 0:** `ScreenVp8Encoder` wrap-only (no `VpxImgFree` on managed ptr); ICE `iceReady`
+>     always completed + session CT; web `track.stop()`/`video.pause()` + clear open timer;
+>     `TouchLastSeen` uses Background+timeout; `CheckOrigin` fail-closed; Subscribe capacity
+>     before Upgrade (HTTP 429); `sendPLI` done channel; idle capture poll skipped when stream off.
+>   - **Phase 1:** `NetProbeService` + `POST /live-stream/uplink-probe`; `ALPHA_STREAM_MIN_UPLINK_KBPS`
+>     / bitrate ladder / send-backpressure degrade (bitrate→resolution→fps); PLI→`force_keyframe`
+>     ctrl; stream telemetry via `app_status`; token-bucket `WEBRTC_MAX_BITRATE_KBPS` on
+>     `forwardRTP`; TURN empty startup WARNING; ticket cap + offer semaphore; 4h socket lifetime;
+>     watch UserID audit log; employee poll `staleTime`/`refetchInterval` tuned. **Ops:** provision
+>     TURN (`WEBRTC_TURN_*`) on the VPS; re-bake `config.enc` after `.env` (new stream keys).
+>   - Phase 2 horizontal scale (Redis/sticky) deferred until a second instance is required.
+>   - Verified: `dotnet build` 0/0, `go build`/`go vet` clean, `go test ./internal/stream/...` ok,
+>     `npx tsc --noEmit` clean. F1 heap fix needs installed-build start/stop cycle (not provable by build).
 >
 > - 2026-09-29: **Web live-stream — per-tile FPS + full-bleed theater popout.**
 >   - Shared components under `web/src/components/live-stream/` (`LiveStreamWatchTile`,
