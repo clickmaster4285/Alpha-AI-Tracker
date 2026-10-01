@@ -100,6 +100,7 @@ SQLSTATE 42703 (undefined column) → 500.
 
 **Fix** (`server/internal/repository/employee_repo.go`): added the missing `client_version`
 subquery to the `UPDATE…RETURNING` clause:
+
 ```sql
 (SELECT cv.client_version FROM employee_devices cv
  WHERE cv.employee_id = e.employee_id
@@ -110,10 +111,10 @@ subquery to the `UPDATE…RETURNING` clause:
 
 ## Bug Fixes Summary
 
-| # | Issue | Root cause | Fix |
-|---|-------|-----------|-----|
-| 1 | Infinite orphan `app-items` sync loop (32 poison rows every pass) | `_lastMissingSessionIds.Count > 0` guard prevented quarantine counter from advancing | Removed the guard; all refusals count toward the 3-pass quarantine threshold |
-| 2 | `PUT /api/v1/employees/:id` returns 500 | `UPDATE…RETURNING` missing `client_version` subquery; `scanEmployeeRow` expects 18 columns | Added the subquery to the RETURNING clause |
+| # | Issue                                                              | Root cause                                                                                        | Fix                                                                          |
+| - | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| 1 | Infinite orphan`app-items` sync loop (32 poison rows every pass) | `_lastMissingSessionIds.Count > 0` guard prevented quarantine counter from advancing            | Removed the guard; all refusals count toward the 3-pass quarantine threshold |
+| 2 | `PUT /api/v1/employees/:id` returns 500                          | `UPDATE…RETURNING` missing `client_version` subquery; `scanEmployeeRow` expects 18 columns | Added the subquery to the RETURNING clause                                   |
 
 ---
 
@@ -163,10 +164,9 @@ Branch: `feature/live_stream`. Client version bump: **1.1.6 → 1.2.0**.
 - **In-memory hub** (`server/internal/stream/`) — latest-frame-wins mailbox, watcher fan-out,
   start/stop control to the desktop push socket, idle reap, hard caps
   (`LIVE_STREAM_MAX_STREAMS`, max watchers/employee, max frame bytes, max FPS).
-- **Auth split (Client-vs-Web API Auth Separation Rule):**
-  | Surface | Routes | Auth |
-  |---|---|---|
-  | Desktop push | `GET /api/v1/live-stream/push` (WS) | `DeviceAuth` |
+- **Auth split (Client-vs-Web API Auth Separation Rule):**| Surface                     | Routes                                                                                             | Auth                           |
+  | --------------------------- | -------------------------------------------------------------------------------------------------- | ------------------------------ |
+  | Desktop push                | `GET /api/v1/live-stream/push` (WS)                                                              | `DeviceAuth`                 |
   | Admin list / ticket / watch | `GET /live-stream/employees`, `GET /live-stream/watch-ticket`, `GET /live-stream/watch` (WS) | JWT / short-lived watch ticket |
 - **Consent gate** — `terms_consent` feature `live_view` re-checked on push upgrade and watch
   ticket mint (and again on watch connect).
@@ -180,10 +180,10 @@ Branch: `feature/live_stream`. Client version bump: **1.1.6 → 1.2.0**.
 
 ### Migrations shipped with this release
 
-| Migration | What |
-|---|---|
-| **040** `040_fix_app_items_url_index.sql` | Drops `idx_app_items_url` — unbounded URL btree keys exceeded Postgres’ ~2704-byte limit (SQLSTATE 54000) and 500’d entire `app-items/sync` batches |
-| **041** `041_fix_app_items_context_index.sql` | Replaces `idx_app_items_context(employee_id, item_type, identifier)` with `idx_app_items_emp_type` — same overflow when `identifier` held a long URL |
+| Migration                                             | What                                                                                                                                                       |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **040** `040_fix_app_items_url_index.sql`     | Drops`idx_app_items_url` — unbounded URL btree keys exceeded Postgres’ ~2704-byte limit (SQLSTATE 54000) and 500’d entire `app-items/sync` batches  |
+| **041** `041_fix_app_items_context_index.sql` | Replaces`idx_app_items_context(employee_id, item_type, identifier)` with `idx_app_items_emp_type` — same overflow when `identifier` held a long URL |
 
 ---
 
@@ -221,14 +221,14 @@ Branch: `feature/live_stream`. Client version bump: **1.1.6 → 1.2.0**.
 
 ## Bug Fixes Summary
 
-| # | Issue | Root cause | Fix |
-|---|-------|-----------|-----|
-| 1 | Live-stream rail showed Offline while client was syncing | Online window was 60 s; heartbeats arrive on ~60 s sync | 3-minute window + use `GREATEST(value, updated_at)` |
-| 2 | `app-items/sync` 500 — `idx_app_items_url` | Long URLs overflow btree key limit | Migration **040** drop index |
-| 3 | `app-items/sync` 500 — `idx_app_items_context` | Long `identifier` (often URL) in composite btree | Migration **041** replace with `(employee_id, item_type)` |
-| 4 | Sync pass warn — SQLite FK on retention | Deleting parent `app_items` while children still referenced them | Delete children-with-parent first, then roots without children |
-| 5 | Dual-monitor PC, web only showed one display | Monitors enumerated once at process start | Re-scan on hello / start capture; pin enum callback; use callback rect |
-| 6 | Consent / feature id mismatch during early wiring | Seeded feature is `live_view`, not `live_stream` | Hub `FeatureID = "live_view"` end-to-end |
+| # | Issue                                                    | Root cause                                                        | Fix                                                                    |
+| - | -------------------------------------------------------- | ----------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| 1 | Live-stream rail showed Offline while client was syncing | Online window was 60 s; heartbeats arrive on ~60 s sync           | 3-minute window + use`GREATEST(value, updated_at)`                   |
+| 2 | `app-items/sync` 500 — `idx_app_items_url`          | Long URLs overflow btree key limit                                | Migration**040** drop index                                      |
+| 3 | `app-items/sync` 500 — `idx_app_items_context`      | Long`identifier` (often URL) in composite btree                 | Migration**041** replace with `(employee_id, item_type)`       |
+| 4 | Sync pass warn — SQLite FK on retention                 | Deleting parent`app_items` while children still referenced them | Delete children-with-parent first, then roots without children         |
+| 5 | Dual-monitor PC, web only showed one display             | Monitors enumerated once at process start                         | Re-scan on hello / start capture; pin enum callback; use callback rect |
+| 6 | Consent / feature id mismatch during early wiring        | Seeded feature is`live_view`, not `live_stream`               | Hub`FeatureID = "live_view"` end-to-end                              |
 
 ---
 
@@ -264,6 +264,7 @@ Branch: `feature/live_stream`. Client version bump: **1.1.6 → 1.2.0**.
 - Ephemeral / consent-revoke / cap stress checks still worth a formal installed-build pass.
 
 ---
+
 ---
 
 # Release Notes — v1.1.6
@@ -298,10 +299,10 @@ new `--terms` agent mode on the client.
 
 ### Auth surfaces separated (Client-vs-Web API Auth Separation Rule, codified in AGENTS.md §6)
 
-| Surface | Routes | Auth |
-|---|---|---|
-| **Client (device)** | `GET /terms-content/active`, `POST /terms-consent/sync` | `DeviceAuth` (the `syncGroup` — employee JWTs were rejected by the old JWTAuth admin-issuer check, and `employee_id` was never set under JWTAuth) |
-| **Web admin** | `POST/PUT/PATCH/DELETE /terms-content`, `GET /terms-content[/:id]`, `GET /terms-consent` (+ `/check`) | `JWTAuth` |
+| Surface                   | Routes                                                                                                        | Auth                                                                                                                                                     |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Client (device)** | `GET /terms-content/active`, `POST /terms-consent/sync`                                                   | `DeviceAuth` (the `syncGroup` — employee JWTs were rejected by the old JWTAuth admin-issuer check, and `employee_id` was never set under JWTAuth) |
+| **Web admin**       | `POST/PUT/PATCH/DELETE /terms-content`, `GET /terms-content[/:id]`, `GET /terms-consent` (+ `/check`) | `JWTAuth`                                                                                                                                              |
 
 `GET /terms-content/active` returns **only** `is_active = 1` terms in server order
 (`sort_order ASC, created_at ASC`); `GET /terms-consent` remains the web's privacy/audit view.
@@ -325,11 +326,11 @@ new `--terms` agent mode on the client.
 
 The client now runs as **three instances**:
 
-| Instance | What | How it runs |
-|---|---|---|
-| 1 | **Tracker GUI** — login, shell, dashboard pages | `client.exe` (normal launch) — unchanged behavior |
-| 2 | **Collector / sync engine** — journeys + sync | Headless services inside the tracker process (`--background` for pure headless) |
-| 3 | **Terms & Conditions app** (new) — fetch → show → accept → sync consent | `client.exe --terms` — **own process, own neutral GUI, own mutex**, no tracking services registered, exits when the queue is done |
+| Instance | What                                                                              | How it runs                                                                                                                                |
+| -------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1        | **Tracker GUI** — login, shell, dashboard pages                            | `client.exe` (normal launch) — unchanged behavior                                                                                       |
+| 2        | **Collector / sync engine** — journeys + sync                              | Headless services inside the tracker process (`--background` for pure headless)                                                          |
+| 3        | **Terms & Conditions app** (new) — fetch → show → accept → sync consent | `client.exe --terms` — **own process, own neutral GUI, own mutex**, no tracking services registered, exits when the queue is done |
 
 - **`TermsService`** (new): ScheduleCacheService-style pull loop (login/session-restore wake +
   `ALPHA_TERMS_CHECK_HOURS` timer) hitting `GET /terms-content/active` with Device-token auth;
@@ -355,17 +356,17 @@ The client now runs as **three instances**:
 
 ## Bug Fixes Summary
 
-| # | Issue | Root cause | Fix |
-|---|-------|-----------|-----|
-| 1 | Terms visible in SQLite but the GUI showed nothing | `TermsPage` never got its `DataContext` (inherited `MainViewModel`; bindings target `TermsViewModel`) | Explicit `DataContext="{Binding Terms}"` + `PendingTermsChanged` marshaled through `Dispatcher.UIThread.Post` |
-| 2 | Terms auto-accepted without the user ever seeing them | Retry loop re-POSTed every `is_accepted=0` row — pending also meant "not yet agreed" | Two-state `is_user_accepted` / `is_accepted`; retry loop re-sends user-accepted rows only; one-time data repair in `MigrateSql` |
-| 3 | Accepting the 3rd term crashed the modal; after relaunch every accept closed it | Index/list desync — the pending list shrank after each accept but presentation kept indexing with the stale counter → `ArgumentOutOfRangeException` inside `async void` (terms were also silently skipped) | Queue head always presented (`pending[0]`); progress/position derived from counts |
-| 4 | Modal stayed open after the last acceptance | The `Done` event subscription was lost in the move to the standalone agent | `Done` → `Dispatcher.UIThread.Post(close)` |
-| 5 | Modal not always on top | Standalone `TermsWindow` never set `Topmost` | `Topmost="True"` |
-| 6 | Agent process lingered as a windowless zombie after its window closed | `ShutdownMode.OnMainWindowClose` never ended the Avalonia lifetime; unbounded `host.StopAsync` hung; empty-queue close-during-init wedged the lifetime | `Environment.Exit(0)` from the window's `Closed` event (safe — consents flush synchronously at accept) + bounded 5 s `host.StopAsync` on the pre-window path |
-| 7 | `POST /terms-content` returned 500 on every create after the first | Manually-added live-DB UNIQUE index on `feature_id` collided on the hardcoded empty string | Migration `039` re-scopes the index to `feature_id <> ''` |
-| 8 | Client startup crashed with `SQLite Error 1: near "is_user_accepted": syntax error` | Migration comments contained `;` / quotes — `RunMigrationsAsync` splits `MigrateSql` on `;` **before** stripping comments, gluing half a comment onto the `ALTER TABLE` | All semicolons/quotes removed from migration comments (trap documented in `StripSqlLineComments`) |
-| 9 | A failed terms fetch was silent — no spawn, no window, no log | `RefreshAsync` swallowed all exceptions and returned without raising `PendingTermsChanged` | Loud warning + spawn from the cached pending queue |
+| # | Issue                                                                                | Root cause                                                                                                                                                                                                      | Fix                                                                                                                                                                 |
+| - | ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1 | Terms visible in SQLite but the GUI showed nothing                                   | `TermsPage` never got its `DataContext` (inherited `MainViewModel`; bindings target `TermsViewModel`)                                                                                                   | Explicit`DataContext="{Binding Terms}"` + `PendingTermsChanged` marshaled through `Dispatcher.UIThread.Post`                                                  |
+| 2 | Terms auto-accepted without the user ever seeing them                                | Retry loop re-POSTed every`is_accepted=0` row — pending also meant "not yet agreed"                                                                                                                          | Two-state`is_user_accepted` / `is_accepted`; retry loop re-sends user-accepted rows only; one-time data repair in `MigrateSql`                                |
+| 3 | Accepting the 3rd term crashed the modal; after relaunch every accept closed it      | Index/list desync — the pending list shrank after each accept but presentation kept indexing with the stale counter →`ArgumentOutOfRangeException` inside `async void` (terms were also silently skipped) | Queue head always presented (`pending[0]`); progress/position derived from counts                                                                                 |
+| 4 | Modal stayed open after the last acceptance                                          | The`Done` event subscription was lost in the move to the standalone agent                                                                                                                                     | `Done` → `Dispatcher.UIThread.Post(close)`                                                                                                                     |
+| 5 | Modal not always on top                                                              | Standalone`TermsWindow` never set `Topmost`                                                                                                                                                                 | `Topmost="True"`                                                                                                                                                  |
+| 6 | Agent process lingered as a windowless zombie after its window closed                | `ShutdownMode.OnMainWindowClose` never ended the Avalonia lifetime; unbounded `host.StopAsync` hung; empty-queue close-during-init wedged the lifetime                                                      | `Environment.Exit(0)` from the window's `Closed` event (safe — consents flush synchronously at accept) + bounded 5 s `host.StopAsync` on the pre-window path |
+| 7 | `POST /terms-content` returned 500 on every create after the first                 | Manually-added live-DB UNIQUE index on`feature_id` collided on the hardcoded empty string                                                                                                                     | Migration`039` re-scopes the index to `feature_id <> ''`                                                                                                        |
+| 8 | Client startup crashed with`SQLite Error 1: near "is_user_accepted": syntax error` | Migration comments contained`;` / quotes — `RunMigrationsAsync` splits `MigrateSql` on `;` **before** stripping comments, gluing half a comment onto the `ALTER TABLE`                         | All semicolons/quotes removed from migration comments (trap documented in`StripSqlLineComments`)                                                                  |
+| 9 | A failed terms fetch was silent — no spawn, no window, no log                       | `RefreshAsync` swallowed all exceptions and returned without raising `PendingTermsChanged`                                                                                                                  | Loud warning + spawn from the cached pending queue                                                                                                                  |
 
 ---
 
@@ -401,6 +402,7 @@ The client now runs as **three instances**:
 - No rate limiting on login or sync endpoints.
 
 ---
+
 ---
 
 # Release Notes — v1.1.5
@@ -414,6 +416,7 @@ v1.1.5 is a major feature release spanning Time & Attendance, Dynamic RBAC, Empl
 ## 1. Time & Attendance (Phase 1) — Client + Server
 
 **Client**
+
 - New `SystemEventWatcher` (cross-platform `BackgroundService`) emits `session_events` via the existing `IEventRecorder`:
   - **Linux**: D-Bus `UPower` (PrepareForSleep), `login1` (Lock/Unlock), `org.gnome.ScreenSaver` (ActiveChanged).
   - **Windows**: `Microsoft.Win32.SystemEvents` PowerModeChanged + SessionSwitch + SessionEnding.
@@ -428,6 +431,7 @@ v1.1.5 is a major feature release spanning Time & Attendance, Dynamic RBAC, Empl
 - New env knobs: `ALPHA_TA_ENABLED`, `ALPHA_IDLE_*`, `ALPHA_TA_LOCK_HYSTERESIS_SEC`.
 
 **Server**
+
 - Migration `028`: `shifts` gains `timezone`, `holidays` table, aggregate event fields on `session_events`.
 - New endpoints: `GET /api/v1/schedules/me`, `GET /api/v1/holidays`, `POST /api/v1/attendance/rollup`.
 - Shift timezone defaults to server local time (`DEFAULT_SHIFT_TIMEZONE` env); attendance late rule uses `firstLocal.After(shiftStart + grace)` in the shift’s own IANA zone.
@@ -495,11 +499,13 @@ v1.1.5 is a major feature release spanning Time & Attendance, Dynamic RBAC, Empl
 ## 6. Hours Insights Redesign & Time Calculation Fix
 
 **Critical bug fixed**: unclosed `app_items` with `opened_at` in the past but `closed_at = NULL` were being bounded by the filter’s `from_ts` (midnight today), inflating Today’s total to 19+ hours. The fix:
+
 - `app_items` are now bounded by their parent `app_sessions.ended_at` / `last_sync_at` / `last_activity_at` when `closed_at` is NULL.
 - `site_usage` filters on `item_type = 'browser_tab'` only (eliminates duplicate `browser_navigation` counts).
 - Total active time is derived from true computer/application runtime, not by adding site durations on top of browser runtime.
 
 **New dual-view UX** (URL-synced via `?view=productivity` or `?view=applications`):
+
 - **"From Productivity"**: stacked-area chart (Productive / Neutral / Unproductive) + breakdown table with productivity type, category, duration, and focus score.
 - **"From Application Individually"**: per-application stacked-area chart (top apps sorted by total duration, hourly buckets for ≤3 days, daily for longer) + ranked breakdown table with duration, percentage bar, session count, category, and productivity tag.
 
@@ -510,6 +516,7 @@ v1.1.5 is a major feature release spanning Time & Attendance, Dynamic RBAC, Empl
 **Root cause**: the a11y reader returned a fresh `WindowKey` per tab; the old `ResolveWindowKey` only collapsed tabs when titles matched; transient "Loading…" states slipped through and opened a session per tab. The web page then summed per-row `endedAt - startedAt`.
 
 **Fix**:
+
 - **Layer 1 — client** (`AccessibilityBrowserTracker.ResolveWindowKey`): two new collapse rules — (a) exact URL match (stronger than title), and (b) fresh-key recency window of `poll×2` seconds that attaches a new same-PID key to the FRESHEST tracked window.
 - **Layer 2 — web** (`/employee-journey/apps`): the `useMemo` now recomputes duration as `lastClosedAt - firstOpenedAt` regardless of what the server returns.
 - **Layer 3 — server**: new `GET /api/v1/app-sessions/usage` returns one row per `(appDisplayName, processName)` with `MIN(started_at)`, `MAX(COALESCE(ended_at, last_sync_at, started_at))`, `SUM(...)` for `totalDurationSeconds`. Composite index `idx_app_sessions_employee_started_name` covers the WHERE + GROUP BY.
@@ -535,6 +542,7 @@ v1.1.5 is a major feature release spanning Time & Attendance, Dynamic RBAC, Empl
 **Root cause 1**: the orphan preflight returned only a survivor COUNT and the client’s `SendAsync` never read the response body, so the client marked ALL sent ids `is_synced=1` — including rows the server had refused — permanently losing them.
 
 **Fix**:
+
 - `SyncBatchResponse` now carries `rejectedIds []string` (omitempty: the other 11 sync endpoints’ wire format is untouched; absent field = old mark-all behavior, so new-client↔old-server stays compatible).
 - `BulkInsertAppItems` returns the refused item ids.
 - `SyncAppItems` surfaces them.
@@ -916,28 +924,28 @@ v1.1.5 is a major feature release spanning Time & Attendance, Dynamic RBAC, Empl
 
 ## Bug Fixes Summary
 
-| # | Issue | Fix |
-|---|-------|-----|
-| 1 | Orphan `app_items` silently lost | Client reads `rejectedIds` + `missingSessionIds`; server preflights parent session IDs |
-| 2 | Chrome multi-tab duration wrong | 3-layer fix: client collapse rules, server usage aggregate, web `lastClosed - firstOpened` |
-| 3 | OFFLINE/STALE sessions labeled "Running" | `has_open_session = BOOL_OR(status='ACTIVE' AND ended_at IS NULL)` |
-| 4 | Windows shutdown never emitted `power_off` | `SessionEnding` → `CloseAllOpenSessionsOnShutdownAsync()` |
-| 5 | Focus totals frozen at 0 | Additive flush SQL; foreground/background now accumulated per poll |
-| 6 | App-session tracking not starting headlessly | `ExecuteAsync` calls `StartTracking()` after `RefreshEmployeeInfo` |
-| 7 | Journey noise flood (AppData churn) | `FileSystemEventWatcher` excludes appdata/programdata/program files trees |
-| 8 | Duplicate Linux lock/unlock events | Machine-wide `Global\` mutex |
-| 9 | Unclosed sessions duration runaway | Bounded to parent session `ended_at` / `last_sync_at` / `last_activity_at` |
-| 10 | Windows software detection hardcoded | PE Subsystem + C:\Windows tree + registry flags + winget |
-| 11 | Windows installer tree-kills itself | `/T` removed from `KillRunningInstance`; detached `.cmd` waits then installs |
-| 12 | Stale installers linger in `updates/` | `CleanupUpdatesDirectoryAsync` after install + startup sweep |
-| 13 | Snap Firefox invisible to AT-SPI | Surgical AppArmor override |
-| 14 | Flatpak/snap browsers show proxy name | `resolve_app_name(pid)` walks PPID chain + checks `FLATPAK_ID` / `snap` path |
-| 15 | Employee disconnect breaks tracking | Disconnect button + endpoint removed; client tracks until process stops |
-| 16 | Attendance late rule in wrong timezone | Shift timezone defaults to server local time; web formats in shift’s IANA zone |
-| 17 | URL-synced filters lose employee selection | Unified URL state via `useUrlQueryState` |
-| 18 | Productivity total includes browser runtime | Site usage bounded by parent session; `item_type = 'browser_tab'` only |
-| 19 | Windows inventory shows CLI tools as apps | PE Subsystem gate + C:\Windows tree + Start Menu `.lnk` presence |
-| 20 | `dpkg-query` startup noise | Format string double-quoted so tab/newline escapes reach dpkg-query as one argument |
+| #  | Issue                                        | Fix                                                                                         |
+| -- | -------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| 1  | Orphan`app_items` silently lost            | Client reads`rejectedIds` + `missingSessionIds`; server preflights parent session IDs   |
+| 2  | Chrome multi-tab duration wrong              | 3-layer fix: client collapse rules, server usage aggregate, web`lastClosed - firstOpened` |
+| 3  | OFFLINE/STALE sessions labeled "Running"     | `has_open_session = BOOL_OR(status='ACTIVE' AND ended_at IS NULL)`                        |
+| 4  | Windows shutdown never emitted`power_off`  | `SessionEnding` → `CloseAllOpenSessionsOnShutdownAsync()`                              |
+| 5  | Focus totals frozen at 0                     | Additive flush SQL; foreground/background now accumulated per poll                          |
+| 6  | App-session tracking not starting headlessly | `ExecuteAsync` calls `StartTracking()` after `RefreshEmployeeInfo`                    |
+| 7  | Journey noise flood (AppData churn)          | `FileSystemEventWatcher` excludes appdata/programdata/program files trees                 |
+| 8  | Duplicate Linux lock/unlock events           | Machine-wide`Global\` mutex                                                               |
+| 9  | Unclosed sessions duration runaway           | Bounded to parent session`ended_at` / `last_sync_at` / `last_activity_at`             |
+| 10 | Windows software detection hardcoded         | PE Subsystem + C:\Windows tree + registry flags + winget                                    |
+| 11 | Windows installer tree-kills itself          | `/T` removed from `KillRunningInstance`; detached `.cmd` waits then installs          |
+| 12 | Stale installers linger in`updates/`       | `CleanupUpdatesDirectoryAsync` after install + startup sweep                              |
+| 13 | Snap Firefox invisible to AT-SPI             | Surgical AppArmor override                                                                  |
+| 14 | Flatpak/snap browsers show proxy name        | `resolve_app_name(pid)` walks PPID chain + checks `FLATPAK_ID` / `snap` path          |
+| 15 | Employee disconnect breaks tracking          | Disconnect button + endpoint removed; client tracks until process stops                     |
+| 16 | Attendance late rule in wrong timezone       | Shift timezone defaults to server local time; web formats in shift’s IANA zone             |
+| 17 | URL-synced filters lose employee selection   | Unified URL state via`useUrlQueryState`                                                   |
+| 18 | Productivity total includes browser runtime  | Site usage bounded by parent session;`item_type = 'browser_tab'` only                     |
+| 19 | Windows inventory shows CLI tools as apps    | PE Subsystem gate + C:\Windows tree + Start Menu`.lnk` presence                           |
+| 20 | `dpkg-query` startup noise                 | Format string double-quoted so tab/newline escapes reach dpkg-query as one argument         |
 
 ---
 
