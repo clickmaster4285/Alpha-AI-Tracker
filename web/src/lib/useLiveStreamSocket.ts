@@ -160,8 +160,8 @@ export function useLiveStreamSocket(
         const stream = ev.streams[0] ?? new MediaStream([ev.track]);
         const video = videoHolder.current.current;
         if (video) {
-          const prev = video.srcObject as MediaStream | null;
-          if (prev && prev !== stream) stopVideoStream(prev);
+          // Detach previous stream without track.stop() — stopping remote tracks
+          // mid-renegotiation races with track_ready recreate and can blank video.
           try {
             video.pause();
           } catch {

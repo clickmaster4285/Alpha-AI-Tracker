@@ -280,13 +280,19 @@ public sealed class LiveStreamClient : BackgroundService
     private async Task<(RTCPeerConnection pc, ScreenVp8Encoder encoder, CancellationTokenSource mediaCts, Task mediaPump)>
         StartPublisherAsync(ClientWebSocket ws, List<RTCIceServer> iceServers, CancellationToken ct)
     {
+        // Probe soft-fails: a transient HTTP/auth/timeout must not refuse publish.
+        // Only a successful measurement below the floor hard-skips (thin-link guard).
         var uplink = await _probe.MeasureUplinkKbpsAsync(ct);
+        int uplinkKbps;
         if (uplink is null)
         {
-            await WriteStatusAsync("stream_skip_reason", "uplink_probe_failed");
-            throw new InvalidOperationException("Uplink probe failed — refusing to publish");
+            uplinkKbps = Math.Min(_config.StreamMaxBitrateKbps, Math.Max(1500, _config.StreamMinUplinkKbps));
+            await WriteStatusAsync("stream_skip_reason", "uplink_probe_failed_using_fallback");
+            _logger.LogWarning(
+                "LiveStreamClient: uplink probe failed — publishing at conservative fallback uplink={Kbps}kbps",
+                uplinkKbps);
         }
-        if (uplink.Value < _config.StreamMinUplinkKbps)
+        else if (uplink.Value < _config.StreamMinUplinkKbps)
         {
             await WriteStatusAsync("stream_skip_reason",
                 $"uplink_below_floor measured={uplink} min={_config.StreamMinUplinkKbps}");
@@ -296,11 +302,15 @@ public sealed class LiveStreamClient : BackgroundService
             throw new InvalidOperationException(
                 $"Uplink {uplink} kbps below floor {_config.StreamMinUplinkKbps} kbps");
         }
+        else
+        {
+            uplinkKbps = uplink.Value;
+            await WriteStatusAsync("stream_skip_reason", "");
+        }
 
-        var kbps = NetProbeService.SelectBitrateKbps(uplink.Value, _config.StreamMaxBitrateKbps);
-        await WriteStatusAsync("stream_uplink_kbps", uplink.Value.ToString());
+        var kbps = NetProbeService.SelectBitrateKbps(uplinkKbps, _config.StreamMaxBitrateKbps);
+        await WriteStatusAsync("stream_uplink_kbps", uplinkKbps.ToString());
         await WriteStatusAsync("stream_selected_bitrate_kbps", kbps.ToString());
-        await WriteStatusAsync("stream_skip_reason", "");
 
         _capture.SetMaxWidthOverride(0);
         _capture.SetStreamActive(true);
@@ -318,7 +328,7 @@ public sealed class LiveStreamClient : BackgroundService
         encoder.ForceKeyFrame();
         _logger.LogInformation(
             "LiveStreamClient VP8 encode bitrate={Kbps}kbps (uplink≈{Up}kbps) fps={Fps} maxWidth={MaxW} keyframeEvery={Kf} lag={Lag} [ScreenVp8Encoder]",
-            kbps, uplink, _config.StreamFps, _config.StreamMaxWidth, keyframeEvery, _config.StreamVp8LagFrames);
+            kbps, uplinkKbps, _config.StreamFps, _config.StreamMaxWidth, keyframeEvery, _config.StreamVp8LagFrames);
         var mediaCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
         var videoTrack = new MediaStreamTrack(
@@ -375,7 +385,7 @@ public sealed class LiveStreamClient : BackgroundService
             iceReady.TrySetResult();
         }
 
-        var mediaPump = Task.Run(() => MediaPumpAsync(pc, encoder, kbps, uplink.Value, mediaCts.Token), mediaCts.Token);
+        var mediaPump = Task.Run(() => MediaPumpAsync(pc, encoder, kbps, uplinkKbps, mediaCts.Token), mediaCts.Token);
         return (pc, encoder, mediaCts, mediaPump);
     }
 

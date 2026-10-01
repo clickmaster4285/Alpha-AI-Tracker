@@ -137,7 +137,16 @@ func NewHub(cfg Config) *Hub {
 		tickets:  make(map[string]watchTicket),
 		stopIdle: make(chan struct{}),
 	}
+	// One-shot IDR request when the publisher track becomes ready (late joiners).
+	// Throttled so rapid republish cannot spam the ctrl channel.
+	var lastKF sync.Map // empID → time.Time
 	h.sfu.SetPublisherPLIHook(func(empID string) {
+		if v, ok := lastKF.Load(empID); ok {
+			if t, _ := v.(time.Time); time.Since(t) < 8*time.Second {
+				return
+			}
+		}
+		lastKF.Store(empID, time.Now())
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		m, ok := h.boxes[empID]
@@ -252,15 +261,21 @@ func (h *Hub) sendCtrlEventLocked(m *mailbox, ev ControlEvent) {
 	}
 	select {
 	case m.ctrl <- ev:
+		return
 	default:
-		select {
-		case <-m.ctrl:
-		default:
-		}
-		select {
-		case m.ctrl <- ev:
-		default:
-		}
+	}
+	// Channel full. Never displace start/stop with force_keyframe — DropOldest
+	// used to swallow start while PLI-driven keyframes flooded the buffer.
+	if ev.Type == "force_keyframe" {
+		return
+	}
+	select {
+	case <-m.ctrl:
+	default:
+	}
+	select {
+	case m.ctrl <- ev:
+	default:
 	}
 }
 

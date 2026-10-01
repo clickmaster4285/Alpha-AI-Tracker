@@ -105,9 +105,10 @@ public class AppConfig
     /// </summary>
     public int StreamMinUplinkKbps { get; init; } = 2500;
     /// <summary>
-    /// libvpx GLagInFrames (altref). Screen content benefits from 1; 0 = lowest latency.
+    /// libvpx GLagInFrames (altref). Default 0 = lowest latency for live preview;
+    /// set ALPHA_STREAM_VP8_LAG_FRAMES=1 after A/B on a real stream if compression wins.
     /// </summary>
-    public int StreamVp8LagFrames { get; init; } = 1;
+    public int StreamVp8LagFrames { get; init; } = 0;
 
     // ─── Control WebSocket (presence / keep-alive channel) ───
     // Long-lived outbound WS to GET /api/v1/ws (DeviceAuth). Independent of
@@ -177,7 +178,7 @@ public class AppConfig
             StreamMaxBitrateKbps = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_MAX_BITRATE_KBPS"), out var streamBr) ? streamBr : 12000, 500, 15000),
             StreamKeyframeIntervalSec = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_KEYFRAME_INTERVAL_SEC"), out var streamKf) ? streamKf : 1, 1, 10),
             StreamMinUplinkKbps = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_MIN_UPLINK_KBPS"), out var streamMinUp) ? streamMinUp : 2500, 500, 15000),
-            StreamVp8LagFrames = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_VP8_LAG_FRAMES"), out var streamLag) ? streamLag : 1, 0, 5),
+            StreamVp8LagFrames = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_VP8_LAG_FRAMES"), out var streamLag) ? streamLag : 0, 0, 5),
             WsEnabled = IsEnvTruthy(GetEnv("ALPHA_WS_ENABLED")),
             WsPingSec = Math.Clamp(int.TryParse(GetEnv("ALPHA_WS_PING_SEC"), out var wsPing) ? wsPing : 30, 5, 300),
             WsReconnectBaseSec = Math.Clamp(int.TryParse(GetEnv("ALPHA_WS_RECONNECT_BASE_SEC"), out var wsRecon) ? wsRecon : 2, 1, 60),

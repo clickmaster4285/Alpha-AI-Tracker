@@ -291,7 +291,12 @@ func (s *SFU) AcceptPublisherOffer(empID, sdp string, onICE func(candidate webrt
 
 		log.Printf("[webrtc-sfu] publisher track ready employee=%s codec=%s", empID, remote.Codec().MimeType)
 		go forwardRTP(remote, local, &r.pubActive, s.maxBitrateKbps)
-		go sendPLI(pc, remote, pliDone, empID, s.onPublisherPLI)
+		// One IDR nudge for late joiners — NOT every PLI tick (that flooded ctrl
+		// and could drop start/stop on the buffered channel).
+		if s.onPublisherPLI != nil {
+			s.onPublisherPLI(empID)
+		}
+		go sendPLI(pc, remote, pliDone)
 		_ = receiver
 	})
 
@@ -359,7 +364,10 @@ func forwardRTP(remote *webrtc.TrackRemote, local *webrtc.TrackLocalStaticRTP, a
 	}
 }
 
-func sendPLI(pc *webrtc.PeerConnection, remote *webrtc.TrackRemote, done <-chan struct{}, empID string, onPLI func(string)) {
+// sendPLI periodically requests a decoder refresh from the publisher via RTCP.
+// Encoder ForceKeyFrame is triggered separately (one-shot on track ready) —
+// wiring every PLI tick to the ctrl channel caused I-frame spam + dropped start/stop.
+func sendPLI(pc *webrtc.PeerConnection, remote *webrtc.TrackRemote, done <-chan struct{}) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -371,9 +379,6 @@ func sendPLI(pc *webrtc.PeerConnection, remote *webrtc.TrackRemote, done <-chan 
 				&rtcp.PictureLossIndication{MediaSSRC: uint32(remote.SSRC())},
 			}); err != nil {
 				return
-			}
-			if onPLI != nil {
-				onPLI(empID)
 			}
 		}
 	}

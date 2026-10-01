@@ -130,8 +130,8 @@ public sealed class ScreenVp8Encoder : IDisposable
         cfg.RcTargetBitrate = Math.Max(500, _targetKbps);
         // VBR spends bits on hard frames (UI text) instead of padding CBR on static P-frames.
         cfg.RcEndUsage = VpxRcMode.VPX_VBR;
-        // Altref (lag>0) helps screen content compression; 0 = lowest latency.
-        // Tunable via ALPHA_STREAM_VP8_LAG_FRAMES (default 1 after V3 A/B preference).
+        // Altref (lag>0) helps screen compression; default 0 for live latency.
+        // Tunable via ALPHA_STREAM_VP8_LAG_FRAMES.
         cfg.GLagInFrames = _lagFrames;
         cfg.GErrorResilient = 0;
         cfg.RcUndershootPct = 100;
