@@ -135,6 +135,7 @@ public sealed class WsClient : BackgroundService
             ws.Options.SetRequestHeader("Authorization", $"Device {employee.DeviceToken}");
         else
             ws.Options.SetRequestHeader("Authorization", $"Bearer {employee.Token}");
+        ClientIdentityHeaders.Apply(ws.Options);
 
         _logger.LogInformation("WsClient connecting to {Url}", wsUrl);
         await ws.ConnectAsync(new Uri(wsUrl), ct);

@@ -941,6 +941,7 @@ public class SyncService : BackgroundService
             {
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _token);
             }
+            ClientIdentityHeaders.Apply(request);
 
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(30));

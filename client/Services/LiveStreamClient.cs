@@ -111,6 +111,7 @@ public sealed class LiveStreamClient : BackgroundService
             ws.Options.SetRequestHeader("Authorization", $"Device {employee.DeviceToken}");
         else
             ws.Options.SetRequestHeader("Authorization", $"Bearer {employee.Token}");
+        ClientIdentityHeaders.Apply(ws.Options);
 
         _logger.LogInformation("LiveStreamClient connecting to {Url}", wsUrl);
         await ws.ConnectAsync(new Uri(wsUrl), ct);
@@ -339,6 +340,15 @@ public sealed class LiveStreamClient : BackgroundService
         pc.onconnectionstatechange += (state) =>
         {
             _logger.LogInformation("LiveStreamClient PC state → {State}", state);
+            _ = WriteStatusAsync("stream_pc_state", state.ToString());
+            if (state == RTCPeerConnectionState.connected)
+                encoder.ForceKeyFrame();
+        };
+
+        pc.oniceconnectionstatechange += (state) =>
+        {
+            _logger.LogInformation("LiveStreamClient ICE state → {State}", state);
+            _ = WriteStatusAsync("stream_ice_state", state.ToString());
         };
 
         var iceReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -413,14 +423,53 @@ public sealed class LiveStreamClient : BackgroundService
         var slowSendStreak = 0;
         var goodSendStreak = 0;
         var lastTelemetryAt = Environment.TickCount64;
+        // 0 ⇒ stall watchdog reports no_frames until the first real frame arrives
+        // (Task.Delay(5s) + init-now falsely cleared stall forever on blank machines).
+        var lastFrameAt = 0L;
+        var waitingForIceLogged = false;
+        var lastEncodeErrorAt = 0L;
+
+        // Watchdog: if capture stops producing frames, log + sync status so we can see
+        // blank-preview machines in Postgres (stream_capture_stall) without the client log.
+        var stallWatch = Task.Run(async () =>
+        {
+            try
+            {
+                while (!ct.IsCancellationRequested)
+                {
+                    await Task.Delay(5000, ct);
+                    var frameAge = lastFrameAt == 0
+                        ? long.MaxValue
+                        : Environment.TickCount64 - lastFrameAt;
+                    if (frameAge < 5000)
+                    {
+                        await WriteStatusAsync("stream_capture_stall", "");
+                        await WriteStatusAsync("stream_capture_error", "");
+                        continue;
+                    }
+                    var captureErr = _capture.LastCaptureError;
+                    var detail = string.IsNullOrEmpty(captureErr)
+                        ? $"no_frames_5s produced={_capture.FramesProduced} pc={pc.connectionState}"
+                        : $"no_frames_5s produced={_capture.FramesProduced} capture={captureErr} pc={pc.connectionState}";
+                    _logger.LogWarning(
+                        "LiveStreamClient: no screen frames for ≥5s (available={Avail}) — {Detail}",
+                        _capture.StreamAvailable, detail);
+                    await WriteStatusAsync("stream_capture_stall", "no_frames_5s");
+                    await WriteStatusAsync("stream_capture_error", TruncateStatus(detail));
+                }
+            }
+            catch (OperationCanceledException) { /* normal */ }
+        }, ct);
 
         try
         {
             await foreach (var frame in _capture.Frames.ReadAllAsync(ct))
             {
+                lastFrameAt = Environment.TickCount64;
                 if (pc.connectionState is RTCPeerConnectionState.closed or RTCPeerConnectionState.failed)
                     break;
 
+                byte[]? encoded = null;
                 try
                 {
                     if (frameIndex % keyframeEvery == 0)
@@ -428,86 +477,125 @@ public sealed class LiveStreamClient : BackgroundService
                     frameIndex++;
 
                     var encSw = Stopwatch.StartNew();
-                    var encoded = encoder.EncodeBgra(frame.Width, frame.Height, frame.Bgra);
+                    encoded = encoder.EncodeBgra(frame.Width, frame.Height, frame.Bgra);
                     encSw.Stop();
                     encodeMsAcc += encSw.ElapsedMilliseconds;
                     encodeCount++;
+                }
+                catch (Exception ex) when (!ct.IsCancellationRequested)
+                {
+                    dropped++;
+                    if (Environment.TickCount64 - lastEncodeErrorAt >= 5000)
+                    {
+                        lastEncodeErrorAt = Environment.TickCount64;
+                        _logger.LogWarning(ex, "LiveStreamClient encode failed ({W}x{H})", frame.Width, frame.Height);
+                        await WriteStatusAsync("stream_encode_error", TruncateStatus($"{ex.GetType().Name}: {ex.Message}"));
+                    }
+                    continue;
+                }
 
+                try
+                {
                     if (encoded is { Length: > 0 })
                     {
-                        bytesWindow += encoded.Length;
-                        if (frameIndex <= 3 || frameIndex % keyframeEvery == 1)
+                        // SIPSorcery: media should flow after ICE+DTLS connected.
+                        // Sending while checking/failed silently drops RTP → SFU withTrack=false.
+                        if (pc.connectionState != RTCPeerConnectionState.connected)
                         {
-                            _logger.LogInformation(
-                                "LiveStreamClient frame#{N} encoded {Bytes} bytes ({W}x{H})",
-                                frameIndex, encoded.Length, frame.Width, frame.Height);
-                        }
-
-                        var sendSw = Stopwatch.StartNew();
-                        pc.SendVideo((uint)frameDurationRtp, encoded);
-                        // Dev/QA: inject backpressure so ABR can be proven without NIC tools.
-                        if (_config.StreamDebugSendDelayMs > 0)
-                            await Task.Delay(_config.StreamDebugSendDelayMs, ct);
-                        sendSw.Stop();
-
-                        // Adaptive degradation on send backpressure (bitrate → resolution → fps).
-                        if (sendSw.ElapsedMilliseconds > 80)
-                        {
-                            slowSendStreak++;
-                            goodSendStreak = 0;
-                            if (slowSendStreak >= 5)
+                            if (!waitingForIceLogged)
                             {
-                                slowSendStreak = 0;
-                                if (currentKbps > 800)
-                                {
-                                    currentKbps = Math.Max(500, currentKbps * 3 / 4);
-                                    encoder.TargetKbps = currentKbps;
-                                    _logger.LogInformation("LiveStreamClient degrade bitrate → {Kbps}kbps", currentKbps);
-                                }
-                                else if (widthTierIdx < widthTier.Length - 1)
-                                {
-                                    widthTierIdx++;
-                                    _capture.SetMaxWidthOverride(widthTier[widthTierIdx]);
-                                    _logger.LogInformation("LiveStreamClient degrade resolution maxWidth → {W}", widthTier[widthTierIdx]);
-                                }
-                                else if (currentFps > 8)
-                                {
-                                    currentFps = Math.Max(8, currentFps - 2);
-                                    encoder.Fps = (uint)currentFps;
-                                    frameDurationRtp = 90000 / currentFps;
-                                    keyframeEvery = Math.Max(1, currentFps * Math.Max(1, _config.StreamKeyframeIntervalSec));
-                                    _logger.LogInformation("LiveStreamClient degrade fps → {Fps}", currentFps);
-                                }
+                                waitingForIceLogged = true;
+                                _logger.LogWarning(
+                                    "LiveStreamClient: encoded frames waiting for WebRTC connected (state={State} ice={Ice})",
+                                    pc.connectionState, pc.iceConnectionState);
+                                await WriteStatusAsync("stream_send_error",
+                                    TruncateStatus($"waiting_pc={pc.connectionState};ice={pc.iceConnectionState}"));
                             }
                         }
-                        else if (sendSw.ElapsedMilliseconds < 20)
+                        else
                         {
-                            goodSendStreak++;
-                            slowSendStreak = 0;
-                            // Slow recovery toward ladder target.
-                            if (goodSendStreak >= 60)
+                            if (waitingForIceLogged)
                             {
+                                waitingForIceLogged = false;
+                                encoder.ForceKeyFrame();
+                                await WriteStatusAsync("stream_send_error", "");
+                                _logger.LogInformation("LiveStreamClient: WebRTC connected — sending video");
+                            }
+
+                            bytesWindow += encoded.Length;
+                            if (frameIndex <= 3 || frameIndex % keyframeEvery == 1)
+                            {
+                                _logger.LogInformation(
+                                    "LiveStreamClient frame#{N} encoded {Bytes} bytes ({W}x{H})",
+                                    frameIndex, encoded.Length, frame.Width, frame.Height);
+                            }
+
+                            var sendSw = Stopwatch.StartNew();
+                            pc.SendVideo((uint)frameDurationRtp, encoded);
+                            // Dev/QA: inject backpressure so ABR can be proven without NIC tools.
+                            if (_config.StreamDebugSendDelayMs > 0)
+                                await Task.Delay(_config.StreamDebugSendDelayMs, ct);
+                            sendSw.Stop();
+
+                            // Adaptive degradation on send backpressure (bitrate → resolution → fps).
+                            if (sendSw.ElapsedMilliseconds > 80)
+                            {
+                                slowSendStreak++;
                                 goodSendStreak = 0;
-                                var target = NetProbeService.SelectBitrateKbps(uplinkKbps, _config.StreamMaxBitrateKbps);
-                                if (currentFps < fps)
+                                if (slowSendStreak >= 5)
                                 {
-                                    currentFps = Math.Min(fps, currentFps + 1);
-                                    encoder.Fps = (uint)currentFps;
-                                    frameDurationRtp = 90000 / currentFps;
-                                    keyframeEvery = Math.Max(1, currentFps * Math.Max(1, _config.StreamKeyframeIntervalSec));
-                                }
-                                else if (widthTierIdx > 0)
-                                {
-                                    widthTierIdx--;
-                                    if (widthTierIdx == 0)
-                                        _capture.SetMaxWidthOverride(0);
-                                    else
+                                    slowSendStreak = 0;
+                                    if (currentKbps > 800)
+                                    {
+                                        currentKbps = Math.Max(500, currentKbps * 3 / 4);
+                                        encoder.TargetKbps = currentKbps;
+                                        _logger.LogInformation("LiveStreamClient degrade bitrate → {Kbps}kbps", currentKbps);
+                                    }
+                                    else if (widthTierIdx < widthTier.Length - 1)
+                                    {
+                                        widthTierIdx++;
                                         _capture.SetMaxWidthOverride(widthTier[widthTierIdx]);
+                                        _logger.LogInformation("LiveStreamClient degrade resolution maxWidth → {W}", widthTier[widthTierIdx]);
+                                    }
+                                    else if (currentFps > 8)
+                                    {
+                                        currentFps = Math.Max(8, currentFps - 2);
+                                        encoder.Fps = (uint)currentFps;
+                                        frameDurationRtp = 90000 / currentFps;
+                                        keyframeEvery = Math.Max(1, currentFps * Math.Max(1, _config.StreamKeyframeIntervalSec));
+                                        _logger.LogInformation("LiveStreamClient degrade fps → {Fps}", currentFps);
+                                    }
                                 }
-                                else if (currentKbps < target)
+                            }
+                            else if (sendSw.ElapsedMilliseconds < 20)
+                            {
+                                goodSendStreak++;
+                                slowSendStreak = 0;
+                                // Slow recovery toward ladder target.
+                                if (goodSendStreak >= 60)
                                 {
-                                    currentKbps = Math.Min(target, currentKbps + Math.Max(250, currentKbps / 10));
-                                    encoder.TargetKbps = currentKbps;
+                                    goodSendStreak = 0;
+                                    var target = NetProbeService.SelectBitrateKbps(uplinkKbps, _config.StreamMaxBitrateKbps);
+                                    if (currentFps < fps)
+                                    {
+                                        currentFps = Math.Min(fps, currentFps + 1);
+                                        encoder.Fps = (uint)currentFps;
+                                        frameDurationRtp = 90000 / currentFps;
+                                        keyframeEvery = Math.Max(1, currentFps * Math.Max(1, _config.StreamKeyframeIntervalSec));
+                                    }
+                                    else if (widthTierIdx > 0)
+                                    {
+                                        widthTierIdx--;
+                                        if (widthTierIdx == 0)
+                                            _capture.SetMaxWidthOverride(0);
+                                        else
+                                            _capture.SetMaxWidthOverride(widthTier[widthTierIdx]);
+                                    }
+                                    else if (currentKbps < target)
+                                    {
+                                        currentKbps = Math.Min(target, currentKbps + Math.Max(250, currentKbps / 10));
+                                        encoder.TargetKbps = currentKbps;
+                                    }
                                 }
                             }
                         }
@@ -522,9 +610,10 @@ public sealed class LiveStreamClient : BackgroundService
                     {
                         var kbpsOut = bytesWindow * 8.0 / elapsed;
                         _logger.LogInformation(
-                            "LiveStreamClient encode stats: ~{Kbps:F0}kbps out, target={Target}kbps, frame={W}x{H}, frames={N}, drops={D}, encodeAvgMs={Enc:F1}",
+                            "LiveStreamClient encode stats: ~{Kbps:F0}kbps out, target={Target}kbps, frame={W}x{H}, frames={N}, drops={D}, encodeAvgMs={Enc:F1}, pc={Pc}",
                             kbpsOut, currentKbps, frame.Width, frame.Height, frameIndex, dropped,
-                            encodeCount > 0 ? encodeMsAcc / (double)encodeCount : 0);
+                            encodeCount > 0 ? encodeMsAcc / (double)encodeCount : 0,
+                            pc.connectionState);
                         bytesWindow = 0;
                         windowStarted = Environment.TickCount64;
                     }
@@ -534,12 +623,14 @@ public sealed class LiveStreamClient : BackgroundService
                         lastTelemetryAt = Environment.TickCount64;
                         var sendKbps = bytesWindow > 0 && elapsed > 0
                             ? (int)(bytesWindow * 8.0 / Math.Max(1, Environment.TickCount64 - windowStarted + elapsed))
-                            : (int)currentKbps;
+                            : (int)(pc.connectionState == RTCPeerConnectionState.connected ? currentKbps : 0);
                         await WriteStatusAsync("stream_selected_bitrate_kbps", currentKbps.ToString());
                         await WriteStatusAsync("stream_send_kbps", sendKbps.ToString());
                         await WriteStatusAsync("stream_encode_ms",
                             encodeCount > 0 ? ((int)(encodeMsAcc / encodeCount)).ToString() : "0");
                         await WriteStatusAsync("stream_dropped_frames", dropped.ToString());
+                        await WriteStatusAsync("stream_pc_state", pc.connectionState.ToString());
+                        await WriteStatusAsync("stream_ice_state", pc.iceConnectionState.ToString());
                         encodeMsAcc = 0;
                         encodeCount = 0;
                     }
@@ -547,12 +638,24 @@ public sealed class LiveStreamClient : BackgroundService
                 catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
                     dropped++;
-                    _logger.LogDebug(ex, "LiveStreamClient encode/send failed");
+                    if (Environment.TickCount64 - lastEncodeErrorAt >= 5000)
+                    {
+                        lastEncodeErrorAt = Environment.TickCount64;
+                        _logger.LogWarning(ex, "LiveStreamClient send failed");
+                        await WriteStatusAsync("stream_send_error", TruncateStatus($"{ex.GetType().Name}: {ex.Message}"));
+                    }
                 }
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        finally
+        {
+            try { await stallWatch; } catch { /* cancelled */ }
+        }
     }
+
+    private static string TruncateStatus(string value) =>
+        value.Length <= 180 ? value : value[..177] + "...";
 
     private async Task WriteStatusAsync(string key, string value)
     {

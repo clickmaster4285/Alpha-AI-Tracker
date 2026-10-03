@@ -92,13 +92,17 @@ func (r *DeviceRepo) GetByTokenHash(ctx context.Context, tokenHash string) (*mod
 	return &d, nil
 }
 
-// TouchLastSeen updates the last_seen_at timestamp for a device.
-func (r *DeviceRepo) TouchLastSeen(ctx context.Context, deviceID string) error {
+// TouchLastSeen updates last_seen_at and optionally refreshes client_version / platform.
+// Empty clientVersion or platform leave the existing column unchanged — so callers that
+// only heartbeat (no identity headers) never wipe a known version.
+func (r *DeviceRepo) TouchLastSeen(ctx context.Context, deviceID, clientVersion, platform string) error {
 	_, err := r.pool.Exec(ctx, `
 		UPDATE employee_devices
-		SET last_seen_at = NOW()
+		SET last_seen_at = NOW(),
+		    client_version = CASE WHEN NULLIF(TRIM($2), '') IS NOT NULL THEN TRIM($2) ELSE client_version END,
+		    platform = CASE WHEN NULLIF(TRIM($3), '') IS NOT NULL THEN TRIM($3) ELSE platform END
 		WHERE id = $1 AND revoked_at IS NULL
-	`, deviceID)
+	`, deviceID, clientVersion, platform)
 	return err
 }
 

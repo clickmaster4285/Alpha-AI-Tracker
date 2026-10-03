@@ -58,6 +58,9 @@ public sealed class ScreenCaptureService : BackgroundService
     private Bitmap? _srcBitmap;
     private Bitmap? _scaledBitmap;
     private byte[]? _bgraScratch;
+    private long _framesProduced;
+    private int _consecutiveCaptureFails;
+    private string? _lastCaptureError;
 
     public ScreenCaptureService(AppConfig config, ILogger<ScreenCaptureService> logger)
     {
@@ -69,6 +72,12 @@ public sealed class ScreenCaptureService : BackgroundService
     }
 
     public bool StreamAvailable { get; private set; }
+
+    /// <summary>Total frames written to the channel since process start (diagnostics).</summary>
+    public long FramesProduced => Interlocked.Read(ref _framesProduced);
+
+    /// <summary>Last capture failure message (empty when healthy).</summary>
+    public string LastCaptureError => _lastCaptureError ?? "";
 
     public ChannelReader<ScreenFrame> Frames => _frames.Reader;
 
@@ -193,17 +202,40 @@ public sealed class ScreenCaptureService : BackgroundService
             {
                 var frame = CaptureFrame();
                 if (frame is not null)
+                {
                     _frames.Writer.TryWrite(frame);
+                    Interlocked.Increment(ref _framesProduced);
+                    _consecutiveCaptureFails = 0;
+                    _lastCaptureError = null;
+                }
+                else
+                {
+                    _consecutiveCaptureFails++;
+                    if (_consecutiveCaptureFails == 1 || _consecutiveCaptureFails % 30 == 0)
+                    {
+                        _lastCaptureError = $"null_frame bounds={_captureBounds.Width}x{_captureBounds.Height} fails={_consecutiveCaptureFails}";
+                        _logger.LogWarning("Screen capture returned no frame ({Error})", _lastCaptureError);
+                    }
+                }
             }
             catch (Exception ex)
             {
+                // Win32 ERROR_INVALID_HANDLE (6) is common after lock screen, DPI/display
+                // change, or a stale GDI Bitmap HDC. Do NOT clear _streamActive here —
+                // LiveStreamClient owns that flag; clearing it silently starves the
+                // WebRTC media pump (PC stays "connected", SFU answers withTrack=false).
+                _consecutiveCaptureFails++;
+                _lastCaptureError = $"{ex.GetType().Name}: {ex.Message}";
+                _logger.LogWarning(ex, "Screen capture failed — recreating GDI surfaces and retrying");
+                DisposeCaptureBitmaps();
                 StreamAvailable = false;
-                _logger.LogWarning(ex, "Screen capture failed — reporting unavailable");
-                _streamActive = false;
-                try { Task.Delay(5000, stoppingToken).GetAwaiter().GetResult(); }
+                try { Task.Delay(1000, stoppingToken).GetAwaiter().GetResult(); }
                 catch (OperationCanceledException) { break; }
-                StreamAvailable = OperatingSystem.IsWindows();
-                RefreshMonitors();
+                if (OperatingSystem.IsWindows())
+                {
+                    RefreshMonitors();
+                    StreamAvailable = true;
+                }
                 continue;
             }
 
@@ -356,9 +388,21 @@ public sealed class ScreenCaptureService : BackgroundService
             _srcBitmap = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format32bppArgb);
         }
 
-        using (var g = Graphics.FromImage(_srcBitmap))
+        try
         {
-            g.CopyFromScreen(bounds.Left, bounds.Top, 0, 0, _srcBitmap.Size, CopyPixelOperation.SourceCopy);
+            // Multi-strategy capture. Win11 (esp. 24H2) often breaks CopyFromScreen
+            // with ERROR_INVALID_HANDLE (6); CAPTUREBLT also fails on some HD 530 drivers.
+            if (!TryCaptureToBitmap(_srcBitmap, bounds))
+            {
+                using var g = Graphics.FromImage(_srcBitmap);
+                g.CopyFromScreen(bounds.Left, bounds.Top, 0, 0, _srcBitmap.Size, CopyPixelOperation.SourceCopy);
+            }
+        }
+        catch (Exception)
+        {
+            // Stale HBITMAP / display change — force recreate on the next attempt.
+            DisposeCaptureBitmaps();
+            throw;
         }
 
         var maxW = EffectiveMaxWidth;
@@ -424,6 +468,98 @@ public sealed class ScreenCaptureService : BackgroundService
 #pragma warning restore CA1416
     }
 
+    private void DisposeCaptureBitmaps()
+    {
+#pragma warning disable CA1416
+        try { _srcBitmap?.Dispose(); } catch { /* stale GDI */ }
+        try { _scaledBitmap?.Dispose(); } catch { /* stale GDI */ }
+#pragma warning restore CA1416
+        _srcBitmap = null;
+        _scaledBitmap = null;
+    }
+
+    private const int RasterSrcCopy = 0x00CC0020;
+    private const int RasterCaptureBlt = unchecked((int)0x40CC0020); // SRCCOPY | CAPTUREBLT
+
+    /// <summary>
+    /// Try several Win32 BitBlt sources before falling back to CopyFromScreen.
+    /// Order matters: plain SRCCOPY is the most reliable on Win11 + Intel HD.
+    /// </summary>
+    private static bool TryCaptureToBitmap(Bitmap dest, Rectangle bounds)
+    {
+#pragma warning disable CA1416
+        if (TryBitBltFromWindow(IntPtr.Zero, dest, bounds, RasterSrcCopy))
+            return true;
+        if (TryBitBltFromWindow(IntPtr.Zero, dest, bounds, RasterCaptureBlt))
+            return true;
+
+        var desktop = GetDesktopWindow();
+        if (desktop != IntPtr.Zero)
+        {
+            if (TryBitBltFromWindow(desktop, dest, bounds, RasterSrcCopy))
+                return true;
+            if (TryBitBltFromWindow(desktop, dest, bounds, RasterCaptureBlt))
+                return true;
+        }
+
+        var hdcDisplay = CreateDC("DISPLAY", null, null, IntPtr.Zero);
+        if (hdcDisplay != IntPtr.Zero)
+        {
+            try
+            {
+                if (TryBitBltFromHdc(hdcDisplay, dest, bounds, RasterSrcCopy))
+                    return true;
+            }
+            finally
+            {
+                DeleteDC(hdcDisplay);
+            }
+        }
+
+        return false;
+#pragma warning restore CA1416
+    }
+
+    private static bool TryBitBltFromWindow(IntPtr hwnd, Bitmap dest, Rectangle bounds, int raster)
+    {
+#pragma warning disable CA1416
+        var hdcScreen = GetDC(hwnd);
+        if (hdcScreen == IntPtr.Zero)
+            return false;
+        try
+        {
+            return TryBitBltFromHdc(hdcScreen, dest, bounds, raster);
+        }
+        finally
+        {
+            ReleaseDC(hwnd, hdcScreen);
+        }
+#pragma warning restore CA1416
+    }
+
+    private static bool TryBitBltFromHdc(IntPtr hdcScreen, Bitmap dest, Rectangle bounds, int raster)
+    {
+#pragma warning disable CA1416
+        try
+        {
+            using var g = Graphics.FromImage(dest);
+            var hdcDest = g.GetHdc();
+            try
+            {
+                return BitBlt(hdcDest, 0, 0, dest.Width, dest.Height, hdcScreen, bounds.Left, bounds.Top, raster);
+            }
+            finally
+            {
+                g.ReleaseHdc(hdcDest);
+            }
+        }
+        catch
+        {
+            return false;
+        }
+#pragma warning restore CA1416
+    }
+
     private const int SM_CXSCREEN = 0;
     private const int SM_CYSCREEN = 1;
     private const int SM_CMONITORS = 80;
@@ -456,4 +592,23 @@ public sealed class ScreenCaptureService : BackgroundService
 
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int nIndex);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetDC(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetDesktopWindow();
+
+    [DllImport("gdi32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr CreateDC(string? lpszDriver, string? lpszDevice, string? lpszOutput, IntPtr lpInitData);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteDC(IntPtr hdc);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool BitBlt(IntPtr hdcDest, int nXDest, int nYDest, int nWidth, int nHeight,
+        IntPtr hdcSrc, int nXSrc, int nYSrc, int dwRop);
 }

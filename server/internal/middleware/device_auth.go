@@ -50,12 +50,16 @@ func DeviceAuth(deviceRepo *repository.DeviceRepo, userRepo *repository.UserRepo
 			if err == nil && device != nil {
 				// Copy ID out of the pooled Echo context; use Background + timeout
 				// so TouchLastSeen does not race request cancellation after WS upgrade.
+				// Version/platform headers let a reinstalled client refresh employee_devices
+				// without requiring a fresh employee-login (web Client Version column).
 				devID := device.ID
-				go func(id string) {
+				clientVer := strings.TrimSpace(c.Request().Header.Get("X-Client-Version"))
+				platform := strings.TrimSpace(c.Request().Header.Get("X-Client-Platform"))
+				go func(id, ver, plat string) {
 					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer cancel()
-					_ = deviceRepo.TouchLastSeen(ctx, id)
-				}(devID)
+					_ = deviceRepo.TouchLastSeen(ctx, id, ver, plat)
+				}(devID, clientVer, platform)
 
 				c.Set("employee_id", device.EmployeeID)
 				c.Set("device_id", device.ID)

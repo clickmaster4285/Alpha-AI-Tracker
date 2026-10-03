@@ -419,8 +419,8 @@ func (h *StreamHandler) Push(c echo.Context) error {
 				Monitors:        msg.Monitors,
 				SelectedMonitor: msg.SelectedMonitor,
 			})
-			log.Printf("[live-stream] hello employee=%s platform=%s available=%v monitors=%d",
-				empID, msg.Platform, msg.StreamAvailable, len(msg.Monitors))
+			log.Printf("[live-stream] hello employee=%s platform=%s available=%v monitors=%d version=%s",
+				empID, msg.Platform, msg.StreamAvailable, len(msg.Monitors), msg.Version)
 		case "offer":
 			answer, err := h.hub.SFU().AcceptPublisherOffer(empID, msg.SDP, func(c webrtc.ICECandidateInit) {
 				payload := map[string]interface{}{

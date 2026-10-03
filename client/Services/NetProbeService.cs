@@ -79,6 +79,7 @@ public sealed class NetProbeService
                 req.Headers.Authorization = new AuthenticationHeaderValue("Device", employee.DeviceToken);
             else
                 req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", employee.Token);
+            ClientIdentityHeaders.Apply(req);
             req.Content = new ByteArrayContent(payload);
             req.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
 
