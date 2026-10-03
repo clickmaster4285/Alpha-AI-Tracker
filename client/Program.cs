@@ -75,9 +75,47 @@ if (args.Contains("--print-config"))
     Console.WriteLine($"StreamKeyframeIntervalSec={cfg.StreamKeyframeIntervalSec}");
     Console.WriteLine($"StreamMinUplinkKbps={cfg.StreamMinUplinkKbps}");
     Console.WriteLine($"StreamVp8LagFrames={cfg.StreamVp8LagFrames}");
+    Console.WriteLine($"StreamDebugSendDelayMs={cfg.StreamDebugSendDelayMs}");
     Console.WriteLine($"WsEnabled={cfg.WsEnabled}");
     Console.WriteLine($"WsPingSec={cfg.WsPingSec}");
     Console.WriteLine($"WsReconnectBaseSec={cfg.WsReconnectBaseSec}");
+    return;
+}
+
+// Headless: verify uplink bitrate ladder math (no GUI / no network required).
+if (args.Contains("--self-test-stream-ladder"))
+{
+    var failed = 0;
+    void Expect(int uplink, int max, uint want, string label)
+    {
+        var got = NetProbeService.SelectBitrateKbps(uplink, max);
+        if (got != want)
+        {
+            Console.Error.WriteLine($"FAIL {label}: uplink={uplink} max={max} → {got} (want {want})");
+            failed++;
+        }
+        else
+        {
+            Console.WriteLine($"OK   {label}: uplink={uplink} → {got} kbps");
+        }
+    }
+
+    // budget = uplink * 0.7; tiers 15k→12k, 8k→6k, 4k→3k, 2.5k→1.5k, 1.5k→1k, else 500
+    Expect(25000, 12000, 12000, "fat-link capped at max");
+    Expect(12000, 12000, 6000, "12 Mbps uplink → 6k tier");
+    Expect(6000, 12000, 3000, "6 Mbps uplink → 3k tier");
+    Expect(4000, 12000, 1500, "4 Mbps uplink → 1.5k tier");
+    Expect(2000, 12000, 500, "2 Mbps uplink → 500 floor (thin)");
+    Expect(1000, 12000, 500, "1 Mbps uplink → 500 floor");
+    Expect(8000, 1000, 1000, "tier clamped by maxBitrate");
+
+    if (failed > 0)
+    {
+        Console.Error.WriteLine($"stream ladder self-test: {failed} failure(s)");
+        Environment.ExitCode = 1;
+        return;
+    }
+    Console.WriteLine("stream ladder self-test: PASS");
     return;
 }
 

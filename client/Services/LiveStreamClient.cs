@@ -445,6 +445,9 @@ public sealed class LiveStreamClient : BackgroundService
 
                         var sendSw = Stopwatch.StartNew();
                         pc.SendVideo((uint)frameDurationRtp, encoded);
+                        // Dev/QA: inject backpressure so ABR can be proven without NIC tools.
+                        if (_config.StreamDebugSendDelayMs > 0)
+                            await Task.Delay(_config.StreamDebugSendDelayMs, ct);
                         sendSw.Stop();
 
                         // Adaptive degradation on send backpressure (bitrate → resolution → fps).

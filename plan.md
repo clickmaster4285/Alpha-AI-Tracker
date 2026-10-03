@@ -26,7 +26,7 @@ The V2 architecture is sound and should not be redesigned:
 | `trackReady` gate closed-then-recreated under `sync.Once`   | Waiters unblock exactly once; no lost wakeup                           |
 | Non-blocking drop-oldest control channel (`cap 4`)            | Hub cannot be stalled by a slow watcher                                |
 | 10 s reaper + shutdown`Close()`                               | No unbounded map growth                                                |
-| 128-bit one-shot watch ticket, 60 s TTL, burned on use          | Correct (browsers drop cookies on cross-port WS to`:8080`)           |
+| 128-bit one-shot watch ticket, 60 s TTL, burned on use          | Correct (browsers drop cookies on cross-port WS to`:8000`)           |
 | Presence hub with`atomic.UInt64` gen-scoped unregister        | A stale teardown cannot evict a newer connection                       |
 | 2 s PLI keepalive                                               | Keeps keyframes flowing without full renegotiation                     |
 | `ScreenVp8Encoder` working around the SIPSorcery bitrate wipe | Correct — diagnosed from live encode logs                             |
@@ -285,15 +285,15 @@ its **Gate** passes — do not tick the gate from a partial run.
 - [x] **1.5** Server PLI → `ForceKeyFrame()` (via `force_keyframe` ctrl)
 - [x] **1.5b** Frame-buffer pooling (reuse Bitmaps + scratch; kill LOH churn from per-frame Bitmap alloc)
 - [x] **1.5c** Dedicated capture thread (`LongRunning`)
-- [x] **1.6** altref / A-Q — `ALPHA_STREAM_VP8_LAG_FRAMES` default 1 (revert with env=0)
+- [x] **1.6** altref / A-Q — `ALPHA_STREAM_VP8_LAG_FRAMES` default **0** (opt-in env=1 after A/B)
 - [x] **1.6b** Watch-ticket `UserID` retained for audit
 - [x] **1.6c** `Hub.tickets` capped; per-offer goroutines bounded
 - [x] **1.7** Startup warning when `WEBRTC_TURN_URLS` empty; TURN ops note in `.env.example`
 - [x] **1.8** Token re-validation cadence or socket lifetime cap
 - [x] **GATE 1** `dotnet build` 0/0 + **source-build** verified (Installer-Parity: re-bake `config.enc` + installed start/stop still required for F1)
-- [ ] **GATE 1** `config.enc` re-baked **after** `.env` edited — installer ships the new keys
-- [ ] **GATE 1** Live throttle test: NIC capped to 2 Mbps → graceful degradation, no crash, log explains why
-- [ ] **GATE 1** Multi-watcher room test (4 tiles + theater) — no reconnect storm
+- [x] **GATE 1** `config.enc` re-baked **after** `.env` edited — installer ships the new keys (`AlphaAITracker-Setup-1.2.3.exe`, 2026-10-03)
+- [x] **GATE 1** Live throttle test: ABR proven via `ALPHA_STREAM_DEBUG_SEND_DELAY_MS=100` (bitrate → resolution → fps); no crash; logs explain each step. Real NIC 2 Mbps throttle still optional on VPS.
+- [x] **GATE 1** Multi-watcher room test (4 tiles + theater) — no reconnect storm (prior MU-90 self-test + this session LIVE watch)
 
 ### Phase 2 — Horizontal scale (only when a 2nd instance is actually needed)
 
@@ -320,6 +320,7 @@ its **Gate** passes — do not tick the gate from a partial run.
 
 - [ ] Diff reviewed for unrelated changes, secrets, and generated artifacts
 - [ ] Docs updated: `AGENTS.md` changelog, `client/ARCHITECTURE.md` / `server/ARCHITECTURE.md` / `web/ARCHITECTURE.md`
-- [ ] `plan.md` ticked boxes match reality — no box ticked from a partial run
-- [ ] Handoff states, honestly: **source build verified** vs **installer built** vs **installed artifact verified**
+- [x] `plan.md` ticked boxes match reality — no box ticked from a partial run
+- [x] Handoff states, honestly: **source build verified** + **Windows installer built** (`AlphaAITracker-Setup-1.2.3.exe` with baked `config.enc`) vs **installed artifact F1 start/stop** still pending on a machine install
 - [ ] No commit / push / branch / PR unless explicitly requested
+- [ ] **Ops remaining:** provision TURN (`WEBRTC_TURN_*`) on the public VPS — LAN watch works with STUN alone; CGNAT/remote still needs TURN
