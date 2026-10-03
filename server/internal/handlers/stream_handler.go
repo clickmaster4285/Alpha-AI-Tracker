@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
@@ -26,6 +27,7 @@ const (
 	wsPongWait             = 90 * time.Second
 	wsPingPeriod           = 30 * time.Second
 	wsMaxSocketLife        = 4 * time.Hour
+	wsTokenRecheck         = 5 * time.Minute
 	maxConcurrentOffers    = 32
 	uplinkProbeMaxBytes    = 512 * 1024
 )
@@ -37,18 +39,21 @@ type StreamHandler struct {
 	employeeRepo     *repository.EmployeeRepo
 	termsConsentRepo *repository.TermsConsentRepo
 	taRepo           *repository.TimeAttendanceRepo
+	deviceRepo       *repository.DeviceRepo // optional — DeviceAuth re-check on push sockets
 	allowedOrigins   map[string]bool
 	upgrader         websocket.Upgrader
 	offerSem         chan struct{}
 }
 
 // NewStreamHandler constructs the handler. presence may be nil (falls back to heartbeat online).
+// deviceRepo may be nil (skips post-upgrade device re-validation on push sockets).
 func NewStreamHandler(
 	hub *stream.Hub,
 	presence *ws.Hub,
 	employeeRepo *repository.EmployeeRepo,
 	termsConsentRepo *repository.TermsConsentRepo,
 	taRepo *repository.TimeAttendanceRepo,
+	deviceRepo *repository.DeviceRepo,
 	allowedOrigins []string,
 ) *StreamHandler {
 	originSet := make(map[string]bool, len(allowedOrigins))
@@ -61,6 +66,7 @@ func NewStreamHandler(
 		employeeRepo:     employeeRepo,
 		termsConsentRepo: termsConsentRepo,
 		taRepo:           taRepo,
+		deviceRepo:       deviceRepo,
 		allowedOrigins:   originSet,
 		offerSem:         make(chan struct{}, maxConcurrentOffers),
 	}
@@ -136,10 +142,7 @@ func (h *StreamHandler) ListEmployees(c echo.Context) error {
 		wsConnected := presenceOn && h.presence.IsConnected(e.EmployeeID)
 		hb, hasHB := heartbeats[e.EmployeeID]
 		hbOnline := hasHB && now.Sub(hb.UTC()) <= liveStreamOnlineWindow
-		online := wsConnected
-		if !presenceOn {
-			online = hbOnline
-		}
+		online := employeeLiveOnline(presenceOn, wsConnected, hbOnline)
 		out = append(out, LiveStreamEmployee{
 			EmployeeID:      e.EmployeeID,
 			Name:            e.Name,
@@ -153,6 +156,33 @@ func (h *StreamHandler) ListEmployees(c echo.Context) error {
 		})
 	}
 	return c.JSON(http.StatusOK, map[string]interface{}{"data": out, "total": len(out)})
+}
+
+// employeeLiveOnline chooses Online for the live-stream rail.
+// When presence WS is enabled, a live control socket is authoritative (WsConnected).
+// When presence is disabled, fall back to app_status last_heartbeat_at within the online window.
+func employeeLiveOnline(presenceEnabled, wsConnected, hbOnline bool) bool {
+	if presenceEnabled {
+		return wsConnected
+	}
+	return hbOnline
+}
+
+// deviceStillActive re-checks a DeviceAuth device after WS upgrade (F14c).
+// Missing deviceID (legacy employee JWT) or nil repo → treat as still active;
+// max socket lifetime still bounds the connection.
+func (h *StreamHandler) deviceStillActive(deviceID string) bool {
+	if deviceID == "" || h.deviceRepo == nil {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ok, err := h.deviceRepo.IsActive(ctx, deviceID)
+	if err != nil {
+		log.Printf("[live-stream] device re-check error device=%s: %v", deviceID, err)
+		return true // transient DB errors must not drop live publishers
+	}
+	return ok
 }
 
 // IssueWatchTicket handles GET /api/v1/live-stream/watch-ticket?employeeId=.
@@ -267,6 +297,7 @@ func (h *StreamHandler) Push(c echo.Context) error {
 			Code: http.StatusUnauthorized, Message: "Unauthorized employee context",
 		})
 	}
+	deviceID, _ := c.Get("device_id").(string)
 	accepted, err := h.termsConsentRepo.HasAccepted(c.Request().Context(), empID, stream.FeatureID, "")
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, dto.APIError{
@@ -319,6 +350,8 @@ func (h *StreamHandler) Push(c echo.Context) error {
 		defer closeDone()
 		ticker := time.NewTicker(wsPingPeriod)
 		defer ticker.Stop()
+		recheck := time.NewTicker(wsTokenRecheck)
+		defer recheck.Stop()
 		for {
 			select {
 			case ev, ok := <-ctrl:
@@ -338,6 +371,12 @@ func (h *StreamHandler) Push(c echo.Context) error {
 				err := conn.WriteMessage(websocket.PingMessage, nil)
 				writeMu.Unlock()
 				if err != nil {
+					return
+				}
+			case <-recheck.C:
+				if !h.deviceStillActive(deviceID) {
+					log.Printf("[live-stream] push device revoked employee=%s device=%s — closing", empID, deviceID)
+					_ = conn.Close()
 					return
 				}
 			case <-done:

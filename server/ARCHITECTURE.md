@@ -1,7 +1,11 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-10-03 (live stream V3 Phase 0–2 Redis single-server)
+> **Last audited:** 2026-10-03 (live stream V3 Phase 0–3)
 > **Changelog:**
+> - 2026-10-03: **Live stream V3 Phase 3 — F14c + presence Online contract.**
+>   Push/watch/presence sockets: 4h max life. DeviceAuth push + `/ws`: every 5m
+>   `DeviceRepo.IsActive` closes on revoke/expire. `employeeLiveOnline` + unit tests
+>   (presence-on → WS; presence-off → heartbeat ≤3m).
 > - 2026-10-03: **Live stream V3 — safety, slow-network resilience, Redis cluster state (one API).**
 >   Phase 0: fail-closed `CheckOrigin`, Subscribe capacity before Upgrade (429), `sendPLI` done
 >   channel, `TouchLastSeen` Background+timeout. Phase 1: `POST /live-stream/uplink-probe`

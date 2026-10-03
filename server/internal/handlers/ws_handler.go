@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/alpha-ai-tracker/server/internal/dto"
+	"github.com/alpha-ai-tracker/server/internal/repository"
 	"github.com/alpha-ai-tracker/server/internal/ws"
 	"github.com/gorilla/websocket"
 	"github.com/labstack/echo/v4"
@@ -18,23 +20,28 @@ const (
 	presenceWriteWait  = 10 * time.Second
 	presencePongWait   = 60 * time.Second
 	presencePingPeriod = 30 * time.Second
+	presenceMaxLife    = 4 * time.Hour
+	presenceTokenCheck = 5 * time.Minute
 )
 
 // WsHandler serves the long-lived control / presence WebSocket (DeviceAuth).
 type WsHandler struct {
 	hub            *ws.Hub
+	deviceRepo     *repository.DeviceRepo // optional — post-upgrade device re-check
 	allowedOrigins map[string]bool
 	upgrader       websocket.Upgrader
 }
 
 // NewWsHandler constructs the presence WS handler.
-func NewWsHandler(hub *ws.Hub, allowedOrigins []string) *WsHandler {
+// deviceRepo may be nil (skips post-upgrade device re-validation).
+func NewWsHandler(hub *ws.Hub, deviceRepo *repository.DeviceRepo, allowedOrigins []string) *WsHandler {
 	originSet := make(map[string]bool, len(allowedOrigins))
 	for _, o := range allowedOrigins {
 		originSet[strings.TrimSpace(o)] = true
 	}
 	h := &WsHandler{
 		hub:            hub,
+		deviceRepo:     deviceRepo,
 		allowedOrigins: originSet,
 	}
 	h.upgrader = websocket.Upgrader{
@@ -75,6 +82,7 @@ func (h *WsHandler) Connect(c echo.Context) error {
 			Code: http.StatusUnauthorized, Message: "Unauthorized employee context",
 		})
 	}
+	deviceID, _ := c.Get("device_id").(string)
 
 	gen, ok := h.hub.Register(empID)
 	if !ok {
@@ -101,7 +109,13 @@ func (h *WsHandler) Connect(c echo.Context) error {
 	var once sync.Once
 	closeDone := func() { once.Do(func() { close(done) }) }
 
-	// Welcome + protocol-level ping pump.
+	lifeTimer := time.AfterFunc(presenceMaxLife, func() {
+		log.Printf("[ws] max lifetime employee=%s — closing", empID)
+		_ = conn.Close()
+	})
+	defer lifeTimer.Stop()
+
+	// Welcome + protocol-level ping pump + periodic device re-check (F14c).
 	go func() {
 		defer closeDone()
 		writeMu.Lock()
@@ -114,6 +128,8 @@ func (h *WsHandler) Connect(c echo.Context) error {
 
 		ticker := time.NewTicker(presencePingPeriod)
 		defer ticker.Stop()
+		recheck := time.NewTicker(presenceTokenCheck)
+		defer recheck.Stop()
 		for {
 			select {
 			case <-ticker.C:
@@ -122,6 +138,12 @@ func (h *WsHandler) Connect(c echo.Context) error {
 				err := conn.WriteMessage(websocket.PingMessage, nil)
 				writeMu.Unlock()
 				if err != nil {
+					return
+				}
+			case <-recheck.C:
+				if !h.deviceStillActive(deviceID) {
+					log.Printf("[ws] device revoked employee=%s device=%s — closing", empID, deviceID)
+					_ = conn.Close()
 					return
 				}
 			case <-done:
@@ -172,4 +194,18 @@ func (h *WsHandler) Connect(c echo.Context) error {
 			// Ignore unknown control frames — channel is keep-alive only for now.
 		}
 	}
+}
+
+func (h *WsHandler) deviceStillActive(deviceID string) bool {
+	if deviceID == "" || h.deviceRepo == nil {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ok, err := h.deviceRepo.IsActive(ctx, deviceID)
+	if err != nil {
+		log.Printf("[ws] device re-check error device=%s: %v", deviceID, err)
+		return true
+	}
+	return ok
 }

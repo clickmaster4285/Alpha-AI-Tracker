@@ -102,6 +102,31 @@ func (r *DeviceRepo) TouchLastSeen(ctx context.Context, deviceID string) error {
 	return err
 }
 
+// IsActive reports whether deviceID still exists, is unrevoked, and is unexpired.
+// Used by long-lived DeviceAuth WebSockets to re-validate after upgrade (F14c).
+func (r *DeviceRepo) IsActive(ctx context.Context, deviceID string) (bool, error) {
+	var revokedAt *time.Time
+	var expiresAt *time.Time
+	err := r.pool.QueryRow(ctx, `
+		SELECT revoked_at, expires_at
+		FROM employee_devices
+		WHERE id = $1
+	`, deviceID).Scan(&revokedAt, &expiresAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("device is-active: %w", err)
+	}
+	if revokedAt != nil {
+		return false, nil
+	}
+	if expiresAt != nil && time.Now().After(*expiresAt) {
+		return false, nil
+	}
+	return true, nil
+}
+
 // ListByEmployeeID returns all devices for an employee ordered by last_seen_at DESC.
 func (r *DeviceRepo) ListByEmployeeID(ctx context.Context, employeeID string) ([]models.EmployeeDevice, error) {
 	query := `

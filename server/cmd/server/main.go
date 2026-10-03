@@ -160,7 +160,7 @@ func main() {
 		log.Println("[server] live-stream cluster: Redis unavailable — single-instance local hubs only")
 	}
 
-	wsHandler := handlers.NewWsHandler(presenceHub, cfg.CORS.AllowedOrigins)
+	wsHandler := handlers.NewWsHandler(presenceHub, deviceRepo, cfg.CORS.AllowedOrigins)
 	if cfg.PresenceWS.Enabled {
 		log.Printf("[server] presence ws enabled (maxConnections=%d)", cfg.PresenceWS.MaxConnections)
 	} else {
@@ -174,7 +174,7 @@ func main() {
 	}
 
 	streamHandler := handlers.NewStreamHandler(
-		streamHub, presenceHub, employeeRepo, termsConsentRepo, timeAttendanceRepo, cfg.CORS.AllowedOrigins,
+		streamHub, presenceHub, employeeRepo, termsConsentRepo, timeAttendanceRepo, deviceRepo, cfg.CORS.AllowedOrigins,
 	)
 	if cfg.LiveStream.Enabled {
 		log.Printf("[server] live-stream webrtc sfu enabled (maxStreams=%d bitrate=%dkbps)", cfg.LiveStream.MaxStreams, cfg.LiveStream.MaxBitrateKbps)

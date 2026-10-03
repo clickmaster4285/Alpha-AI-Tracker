@@ -3,6 +3,13 @@
 > **Last audited:** 2026-10-03
 > **Changelog:**
 >
+> - 2026-10-03: **Live stream Phase 3 — F14c socket hardening + presence Online contract.**
+>   DeviceAuth push + presence WS: 4h max lifetime + every-5m `DeviceRepo.IsActive` re-check
+>   (revoked/expired/missing device closes the socket; transient DB errors keep the socket).
+>   Watch sockets keep the existing 4h lifetime (ticket-auth). `employeeLiveOnline` documents
+>   presence-on → WS authoritative, presence-off → heartbeat window; unit-tested. Verified:
+>   `go build`/`go vet`; `go test` handlers+stream+redis+scale ok.
+>
 > - 2026-10-03: **Live stream Phase 2 — Redis cluster state (single-server deploy).**
 >   Shared Redis presence (`presence:emp:*` + `alpha:presence` pub/sub), watch tickets
 >   (`stream:ticket:*`), publisher registry (`stream:pub:{emp}` → instanceId). Env
