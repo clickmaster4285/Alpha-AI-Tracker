@@ -3,6 +3,20 @@
 > **Last audited:** 2026-10-03
 > **Changelog:**
 >
+> - 2026-10-03: **Live stream post-Phase-3 — Win11 blank preview (FA-27) + stale Client Version.**
+>   Root cause of FA-27 `LIVE` + `--- FPS` / SFU `withTrack=false`: Win11 GDI capture
+>   (`CopyFromScreen` / CAPTUREBLT-only BitBlt) failed on that machine so no RTP reached the
+>   SFU; signaling still looked healthy. Fix (client **1.2.34**): multi-path BitBlt
+>   (`SRCCOPY` → CAPTUREBLT → desktop HWND → `CreateDC("DISPLAY")` → CopyFromScreen fallback);
+>   `SendVideo` only after WebRTC `connected` + force keyframe; honest
+>   `stream_capture_stall`/`stream_pc_state`/`stream_ice_state`/`stream_capture_error` telemetry.
+>   Stale web Client Version: `employee_devices.client_version` only refreshed on login —
+>   reinstall kept old version until re-login. Fix: DeviceAuth `X-Client-Version` /
+>   `X-Client-Platform` → `TouchLastSeen` updates version; client `ClientIdentityHeaders` on
+>   all DeviceAuth HTTP/WS; boot `app_status.client_version`. Verified: FA-27 + MU-115 live
+>   preview; FA-27 `stream_ice_state=connected` / `stream_send_kbps` flowing; `dotnet build` 0/0;
+>   installer `AlphaAITracker-Setup-1.2.34.exe`.
+>
 > - 2026-10-03: **Live stream Phase 3 — F14c socket hardening + presence Online contract.**
 >   DeviceAuth push + presence WS: 4h max lifetime + every-5m `DeviceRepo.IsActive` re-check
 >   (revoked/expired/missing device closes the socket; transient DB errors keep the socket).
@@ -1106,7 +1120,7 @@ flowchart LR
 - **Single-instance activation** — a second user launch signals the running instance (named pipe `alpha-ai-tracker-activation`) to raise its window; `--background`/`--minimized` relaunches exit quietly
 - **Six-page GUI** (2026-08-10) — `MainWindow` is a router over four exclusive states; pages live in `Views/Pages/`: Splash (boot checklist), Login, PermissionSetup (stepper), and behind the nav rail Dashboard (identity + status tiles + pipeline health + attached devices), System Specs (machine/compute/network/storage/peripherals) and Installed Applications (searchable apps + packages inventory, virtualized). One VM per page, all Transient in DI. Details: [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md)
 - **Runtime branding from a single source** — `Core/AppInfo.cs` resolves the product name, tagline, initials, publisher, copyright and version from the embedded `APP_IDENTIFIERS` + `VERSION`; no XAML or C# literal names anywhere in the UI. Editing either file re-brands both the app and the installers (§6 → *Branding-Single-Source Rule*)
-- **Live stream WebRTC publisher (V3, Windows)** — `LiveStreamClient` + `NetProbeService` + `ScreenCaptureService` + `ScreenVp8Encoder`; ABR ladder / min uplink / `force_keyframe`; gated on `ALPHA_STREAM_*`; media only while an admin watches. **`WsClient`** presence (`ALPHA_WS_*`) independent of stream
+- **Live stream WebRTC publisher (V3, Windows)** — `LiveStreamClient` + `NetProbeService` + multi-path GDI `ScreenCaptureService` + `ScreenVp8Encoder`; ABR / min uplink / `force_keyframe`; send gated on PC `connected`; `ClientIdentityHeaders` for Client Version; `ALPHA_STREAM_*` / `ALPHA_WS_*`. Installer **1.2.34**
 
 **What's missing:**
 
@@ -1148,7 +1162,7 @@ flowchart LR
 - **No accessibility testing** — many interactive elements lack aria attributes
 - **No unit tests** — 0 test files
 - **GitHub release download** fetches from `clickmaster4285/Alpha-AI-Tracker`, not the org repo
-- **Live stream Linux capture** — still deferred (Windows GDI only)
+- **Live stream Linux capture** — still deferred (Windows GDI multi-path BitBlt; Win11 24H2 hardened in 1.2.34)
 
 ---
 

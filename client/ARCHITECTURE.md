@@ -1,7 +1,17 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-10-03 (live stream V3 ABR + NetProbe)
+> **Last audited:** 2026-10-03 (Win11 capture + Client Version headers, 1.2.34)
 > **Changelog:**
+> - 2026-10-03: **Win11 blank live preview (FA-27) + Client Version on DeviceAuth.**
+>   FA-27 showed admin `LIVE` / `--- FPS` while SFU logged `withTrack=false`: Win11 GDI
+>   `CopyFromScreen` / CAPTUREBLT-only BitBlt produced no frames → no RTP. **`ScreenCaptureService`**
+>   now tries `SRCCOPY` BitBlt → CAPTUREBLT → `GetDesktopWindow` → `CreateDC("DISPLAY")` →
+>   CopyFromScreen. **`LiveStreamClient`** gates `SendVideo` on PC `connected`, forces a keyframe
+>   on connect, and writes `stream_pc_state` / `stream_ice_state` / `stream_capture_stall` /
+>   `stream_capture_error` / encode-send errors to `app_status`. **`ClientIdentityHeaders`**
+>   attaches `X-Client-Version` + `X-Client-Platform` on every DeviceAuth HTTP/WS call; boot
+>   persists `app_status.client_version` so reinstall updates the web Client Version without
+>   re-login. Installer **1.2.34**. Verified: FA-27 + MU-115 preview; `dotnet build` 0/0.
 > - 2026-10-03: **Live stream V3 Phase 0/1 — ABR + uplink probe + PLI keyframe.**
 >   `NetProbeService` POSTs a timed body to DeviceAuth `POST /api/v1/live-stream/uplink-probe`,
 >   then `SelectBitrateKbps` picks a rung under `ALPHA_STREAM_MAX_BITRATE_KBPS`. Publish is skipped
@@ -289,9 +299,10 @@ client/
 │   ├── LogCollectorService.cs      # ⭐ main BackgroundService: collect → resolve → sessions/items → heartbeat (no network I/O since 2026-08-11)
 │   ├── SyncService.cs              # ⭐ dedicated sync engine: drains unsent rows in byte-bounded chunks (gzip, polite pauses, exponential backoff)
 │   ├── AppUpdateService.cs         # ⭐ self-updater (2026-08-12): GitHub latest-release check → platform asset → download to user data dir → pkexec dpkg / silent Inno / dmg; ObservableObject state bound by the GUI; 24h auto-check loop
-│   ├── LiveStreamClient.cs         # ⭐ WebRTC VP8 publisher → GET /live-stream/push; ABR + force_keyframe
+│   ├── LiveStreamClient.cs         # ⭐ WebRTC VP8 publisher → GET /live-stream/push; ABR; send after PC connected
 │   ├── NetProbeService.cs          # Uplink probe → POST /live-stream/uplink-probe; SelectBitrateKbps ladder
-│   ├── ScreenCaptureService.cs     # Windows GDI monitor capture → BGRA frames (DropOldest channel)
+│   ├── ScreenCaptureService.cs     # Windows multi-path GDI BitBlt → BGRA (DropOldest; Win11 hardened)
+│   ├── ClientIdentityHeaders.cs    # X-Client-Version / X-Client-Platform on DeviceAuth HTTP+WS
 │   ├── WsClient.cs                 # Presence / keep-alive WS → GET /api/v1/ws (independent of LiveStreamClient)
 │   ├── Streaming/
 │   │   └── ScreenVp8Encoder.cs     # libvpx wrapper that honors TargetKbps (fixes SIPSorcery ConfigDefault wipe)
@@ -1021,10 +1032,11 @@ the grouping; `DrainSessionEventsAsync` marks every source row `is_synced` after
 
 | Piece | Role |
 |---|---|
-| `ScreenCaptureService` | Windows GDI `CopyFromScreen` → BGRA; bounded channel `DropOldest(1)`; EnumDisplayMonitors + `select_monitor` |
+| `ScreenCaptureService` | Windows multi-path GDI BitBlt → BGRA (`DropOldest(1)`); EnumDisplayMonitors + `select_monitor`; Win11 fallbacks |
 | `ScreenVp8Encoder` | libvpx via `vpxmd`; **ConfigDefault then** `RcTargetBitrate` / VBR / timebase `1/fps` / `KfMaxDist`; wrap-only image lifecycle |
 | `NetProbeService` | Timed POST to `/live-stream/uplink-probe`; `SelectBitrateKbps` ladder under max bitrate |
-| `LiveStreamClient` | DeviceAuth WS push; VP8 after `start`; ABR degrade; `force_keyframe` from PLI |
+| `LiveStreamClient` | DeviceAuth WS push; VP8 after `start` + PC `connected`; ABR; `force_keyframe`; stream_* app_status telemetry |
+| `ClientIdentityHeaders` | `X-Client-Version` / `X-Client-Platform` on DeviceAuth HTTP + WS |
 
 Flow: login → push WS `hello` → idle until admin watches → server `start` → NetProbe uplink → pick ladder rung (or skip if below min) → offer/answer/ICE → media pump (degrade on backpressure) → `stop` tears down PC/encoder.
 

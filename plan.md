@@ -1,6 +1,6 @@
 # Live Stream V3.0 — WebRTC/WebSocket Reliability & Scale Plan
 
-> **Status:** Phase 0–3 complete (Redis single-server; sticky LB removed; F14c + presence online contract).
+> **Status:** Phase 0–3 complete + post-Phase-3 FA-27 capture / Client Version fixes (client **1.2.34**).
 > **Branch:** `feature/live_streamV3.0`
 > **Scope:** client (`client/`), server (`server/`), web (`web/`)
 > **Baseline:** V2.0 shipped 2026-09-29 — Pion SFU (VP8 RTP relay) + dedicated presence WS.
@@ -9,6 +9,7 @@
 > **Supersedes:** the V2 presence-WS plan, archived at `plan.v2-presence-ws.archived.md`.
 > **Track progress in:** §7 Execution checklist.
 > **Docs:** `AGENTS.md`, `server/ARCHITECTURE.md`, `client/ARCHITECTURE.md`, `web/ARCHITECTURE.md`.
+> **Latest installer:** `client/installers/AlphaAITracker-Setup-1.2.34.exe` (Win11 capture + version headers).
 
 ---
 
@@ -246,11 +247,15 @@ as unwanted for this deploy shape.
 
 ## 6. Known gaps carried forward
 
-- Linux screen capture remains unimplemented (Windows GDI only) — unchanged by this plan.
-- Zero automated tests across all three services. Every phase is verified by build + manual
-test only.
-- TURN server provisioning is an operational prerequisite for Phase 1.7, not a code change.
+- Linux screen capture remains unimplemented (Windows multi-path GDI BitBlt in **1.2.34**;
+  Win11 24H2 `CopyFromScreen` / CAPTUREBLT-only path was the FA-27 blank-preview root cause —
+  fixed; DXGI Desktop Duplication still not implemented).
+- Zero automated tests across all three services for most handlers. Live-stream Go packages
+  have unit tests; every phase is still primarily verified by build + manual / installed test.
+- TURN server provisioning is an operational prerequisite for Phase 1.7 / public VPS, not a code change.
 - F1 cannot be proven fixed by any build; it requires an installed-build runtime test.
+- Client Version on the web now refreshes via DeviceAuth `X-Client-Version` without re-login
+  (1.2.33+); older installed clients still need one login or upgrade.
 
 ---
 
@@ -331,10 +336,18 @@ its **Gate** passes — do not tick the gate from a partial run.
 - [ ] D10 — closed by **0.1**
 - [ ] D11 — duplicate `/terms-consent/check` route reported (do **not** fix in this cycle)
 
+### Post-Phase-3 field fixes (not a new plan phase)
+
+- [x] **Client Version refresh** — DeviceAuth `X-Client-Version`/`X-Client-Platform` →
+  `TouchLastSeen`; `ClientIdentityHeaders` + boot `app_status.client_version` (installer **1.2.33**)
+- [x] **FA-27 blank preview** — Win11 multi-path BitBlt + SendVideo gated on PC `connected` +
+  stall/ICE/encode `app_status` telemetry (installer **1.2.34**); live-verified FA-27 + MU-115
+- [x] Docs updated for the above (`AGENTS.md`, `plan.md`, `prompt.md`, ARCHITECTURE.md files, `FILE_HIERARCHY.md`)
+
 ### Final handoff
 
-- [x] Docs updated: `AGENTS.md` + `plan.md` + `prompt.md` + `server|client|web/ARCHITECTURE.md` (V3 Phase 0–3; sticky removed; Redis kept)
+- [x] Docs updated: `AGENTS.md` + `plan.md` + `prompt.md` + `server|client|web/ARCHITECTURE.md` (V3 Phase 0–3; sticky removed; Redis kept; 1.2.34 field fixes)
 - [x] `plan.md` ticked boxes match reality — no box ticked from a partial run
-- [x] Handoff states, honestly: **source build verified** + Redis cluster self-test PASS + Phase 3 F14c/presence tests PASS; Windows installer from Phase 1 still at `AlphaAITracker-Setup-1.2.3.exe`; F1 installed start/stop still pending
+- [x] Handoff states, honestly: **source build verified** + Redis cluster self-test PASS + Phase 3 F14c/presence tests PASS; Windows installer **`AlphaAITracker-Setup-1.2.34.exe`** (capture + version); FA-27 blank preview **installed-verified**; F1 heap start/stop cycle still pending as a dedicated proof
 - [ ] No commit / push / branch / PR unless explicitly requested
 - [ ] **Ops remaining:** provision TURN (`WEBRTC_TURN_`*) on the public VPS — LAN watch works with STUN alone; CGNAT/remote still needs TURN

@@ -1,7 +1,13 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-10-03 (live stream V3 Phase 0–3)
+> **Last audited:** 2026-10-03 (DeviceAuth Client Version refresh + Phase 0–3)
 > **Changelog:**
+> - 2026-10-03: **DeviceAuth refreshes `employee_devices.client_version` without re-login.**
+>   `TouchLastSeen(deviceID, clientVersion, platform)` updates `client_version`/`platform` when
+>   DeviceAuth requests carry `X-Client-Version` / `X-Client-Platform` (optional; empty leaves
+>   prior values). Wired in `device_auth.go` Background+timeout path. Fixes stale web Client
+>   Version after silent reinstall (version was only set on `UpsertDevice` at employee-login).
+>   Verified: FA-27/MU-115 → 1.2.33/1.2.34 without re-login; `go build`/`go vet` clean.
 > - 2026-10-03: **Live stream V3 Phase 3 — F14c + presence Online contract.**
 >   Push/watch/presence sockets: 4h max life. DeviceAuth push + `/ws`: every 5m
 >   `DeviceRepo.IsActive` closes on revoke/expire. `employeeLiveOnline` + unit tests

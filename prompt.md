@@ -96,8 +96,12 @@ Follow the full definitions in `AGENTS.md`. In particular:
   wiped `TargetKbps`). Phase 1: uplink probe / bitrate ladder / ABR degrade / PLI→`force_keyframe` /
   `NetProbeService` + `POST /live-stream/uplink-probe`. Phase 2 (single-server): Redis mirrors
   presence, watch tickets, and publisher→instance registry (`INSTANCE_ID` optional); no sticky LB.
-  Re-bake `config.enc` for any `ALPHA_STREAM_*` / `ALPHA_WS_*` change. Web: per-tile FPS;
-  `/live-stream/theater` full-bleed popout; optional ticket `watchBaseUrl` for future multi-API.
+  Phase 3: 4h socket life + DeviceAuth `IsActive` re-check; presence Online contract tested.
+  Post-Phase-3 field fixes (client **1.2.34**): Win11 multi-path BitBlt capture; `SendVideo` only
+  after PC `connected`; DeviceAuth `X-Client-Version`/`X-Client-Platform` → `TouchLastSeen` so
+  web Client Version updates without re-login. Re-bake `config.enc` for any `ALPHA_STREAM_*` /
+  `ALPHA_WS_*` change. Web: per-tile FPS; `/live-stream/theater` full-bleed popout; optional
+  ticket `watchBaseUrl` for future multi-API.
 - After live-stream/server/web/client contract changes, update the matching `*/ARCHITECTURE.md`
   changelogs and `AGENTS.md` (see plan handoff / Definition of done).
 - **Cross-platform analyzer safety:** guard platform method bodies with

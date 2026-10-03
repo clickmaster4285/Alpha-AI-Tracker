@@ -1,7 +1,11 @@
 # Web Architecture — Alpha AI Tracker Dashboard
 
-> **Last audited:** 2026-10-03 (live stream V3 watchBaseUrl + track cleanup)
+> **Last audited:** 2026-10-03 (live stream V3 + Client Version via DeviceAuth)
 > **Changelog:**
+> - 2026-10-03: **Client Version on employees/live-stream refreshes without re-login (server+client).**
+>   Web still reads `employee_devices.client_version` as before; server `TouchLastSeen` now
+>   updates version/platform from DeviceAuth headers so a reinstall of 1.2.33+ shows immediately.
+>   No web code change. Blank FA-27 preview was client capture/WebRTC (fixed in installer 1.2.34).
 > - 2026-10-03: **Live stream V3 — ticket `watchBaseUrl` + tile teardown hygiene.**
 >   `useLiveStreamSocket` prefers `watchBaseUrl` from `GET /live-stream/watch-ticket` when set
 >   (future multi-API); otherwise `NEXT_PUBLIC_WS_URL`. Phase 0: clear open timer; pause video /
