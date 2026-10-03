@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -200,11 +201,19 @@ func (h *StreamHandler) IssueWatchTicket(c echo.Context) error {
 		})
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"ticket":     ticket,
 		"expiresIn":  expiresIn,
 		"iceServers": h.hub.ICEServers(),
-	})
+	}
+	// Phase 2: when the publisher SFU lives on another instance, tell the web
+	// client which base URL to open the watch WebSocket against.
+	if base, err := h.hub.ResolveWatchTarget(empID); err != nil {
+		log.Printf("[live-stream] ResolveWatchTarget employee=%s: %v", empID, err)
+	} else if base != "" {
+		resp["watchBaseUrl"] = base
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 // UplinkProbe handles POST /api/v1/live-stream/uplink-probe (DeviceAuth).
@@ -232,17 +241,17 @@ func (h *StreamHandler) UplinkProbe(c echo.Context) error {
 }
 
 type signalMsg struct {
-	Type             string               `json:"type"`
-	SDP              string               `json:"sdp,omitempty"`
-	Candidate        string               `json:"candidate,omitempty"`
-	SDPMLineIndex    *uint16              `json:"sdpMLineIndex,omitempty"`
-	SDPMid           *string              `json:"sdpMid,omitempty"`
-	Index            int                  `json:"index,omitempty"`
-	Platform         string               `json:"platform,omitempty"`
-	StreamAvailable  bool                 `json:"streamAvailable,omitempty"`
-	Version          string               `json:"version,omitempty"`
-	SelectedMonitor  int                  `json:"selectedMonitor,omitempty"`
-	Monitors         []stream.MonitorInfo `json:"monitors,omitempty"`
+	Type            string               `json:"type"`
+	SDP             string               `json:"sdp,omitempty"`
+	Candidate       string               `json:"candidate,omitempty"`
+	SDPMLineIndex   *uint16              `json:"sdpMLineIndex,omitempty"`
+	SDPMid          *string              `json:"sdpMid,omitempty"`
+	Index           int                  `json:"index,omitempty"`
+	Platform        string               `json:"platform,omitempty"`
+	StreamAvailable bool                 `json:"streamAvailable,omitempty"`
+	Version         string               `json:"version,omitempty"`
+	SelectedMonitor int                  `json:"selectedMonitor,omitempty"`
+	Monitors        []stream.MonitorInfo `json:"monitors,omitempty"`
 }
 
 // Push handles GET /api/v1/live-stream/push (DeviceAuth) — WebRTC publisher signaling.
@@ -435,6 +444,18 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, dto.APIError{
 			Code: http.StatusBadRequest, Message: "employeeId and ticket are required",
 		})
+	}
+	// Route BEFORE burning the ticket so Redis can redirect to the publisher instance.
+	if base, err := h.hub.ResolveWatchTarget(empID); err != nil {
+		return c.JSON(http.StatusServiceUnavailable, dto.APIError{
+			Code: http.StatusServiceUnavailable, Message: err.Error(),
+		})
+	} else if base != "" {
+		q := url.Values{}
+		q.Set("employeeId", empID)
+		q.Set("ticket", ticket)
+		loc := base + "/api/v1/live-stream/watch?" + q.Encode()
+		return c.Redirect(http.StatusTemporaryRedirect, loc)
 	}
 	watcherUserID, err := h.hub.ConsumeWatchTicket(ticket, empID)
 	if err != nil {

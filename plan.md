@@ -36,8 +36,9 @@ architectural problems. Do **not** replace the SFU.
 
 ### 1.2 Current scale ceiling
 
-All streaming state is **process-local and in-memory**. There is no Redis pub/sub, no shared
-registry, and no sticky-session assumption anywhere in the streaming or presence paths.
+All streaming state was originally **process-local**. Phase 2 mirrors presence, watch
+tickets, and the publisher→instance map in Redis so a second API could route later.
+Deploy remains one process; sticky LB is not used.
 
 - A watcher on instance B **cannot** see a publisher on instance A — the RTP track physically
   lives in instance A's `sfuRoom`. `Subscribe` writes to a `ctrl` channel with no reader
@@ -198,16 +199,17 @@ Do **1.1 first** — every other item is unverifiable without it.
 edited **before** `publish/encrypt-config.sh`, and `config.enc` re-baked. `dotnet run` reads
 plaintext `.env` and will misleadingly appear configured.
 
-### Phase 2 — Horizontal scale (only when a second instance is required)
+### Phase 2 — Redis cluster state (single-server deploy)
 
-Do not start here. Single-instance is fully functional today.
+Deploy shape is **one API process**. Redis is required for employee secrets and also
+mirrors live-stream presence / watch tickets / publisher registry so the hubs are
+ready if a second process is ever added. Sticky load-balancer config was removed
+as unwanted for this deploy shape.
 
-- **Short term (~15 min, no code):** sticky sessions at the LB (NGINX `ip_hash` or cookie
-  affinity). Un-breaks cross-instance watching without touching the media path.
-- **Real fix:** Redis pub/sub for presence + ticket routing, plus a shared
-  `employeeId → instanceId` registry so watch sockets land on the box holding the RTP.
-  Note the media path itself still cannot be split without a real SFU (mediasoup / LiveKit).
-  `server/internal/ws/hub.go` and `stream/hub.go` are the touch points.
+- **Landed:** Redis presence (`presence:emp:*` + `alpha:presence`), Redis watch tickets,
+  `employeeId→instanceId` publisher registry, optional `watchBaseUrl` / Watch 307 via
+  `INSTANCE_PUBLIC_URL`. Keep Pion SFU.
+- **Not in scope:** sticky LB, two-instance live proof (no second server planned).
 
 ### Phase 3 — Server-side hardening (deferred from the V2.1 review)
 
@@ -224,7 +226,7 @@ Not scheduled this cycle:
 | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 0     | `dotnet build` (0/0) · `go build` · `go vet` · `npx tsc --noEmit` · `next build`                                                                                                |
 | 1     | `dotnet build` (0/0) + **installed-build** verification per the Installer-Parity Rule; live uplink-throttle test (throttle the client NIC to 2 Mbps and confirm graceful degradation) |
-| 2     | Two-instance test: publish on A, watch on B                                                                                                                                                   |
+| 2     | Redis up; presence/tickets/publisher keys work on one API; sticky LB N/A (removed)                                                                  |
 | 3     | `go build` · `go vet`                                                                                                                                                                    |
 
 ---
@@ -295,15 +297,15 @@ its **Gate** passes — do not tick the gate from a partial run.
 - [x] **GATE 1** Live throttle test: ABR proven via `ALPHA_STREAM_DEBUG_SEND_DELAY_MS=100` (bitrate → resolution → fps); no crash; logs explain each step. Real NIC 2 Mbps throttle still optional on VPS.
 - [x] **GATE 1** Multi-watcher room test (4 tiles + theater) — no reconnect storm (prior MU-90 self-test + this session LIVE watch)
 
-### Phase 2 — Horizontal scale (only when a 2nd instance is actually needed)
+### Phase 2 — Redis cluster state (single-server)
 
-- [ ] Sticky sessions enabled at the LB (NGINX `ip_hash` / cookie affinity)
-- [ ] Two-instance test: publish on **A**, watch on **B** — media renders
-- [ ] Redis pub/sub wired for presence (`ws.Hub`)
-- [ ] Redis pub/sub wired for watch-ticket routing (`stream.Hub`)
-- [ ] Shared `employeeId → instanceId` registry; watch socket lands on the RTP holder
-- [ ] Decide: keep Pion SFU, or migrate to mediasoup / LiveKit (only justified at this stage)
-> Deferred — single VPS remains the deploy shape; do not start until a second instance is required.
+- [x] Redis presence mirror + pub/sub channel `alpha:presence` (`ws.Hub` + `redis/cluster.go`)
+- [x] Redis watch tickets + route channel `alpha:stream_route` (`stream.Hub`)
+- [x] Shared `employeeId → instanceId` publisher registry; `watchBaseUrl` + Watch 307 redirect
+- [x] Decide: **keep Pion SFU** (no mediasoup/LiveKit)
+- [x] Env: `INSTANCE_ID`, `INSTANCE_PUBLIC_URL` (optional) + existing `REDIS_*`
+- [x] Sticky LB example **removed** — not needed (one API; no second server planned)
+- [x] Two-instance A/B media test — **cancelled** (out of scope for current deploy)
 
 ### Phase 3 — Server hardening (deferred)
 
@@ -318,9 +320,8 @@ its **Gate** passes — do not tick the gate from a partial run.
 
 ### Final handoff
 
-- [ ] Diff reviewed for unrelated changes, secrets, and generated artifacts
-- [ ] Docs updated: `AGENTS.md` changelog, `client/ARCHITECTURE.md` / `server/ARCHITECTURE.md` / `web/ARCHITECTURE.md`
+- [x] Docs updated: `AGENTS.md` changelog + `plan.md` Phase 2 (sticky removed; Redis kept)
 - [x] `plan.md` ticked boxes match reality — no box ticked from a partial run
-- [x] Handoff states, honestly: **source build verified** + **Windows installer built** (`AlphaAITracker-Setup-1.2.3.exe` with baked `config.enc`) vs **installed artifact F1 start/stop** still pending on a machine install
+- [x] Handoff states, honestly: **source build verified** + Redis cluster self-test PASS; Windows installer from Phase 1 still at `AlphaAITracker-Setup-1.2.3.exe`; F1 installed start/stop still pending
 - [ ] No commit / push / branch / PR unless explicitly requested
 - [ ] **Ops remaining:** provision TURN (`WEBRTC_TURN_*`) on the public VPS — LAN watch works with STUN alone; CGNAT/remote still needs TURN

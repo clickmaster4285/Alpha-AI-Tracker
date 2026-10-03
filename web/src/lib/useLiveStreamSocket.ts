@@ -228,10 +228,18 @@ export function useLiveStreamSocket(
       setState((s) => ({ ...s, status: 'connecting', error: null, streaming: false }));
 
       let ticket: string;
+      let watchBase = resolveWsBase();
       try {
         const res = await liveStreamApi.watchTicket(employeeId);
         ticket = res.ticket;
         iceServersRef.current = toRtcIceServers(res.iceServers);
+        if (res.watchBaseUrl) {
+          // http(s)://host → ws(s)://host for the watch WebSocket.
+          watchBase = res.watchBaseUrl
+            .replace(/^http:\/\//i, 'ws://')
+            .replace(/^https:\/\//i, 'wss://')
+            .replace(/\/$/, '');
+        }
       } catch (err) {
         if (cancelled) return;
         const msg = err instanceof Error ? err.message : 'ticket_failed';
@@ -257,7 +265,7 @@ export function useLiveStreamSocket(
       if (cancelled) return;
 
       const url =
-        `${resolveWsBase()}/api/v1/live-stream/watch` +
+        `${watchBase}/api/v1/live-stream/watch` +
         `?employeeId=${encodeURIComponent(employeeId)}` +
         `&ticket=${encodeURIComponent(ticket)}`;
       const ws = new WebSocket(url);

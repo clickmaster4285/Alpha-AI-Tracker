@@ -59,6 +59,13 @@ type PresenceWSConfig struct {
 type ServerConfig struct {
 	Host string
 	Port int
+	// InstanceID uniquely identifies this process in a multi-node deploy
+	// (presence + publisher registry + watch redirects). Empty → auto-generated.
+	InstanceID string
+	// InstancePublicURL is this process's externally reachable base URL
+	// (scheme://host:port, no trailing slash). Used for Redis-driven watch
+	// redirects if a second API instance ever exists. Empty → redirect disabled.
+	InstancePublicURL string
 }
 
 type DatabaseConfig struct {
@@ -121,8 +128,10 @@ func Load() (*Config, error) {
 
 	cfg := &Config{
 		Server: ServerConfig{
-			Host: getEnv("SERVER_HOST", "0.0.0.0"),
-			Port: getEnvInt("SERVER_PORT", 8080),
+			Host:              getEnv("SERVER_HOST", "0.0.0.0"),
+			Port:              getEnvInt("SERVER_PORT", 8080),
+			InstanceID:        strings.TrimSpace(getEnv("INSTANCE_ID", "")),
+			InstancePublicURL: strings.TrimRight(strings.TrimSpace(getEnv("INSTANCE_PUBLIC_URL", "")), "/"),
 		},
 		Database: DatabaseConfig{
 			Host:            getEnv("DB_HOST", "localhost"),

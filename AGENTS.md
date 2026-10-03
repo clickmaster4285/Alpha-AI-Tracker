@@ -3,6 +3,14 @@
 > **Last audited:** 2026-10-01
 > **Changelog:**
 >
+> - 2026-10-03: **Live stream Phase 2 — Redis cluster state (single-server deploy).**
+>   Shared Redis presence (`presence:emp:*` + `alpha:presence` pub/sub), watch tickets
+>   (`stream:ticket:*`), publisher registry (`stream:pub:{emp}` → instanceId). Env
+>   `INSTANCE_ID` / `INSTANCE_PUBLIC_URL` (optional; auto instance id). Watch-ticket may
+>   return `watchBaseUrl` / Watch 307 if a second API appears later. Sticky LB example
+>   removed — not needed for the one-server deploy shape. Keep Pion SFU. Verified:
+>   `go build`/`go vet`/`go test` scale+stream ok; `npx tsc --noEmit` clean.
+>
 > - 2026-10-01: **Live stream V3.0 — safety + slow-network resilience (VPS/public internet).**
 >   Implements [plan.md](./plan.md) Phase 0 + Phase 1 against the V2 WebRTC SFU. Deploy assumes
 >   API on a public VPS domain (not LAN).
@@ -16,7 +24,8 @@
 >     `forwardRTP`; TURN empty startup WARNING; ticket cap + offer semaphore; 4h socket lifetime;
 >     watch UserID audit log; employee poll `staleTime`/`refetchInterval` tuned. **Ops:** provision
 >     TURN (`WEBRTC_TURN_*`) on the VPS; re-bake `config.enc` after `.env` (new stream keys).
->   - Phase 2 horizontal scale (Redis/sticky) deferred until a second instance is required.
+>   - Phase 2 Redis presence/tickets/publisher registry landed; sticky LB example removed
+>     (single-server deploy — no second API planned).
 >   - Verified: `dotnet build` 0/0, `go build`/`go vet` clean, `go test ./internal/stream/...` ok,
 >     `npx tsc --noEmit` clean. F1 heap fix needs installed-build start/stop cycle (not provable by build).
 >

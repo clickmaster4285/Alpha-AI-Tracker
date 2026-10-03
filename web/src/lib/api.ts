@@ -1339,10 +1339,13 @@ export const liveStreamApi = {
   employees: () =>
     request<{ data: LiveStreamEmployee[]; total: number }>('/live-stream/employees'),
   watchTicket: (employeeId: string) =>
-    request<{ ticket: string; expiresIn: number; iceServers?: IceServerConfig[] }>(
-      '/live-stream/watch-ticket',
-      { params: { employeeId } },
-    ),
+    request<{
+      ticket: string;
+      expiresIn: number;
+      iceServers?: IceServerConfig[];
+      /** Phase 2: publisher SFU on another instance — open the watch WS here. */
+      watchBaseUrl?: string;
+    }>('/live-stream/watch-ticket', { params: { employeeId } }),
 };
 
 export { ApiError };

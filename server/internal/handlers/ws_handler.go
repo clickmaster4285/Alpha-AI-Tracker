@@ -133,6 +133,7 @@ func (h *WsHandler) Connect(c echo.Context) error {
 	_ = conn.SetReadDeadline(time.Now().Add(presencePongWait))
 	conn.SetPongHandler(func(string) error {
 		_ = conn.SetReadDeadline(time.Now().Add(presencePongWait))
+		h.hub.Touch(empID, gen)
 		return nil
 	})
 
@@ -144,6 +145,7 @@ func (h *WsHandler) Connect(c echo.Context) error {
 			return nil
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(presencePongWait))
+		h.hub.Touch(empID, gen)
 
 		if msgType != websocket.TextMessage {
 			continue
