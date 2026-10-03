@@ -1,6 +1,6 @@
 # Live Stream V3.0 — WebRTC/WebSocket Reliability & Scale Plan
 
-> **Status:** Plan only — no code changed.
+> **Status:** Phase 0 + Phase 1 complete; Phase 2 Redis (single-server) complete — sticky LB removed.
 > **Branch:** `feature/live_streamV3.0`
 > **Scope:** client (`client/`), server (`server/`), web (`web/`)
 > **Baseline:** V2.0 shipped 2026-09-29 — Pion SFU (VP8 RTP relay) + dedicated presence WS.
@@ -8,6 +8,7 @@
 > **Governing rules:** `AGENTS.md` §6, `prompt.md`.
 > **Supersedes:** the V2 presence-WS plan, archived at `plan.v2-presence-ws.archived.md`.
 > **Track progress in:** §7 Execution checklist.
+> **Docs:** `AGENTS.md`, `server/ARCHITECTURE.md`, `client/ARCHITECTURE.md`, `web/ARCHITECTURE.md`.
 
 ---
 
@@ -320,7 +321,7 @@ its **Gate** passes — do not tick the gate from a partial run.
 
 ### Final handoff
 
-- [x] Docs updated: `AGENTS.md` changelog + `plan.md` Phase 2 (sticky removed; Redis kept)
+- [x] Docs updated: `AGENTS.md` + `plan.md` + `prompt.md` + `server|client|web/ARCHITECTURE.md` (V3 Phase 0–2; sticky removed; Redis kept)
 - [x] `plan.md` ticked boxes match reality — no box ticked from a partial run
 - [x] Handoff states, honestly: **source build verified** + Redis cluster self-test PASS; Windows installer from Phase 1 still at `AlphaAITracker-Setup-1.2.3.exe`; F1 installed start/stop still pending
 - [ ] No commit / push / branch / PR unless explicitly requested

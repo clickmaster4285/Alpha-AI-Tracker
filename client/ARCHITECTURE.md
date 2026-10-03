@@ -1,7 +1,15 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-09-29 (live stream WebRTC SFU + presence WS)
+> **Last audited:** 2026-10-03 (live stream V3 ABR + NetProbe)
 > **Changelog:**
+> - 2026-10-03: **Live stream V3 Phase 0/1 — ABR + uplink probe + PLI keyframe.**
+>   `NetProbeService` POSTs a timed body to DeviceAuth `POST /api/v1/live-stream/uplink-probe`,
+>   then `SelectBitrateKbps` picks a rung under `ALPHA_STREAM_MAX_BITRATE_KBPS`. Publish is skipped
+>   when measured uplink < `ALPHA_STREAM_MIN_UPLINK_KBPS`. `LiveStreamClient` degrades on send
+>   backpressure (bitrate → resolution → fps) and handles server `force_keyframe` ctrl (PLI).
+>   Phase 0: `ScreenVp8Encoder` wrap-only (no free on managed image); ICE completion under session CT;
+>   idle capture poll skipped when stream off. CLI: `--self-test-stream-ladder`. Re-bake `config.enc`
+>   for new knobs. Verified: `dotnet build` 0/0; ladder self-test PASS.
 > - 2026-09-29: **Live stream V2 — WebRTC VP8 publisher + presence WS + ScreenVp8Encoder.**
 >   Replaces the JPEG push path. `LiveStreamClient` opens DeviceAuth WS `GET /api/v1/live-stream/push`,
 >   publishes SIPSorcery WebRTC VP8 after server `{"type":"start"}`, stops on `stop`. Capture remains
@@ -281,7 +289,8 @@ client/
 │   ├── LogCollectorService.cs      # ⭐ main BackgroundService: collect → resolve → sessions/items → heartbeat (no network I/O since 2026-08-11)
 │   ├── SyncService.cs              # ⭐ dedicated sync engine: drains unsent rows in byte-bounded chunks (gzip, polite pauses, exponential backoff)
 │   ├── AppUpdateService.cs         # ⭐ self-updater (2026-08-12): GitHub latest-release check → platform asset → download to user data dir → pkexec dpkg / silent Inno / dmg; ObservableObject state bound by the GUI; 24h auto-check loop
-│   ├── LiveStreamClient.cs         # ⭐ WebRTC VP8 publisher → GET /live-stream/push (DeviceAuth); capture only after server start
+│   ├── LiveStreamClient.cs         # ⭐ WebRTC VP8 publisher → GET /live-stream/push; ABR + force_keyframe
+│   ├── NetProbeService.cs          # Uplink probe → POST /live-stream/uplink-probe; SelectBitrateKbps ladder
 │   ├── ScreenCaptureService.cs     # Windows GDI monitor capture → BGRA frames (DropOldest channel)
 │   ├── WsClient.cs                 # Presence / keep-alive WS → GET /api/v1/ws (independent of LiveStreamClient)
 │   ├── Streaming/
@@ -725,9 +734,10 @@ Watchers (IObservableEventSource)          EventCoordinator                 Jour
 | `ALPHA_UPDATE_AUTO_CHECK_HOURS` | 24 | min hours between quiet background update checks (persisted `update_last_check_at` in app_status) |
 | `ALPHA_UPDATE_AUTO_INSTALL` | true | auto-download+install when a check finds a newer version (Linux still shows the polkit password dialog) |
 | `ALPHA_STREAM_ENABLED` | false | master switch for WebRTC live-stream publisher |
-| `ALPHA_STREAM_FPS` | 12 | capture / encode cadence (1–30) |
-| `ALPHA_STREAM_MAX_WIDTH` | 1920 | scale cap (hard-clamped 320–1920) |
-| `ALPHA_STREAM_MAX_BITRATE_KBPS` | 12000 | VP8 target kbps via `ScreenVp8Encoder` (cap 15000) |
+| `ALPHA_STREAM_FPS` | 12 | capture / encode cadence (1–30); may drop under ABR degrade |
+| `ALPHA_STREAM_MAX_WIDTH` | 1920 | scale cap (hard-clamped 320–1920); may drop under ABR |
+| `ALPHA_STREAM_MAX_BITRATE_KBPS` | 12000 | VP8 target kbps via `ScreenVp8Encoder` (cap 15000); ladder ceiling |
+| `ALPHA_STREAM_MIN_UPLINK_KBPS` | 2500 | skip publish if NetProbe uplink is below this (500–15000) |
 | `ALPHA_STREAM_KEYFRAME_INTERVAL_SEC` | 1 | seconds between forced keyframes (≥1; all-I-frame starves bitrate) |
 | `ALPHA_WS_ENABLED` | false | presence WebSocket (`GET /api/v1/ws`) |
 | `ALPHA_WS_PING_SEC` | 30 | application ping interval |
@@ -1012,10 +1022,13 @@ the grouping; `DrainSessionEventsAsync` marks every source row `is_synced` after
 | Piece | Role |
 |---|---|
 | `ScreenCaptureService` | Windows GDI `CopyFromScreen` → BGRA; bounded channel `DropOldest(1)`; EnumDisplayMonitors + `select_monitor` |
-| `ScreenVp8Encoder` | libvpx via `vpxmd`; **ConfigDefault then** `RcTargetBitrate` / VBR / timebase `1/fps` / `KfMaxDist` |
-| `LiveStreamClient` | DeviceAuth WS push signaling; SIPSorcery `RTCPeerConnection` + VP8 track; encode only after `start` |
+| `ScreenVp8Encoder` | libvpx via `vpxmd`; **ConfigDefault then** `RcTargetBitrate` / VBR / timebase `1/fps` / `KfMaxDist`; wrap-only image lifecycle |
+| `NetProbeService` | Timed POST to `/live-stream/uplink-probe`; `SelectBitrateKbps` ladder under max bitrate |
+| `LiveStreamClient` | DeviceAuth WS push; VP8 after `start`; ABR degrade; `force_keyframe` from PLI |
 
-Flow: login → push WS `hello` → idle until admin watches → server `start` → offer/answer/ICE → media pump → `stop` tears down PC/encoder.
+Flow: login → push WS `hello` → idle until admin watches → server `start` → NetProbe uplink → pick ladder rung (or skip if below min) → offer/answer/ICE → media pump (degrade on backpressure) → `stop` tears down PC/encoder.
+
+CLI: `client --self-test-stream-ladder` exercises `SelectBitrateKbps` without a full publish.
 
 ### Presence (`WsClient`)
 
@@ -1023,6 +1036,7 @@ Long-lived DeviceAuth socket to `GET /api/v1/ws`. Independent of `LiveStreamClie
 
 ### Quality notes
 
-- Do **not** force a keyframe every frame — starves the bitrate budget (blocky UI text).
+- Do **not** force a keyframe every frame — starves the bitrate budget (blocky UI text). Server PLI → one `force_keyframe` is enough.
 - Do **not** use stock `VpxVideoEncoder` alone — SIPSorcery wiped `TargetKbps` until `ScreenVp8Encoder`.
 - Hall-of-mirrors (watching yourself) stacks compression; judge quality on sharp desktop UI outside the admin browser.
+- Re-bake `config.enc` after any `ALPHA_STREAM_*` / `ALPHA_WS_*` change (Installer-Parity).

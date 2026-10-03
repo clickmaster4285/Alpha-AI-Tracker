@@ -76,7 +76,8 @@ client/
 ├── Services/                        long-running hosted services and OS integration
 │   ├── LogCollectorService.cs    ⭐ the heartbeat: collect → persist → sync loop
 │   ├── SyncService.cs               dedicated sync drain (byte-bounded, gzip, backoff)
-│   ├── LiveStreamClient.cs          WebRTC VP8 publisher → /live-stream/push (DeviceAuth)
+│   ├── LiveStreamClient.cs          WebRTC VP8 publisher → /live-stream/push (ABR + force_keyframe)
+│   ├── NetProbeService.cs           Uplink probe → POST /live-stream/uplink-probe; bitrate ladder
 │   ├── ScreenCaptureService.cs      Windows GDI monitor capture → BGRA (DropOldest)
 │   ├── WsClient.cs                  presence WS → /api/v1/ws (Online/Offline; not media)
 │   ├── Streaming/
@@ -186,6 +187,8 @@ server/
 │   ├── jobs/                    staleness_sweep.go (stale catalog links)
 │   │                            · retention_sweep.go (hourly data purge, RETENTION_DAYS)
 │   │                            · session_lifecycle_sweep.go (1-min ACTIVE→STALE→CLOSED sweep)
+│   ├── redis/cluster.go         live-stream presence / tickets / publisher registry (Phase 2)
+│   ├── scale/instance.go        INSTANCE_ID resolution
 │   └── stream/                  live preview WebRTC SFU — hub.go + sfu.go (preview only; no DB frames)
 │
 ├── migrations/               ⭐ sequential SQL files (001…). Append-only: never edit applied migrations.

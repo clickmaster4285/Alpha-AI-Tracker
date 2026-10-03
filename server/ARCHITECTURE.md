@@ -1,7 +1,16 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-09-29 (live stream WebRTC SFU + presence WS)
+> **Last audited:** 2026-10-03 (live stream V3 Phase 0–2 Redis single-server)
 > **Changelog:**
+> - 2026-10-03: **Live stream V3 — safety, slow-network resilience, Redis cluster state (one API).**
+>   Phase 0: fail-closed `CheckOrigin`, Subscribe capacity before Upgrade (429), `sendPLI` done
+>   channel, `TouchLastSeen` Background+timeout. Phase 1: `POST /live-stream/uplink-probe`
+>   (DeviceAuth); token-bucket `WEBRTC_MAX_BITRATE_KBPS` on `forwardRTP`; ticket cap; 4h socket
+>   lifetime; watch UserID audit. Phase 2: Redis keys `presence:emp:*`, `stream:ticket:*`,
+>   `stream:pub:{emp}` (+ pub/sub `alpha:presence` / `alpha:stream_route`); optional
+>   `INSTANCE_ID` / `INSTANCE_PUBLIC_URL`; watch-ticket may return `watchBaseUrl`; Watch may 307.
+>   Sticky LB example removed (single-server deploy). Hubs fall back to in-memory when Redis is nil
+>   (secrets still need Redis). Verified: `go build`/`go vet`; `go test` redis/scale/stream.
 > - 2026-09-29: **Live stream V2 — JPEG relay → Pion WebRTC SFU + dedicated presence WS.**
 >   `internal/stream/sfu.go` RTP-forwards publisher tracks to watchers (no re-encode, no frame
 >   storage). Hub keeps DeviceAuth push + JWT watch-ticket signaling, consent (`live_view`),
@@ -165,13 +174,16 @@ server/
 └── internal/
     ├── config/config.go         # Loads env vars, builds Config struct (incl. LINK_STALE_DAYS, DEFAULT_SHIFT_TIMEZONE)
     ├── database/postgres.go     # pgxpool creation, migration runner
-    ├── redis/redis.go           # Redis client wrapper (StoreSecret, ValidateSecret, DeleteSecret)
+    ├── redis/
+    │   ├── redis.go             # Secrets: StoreSecret / ValidateSecret / DeleteSecret
+    │   └── cluster.go           # Phase 2: presence / watch tickets / publisher registry (+ pub/sub)
+    ├── scale/instance.go        # ResolveInstanceID (INSTANCE_ID or hostname-pid-random)
     ├── jobs/staleness_sweep.go  # Hourly background job deactivating stale employee↔catalog links
     ├── jobs/retention_sweep.go  # Hourly purge of stale app_items and ended app_sessions (RETENTION_DAYS)
     ├── jobs/session_lifecycle_sweep.go # 1-min sweep: ACTIVE→STALE→CLOSED by last_sync_at; honors SESSION_STALE_AFTER_MINUTES / SESSION_CLOSE_AFTER_HOURS
-    └── stream/                 # Live preview WebRTC SFU (2026-09-29)
-        ├── hub.go                 # Signaling, consent, select_monitor, idle reap, caps
-        ├── sfu.go                 # Pion RTP forward publisher → watchers
+    └── stream/                 # Live preview WebRTC SFU (V2/V3)
+        ├── hub.go                 # Signaling, tickets, publisher registry hook, idle reap, caps
+        ├── sfu.go                 # Pion RTP forward publisher → watchers (+ bitrate bucket / PLI)
         └── (handlers wired from router / stream_handler)
     │
     ├── models/                  # Database models (structs with db/json tags)
@@ -430,19 +442,20 @@ Employee token is carried in the request body (`{employeeId, token, entries: [..
 > **Two term types.** Featured terms (`is_system=true`) are seeded by migration 037 and cannot
 > be deleted. Custom terms (`is_system=false`) can be created and deleted by the admin.
 
-### Live stream + presence (WebRTC SFU, 2026-09-29)
+### Live stream + presence (WebRTC SFU, V3)
 
 Preview-only — no frame storage in Postgres or on disk. Auth split follows the Client-vs-Web API Auth Separation Rule.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/live-stream/push` | DeviceAuth (WS) | Desktop publisher signaling (`hello`/`offer`/`answer`/`ice`/`start`/`stop`/`select_monitor`) |
-| GET | `/ws` | DeviceAuth (WS) | Presence / keep-alive (Online/`wsConnected`); not media |
+| GET | `/live-stream/push` | DeviceAuth (WS) | Desktop publisher signaling (`hello`/`offer`/`answer`/`ice` + `force_keyframe` ctrl) |
+| POST | `/live-stream/uplink-probe` | DeviceAuth | Client uplink benchmark body (discarded); times RTT for bitrate ladder |
+| GET | `/ws` | DeviceAuth (WS) | Presence / keep-alive (Online/`wsConnected`); mirrored to Redis when available |
 | GET | `/live-stream/employees` | JWT | Admin list + online/consent/wsConnected flags |
-| GET | `/live-stream/watch-ticket` | JWT | Short-lived ticket for watch WS |
-| GET | `/live-stream/watch` | Watch ticket (WS) | Admin subscriber signaling + WebRTC receive |
+| GET | `/live-stream/watch-ticket` | JWT | Short-lived ticket (Redis when available); may include `watchBaseUrl` |
+| GET | `/live-stream/watch` | Watch ticket (WS) | Admin subscriber signaling + WebRTC receive (may 307 if publisher elsewhere) |
 
-SFU implementation: `internal/stream/sfu.go` (Pion) + `hub.go` (rooms, idle reap, caps).
+SFU: `internal/stream/sfu.go` (Pion) + `hub.go`. Cluster: `internal/redis/cluster.go` (presence TTL, tickets, `stream:pub:{emp}` → instance). Deploy shape: **one API process**; sticky LB not used.
 
 ### Missing Endpoints (sync-only tables with no standalone listing API)
 
@@ -866,11 +879,14 @@ The server is **mostly stateless**:
 
 ### Can It Run Multiple Instances?
 
-**Yes**, with caveats:
+**Yes for REST/sync**, with caveats for live-stream:
 - Employee secrets: Redis is external, so any instance can validate
 - Ingestion: no ordering requirement, so round-robin works
 - **Sequences**: `employee_id_seq` uses `NEXTVAL` — safe across instances
-- **No sticky sessions required** — cookie-based auth is stateless
+- **Cookie JWT auth is stateless** — no sticky sessions for admin REST
+- **Live-stream media (Pion SFU) is process-local.** Redis shares presence/tickets/publisher
+  location; a second API would need `INSTANCE_PUBLIC_URL` (watch redirect / `watchBaseUrl`).
+  Current product deploy is **one API** — sticky LB is not configured.
 
 ### Connection Pooling
 
@@ -891,7 +907,7 @@ The server is **mostly stateless**:
 | `LINK_STALE_DAYS` | `7` | Catalog junction staleness window |
 | `DEFAULT_SHIFT_TIMEZONE` | *(empty)* | Company IANA zone applied to legacy `UTC` shifts at boot; create-shift fallback when timezone omitted |
 
-**Environment (live stream + presence, 2026-09-29):**
+**Environment (live stream + presence, V3):**
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -899,11 +915,14 @@ The server is **mostly stateless**:
 | `LIVE_STREAM_MAX_STREAMS` | `25` | Concurrent publisher rooms |
 | `LIVE_STREAM_MAX_WATCHERS_PER_EMPLOYEE` | `10` | Watchers per employee room |
 | `LIVE_STREAM_IDLE_SEC` | `90` | Idle reap (no watchers → stop publisher) |
-| `WEBRTC_MAX_BITRATE_KBPS` | `12000` | Ops/advertise cap only — client encode uses `ALPHA_STREAM_MAX_BITRATE_KBPS` |
+| `WEBRTC_MAX_BITRATE_KBPS` | `12000` | Enforced on subscriber RTP forward (token bucket); client encode uses `ALPHA_STREAM_MAX_BITRATE_KBPS` |
 | `WEBRTC_STUN_URLS` | Google STUN | Comma-separated STUN |
-| `WEBRTC_TURN_*` | empty | Optional TURN for restrictive NATs |
+| `WEBRTC_TURN_*` | empty | Optional TURN for restrictive NATs (startup WARNING if empty) |
 | `PRESENCE_WS_ENABLED` | `true` | Accept `GET /api/v1/ws` |
 | `PRESENCE_WS_MAX_CONNECTIONS` | `10000` | Cap on simultaneous presence sockets |
+| `INSTANCE_ID` | auto | Process id for Redis publisher/presence ownership |
+| `INSTANCE_PUBLIC_URL` | empty | Base URL for watch redirects (only if a second API exists) |
+| `REDIS_*` | localhost:6379 | Secrets + live-stream cluster keys |
 
 **Still missing (data jobs):**
 - No data-pruning job — app_sessions/app_items/device_hardware/etc. grow unbounded
@@ -915,7 +934,7 @@ The server is **mostly stateless**:
 
 | Gap | Severity | Details |
 |---|---|---|
-| **No tests** | 🔴 High | 0 test files. `go test ./... -v -count=1` runs nothing. |
+| **Sparse tests** | 🟠 Medium | Live-stream coverage exists (`internal/redis`, `internal/scale`, `internal/stream`); most handlers/services still untested. |
 | **No structured logging** | 🟠 Medium | Uses `log.Printf` instead of a structured logger (zap, slog, logrus). No log levels beyond text prefix `[server]`, `[database]`, `[auth]`. |
 | **No request validation** | 🟠 Medium | DTOs have `validate:` tags but **no validation library is imported**. Echo's `c.Bind(&req)` only deserializes JSON — it doesn't validate. All validation is manual `if req.Field == ""` checks. |
 | **No rate limiting** | 🟠 Medium | Login endpoint and sync endpoints are completely unprotected. Brute-force / DoS is trivial. |
