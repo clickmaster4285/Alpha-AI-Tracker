@@ -1,3 +1,178 @@
+# Release Notes — v1.2.34
+
+## Overview
+
+v1.2.34 is the **Live Stream V3.0** release on top of the v1.2.2 WebRTC SFU baseline. It ships
+safety hardening, slow-network ABR, Redis-backed single-server cluster state, socket lifetime /
+device re-check, Win11 capture reliability, Client Version refresh without re-login, late-joiner
+keyframe recovery, and consistent theater tile fill.
+
+Branch: `feature/live_streamV3.0` (plan: `plan.md`). Client version: **1.2.34**.
+Installer: `AlphaAITracker-Setup-1.2.34.exe`.
+
+**Scope of this note:** everything after **v1.2.2** (V3 Phase 0–3 + field fixes). Theater popout /
+per-tile FPS that landed with v1.2.2 remain the baseline and are not re-listed unless changed.
+
+---
+
+## 1. Server — V3 safety, ABR egress, Redis, socket hardening
+
+### Phase 0 — Safety
+
+- `CheckOrigin` fails **closed** when `CORS_ALLOWED_ORIGINS` is empty (CSWSH guard).
+- Watch `Subscribe` capacity checked **before** WebSocket Upgrade → HTTP **429**.
+- `sendPLI` takes a done channel tied to publisher close.
+- `TouchLastSeen` runs on `context.Background()` + timeout (no race after WS upgrade).
+- Watch-ticket `UserID` retained for audit logging.
+
+### Phase 1 — Slow-network / egress
+
+- DeviceAuth `POST /api/v1/live-stream/uplink-probe` (body discarded; client times RTT).
+- Token-bucket enforcement of `WEBRTC_MAX_BITRATE_KBPS` on `forwardRTP`.
+- RTP truncation guard on oversized packets.
+- Watch-ticket map capped; per-offer goroutines bounded (semaphore).
+- Startup **WARNING** when `WEBRTC_TURN_URLS` is empty (ops: provision TURN for VPS/CGNAT).
+- 4h max socket lifetime on push / watch / presence paths.
+
+### Phase 2 — Redis cluster state (single-server deploy)
+
+- Presence mirror: `presence:emp:*` + pub/sub `alpha:presence`.
+- Watch tickets: `stream:ticket:*` (+ route channel `alpha:stream_route`).
+- Publisher registry: `stream:pub:{emp}` → `instanceId`.
+- Env: optional `INSTANCE_ID` / `INSTANCE_PUBLIC_URL` (auto instance id when unset).
+- Watch-ticket may return `watchBaseUrl`; Watch may **307** if a second API appears later.
+- Sticky LB example **removed** — not needed for one-API deploy. Pion SFU kept.
+
+### Phase 3 — DeviceAuth socket re-check + Online contract
+
+- Push + presence WS: every **5 minutes** `DeviceRepo.IsActive` — revoked/expired/missing device
+  closes the socket; transient DB errors keep it open.
+- `employeeLiveOnline` contract unit-tested: presence-on → WS authoritative; presence-off →
+  heartbeat window (≤3 min).
+
+### Field fixes (post Phase 3)
+
+- **Client Version without re-login:** `TouchLastSeen(deviceID, version, platform)` updates
+  `employee_devices.client_version` / `platform` from DeviceAuth headers
+  `X-Client-Version` / `X-Client-Platform`.
+- **Late-joiner blank LIVE tile:** `NudgePublisherKeyframe` when a watcher answer includes media;
+  `WatchTrackReady` fires immediately if the track already exists (fixes missed `track_ready` race).
+
+---
+
+## 2. Client — ABR, Win11 capture, identity headers (1.2.34)
+
+### Phase 0 / 1
+
+- `ScreenVp8Encoder` — wrap-only (`VpxImgWrap`); never `VpxImgFree` on a managed buffer (F1).
+- ICE `iceReady` completed in `finally`; session cancellation token (no hung ICE tasks).
+- Idle capture poll skipped when streaming is off.
+- **`NetProbeService`** — uplink probe → bitrate ladder under `ALPHA_STREAM_MAX_BITRATE_KBPS`.
+- Skip publish when measured uplink &lt; `ALPHA_STREAM_MIN_UPLINK_KBPS` (reason in `app_status`).
+- ABR on send backpressure: bitrate → resolution → fps; slow recovery.
+- Server `force_keyframe` ctrl → `ForceKeyFrame()` (PLI path).
+- Dedicated LongRunning capture thread; Bitmap / scratch reuse (LOH churn cut).
+- `ALPHA_STREAM_VP8_LAG_FRAMES` (default **0**; opt-in altref).
+- Stream telemetry via `app_status`: uplink, selected bitrate, send kbps, encode ms, drops.
+- CLI: `--self-test-stream-ladder`.
+
+### Win11 blank preview + ICE gating (1.2.33 → 1.2.34)
+
+- **Root cause (FA-27):** GDI `CopyFromScreen` / CAPTUREBLT-only BitBlt failed → no RTP → SFU
+  `withTrack=false` while UI still showed Stream ready / LIVE.
+- **`ScreenCaptureService`:** multi-path BitBlt — `SRCCOPY` → CAPTUREBLT → desktop HWND →
+  `CreateDC("DISPLAY")` → CopyFromScreen fallback.
+- **`LiveStreamClient`:** `SendVideo` only after WebRTC PC `connected` + force keyframe on connect.
+- Honest diagnostics: `stream_capture_stall`, `stream_capture_error`, `stream_pc_state`,
+  `stream_ice_state`, `stream_encode_error`, `stream_send_error`.
+
+### Client Version refresh (1.2.33+)
+
+- **`ClientIdentityHeaders`** — `X-Client-Version` / `X-Client-Platform` on all DeviceAuth HTTP + WS.
+- Boot persists `app_status.client_version` so reinstall updates the web Client Version column
+  without employee re-login.
+
+### New / changed env (re-bake `config.enc`)
+
+| Key | Role |
+| --- | ---- |
+| `ALPHA_STREAM_MIN_UPLINK_KBPS` | Floor before publish (default 2500) |
+| `ALPHA_STREAM_VP8_LAG_FRAMES` | libvpx altref lag (default 0) |
+| `ALPHA_STREAM_DEBUG_SEND_DELAY_MS` | Dev ABR inject (optional) |
+| Existing `ALPHA_STREAM_*` / `ALPHA_WS_*` | Unchanged shape; must be in bake |
+
+---
+
+## 3. Web — watch resilience + tile fill
+
+### Phase 0 / 1
+
+- `useLiveStreamSocket`: stop prior tracks + `video.pause()` on cleanup / before `ontrack` overwrite.
+- Clear open-offer timer on cleanup.
+- Employee list poll: shared queryKey console ↔ theater; `staleTime` / `refetchInterval` tuned
+  (avoid multi-tab hammering).
+- Prefer ticket `watchBaseUrl` when present (future multi-API).
+
+### Field fixes
+
+- **Blank LIVE recovery:** if `ontrack` fires but `videoWidth` stays 0 for 5s → one renegotiate.
+- **Consistent tile fill:** `<video>` uses `absolute inset-0 w-full h-full object-contain` so every
+  employee fills the tile (letterbox as needed). Previously intrinsic resolution made some tiles
+  look fullscreen and others tiny/partial.
+
+---
+
+## Bug Fixes Summary
+
+| # | Issue | Root cause | Fix |
+| - | ----- | ---------- | --- |
+| 1 | FA-27 LIVE / `--- FPS` / SFU `withTrack=false` | Win11 GDI capture failed; RTP never published | Multi-path BitBlt + send after PC `connected` (1.2.34) |
+| 2 | Web Client Version stuck after reinstall | `client_version` only set on employee-login | DeviceAuth `X-Client-Version` → `TouchLastSeen` |
+| 3 | LIVE tile black after late join | Missed IDR / `track_ready` race | `NudgePublisherKeyframe` + immediate `WatchTrackReady` + web renegotiate |
+| 4 | Some tiles fullscreen, some not | Video sized to intrinsic resolution | Tile-filling `object-contain` layout |
+| 5 | Silent “slideshow” on thin uplink | Fixed bitrate, no floor | Uplink probe + ABR ladder + skip below floor |
+| 6 | Encoder heap risk on every stop | `VpxImgFree` on wrapped managed ptr | Wrap-only encoder (F1) |
+| 7 | CSWSH if CORS list empty | `CheckOrigin` fail-open | Fail-closed |
+| 8 | Watcher over-capacity | Subscribe after Upgrade | Capacity check → HTTP 429 before Upgrade |
+
+---
+
+## Verification
+
+| Check | Result |
+| ----- | ------ |
+| `dotnet build` | 0 warnings / 0 errors |
+| `go build` / `go vet` | clean |
+| `go test` stream + redis (+ related) | PASS |
+| `npx tsc --noEmit` | clean |
+| Installer | `AlphaAITracker-Setup-1.2.34.exe` built |
+| Installed proof | FA-27 + MU-115 live preview; Client Version updates without re-login |
+| F1 heap | Argument from libvpx contract; dedicated start/stop cycle still recommended |
+
+---
+
+## Deploy sequence
+
+1. **Server** — deploy/restart with Redis up; set `WEBRTC_*`, optional `INSTANCE_*`; provision
+   **TURN** on public VPS (`WEBRTC_TURN_*`). No new migration required for V3 stream work.
+2. **Web** — deploy Next app (tile fill + blank-LIVE recovery + `watchBaseUrl`).
+3. **Client** — install **1.2.34**; ensure `.env` has V3 stream keys **before** `encrypt-config.sh`
+   so `config.enc` is re-baked (Installer-Parity).
+
+---
+
+## Known gaps / follow-ups
+
+- Linux screen capture still deferred (Windows multi-path GDI only; DXGI Desktop Duplication not yet).
+- TURN remains an ops prerequisite for many remote / CGNAT employees.
+- Software VP8 (no hardware H.264); text sharpness is good but not Meet-class.
+- F1 wrap-only fix should still get a dedicated installed start/stop/restart stress pass.
+- Older clients (&lt; 1.2.33) still need one login (or upgrade) for Client Version to refresh.
+
+---
+
+---
+
 # Release Notes — v1.2.2
 
 ## Overview
