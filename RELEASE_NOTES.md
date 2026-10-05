@@ -1,3 +1,97 @@
+# Release Notes — v1.2.35
+
+## Overview
+
+v1.2.35 is a **live-stream field fix** on top of **1.2.34**: the publish uplink floor is lowered so
+employees on thin office uploads (~1 Mbps) still publish preview video instead of showing admin
+**LIVE / --- FPS** / black tiles while a peer on a fatter link works fine.
+
+Client version: **1.2.35**. Installer: `AlphaAITracker-Setup-1.2.35.exe`.
+
+**Scope of this note:** uplink-floor change only. All V3 WebRTC / TURN / Win11 capture behaviour from
+**1.2.34** is unchanged — see that note below for the full V3 baseline.
+
+---
+
+## Root cause (field)
+
+On the public VPS deploy (TURN configured), **HA-139** previewed correctly while **AH-138** stayed
+black:
+
+| Signal | HA-139 | AH-138 |
+| ------ | ------ | ------ |
+| Push / hello / version | OK (`1.2.34`) | OK (`1.2.34`) |
+| SFU | `publisher track ready` / `withTrack=true` | **no** publisher offer / `withTrack=false` |
+| `app_status.stream_skip_reason` | empty | `uplink_below_floor measured=1162 min=2500` |
+| `app_status.stream_uplink_kbps` | ~4619 | (skipped before publish) |
+
+Sidebar **“Stream ready”** only means the push WebSocket is up — it does **not** mean RTP is
+flowing. AH-138’s NetProbe measured **~1162 kbps**; **1.2.34** default
+`ALPHA_STREAM_MIN_UPLINK_KBPS=2500` refused to publish, so the SFU never got a publisher track.
+
+TURN was **not** the cause for this pair (HA-139 proved the media path).
+
+---
+
+## Fix
+
+| Change | Detail |
+| ------ | ------ |
+| Bake / default floor | `ALPHA_STREAM_MIN_UPLINK_KBPS` **2500 → 300** (`.env`, `.env.example`, `AppConfig` default) |
+| Clamp range | Allow **100–15000** (was 500–15000) so a 300 bake is not forced up to 500 |
+| Encode path | Unchanged — ABR ladder still picks ~**500 kbps** encode on ~1 Mbps uplinks (`NetProbeService.SelectBitrateKbps`) |
+| Skip behaviour | Still skips when measured uplink &lt; floor; reason still written to `app_status.stream_skip_reason` |
+
+No server or web code change required for this release. Ops must still keep **TURN** configured on
+public VPS (`WEBRTC_TURN_*`) for CGNAT / hard NAT employees.
+
+---
+
+## Bug Fixes Summary
+
+| # | Issue | Root cause | Fix |
+| - | ----- | ---------- | --- |
+| 1 | AH-138 LIVE / `--- FPS` / black; HA-139 OK on same VPS | `ALPHA_STREAM_MIN_UPLINK_KBPS=2500` skipped publish at measured ~1162 kbps | Floor **300**; re-bake `config.enc` + install **1.2.35** |
+
+---
+
+## Verification
+
+| Check | Result |
+| ----- | ------ |
+| Field evidence | `app_status` + PM2 SFU logs (AH-138 skip vs HA-139 track ready) |
+| Config | `.env` / `.env.example` / `AppConfig` default = **300** |
+| Installer | Rebuild `AlphaAITracker-Setup-1.2.35.exe` with re-baked `config.enc` |
+| Expected after deploy | AH-138: empty `stream_skip_reason`, `publisher track ready`, tile FPS &gt; 0 |
+
+---
+
+## Deploy sequence
+
+1. **Server / Web** — no change required for this floor tweak (keep TURN if already provisioned).
+2. **Client** — set `ALPHA_STREAM_MIN_UPLINK_KBPS=300` in `.env` **before** `encrypt-config.sh`, build
+   installer **1.2.35**, install on affected machines (at least AH-138), restart tracker.
+3. Confirm:  
+   `SELECT key, value FROM app_status WHERE employee_id='AH-138' AND key LIKE 'stream_%';`  
+   expect empty `stream_skip_reason` and non-zero `stream_send_kbps` while watched.
+
+**Installer-Parity:** editing `.env` on the VPS alone does **not** update already-installed PCs —
+they keep the old baked **2500** until a new installer / `config.enc` lands.
+
+---
+
+## Known gaps / follow-ups
+
+- Very thin links (&lt; 300 kbps measured) still skip publish by design.
+- Soft stream at ~500 kbps encode is usable preview, not Meet-class sharpness.
+- Linux screen capture still deferred.
+- Raise `ALPHA_STREAM_MIN_UPLINK_KBPS` again per company policy if you prefer hard skip over a
+  soft stream on slow uplinks.
+
+---
+
+---
+
 # Release Notes — v1.2.34
 
 ## Overview

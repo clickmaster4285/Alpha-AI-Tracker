@@ -748,7 +748,7 @@ Watchers (IObservableEventSource)          EventCoordinator                 Jour
 | `ALPHA_STREAM_FPS` | 12 | capture / encode cadence (1–30); may drop under ABR degrade |
 | `ALPHA_STREAM_MAX_WIDTH` | 1920 | scale cap (hard-clamped 320–1920); may drop under ABR |
 | `ALPHA_STREAM_MAX_BITRATE_KBPS` | 12000 | VP8 target kbps via `ScreenVp8Encoder` (cap 15000); ladder ceiling |
-| `ALPHA_STREAM_MIN_UPLINK_KBPS` | 2500 | skip publish if NetProbe uplink is below this (500–15000) |
+| `ALPHA_STREAM_MIN_UPLINK_KBPS` | 300 | skip publish if NetProbe uplink is below this (100–15000); was 2500 in 1.2.34 |
 | `ALPHA_STREAM_KEYFRAME_INTERVAL_SEC` | 1 | seconds between forced keyframes (≥1; all-I-frame starves bitrate) |
 | `ALPHA_WS_ENABLED` | false | presence WebSocket (`GET /api/v1/ws`) |
 | `ALPHA_WS_PING_SEC` | 30 | application ping interval |

@@ -103,7 +103,7 @@ public class AppConfig
     /// Minimum measured uplink (kbps) required before publishing. Below this
     /// the client skips publish and logs — avoids silent slideshow on thin links.
     /// </summary>
-    public int StreamMinUplinkKbps { get; init; } = 2500;
+    public int StreamMinUplinkKbps { get; init; } = 300;
     /// <summary>
     /// libvpx GLagInFrames (altref). Default 0 = lowest latency for live preview;
     /// set ALPHA_STREAM_VP8_LAG_FRAMES=1 after A/B on a real stream if compression wins.
@@ -182,7 +182,7 @@ public class AppConfig
             StreamMaxWidth = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_MAX_WIDTH"), out var streamW) ? streamW : 1920, 320, 1920),
             StreamMaxBitrateKbps = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_MAX_BITRATE_KBPS"), out var streamBr) ? streamBr : 12000, 500, 15000),
             StreamKeyframeIntervalSec = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_KEYFRAME_INTERVAL_SEC"), out var streamKf) ? streamKf : 1, 1, 10),
-            StreamMinUplinkKbps = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_MIN_UPLINK_KBPS"), out var streamMinUp) ? streamMinUp : 2500, 500, 15000),
+            StreamMinUplinkKbps = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_MIN_UPLINK_KBPS"), out var streamMinUp) ? streamMinUp : 300, 100, 15000),
             StreamVp8LagFrames = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_VP8_LAG_FRAMES"), out var streamLag) ? streamLag : 0, 0, 5),
             StreamDebugSendDelayMs = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_DEBUG_SEND_DELAY_MS"), out var streamDbgDelay) ? streamDbgDelay : 0, 0, 500),
             WsEnabled = IsEnvTruthy(GetEnv("ALPHA_WS_ENABLED")),
