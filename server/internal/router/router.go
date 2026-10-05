@@ -112,6 +112,7 @@ func Setup(
 	// Live stream — client push socket (DeviceAuth). Web watch/employees live under JWTAuth.
 	if streamHandler != nil {
 		syncGroup.GET("/live-stream/push", streamHandler.Push)
+		syncGroup.POST("/live-stream/uplink-probe", streamHandler.UplinkProbe)
 	}
 
 	// Control / presence WebSocket (DeviceAuth) — keep-alive channel, not frame streaming.

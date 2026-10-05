@@ -1,0 +1,61 @@
+2026/10/03 13:25:25 main.go:28: [server] Alpha AI Tracker — Starting...
+2026/10/03 13:25:25 main.go:37: [server] configured for 192.168.88.35:8000
+2026/10/03 13:25:25 postgres.go:40: [database] connected to PostgreSQL at localhost:5432/alpha_ai_tracker
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 001_init.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 002_employees.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 004_employee_department_id.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 005_soft_delete.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 006_new_schema.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 007_shell_commands.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 008_app_items.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 009_installed_packages.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 010_session_process_ids.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 011_app_items_url_domain.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 012_installed_applications_identity.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 013_session_identity.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 014_app_items_journey.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 015_employee_app_links.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 016_employee_package_links.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 017_status_hardware_permission_storage.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 018_drop_employee_role.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 019_drop_employee_department.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 020_app_session_focus.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 021_employee_devices.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 022_sequence_retention_indexes.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 023_monitoring_config.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 024_catalog_merge.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 025_rbac_roles_modules.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 026_refresh_tokens.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 027_shifts.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 028_time_attendance_phase2.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 029_location_samples.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 030_geofence_zones.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 031_app_sessions_status.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 032_app_sessions_usage_index.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 033_synced_at_backfill.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 034_app_sessions_closed_status.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 035_fix_stranded_sessions.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 036_terms_consent.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 037_terms_content.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 038_terms_content_add_columns.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 039_terms_content_unique_feature_fix.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 040_fix_app_items_url_index.sql
+2026/10/03 13:25:26 postgres.go:82: [database] migration already applied: 041_fix_app_items_context_index.sql
+2026/10/03 13:25:26 main.go:65: [server] connected to Redis at localhost:6379
+2026/10/03 13:25:26 terms_content_seeder.go:89: [seeder] featured term already exists: feature_id=app_usage — skipping
+2026/10/03 13:25:26 terms_content_seeder.go:89: [seeder] featured term already exists: feature_id=browser_journey — skipping
+2026/10/03 13:25:26 terms_content_seeder.go:89: [seeder] featured term already exists: feature_id=file_journey — skipping
+2026/10/03 13:25:26 terms_content_seeder.go:89: [seeder] featured term already exists: feature_id=live_view — skipping
+2026/10/03 13:25:26 main.go:133: [server] instance id=DESKTOP-G2KBECV-25164-e0e62c publicURL=""
+2026/10/03 13:25:26 main.go:158: [server] live-stream cluster: Redis presence + tickets + publisher registry enabled
+2026/10/03 13:25:26 main.go:165: [server] presence ws enabled (maxConnections=10000)
+2026/10/03 13:25:26 main.go:171: [server] WARNING: WEBRTC_TURN_URLS is empty — remote clients behind CGNAT/firewall will fail ICE. Provision coturn (or equivalent) on/near this VPS domain before calling live-stream production. TURN doubles media bandwidth on the relayed path.
+2026/10/03 13:25:26 main.go:180: [server] live-stream webrtc sfu enabled (maxStreams=25 bitrate=12000kbps)
+2026/10/03 13:25:26 rbac_service.go:160: [rbac] catalog seeded (10 modules) — 'company_admin' has full access
+2026/10/03 13:25:26 auth_service.go:120: [auth] company admin exists, skipping initialization
+2026/10/03 13:25:26 main.go:215: [server] staleness sweep started (stale window: 7 days)
+2026/10/03 13:25:26 retention_sweep.go:35: [retention] Starting activity retention sweep worker (retention_days=168, interval=1h0m0s)
+2026/10/03 13:25:26 session_lifecycle_sweep.go:93: [session-lifecycle] starting (offline_after=10m0s, stale_after=1h0m0s, close_after=24h0m0s, interval=1m0s)
+2026/10/03 13:25:26 main.go:236: [server] listening on 192.168.88.35:8000
+2026/10/03 13:25:27 stream_handler.go:507: [live-stream] watch connected employee=MU-90 watcher=1 user=d9837b3e-37b9-40fc-97ee-481c2214bca8 (webrtc)
+2026/10/03 13:25:40 sfu.go:503: [webrtc-sfu] subscriber answer employee=MU-90 watcher=1 withTrack=false

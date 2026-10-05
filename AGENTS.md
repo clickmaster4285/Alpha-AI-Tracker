@@ -1,7 +1,54 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-09-29
+> **Last audited:** 2026-10-03
 > **Changelog:**
+>
+> - 2026-10-03: **Live stream post-Phase-3 — Win11 blank preview (FA-27) + stale Client Version.**
+>   Root cause of FA-27 `LIVE` + `--- FPS` / SFU `withTrack=false`: Win11 GDI capture
+>   (`CopyFromScreen` / CAPTUREBLT-only BitBlt) failed on that machine so no RTP reached the
+>   SFU; signaling still looked healthy. Fix (client **1.2.34**): multi-path BitBlt
+>   (`SRCCOPY` → CAPTUREBLT → desktop HWND → `CreateDC("DISPLAY")` → CopyFromScreen fallback);
+>   `SendVideo` only after WebRTC `connected` + force keyframe; honest
+>   `stream_capture_stall`/`stream_pc_state`/`stream_ice_state`/`stream_capture_error` telemetry.
+>   Stale web Client Version: `employee_devices.client_version` only refreshed on login —
+>   reinstall kept old version until re-login. Fix: DeviceAuth `X-Client-Version` /
+>   `X-Client-Platform` → `TouchLastSeen` updates version; client `ClientIdentityHeaders` on
+>   all DeviceAuth HTTP/WS; boot `app_status.client_version`. Verified: FA-27 + MU-115 live
+>   preview; FA-27 `stream_ice_state=connected` / `stream_send_kbps` flowing; `dotnet build` 0/0;
+>   installer `AlphaAITracker-Setup-1.2.34.exe`.
+>
+> - 2026-10-03: **Live stream Phase 3 — F14c socket hardening + presence Online contract.**
+>   DeviceAuth push + presence WS: 4h max lifetime + every-5m `DeviceRepo.IsActive` re-check
+>   (revoked/expired/missing device closes the socket; transient DB errors keep the socket).
+>   Watch sockets keep the existing 4h lifetime (ticket-auth). `employeeLiveOnline` documents
+>   presence-on → WS authoritative, presence-off → heartbeat window; unit-tested. Verified:
+>   `go build`/`go vet`; `go test` handlers+stream+redis+scale ok.
+>
+> - 2026-10-03: **Live stream Phase 2 — Redis cluster state (single-server deploy).**
+>   Shared Redis presence (`presence:emp:*` + `alpha:presence` pub/sub), watch tickets
+>   (`stream:ticket:*`), publisher registry (`stream:pub:{emp}` → instanceId). Env
+>   `INSTANCE_ID` / `INSTANCE_PUBLIC_URL` (optional; auto instance id). Watch-ticket may
+>   return `watchBaseUrl` / Watch 307 if a second API appears later. Sticky LB example
+>   removed — not needed for the one-server deploy shape. Keep Pion SFU. Verified:
+>   `go build`/`go vet`/`go test` scale+stream ok; `npx tsc --noEmit` clean.
+>
+> - 2026-10-01: **Live stream V3.0 — safety + slow-network resilience (VPS/public internet).**
+>   Implements [plan.md](./plan.md) Phase 0 + Phase 1 against the V2 WebRTC SFU. Deploy assumes
+>   API on a public VPS domain (not LAN).
+>   - **Phase 0:** `ScreenVp8Encoder` wrap-only (no `VpxImgFree` on managed ptr); ICE `iceReady`
+>     always completed + session CT; web `track.stop()`/`video.pause()` + clear open timer;
+>     `TouchLastSeen` uses Background+timeout; `CheckOrigin` fail-closed; Subscribe capacity
+>     before Upgrade (HTTP 429); `sendPLI` done channel; idle capture poll skipped when stream off.
+>   - **Phase 1:** `NetProbeService` + `POST /live-stream/uplink-probe`; `ALPHA_STREAM_MIN_UPLINK_KBPS`
+>     / bitrate ladder / send-backpressure degrade (bitrate→resolution→fps); PLI→`force_keyframe`
+>     ctrl; stream telemetry via `app_status`; token-bucket `WEBRTC_MAX_BITRATE_KBPS` on
+>     `forwardRTP`; TURN empty startup WARNING; ticket cap + offer semaphore; 4h socket lifetime;
+>     watch UserID audit log; employee poll `staleTime`/`refetchInterval` tuned. **Ops:** provision
+>     TURN (`WEBRTC_TURN_*`) on the VPS; re-bake `config.enc` after `.env` (new stream keys).
+>   - Phase 2 Redis presence/tickets/publisher registry landed; sticky LB example removed
+>     (single-server deploy — no second API planned).
+>   - Verified: `dotnet build` 0/0, `go build`/`go vet` clean, `go test ./internal/stream/...` ok,
+>     `npx tsc --noEmit` clean. F1 heap fix needs installed-build start/stop cycle (not provable by build).
 >
 > - 2026-09-29: **Web live-stream — per-tile FPS + full-bleed theater popout.**
 >   - Shared components under `web/src/components/live-stream/` (`LiveStreamWatchTile`,
@@ -973,8 +1020,9 @@ flowchart LR
 | Hardware devices sync (client → server)    | REST POST`/api/v1/hardware-devices/sync`    | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
 | Permission status sync (client → server)   | REST POST`/api/v1/permission-status/sync`   | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
 | Storage devices sync (client → server)     | REST POST`/api/v1/storage-devices/sync`     | JWT token in request body             | JSON`{employeeId, token, entries: [...]}`              |
-| Live stream push (client → SFU)            | WS `GET /api/v1/live-stream/push` + WebRTC VP8 | `Authorization: Device <token>`    | Signaling JSON (`hello`/`offer`/`ice`/`start`/`stop`/`select_monitor`); media via WebRTC |
-| Presence keep-alive (client → server)      | WS `GET /api/v1/ws`                         | `Authorization: Device <token>`       | Ping/pong; drives Online/`wsConnected` on `/live-stream` |
+| Live stream push (client → SFU)            | WS `GET /api/v1/live-stream/push` + WebRTC VP8 | `Authorization: Device <token>`    | Signaling JSON (`hello`/`offer`/`ice`/`start`/`stop`/`select_monitor`/`force_keyframe`); media via WebRTC |
+| Live stream uplink probe (client → server) | REST POST `/api/v1/live-stream/uplink-probe` | `Authorization: Device <token>`     | Timed body (discarded); client measures RTT → bitrate ladder |
+| Presence keep-alive (client → server)      | WS `GET /api/v1/ws`                         | `Authorization: Device <token>`       | Ping/pong; Online/`wsConnected` (Redis-mirrored when available) |
 
 ### Server ↔ Web
 
@@ -982,7 +1030,7 @@ flowchart LR
 | ----------------- | -------------------------------------------- | ----------------------------------- | ---------------------------------------- |
 | Web admin login   | REST POST`/api/v1/auth/login`              | email + password → httpOnly cookie | JSON`{email, password}` → sets cookie |
 | All web API calls | REST via Next.js rewrites (`/api/*` proxy) | httpOnly cookie (auto-sent)         | JSON request/response                    |
-| Live stream watch (web → SFU) | WS `GET /api/v1/live-stream/watch` + WebRTC | Short-lived watch ticket (JWT `watch-ticket`) | Signaling + remote MediaStream on `<video>` |
+| Live stream watch (web → SFU) | WS `GET /api/v1/live-stream/watch` + WebRTC | Short-lived watch ticket (`watch-ticket`; may include `watchBaseUrl`) | Signaling + remote MediaStream on `<video>` |
 
 ### Contract Documentation
 
@@ -1021,7 +1069,7 @@ flowchart LR
 
 **What's missing:**
 
-- **No tests** (0 test files)
+- **Sparse tests** — live-stream packages have unit tests (`redis`/`scale`/`stream`); most handlers still untested
 - **No rate limiting** on any endpoint (including login)
 - **No structured logging** — uses `log.Printf` only
 - **No Redis fallback** — if Redis is down, employee secret generation/validation fails (no DB fallback)
@@ -1072,7 +1120,7 @@ flowchart LR
 - **Single-instance activation** — a second user launch signals the running instance (named pipe `alpha-ai-tracker-activation`) to raise its window; `--background`/`--minimized` relaunches exit quietly
 - **Six-page GUI** (2026-08-10) — `MainWindow` is a router over four exclusive states; pages live in `Views/Pages/`: Splash (boot checklist), Login, PermissionSetup (stepper), and behind the nav rail Dashboard (identity + status tiles + pipeline health + attached devices), System Specs (machine/compute/network/storage/peripherals) and Installed Applications (searchable apps + packages inventory, virtualized). One VM per page, all Transient in DI. Details: [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md)
 - **Runtime branding from a single source** — `Core/AppInfo.cs` resolves the product name, tagline, initials, publisher, copyright and version from the embedded `APP_IDENTIFIERS` + `VERSION`; no XAML or C# literal names anywhere in the UI. Editing either file re-brands both the app and the installers (§6 → *Branding-Single-Source Rule*)
-- **Live stream WebRTC publisher (2026-09-29, Windows)** — `LiveStreamClient` + `ScreenCaptureService` + `ScreenVp8Encoder` (fixes SIPSorcery bitrate wipe); gated on `ALPHA_STREAM_*`; media only while an admin watches. **`WsClient`** presence socket (`ALPHA_WS_*`) independent of stream
+- **Live stream WebRTC publisher (V3, Windows)** — `LiveStreamClient` + `NetProbeService` + multi-path GDI `ScreenCaptureService` + `ScreenVp8Encoder`; ABR / min uplink / `force_keyframe`; send gated on PC `connected`; `ClientIdentityHeaders` for Client Version; `ALPHA_STREAM_*` / `ALPHA_WS_*`. Installer **1.2.34**
 
 **What's missing:**
 
@@ -1100,7 +1148,7 @@ flowchart LR
 - **Device Specs module** (2026-08-18) — four real-API pages over the aggregate `GET /employees/:id/detail`: Hardware Overview, Installed Software (Applications/Packages tabs + search), Peripherals, Permissions. This replaced the old `/users/[id]` single-page detail view (deleted)
 - Shared building blocks: `EmployeePage` shell (header + picker + loading/error/no-selection states, optional `fetchDetail`), `hooks/use-employee-detail.ts`, `lib/format.ts`, `EmployeeSelector`, `EmptyState`/`InventoryTable`/`FocusTime`/`DeviceClassIcon`
 - **Web Infinite-Scroll Rule** + **URL-Synced Filters Rule** — see §6. `useUrlQueryState` must never call `router.push`/`replace` inside a `setState` updater (updates Next `LinkComponent` while another component is rendering).
-- **Live stream (WebRTC SFU, 2026-09-29)** — `/live-stream` multi-tile preview (`?ids=`, max 4); per-tile **FPS** badge; **Open theater** → `/live-stream/theater` (full-bleed popout, no app chrome); shared `components/live-stream/*`; `useLiveStreamSocket` + `<video>`; consent `live_view`; Windows publisher only
+- **Live stream (WebRTC SFU, V3)** — `/live-stream` multi-tile preview (`?ids=`, max 4); per-tile **FPS**; **Open theater** → `/live-stream/theater`; shared `components/live-stream/*`; `useLiveStreamSocket` (+ optional ticket `watchBaseUrl`); consent `live_view`; Windows publisher only; server Redis presence/tickets (single API)
 - Departments page — real API calls (CRUD)
 - Logs/Comprehensive page — real API calls (now using new app_sessions API)
 - Dashboard — fully live-API stat tiles (employees total + tracked/untracked split, departments count, app sessions ·24h, web pages ·24h) since the 2026-08-25 mock purge; analytics cards link the journey modules until chart endpoints exist
@@ -1114,7 +1162,7 @@ flowchart LR
 - **No accessibility testing** — many interactive elements lack aria attributes
 - **No unit tests** — 0 test files
 - **GitHub release download** fetches from `clickmaster4285/Alpha-AI-Tracker`, not the org repo
-- **Live stream Linux capture** — still deferred (Windows GDI only)
+- **Live stream Linux capture** — still deferred (Windows GDI multi-path BitBlt; Win11 24H2 hardened in 1.2.34)
 
 ---
 
@@ -1297,7 +1345,7 @@ call graph. .NET 10's `PlatformCompatibilityAnalyzer` can enter exponential glob
 
 | Gap                                 | Severity  | Details                                                                                                                                                                          |
 | ----------------------------------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **No tests anywhere**         | 🔴 High   | 0 test files across all 3 projects. Any refactor is blind.                                                                                                                       |
+| **Sparse tests**              | 🔴 High   | Live-stream Go packages have tests; client/web and most server handlers still untested.                                                                                           |
 | **No observability**          | 🟠 Medium | No structured logging, metrics, tracing. Debugging production issues requires SSH + log scraping.                                                                                |
 | **Client-side RBAC grants**    | 🟠 Medium | RBAC grants (roles/modules/submodules, migration 025) are enforced only in the web frontend (sidebar + RouteGuard). A malicious user can bypass them — API middleware still has no role checks.                                                                   |
 | **No rate limiting**          | 🟠 Medium | Login endpoint and all sync endpoints have no rate limiting. Brute-force / DoS is trivial.                                                                                       |

@@ -139,6 +139,7 @@ public sealed class ScheduleCacheService : BackgroundService
             request.Headers.Authorization =
                 new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", employee.Token);
         }
+        ClientIdentityHeaders.Apply(request);
 
         using var response = await _httpClient.SendAsync(request, ct);
         if (response.StatusCode == System.Net.HttpStatusCode.NotFound)

@@ -68,13 +68,18 @@ export function LiveStreamWatchTile({
         </div>
       </div>
 
-      <div className="flex-1 relative flex items-center justify-center">
+      <div className="flex-1 relative min-h-0 bg-black">
+        {/*
+          Always fill the tile (inset-0 + w/h full). object-contain keeps the whole
+          desktop visible with letterboxing — without this, intrinsic video size
+          made some employees look "fullscreen" and others tiny/partial.
+        */}
         <video
           ref={videoRef}
           autoPlay
           playsInline
           muted
-          className={`max-w-full max-h-full object-contain ${
+          className={`absolute inset-0 h-full w-full object-contain ${
             socket.status === 'live' ? 'block' : 'hidden'
           }`}
         />

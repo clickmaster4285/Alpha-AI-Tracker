@@ -52,10 +52,10 @@ function LiveStreamInner() {
   const { data, isLoading, isError } = useQuery({
     queryKey: ['live-stream-employees'],
     queryFn: () => liveStreamApi.employees(),
-    // Presence WS flips instantly server-side — poll fast so Online/Offline
-    // and "WS connected" update within ~1s of client start/stop.
-    refetchInterval: 1_000,
-    staleTime: 0,
+    // Shared queryKey with theater — same-tab components dedupe. staleTime avoids
+    // back-to-back fetches when both mounts share the cache window.
+    refetchInterval: 2_000,
+    staleTime: 1_000,
   });
 
   const employees = useMemo(() => {

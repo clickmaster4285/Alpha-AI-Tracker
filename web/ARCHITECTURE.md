@@ -1,7 +1,17 @@
 # Web Architecture — Alpha AI Tracker Dashboard
 
-> **Last audited:** 2026-09-29 (live stream theater + per-tile FPS)
+> **Last audited:** 2026-10-03 (live stream V3 + Client Version via DeviceAuth)
 > **Changelog:**
+> - 2026-10-03: **Client Version on employees/live-stream refreshes without re-login (server+client).**
+>   Web still reads `employee_devices.client_version` as before; server `TouchLastSeen` now
+>   updates version/platform from DeviceAuth headers so a reinstall of 1.2.33+ shows immediately.
+>   No web code change. Blank FA-27 preview was client capture/WebRTC (fixed in installer 1.2.34).
+> - 2026-10-03: **Live stream V3 — ticket `watchBaseUrl` + tile teardown hygiene.**
+>   `useLiveStreamSocket` prefers `watchBaseUrl` from `GET /live-stream/watch-ticket` when set
+>   (future multi-API); otherwise `NEXT_PUBLIC_WS_URL`. Phase 0: clear open timer; pause video /
+>   stop local tracks on cleanup (avoid orphan MediaStream). Employee list poll:
+>   `refetchInterval` 2s + `staleTime` 1s (console + theater share queryKey). Verified:
+>   `npx tsc --noEmit` clean.
 > - 2026-09-29: **Live stream theater UX — collapsible sidebar, cols-per-row, scrollable wall.**
 >   Theater navbar: sidebar toggle, **1–4 screens/row** (`?cols=`), online-only filter, clear,
 >   fullscreen, link to console. Sidebar collapses to a thin rail (`?sidebar=0`). Preview scrolls
@@ -333,8 +343,8 @@ web/
 
 | Surface | Mechanism |
 |---|---|
-| **`/live-stream`** | WebRTC SFU via `useLiveStreamSocket` (watch ticket WS + RTCPeerConnection → `<video>`). Requires `NEXT_PUBLIC_WS_URL` (Next rewrites do not proxy WS). Multi-tile `?ids=` (max 4). Per-tile FPS. **Open theater** → `/live-stream/theater`. |
-| **`/live-stream/theater`** | Full-bleed watch wall (`(live-popout)`). Collapsible sidebar; navbar cols 1–4; scrollable aspect tiles (max 16); URL `?ids=&cols=&sidebar=&online=`. |
+| **`/live-stream`** | WebRTC SFU via `useLiveStreamSocket` (watch ticket WS + RTCPeerConnection → `<video>`). WS base: ticket `watchBaseUrl` if present, else `NEXT_PUBLIC_WS_URL` (Next rewrites do not proxy WS). Multi-tile `?ids=` (max 4). Per-tile FPS. **Open theater** → `/live-stream/theater`. |
+| **`/live-stream/theater`** | Full-bleed watch wall (`(live-popout)`). Collapsible sidebar; navbar cols 1–4; scrollable aspect tiles (max 16); URL `?ids=&cols=&sidebar=&online=`. Same employee poll as console. |
 | **Everything else** | No polling / SSE. Pages show data at fetch time (TanStack Query). |
 
 ### URL-Synced Filters (mandatory)
@@ -407,7 +417,7 @@ in the `updateMutation`).
 | `/configuration/websites` | Websites classification | Server (`GET/POST/PATCH /monitoring/websites`) | ✅ |
 | `/configuration/categories` | Categories & Types CRUD | Server (`/monitoring/types`, `/monitoring/categories`) | ✅ |
 | `/screenshots` | Screenshots | Honest empty state (no endpoint) | ❌ |
-| `/live-stream` | Live stream | WebRTC SFU VP8 preview (Windows; consent `live_view`; FPS badge; multi-tile `?ids=`; Open theater) | ✅ |
+| `/live-stream` | Live stream | WebRTC SFU VP8 preview (Windows; consent `live_view`; FPS; multi-tile `?ids=`; optional ticket `watchBaseUrl`; Open theater) | ✅ |
 | `/live-stream/theater` | Live stream theater | Full-bleed popout (no AppSidebar); employee sidebar + same tiles; `(live-popout)` layout | ✅ |
 | `/kpis` | KPIs & KRAs | Hardcoded demo data (scaffolding) | ❌ |
 | `/shifts` | Shift management | Server (`/shifts` CRUD; IANA timezone field; new-shift defaults to browser zone) | ✅ |

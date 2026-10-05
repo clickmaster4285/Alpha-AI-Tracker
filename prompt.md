@@ -91,11 +91,19 @@ Follow the full definitions in `AGENTS.md`. In particular:
   date modals and search inputs have no Clear button — the only way to clear is select a default
   preset or empty the input. `useSearchParams` requires a `<Suspense>` boundary. **Never call
   `router.push`/`replace` inside a React `setState` updater** (updates Next `LinkComponent` mid-render).
-- **Live stream (WebRTC SFU):** preview-only VP8 via Pion SFU + SIPSorcery publisher; presence is a
+- **Live stream (WebRTC SFU, V3):** preview-only VP8 via Pion SFU + SIPSorcery publisher; presence is a
   separate DeviceAuth WS (`/api/v1/ws`). Client encode must use `ScreenVp8Encoder` (stock SIPSorcery
-  wiped `TargetKbps`). Re-bake `config.enc` for any `ALPHA_STREAM_*` / `ALPHA_WS_*` change. Web:
-  per-tile FPS; `/live-stream/theater` full-bleed popout with collapsible sidebar, cols-per-row
-  (`?cols=1|2|3|4`), scrollable wall (max 16), toolbar settings (online filter / clear / fullscreen).
+  wiped `TargetKbps`). Phase 1: uplink probe / bitrate ladder / ABR degrade / PLI→`force_keyframe` /
+  `NetProbeService` + `POST /live-stream/uplink-probe`. Phase 2 (single-server): Redis mirrors
+  presence, watch tickets, and publisher→instance registry (`INSTANCE_ID` optional); no sticky LB.
+  Phase 3: 4h socket life + DeviceAuth `IsActive` re-check; presence Online contract tested.
+  Post-Phase-3 field fixes (client **1.2.34**): Win11 multi-path BitBlt capture; `SendVideo` only
+  after PC `connected`; DeviceAuth `X-Client-Version`/`X-Client-Platform` → `TouchLastSeen` so
+  web Client Version updates without re-login. Re-bake `config.enc` for any `ALPHA_STREAM_*` /
+  `ALPHA_WS_*` change. Web: per-tile FPS; `/live-stream/theater` full-bleed popout; optional
+  ticket `watchBaseUrl` for future multi-API.
+- After live-stream/server/web/client contract changes, update the matching `*/ARCHITECTURE.md`
+  changelogs and `AGENTS.md` (see plan handoff / Definition of done).
 - **Cross-platform analyzer safety:** guard platform method bodies with
   `OperatingSystem.IsWindows/Linux/MacOS()`. Do not propagate `[SupportedOSPlatform]` through
   cross-platform partial/background-service graphs, and never globally disable analyzers.

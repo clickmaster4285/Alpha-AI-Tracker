@@ -1,8 +1,0 @@
-now i want to add one more intense called "ws" under the client
-
-ws instense === websocket 
-the ws is only for to connect the websocket with the server for long time
-
-when the client run first check internet available and when available then it push the ws intense to up and the ws connect with server through websocket,
-
-currently make the plan and save on plan.md file according to @prompt.md once i review plan and confirm then start changes 

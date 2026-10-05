@@ -117,7 +117,19 @@ export function useLiveStreamSocket(
 
     let cancelled = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let openOfferTimer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
+
+    const stopVideoStream = (stream: MediaStream | null | undefined) => {
+      if (!stream) return;
+      for (const track of stream.getTracks()) {
+        try {
+          track.stop();
+        } catch {
+          /* ignored */
+        }
+      }
+    };
 
     const cleanupPc = () => {
       const pc = pcRef.current;
@@ -130,7 +142,15 @@ export function useLiveStreamSocket(
         }
       }
       const video = videoHolder.current.current;
-      if (video) video.srcObject = null;
+      if (video) {
+        try {
+          video.pause();
+        } catch {
+          /* ignored */
+        }
+        stopVideoStream(video.srcObject as MediaStream | null);
+        video.srcObject = null;
+      }
     };
 
     const attachPcHandlers = (pc: RTCPeerConnection, ws: WebSocket) => {
@@ -140,11 +160,28 @@ export function useLiveStreamSocket(
         const stream = ev.streams[0] ?? new MediaStream([ev.track]);
         const video = videoHolder.current.current;
         if (video) {
+          // Detach previous stream without track.stop() — stopping remote tracks
+          // mid-renegotiation races with track_ready recreate and can blank video.
+          try {
+            video.pause();
+          } catch {
+            /* ignored */
+          }
           video.srcObject = stream;
           void video.play().catch(() => undefined);
         }
         liveRef.current = true;
         setState((s) => ({ ...s, status: 'live', streaming: true }));
+        // LIVE + black / — FPS: track attached but no decoded frames (missed IDR).
+        // One recovery renegotiate after 5s if videoWidth stays 0.
+        window.setTimeout(() => {
+          if (cancelled || makingOffer.current) return;
+          const v = videoHolder.current.current;
+          if (!liveRef.current || !v || v.videoWidth > 0) return;
+          if (ws.readyState !== WebSocket.OPEN) return;
+          console.warn('[live-stream] live but no frames — renegotiating', employeeId);
+          void createOffer(ws, true);
+        }, 5000);
       };
 
       pc.onicecandidate = (ev) => {
@@ -201,10 +238,18 @@ export function useLiveStreamSocket(
       setState((s) => ({ ...s, status: 'connecting', error: null, streaming: false }));
 
       let ticket: string;
+      let watchBase = resolveWsBase();
       try {
         const res = await liveStreamApi.watchTicket(employeeId);
         ticket = res.ticket;
         iceServersRef.current = toRtcIceServers(res.iceServers);
+        if (res.watchBaseUrl) {
+          // http(s)://host → ws(s)://host for the watch WebSocket.
+          watchBase = res.watchBaseUrl
+            .replace(/^http:\/\//i, 'ws://')
+            .replace(/^https:\/\//i, 'wss://')
+            .replace(/\/$/, '');
+        }
       } catch (err) {
         if (cancelled) return;
         const msg = err instanceof Error ? err.message : 'ticket_failed';
@@ -230,7 +275,7 @@ export function useLiveStreamSocket(
       if (cancelled) return;
 
       const url =
-        `${resolveWsBase()}/api/v1/live-stream/watch` +
+        `${watchBase}/api/v1/live-stream/watch` +
         `?employeeId=${encodeURIComponent(employeeId)}` +
         `&ticket=${encodeURIComponent(ticket)}`;
       const ws = new WebSocket(url);
@@ -242,7 +287,9 @@ export function useLiveStreamSocket(
           setState((s) => ({ ...s, status: 'connecting', error: null }));
           // Small delay so the server can deliver `start` to the employee
           // before we offer — SFU then waits for the track and answers with media.
-          window.setTimeout(() => {
+          if (openOfferTimer) clearTimeout(openOfferTimer);
+          openOfferTimer = setTimeout(() => {
+            openOfferTimer = null;
             void createOffer(ws, false);
           }, 300);
         }
@@ -372,6 +419,7 @@ export function useLiveStreamSocket(
     return () => {
       cancelled = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (openOfferTimer) clearTimeout(openOfferTimer);
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;

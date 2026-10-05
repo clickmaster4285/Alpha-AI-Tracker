@@ -53,6 +53,14 @@ public sealed class ScreenCaptureService : BackgroundService
     private volatile bool _streamActive;
     private bool _loggedUnavailable;
     private MonitorEnumProc? _enumProc;
+    /// <summary>Runtime max width override from adaptive degradation (0 = use config).</summary>
+    private volatile int _maxWidthOverride;
+    private Bitmap? _srcBitmap;
+    private Bitmap? _scaledBitmap;
+    private byte[]? _bgraScratch;
+    private long _framesProduced;
+    private int _consecutiveCaptureFails;
+    private string? _lastCaptureError;
 
     public ScreenCaptureService(AppConfig config, ILogger<ScreenCaptureService> logger)
     {
@@ -64,6 +72,12 @@ public sealed class ScreenCaptureService : BackgroundService
     }
 
     public bool StreamAvailable { get; private set; }
+
+    /// <summary>Total frames written to the channel since process start (diagnostics).</summary>
+    public long FramesProduced => Interlocked.Read(ref _framesProduced);
+
+    /// <summary>Last capture failure message (empty when healthy).</summary>
+    public string LastCaptureError => _lastCaptureError ?? "";
 
     public ChannelReader<ScreenFrame> Frames => _frames.Reader;
 
@@ -85,8 +99,27 @@ public sealed class ScreenCaptureService : BackgroundService
     {
         if (active && OperatingSystem.IsWindows())
             RefreshMonitors();
+        if (!active)
+            _maxWidthOverride = 0;
         _streamActive = active;
     }
+
+    /// <summary>
+    /// Adaptive resolution lever (Phase 1). Pass 0 to clear and use ALPHA_STREAM_MAX_WIDTH.
+    /// Values are clamped to [320, config max].
+    /// </summary>
+    public void SetMaxWidthOverride(int maxWidth)
+    {
+        if (maxWidth <= 0)
+        {
+            _maxWidthOverride = 0;
+            return;
+        }
+        _maxWidthOverride = Math.Clamp(maxWidth, 320, Math.Max(320, _config.StreamMaxWidth));
+    }
+
+    public int EffectiveMaxWidth =>
+        _maxWidthOverride > 0 ? _maxWidthOverride : Math.Max(320, _config.StreamMaxWidth);
 
     public int SetSelectedMonitor(int index)
     {
@@ -112,6 +145,14 @@ public sealed class ScreenCaptureService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (!_config.StreamEnabled)
+        {
+            _logger.LogInformation("Screen capture parked (ALPHA_STREAM_ENABLED=false)");
+            try { await Task.Delay(Timeout.Infinite, stoppingToken); }
+            catch (OperationCanceledException) { }
+            return;
+        }
+
         if (!OperatingSystem.IsWindows())
         {
             StreamAvailable = false;
@@ -131,6 +172,16 @@ public sealed class ScreenCaptureService : BackgroundService
             "Screen capture ready (fps={Fps}, maxWidth={MaxWidth}, monitors={Count})",
             _config.StreamFps, _config.StreamMaxWidth, GetMonitors().Count);
 
+        // Dedicated thread — GDI CopyFromScreen must not block the thread pool (F12/D8).
+        await Task.Factory.StartNew(
+            () => CaptureLoop(stoppingToken),
+            stoppingToken,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default).ConfigureAwait(false);
+    }
+
+    private void CaptureLoop(CancellationToken stoppingToken)
+    {
         var fps = Math.Clamp(_config.StreamFps, 1, 30);
         var interval = TimeSpan.FromMilliseconds(1000.0 / fps);
         var adaptiveFps = fps;
@@ -141,7 +192,7 @@ public sealed class ScreenCaptureService : BackgroundService
             {
                 adaptiveFps = fps;
                 interval = TimeSpan.FromMilliseconds(1000.0 / adaptiveFps);
-                try { await Task.Delay(200, stoppingToken); }
+                try { Task.Delay(200, stoppingToken).GetAwaiter().GetResult(); }
                 catch (OperationCanceledException) { break; }
                 continue;
             }
@@ -151,22 +202,47 @@ public sealed class ScreenCaptureService : BackgroundService
             {
                 var frame = CaptureFrame();
                 if (frame is not null)
+                {
                     _frames.Writer.TryWrite(frame);
+                    Interlocked.Increment(ref _framesProduced);
+                    _consecutiveCaptureFails = 0;
+                    _lastCaptureError = null;
+                }
+                else
+                {
+                    _consecutiveCaptureFails++;
+                    if (_consecutiveCaptureFails == 1 || _consecutiveCaptureFails % 30 == 0)
+                    {
+                        _lastCaptureError = $"null_frame bounds={_captureBounds.Width}x{_captureBounds.Height} fails={_consecutiveCaptureFails}";
+                        _logger.LogWarning("Screen capture returned no frame ({Error})", _lastCaptureError);
+                    }
+                }
             }
             catch (Exception ex)
             {
+                // Win32 ERROR_INVALID_HANDLE (6) is common after lock screen, DPI/display
+                // change, or a stale GDI Bitmap HDC. Do NOT clear _streamActive here —
+                // LiveStreamClient owns that flag; clearing it silently starves the
+                // WebRTC media pump (PC stays "connected", SFU answers withTrack=false).
+                _consecutiveCaptureFails++;
+                _lastCaptureError = $"{ex.GetType().Name}: {ex.Message}";
+                _logger.LogWarning(ex, "Screen capture failed — recreating GDI surfaces and retrying");
+                DisposeCaptureBitmaps();
                 StreamAvailable = false;
-                _logger.LogWarning(ex, "Screen capture failed — reporting unavailable");
-                _streamActive = false;
-                try { await Task.Delay(5000, stoppingToken); }
+                try { Task.Delay(1000, stoppingToken).GetAwaiter().GetResult(); }
                 catch (OperationCanceledException) { break; }
-                StreamAvailable = OperatingSystem.IsWindows();
-                RefreshMonitors();
+                if (OperatingSystem.IsWindows())
+                {
+                    RefreshMonitors();
+                    StreamAvailable = true;
+                }
                 continue;
             }
 
             sw.Stop();
             // Don't tank quality by dropping to 5 fps under brief load — keep ≥8.
+            // Network-driven adaptive FPS is applied by LiveStreamClient via SetMaxWidthOverride
+            // and encoder Fps — this path only reacts to capture CPU cost.
             var budget = interval.TotalMilliseconds * 0.9;
             if (sw.ElapsedMilliseconds > budget && adaptiveFps > 8)
             {
@@ -183,7 +259,7 @@ public sealed class ScreenCaptureService : BackgroundService
             var delay = interval - sw.Elapsed;
             if (delay > TimeSpan.Zero)
             {
-                try { await Task.Delay(delay, stoppingToken); }
+                try { Task.Delay(delay, stoppingToken).GetAwaiter().GetResult(); }
                 catch (OperationCanceledException) { break; }
             }
         }
@@ -306,70 +382,180 @@ public sealed class ScreenCaptureService : BackgroundService
         if (bounds.Width <= 0 || bounds.Height <= 0)
             return null;
 
-        using var src = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format32bppArgb);
-        using (var g = Graphics.FromImage(src))
+        if (_srcBitmap is null || _srcBitmap.Width != bounds.Width || _srcBitmap.Height != bounds.Height)
         {
-            g.CopyFromScreen(bounds.Left, bounds.Top, 0, 0, src.Size, CopyPixelOperation.SourceCopy);
+            _srcBitmap?.Dispose();
+            _srcBitmap = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format32bppArgb);
         }
 
-        var maxW = Math.Max(320, _config.StreamMaxWidth);
-        Bitmap toCopy = src;
-        Bitmap? scaled = null;
         try
         {
-            if (src.Width > maxW)
+            // Multi-strategy capture. Win11 (esp. 24H2) often breaks CopyFromScreen
+            // with ERROR_INVALID_HANDLE (6); CAPTUREBLT also fails on some HD 530 drivers.
+            if (!TryCaptureToBitmap(_srcBitmap, bounds))
             {
-                var newH = (int)Math.Round(src.Height * (maxW / (double)src.Width));
-                // Even dimensions help most encoders.
-                newH = Math.Max(2, newH & ~1);
-                var newW = maxW & ~1;
-                scaled = new Bitmap(newW, newH, PixelFormat.Format32bppArgb);
-                using var g = Graphics.FromImage(scaled);
-                // HighQualityBicubic keeps UI/text sharper than Bilinear when downscaling.
-                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-                g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
-                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
-                g.DrawImage(src, 0, 0, scaled.Width, scaled.Height);
-                toCopy = scaled;
+                using var g = Graphics.FromImage(_srcBitmap);
+                g.CopyFromScreen(bounds.Left, bounds.Top, 0, 0, _srcBitmap.Size, CopyPixelOperation.SourceCopy);
+            }
+        }
+        catch (Exception)
+        {
+            // Stale HBITMAP / display change — force recreate on the next attempt.
+            DisposeCaptureBitmaps();
+            throw;
+        }
+
+        var maxW = EffectiveMaxWidth;
+        Bitmap toCopy = _srcBitmap;
+        if (_srcBitmap.Width > maxW)
+        {
+            var newH = (int)Math.Round(_srcBitmap.Height * (maxW / (double)_srcBitmap.Width));
+            newH = Math.Max(2, newH & ~1);
+            var newW = maxW & ~1;
+            if (_scaledBitmap is null || _scaledBitmap.Width != newW || _scaledBitmap.Height != newH)
+            {
+                _scaledBitmap?.Dispose();
+                _scaledBitmap = new Bitmap(newW, newH, PixelFormat.Format32bppArgb);
+            }
+            using var g = Graphics.FromImage(_scaledBitmap);
+            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+            g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
+            g.DrawImage(_srcBitmap, 0, 0, _scaledBitmap.Width, _scaledBitmap.Height);
+            toCopy = _scaledBitmap;
+        }
+
+        var w = toCopy.Width & ~1;
+        var h = toCopy.Height & ~1;
+        if (w < 2 || h < 2)
+            return null;
+
+        var rect = new Rectangle(0, 0, w, h);
+        var data = toCopy.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+        try
+        {
+            var stride = Math.Abs(data.Stride);
+            var needed = stride * h;
+            if (_bgraScratch is null || _bgraScratch.Length < needed)
+                _bgraScratch = new byte[needed];
+            Marshal.Copy(data.Scan0, _bgraScratch, 0, needed);
+            // Channel ownership requires a dedicated buffer — copy packed BGRA out.
+            byte[] bgra;
+            if (stride != w * 4)
+            {
+                bgra = new byte[w * h * 4];
+                for (var y = 0; y < h; y++)
+                    Buffer.BlockCopy(_bgraScratch, y * stride, bgra, y * w * 4, w * 4);
+            }
+            else
+            {
+                bgra = new byte[w * h * 4];
+                Buffer.BlockCopy(_bgraScratch, 0, bgra, 0, w * h * 4);
             }
 
-            var w = toCopy.Width & ~1;
-            var h = toCopy.Height & ~1;
-            if (w < 2 || h < 2)
-                return null;
-
-            var rect = new Rectangle(0, 0, w, h);
-            var data = toCopy.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-            try
+            return new ScreenFrame
             {
-                var stride = Math.Abs(data.Stride);
-                var bgra = new byte[stride * h];
-                Marshal.Copy(data.Scan0, bgra, 0, bgra.Length);
-                // If stride != w*4, pack tightly.
-                if (stride != w * 4)
-                {
-                    var packed = new byte[w * h * 4];
-                    for (var y = 0; y < h; y++)
-                        Buffer.BlockCopy(bgra, y * stride, packed, y * w * 4, w * 4);
-                    bgra = packed;
-                }
-
-                return new ScreenFrame
-                {
-                    Bgra = bgra,
-                    Width = w,
-                    Height = h,
-                    TimestampMs = Environment.TickCount64,
-                };
-            }
-            finally
-            {
-                toCopy.UnlockBits(data);
-            }
+                Bgra = bgra,
+                Width = w,
+                Height = h,
+                TimestampMs = Environment.TickCount64,
+            };
         }
         finally
         {
-            scaled?.Dispose();
+            toCopy.UnlockBits(data);
+        }
+#pragma warning restore CA1416
+    }
+
+    private void DisposeCaptureBitmaps()
+    {
+#pragma warning disable CA1416
+        try { _srcBitmap?.Dispose(); } catch { /* stale GDI */ }
+        try { _scaledBitmap?.Dispose(); } catch { /* stale GDI */ }
+#pragma warning restore CA1416
+        _srcBitmap = null;
+        _scaledBitmap = null;
+    }
+
+    private const int RasterSrcCopy = 0x00CC0020;
+    private const int RasterCaptureBlt = unchecked((int)0x40CC0020); // SRCCOPY | CAPTUREBLT
+
+    /// <summary>
+    /// Try several Win32 BitBlt sources before falling back to CopyFromScreen.
+    /// Order matters: plain SRCCOPY is the most reliable on Win11 + Intel HD.
+    /// </summary>
+    private static bool TryCaptureToBitmap(Bitmap dest, Rectangle bounds)
+    {
+#pragma warning disable CA1416
+        if (TryBitBltFromWindow(IntPtr.Zero, dest, bounds, RasterSrcCopy))
+            return true;
+        if (TryBitBltFromWindow(IntPtr.Zero, dest, bounds, RasterCaptureBlt))
+            return true;
+
+        var desktop = GetDesktopWindow();
+        if (desktop != IntPtr.Zero)
+        {
+            if (TryBitBltFromWindow(desktop, dest, bounds, RasterSrcCopy))
+                return true;
+            if (TryBitBltFromWindow(desktop, dest, bounds, RasterCaptureBlt))
+                return true;
+        }
+
+        var hdcDisplay = CreateDC("DISPLAY", null, null, IntPtr.Zero);
+        if (hdcDisplay != IntPtr.Zero)
+        {
+            try
+            {
+                if (TryBitBltFromHdc(hdcDisplay, dest, bounds, RasterSrcCopy))
+                    return true;
+            }
+            finally
+            {
+                DeleteDC(hdcDisplay);
+            }
+        }
+
+        return false;
+#pragma warning restore CA1416
+    }
+
+    private static bool TryBitBltFromWindow(IntPtr hwnd, Bitmap dest, Rectangle bounds, int raster)
+    {
+#pragma warning disable CA1416
+        var hdcScreen = GetDC(hwnd);
+        if (hdcScreen == IntPtr.Zero)
+            return false;
+        try
+        {
+            return TryBitBltFromHdc(hdcScreen, dest, bounds, raster);
+        }
+        finally
+        {
+            ReleaseDC(hwnd, hdcScreen);
+        }
+#pragma warning restore CA1416
+    }
+
+    private static bool TryBitBltFromHdc(IntPtr hdcScreen, Bitmap dest, Rectangle bounds, int raster)
+    {
+#pragma warning disable CA1416
+        try
+        {
+            using var g = Graphics.FromImage(dest);
+            var hdcDest = g.GetHdc();
+            try
+            {
+                return BitBlt(hdcDest, 0, 0, dest.Width, dest.Height, hdcScreen, bounds.Left, bounds.Top, raster);
+            }
+            finally
+            {
+                g.ReleaseHdc(hdcDest);
+            }
+        }
+        catch
+        {
+            return false;
         }
 #pragma warning restore CA1416
     }
@@ -406,4 +592,23 @@ public sealed class ScreenCaptureService : BackgroundService
 
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int nIndex);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetDC(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetDesktopWindow();
+
+    [DllImport("gdi32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr CreateDC(string? lpszDriver, string? lpszDevice, string? lpszOutput, IntPtr lpInitData);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteDC(IntPtr hdc);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool BitBlt(IntPtr hdcDest, int nXDest, int nYDest, int nWidth, int nHeight,
+        IntPtr hdcSrc, int nXSrc, int nYSrc, int dwRop);
 }

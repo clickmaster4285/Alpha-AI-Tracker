@@ -23,8 +23,10 @@ type ICEServerConfig struct {
 // SFU is an in-process Pion selective-forwarding unit: one publisher track per
 // employee room, fan-out to N admin subscribers. No JPEG path.
 type SFU struct {
-	iceServers []webrtc.ICEServer
-	api        *webrtc.API
+	iceServers     []webrtc.ICEServer
+	api            *webrtc.API
+	maxBitrateKbps int
+	onPublisherPLI func(empID string)
 
 	mu    sync.Mutex
 	rooms map[string]*sfuRoom
@@ -37,6 +39,7 @@ type sfuRoom struct {
 	track       *webrtc.TrackLocalStaticRTP
 	trackReady  chan struct{}
 	trackOnce   sync.Once
+	pliDone     chan struct{}
 
 	subscribers map[uint64]*webrtc.PeerConnection
 	pubActive   atomic.Bool
@@ -50,7 +53,7 @@ type sfuRoom struct {
 }
 
 // NewSFU builds a Pion API with the given ICE servers (empty → default Google STUN).
-func NewSFU(ice []ICEServerConfig) *SFU {
+func NewSFU(ice []ICEServerConfig, maxBitrateKbps int) *SFU {
 	servers := toPionICE(ice)
 	m := &webrtc.MediaEngine{}
 	if err := m.RegisterDefaultCodecs(); err != nil {
@@ -64,11 +67,20 @@ func NewSFU(ice []ICEServerConfig) *SFU {
 		webrtc.WithMediaEngine(m),
 		webrtc.WithInterceptorRegistry(i),
 	)
-	return &SFU{
-		iceServers: servers,
-		api:        api,
-		rooms:      make(map[string]*sfuRoom),
+	if maxBitrateKbps <= 0 {
+		maxBitrateKbps = 8000
 	}
+	return &SFU{
+		iceServers:     servers,
+		api:            api,
+		maxBitrateKbps: maxBitrateKbps,
+		rooms:          make(map[string]*sfuRoom),
+	}
+}
+
+// SetPublisherPLIHook registers a callback invoked when the SFU sends a PLI to the publisher.
+func (s *SFU) SetPublisherPLIHook(fn func(empID string)) {
+	s.onPublisherPLI = fn
 }
 
 func toPionICE(ice []ICEServerConfig) []webrtc.ICEServer {
@@ -138,6 +150,14 @@ func (s *SFU) PublisherActive(empID string) bool {
 
 func (r *sfuRoom) closePublisherLocked() {
 	r.pubActive.Store(false)
+	if r.pliDone != nil {
+		select {
+		case <-r.pliDone:
+		default:
+			close(r.pliDone)
+		}
+		r.pliDone = nil
+	}
 	if r.publisherPC != nil {
 		_ = r.publisherPC.Close()
 		r.publisherPC = nil
@@ -195,15 +215,16 @@ func (s *SFU) CloseRoom(empID string) {
 }
 
 // WatchTrackReady returns a one-shot channel that fires when a publisher track
-// becomes available AFTER this call. If a track is already present, the channel
-// stays idle (subscriber answer should already include it).
+// becomes available. If a track is already present (race: arrived after a
+// withTrack=false answer), the channel is signaled immediately so the watcher
+// can renegotiate — leaving it idle permanently blanked LIVE tiles.
 func (s *SFU) WatchTrackReady(empID string, watcherID uint64) <-chan struct{} {
 	r := s.getOrCreateRoom(empID)
 	ch := make(chan struct{}, 1)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.track != nil {
-		// Already publishing — no late renegotiation needed.
+		ch <- struct{}{}
 		return ch
 	}
 	if r.trackReadyListeners == nil {
@@ -258,11 +279,25 @@ func (s *SFU) AcceptPublisherOffer(empID, sdp string, onICE func(candidate webrt
 		r.pubActive.Store(true)
 		r.trackOnce.Do(func() { close(r.trackReady) })
 		r.notifyTrackReadyLocked()
+		if r.pliDone != nil {
+			select {
+			case <-r.pliDone:
+			default:
+				close(r.pliDone)
+			}
+		}
+		r.pliDone = make(chan struct{})
+		pliDone := r.pliDone
 		r.mu.Unlock()
 
 		log.Printf("[webrtc-sfu] publisher track ready employee=%s codec=%s", empID, remote.Codec().MimeType)
-		go forwardRTP(remote, local, &r.pubActive)
-		go sendPLI(pc, remote)
+		go forwardRTP(remote, local, &r.pubActive, s.maxBitrateKbps)
+		// One IDR nudge for late joiners — NOT every PLI tick (that flooded ctrl
+		// and could drop start/stop on the buffered channel).
+		if s.onPublisherPLI != nil {
+			s.onPublisherPLI(empID)
+		}
+		go sendPLI(pc, remote, pliDone)
 		_ = receiver
 	})
 
@@ -294,14 +329,35 @@ func (s *SFU) AcceptPublisherOffer(empID, sdp string, onICE func(candidate webrt
 	return answer.SDP, nil
 }
 
-func forwardRTP(remote *webrtc.TrackRemote, local *webrtc.TrackLocalStaticRTP, active *atomic.Bool) {
+func forwardRTP(remote *webrtc.TrackRemote, local *webrtc.TrackLocalStaticRTP, active *atomic.Bool, maxBitrateKbps int) {
 	buf := make([]byte, 1500)
+	// Token-bucket egress cap (Pion v4 has no RTPSender.SetMaxBitrate).
+	bytesPerSec := float64(maxBitrateKbps) * 1000.0 / 8.0
+	if bytesPerSec < 1 {
+		bytesPerSec = 8000 * 1000.0 / 8.0
+	}
+	tokens := bytesPerSec
+	last := time.Now()
 	for {
 		n, _, readErr := remote.Read(buf)
 		if readErr != nil {
 			active.Store(false)
 			return
 		}
+		if n > len(buf) {
+			log.Printf("[webrtc-sfu] dropping oversized RTP packet n=%d", n)
+			continue
+		}
+		now := time.Now()
+		tokens += now.Sub(last).Seconds() * bytesPerSec
+		if tokens > bytesPerSec*2 {
+			tokens = bytesPerSec * 2
+		}
+		last = now
+		if float64(n) > tokens {
+			continue // over WEBRTC_MAX_BITRATE_KBPS — drop
+		}
+		tokens -= float64(n)
 		if _, writeErr := local.Write(buf[:n]); writeErr != nil && writeErr != io.ErrClosedPipe {
 			active.Store(false)
 			return
@@ -309,14 +365,22 @@ func forwardRTP(remote *webrtc.TrackRemote, local *webrtc.TrackLocalStaticRTP, a
 	}
 }
 
-func sendPLI(pc *webrtc.PeerConnection, remote *webrtc.TrackRemote) {
+// sendPLI periodically requests a decoder refresh from the publisher via RTCP.
+// Encoder ForceKeyFrame is triggered separately (one-shot on track ready) —
+// wiring every PLI tick to the ctrl channel caused I-frame spam + dropped start/stop.
+func sendPLI(pc *webrtc.PeerConnection, remote *webrtc.TrackRemote, done <-chan struct{}) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		if err := pc.WriteRTCP([]rtcp.Packet{
-			&rtcp.PictureLossIndication{MediaSSRC: uint32(remote.SSRC())},
-		}); err != nil {
+	for {
+		select {
+		case <-done:
 			return
+		case <-ticker.C:
+			if err := pc.WriteRTCP([]rtcp.Packet{
+				&rtcp.PictureLossIndication{MediaSSRC: uint32(remote.SSRC())},
+			}); err != nil {
+				return
+			}
 		}
 	}
 }

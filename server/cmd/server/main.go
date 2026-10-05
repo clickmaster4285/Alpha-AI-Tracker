@@ -16,6 +16,7 @@ import (
 	goredis "github.com/alpha-ai-tracker/server/internal/redis"
 	"github.com/alpha-ai-tracker/server/internal/repository"
 	"github.com/alpha-ai-tracker/server/internal/router"
+	"github.com/alpha-ai-tracker/server/internal/scale"
 	"github.com/alpha-ai-tracker/server/internal/services"
 	"github.com/alpha-ai-tracker/server/internal/stream"
 	"github.com/alpha-ai-tracker/server/internal/ws"
@@ -128,6 +129,9 @@ func main() {
 			Credential: cfg.LiveStream.TURNPass,
 		})
 	}
+	instanceID := scale.ResolveInstanceID(cfg.Server.InstanceID)
+	log.Printf("[server] instance id=%s publicURL=%q", instanceID, cfg.Server.InstancePublicURL)
+
 	streamHub := stream.NewHub(stream.Config{
 		Enabled:                cfg.LiveStream.Enabled,
 		MaxStreams:             cfg.LiveStream.MaxStreams,
@@ -135,23 +139,42 @@ func main() {
 		IdleSec:                cfg.LiveStream.IdleSec,
 		MaxBitrateKbps:         cfg.LiveStream.MaxBitrateKbps,
 		ICEServers:             iceServers,
+		InstanceID:             instanceID,
+		InstancePublicURL:      cfg.Server.InstancePublicURL,
 	})
 	defer streamHub.Close()
 
 	presenceHub := ws.NewHub(ws.Config{
 		Enabled:        cfg.PresenceWS.Enabled,
 		MaxConnections: cfg.PresenceWS.MaxConnections,
+		InstanceID:     instanceID,
 	})
 	defer presenceHub.Close()
-	wsHandler := handlers.NewWsHandler(presenceHub, cfg.CORS.AllowedOrigins)
+
+	// Phase 2: when Redis is up, share presence + watch tickets + publisher routing.
+	if redisClient != nil {
+		presenceHub.SetBackend(redisClient)
+		streamHub.SetCluster(redisClient)
+		log.Println("[server] live-stream cluster: Redis presence + tickets + publisher registry enabled")
+	} else {
+		log.Println("[server] live-stream cluster: Redis unavailable — single-instance local hubs only")
+	}
+
+	wsHandler := handlers.NewWsHandler(presenceHub, deviceRepo, cfg.CORS.AllowedOrigins)
 	if cfg.PresenceWS.Enabled {
 		log.Printf("[server] presence ws enabled (maxConnections=%d)", cfg.PresenceWS.MaxConnections)
 	} else {
 		log.Println("[server] presence ws disabled")
 	}
 
+	if len(cfg.LiveStream.TURNURLs) == 0 {
+		log.Println("[server] WARNING: WEBRTC_TURN_URLS is empty — remote clients behind CGNAT/firewall will fail ICE. Provision coturn (or equivalent) on/near this VPS domain before calling live-stream production. TURN doubles media bandwidth on the relayed path.")
+	} else {
+		log.Printf("[server] webrtc TURN configured (%d url(s))", len(cfg.LiveStream.TURNURLs))
+	}
+
 	streamHandler := handlers.NewStreamHandler(
-		streamHub, presenceHub, employeeRepo, termsConsentRepo, timeAttendanceRepo, cfg.CORS.AllowedOrigins,
+		streamHub, presenceHub, employeeRepo, termsConsentRepo, timeAttendanceRepo, deviceRepo, cfg.CORS.AllowedOrigins,
 	)
 	if cfg.LiveStream.Enabled {
 		log.Printf("[server] live-stream webrtc sfu enabled (maxStreams=%d bitrate=%dkbps)", cfg.LiveStream.MaxStreams, cfg.LiveStream.MaxBitrateKbps)

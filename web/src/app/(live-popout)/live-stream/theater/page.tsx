@@ -70,8 +70,8 @@ function LiveStreamTheaterInner() {
   const { data, isLoading, isError } = useQuery({
     queryKey: ['live-stream-employees'],
     queryFn: () => liveStreamApi.employees(),
-    refetchInterval: 1_000,
-    staleTime: 0,
+    refetchInterval: 2_000,
+    staleTime: 1_000,
   });
 
   const employees = useMemo(() => {

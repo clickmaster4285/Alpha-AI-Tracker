@@ -99,6 +99,21 @@ public class AppConfig
     /// all-I-frame encode starves the bitrate budget and looks blocky.
     /// </summary>
     public int StreamKeyframeIntervalSec { get; init; } = 1;
+    /// <summary>
+    /// Minimum measured uplink (kbps) required before publishing. Below this
+    /// the client skips publish and logs — avoids silent slideshow on thin links.
+    /// </summary>
+    public int StreamMinUplinkKbps { get; init; } = 2500;
+    /// <summary>
+    /// libvpx GLagInFrames (altref). Default 0 = lowest latency for live preview;
+    /// set ALPHA_STREAM_VP8_LAG_FRAMES=1 after A/B on a real stream if compression wins.
+    /// </summary>
+    public int StreamVp8LagFrames { get; init; } = 0;
+    /// <summary>
+    /// Dev/QA only: artificial delay (ms) after each SendVideo so ABR degrade can be
+    /// exercised without NIC throttling. 0 = off. Never leave non-zero in fleet config.enc.
+    /// </summary>
+    public int StreamDebugSendDelayMs { get; init; } = 0;
 
     // ─── Control WebSocket (presence / keep-alive channel) ───
     // Long-lived outbound WS to GET /api/v1/ws (DeviceAuth). Independent of
@@ -167,6 +182,9 @@ public class AppConfig
             StreamMaxWidth = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_MAX_WIDTH"), out var streamW) ? streamW : 1920, 320, 1920),
             StreamMaxBitrateKbps = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_MAX_BITRATE_KBPS"), out var streamBr) ? streamBr : 12000, 500, 15000),
             StreamKeyframeIntervalSec = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_KEYFRAME_INTERVAL_SEC"), out var streamKf) ? streamKf : 1, 1, 10),
+            StreamMinUplinkKbps = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_MIN_UPLINK_KBPS"), out var streamMinUp) ? streamMinUp : 2500, 500, 15000),
+            StreamVp8LagFrames = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_VP8_LAG_FRAMES"), out var streamLag) ? streamLag : 0, 0, 5),
+            StreamDebugSendDelayMs = Math.Clamp(int.TryParse(GetEnv("ALPHA_STREAM_DEBUG_SEND_DELAY_MS"), out var streamDbgDelay) ? streamDbgDelay : 0, 0, 500),
             WsEnabled = IsEnvTruthy(GetEnv("ALPHA_WS_ENABLED")),
             WsPingSec = Math.Clamp(int.TryParse(GetEnv("ALPHA_WS_PING_SEC"), out var wsPing) ? wsPing : 30, 5, 300),
             WsReconnectBaseSec = Math.Clamp(int.TryParse(GetEnv("ALPHA_WS_RECONNECT_BASE_SEC"), out var wsRecon) ? wsRecon : 2, 1, 60),

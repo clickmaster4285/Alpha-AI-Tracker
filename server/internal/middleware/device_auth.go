@@ -1,10 +1,12 @@
 package middleware
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/alpha-ai-tracker/server/internal/dto"
 	"github.com/alpha-ai-tracker/server/internal/repository"
@@ -46,10 +48,18 @@ func DeviceAuth(deviceRepo *repository.DeviceRepo, userRepo *repository.UserRepo
 
 			device, err := deviceRepo.GetByTokenHash(c.Request().Context(), tokenHash)
 			if err == nil && device != nil {
-				// Touch last_seen timestamp in background
-				go func(devID string) {
-					_ = deviceRepo.TouchLastSeen(c.Request().Context(), devID)
-				}(device.ID)
+				// Copy ID out of the pooled Echo context; use Background + timeout
+				// so TouchLastSeen does not race request cancellation after WS upgrade.
+				// Version/platform headers let a reinstalled client refresh employee_devices
+				// without requiring a fresh employee-login (web Client Version column).
+				devID := device.ID
+				clientVer := strings.TrimSpace(c.Request().Header.Get("X-Client-Version"))
+				platform := strings.TrimSpace(c.Request().Header.Get("X-Client-Platform"))
+				go func(id, ver, plat string) {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					_ = deviceRepo.TouchLastSeen(ctx, id, ver, plat)
+				}(devID, clientVer, platform)
 
 				c.Set("employee_id", device.EmployeeID)
 				c.Set("device_id", device.ID)

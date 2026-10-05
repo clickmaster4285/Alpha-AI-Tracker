@@ -21,12 +21,12 @@ public sealed class ScreenVp8Encoder : IDisposable
     private readonly object _gate = new();
     private VpxCodecCtx? _ctx;
     private VpxImage? _img;
-    private bool _imgAllocated;
     private uint _width;
     private uint _height;
     private uint _targetKbps;
     private uint _kfMaxDist;
     private uint _fps = 10;
+    private uint _lagFrames = 1;
     private long _pts;
     private bool _forceKeyFrame = true;
     private bool _disposed;
@@ -68,6 +68,23 @@ public sealed class ScreenVp8Encoder : IDisposable
     {
         get => _kfMaxDist;
         set => _kfMaxDist = Math.Max(1, value);
+    }
+
+    /// <summary>libvpx GLagInFrames (altref). Changing rebuilds the encoder.</summary>
+    public uint LagInFrames
+    {
+        get => _lagFrames;
+        set
+        {
+            lock (_gate)
+            {
+                var next = Math.Min(5, value);
+                if (_lagFrames == next) return;
+                _lagFrames = next;
+                DisposeEncoderUnlocked();
+                _forceKeyFrame = true;
+            }
+        }
     }
 
     public void ForceKeyFrame() => _forceKeyFrame = true;
@@ -113,7 +130,9 @@ public sealed class ScreenVp8Encoder : IDisposable
         cfg.RcTargetBitrate = Math.Max(500, _targetKbps);
         // VBR spends bits on hard frames (UI text) instead of padding CBR on static P-frames.
         cfg.RcEndUsage = VpxRcMode.VPX_VBR;
-        cfg.GLagInFrames = 0;
+        // Altref (lag>0) helps screen compression; default 0 for live latency.
+        // Tunable via ALPHA_STREAM_VP8_LAG_FRAMES.
+        cfg.GLagInFrames = _lagFrames;
         cfg.GErrorResilient = 0;
         cfg.RcUndershootPct = 100;
         cfg.RcOvershootPct = 100;
@@ -138,12 +157,8 @@ public sealed class ScreenVp8Encoder : IDisposable
         if (_ctx is null || _img is null)
             return null;
 
-        if (!_imgAllocated)
-        {
-            VpxImage.VpxImgAlloc(_img, VpxImgFmt.VPX_IMG_FMT_I420, _width, _height, 1);
-            _imgAllocated = true;
-        }
-
+        // VpxImgWrap only — never VpxImgAlloc. Freeing a wrapped image with
+        // VpxImgFree would release a GC-pinned managed pointer (heap corruption).
         unsafe
         {
             fixed (byte* pFrame = i420)
@@ -182,11 +197,9 @@ public sealed class ScreenVp8Encoder : IDisposable
     {
         if (_img is not null)
         {
-            if (_imgAllocated)
-                VpxImage.VpxImgFree(_img);
+            // Image was only ever wrapped around managed buffers — do not VpxImgFree.
             _img.Dispose();
             _img = null;
-            _imgAllocated = false;
         }
         if (_ctx is not null)
         {

@@ -1,24 +1,42 @@
 package stream
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"log"
 	"sync"
 	"time"
 )
 
+// ClusterBackend optionally stores watch tickets + publisher instance routing in Redis.
+type ClusterBackend interface {
+	SetPublisher(ctx context.Context, empID, instanceID string) error
+	ClearPublisher(ctx context.Context, empID, instanceID string) error
+	LookupPublisher(ctx context.Context, empID string) (instanceID string, ok bool, err error)
+	SetInstanceURL(ctx context.Context, instanceID, publicURL string) error
+	GetInstanceURL(ctx context.Context, instanceID string) (string, error)
+	StoreWatchTicket(ctx context.Context, ticket, userID, employeeID string) error
+	ConsumeWatchTicket(ctx context.Context, ticket, employeeID string) (userID string, err error)
+}
+
 // FeatureID is the terms_consent feature key for live preview.
 const FeatureID = "live_view"
+
+const (
+	watchTicketTTL    = 60 * time.Second
+	maxPendingTickets = 2000
+)
 
 var (
 	ErrDisabled        = errors.New("live stream disabled")
 	ErrTooManyStreams  = errors.New("too many concurrent streams")
 	ErrTooManyWatchers = errors.New("too many watchers for employee")
 	ErrInvalidTicket   = errors.New("invalid or expired watch ticket")
+	ErrTooManyTickets  = errors.New("too many pending watch tickets")
+	ErrRemotePublisher = errors.New("publisher on another instance; configure INSTANCE_PUBLIC_URL on peers")
 )
-
-const watchTicketTTL = 60 * time.Second
 
 type watchTicket struct {
 	EmployeeID string
@@ -34,6 +52,8 @@ type Config struct {
 	IdleSec                int
 	MaxBitrateKbps         int
 	ICEServers             []ICEServerConfig
+	InstanceID             string
+	InstancePublicURL      string
 }
 
 // DefaultConfig returns defaults for WebRTC live stream.
@@ -68,9 +88,9 @@ type MonitorInfo struct {
 	IsPrimary bool   `json:"isPrimary"`
 }
 
-// ControlEvent is sent to the push-socket handler (start/stop/select_monitor).
+// ControlEvent is sent to the push-socket handler (start/stop/select_monitor/force_keyframe).
 type ControlEvent struct {
-	Type         string // "start" | "stop" | "select_monitor"
+	Type         string // "start" | "stop" | "select_monitor" | "force_keyframe"
 	MonitorIndex int
 }
 
@@ -106,6 +126,9 @@ type Hub struct {
 	boxes          map[string]*mailbox
 	streamingCount int
 	tickets        map[string]watchTicket
+	cluster        ClusterBackend
+	// empID → last force_keyframe time (throttles PLI/ctrl spam).
+	lastKeyframe sync.Map
 
 	stopIdle chan struct{}
 	wg       sync.WaitGroup
@@ -128,15 +151,55 @@ func NewHub(cfg Config) *Hub {
 
 	h := &Hub{
 		cfg:      cfg,
-		sfu:      NewSFU(cfg.ICEServers),
+		sfu:      NewSFU(cfg.ICEServers, cfg.MaxBitrateKbps),
 		boxes:    make(map[string]*mailbox),
 		tickets:  make(map[string]watchTicket),
 		stopIdle: make(chan struct{}),
 	}
+	// IDR when the publisher track first becomes ready, and again when a watcher
+	// attaches with media (late joiner needs a fresh keyframe or the tile stays
+	// LIVE with — FPS / black until the next natural I-frame — which some Win11
+	// sessions never decode without an explicit ForceKeyFrame).
+	h.sfu.SetPublisherPLIHook(func(empID string) {
+		h.NudgePublisherKeyframe(empID)
+	})
 	h.wg.Add(1)
 	go h.idleLoop()
 	return h
 }
+
+// NudgePublisherKeyframe asks the desktop client to ForceKeyFrame (2s throttle).
+func (h *Hub) NudgePublisherKeyframe(empID string) {
+	if v, ok := h.lastKeyframe.Load(empID); ok {
+		if t, _ := v.(time.Time); time.Since(t) < 2*time.Second {
+			return
+		}
+	}
+	h.lastKeyframe.Store(empID, time.Now())
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	m, ok := h.boxes[empID]
+	if !ok || !m.clientConnected {
+		return
+	}
+	h.sendCtrlLocked(m, "force_keyframe")
+}
+
+// SetCluster attaches Redis-backed tickets + publisher routing (nil = local-only).
+func (h *Hub) SetCluster(b ClusterBackend) {
+	h.cluster = b
+	if b == nil || h.cfg.InstanceID == "" || h.cfg.InstancePublicURL == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := b.SetInstanceURL(ctx, h.cfg.InstanceID, h.cfg.InstancePublicURL); err != nil {
+		log.Printf("[live-stream] SetInstanceURL: %v", err)
+	}
+}
+
+// InstanceID returns this process's cluster identity.
+func (h *Hub) InstanceID() string { return h.cfg.InstanceID }
 
 // SFU returns the embedded Pion SFU.
 func (h *Hub) SFU() *SFU { return h.sfu }
@@ -239,15 +302,21 @@ func (h *Hub) sendCtrlEventLocked(m *mailbox, ev ControlEvent) {
 	}
 	select {
 	case m.ctrl <- ev:
+		return
 	default:
-		select {
-		case <-m.ctrl:
-		default:
-		}
-		select {
-		case m.ctrl <- ev:
-		default:
-		}
+	}
+	// Channel full. Never displace start/stop with force_keyframe — DropOldest
+	// used to swallow start while PLI-driven keyframes flooded the buffer.
+	if ev.Type == "force_keyframe" {
+		return
+	}
+	select {
+	case <-m.ctrl:
+	default:
+	}
+	select {
+	case m.ctrl <- ev:
+	default:
 	}
 }
 
@@ -306,8 +375,6 @@ func (h *Hub) RegisterClient(empID string) (ctrl <-chan ControlEvent, gen uint64
 		return nil, 0, false
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	m := h.getOrCreateLocked(empID)
 	if m.ctrl != nil {
 		close(m.ctrl)
@@ -317,29 +384,49 @@ func (h *Hub) RegisterClient(empID string) (ctrl <-chan ControlEvent, gen uint64
 	gen = m.clientGen
 	m.clientConnected = true
 	m.lastActivity = time.Now()
-
 	if m.wanted {
 		h.sendCtrlLocked(m, "start")
 	}
-	return m.ctrl, gen, true
+	ctrl = m.ctrl
+	cluster := h.cluster
+	instanceID := h.cfg.InstanceID
+	h.mu.Unlock()
+
+	if cluster != nil && instanceID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if err := cluster.SetPublisher(ctx, empID, instanceID); err != nil {
+			log.Printf("[live-stream] SetPublisher employee=%s: %v", empID, err)
+		}
+		cancel()
+	}
+	return ctrl, gen, true
 }
 
 // UnregisterClient marks the push client gone (generation-scoped).
 func (h *Hub) UnregisterClient(empID string, gen uint64) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	m, ok := h.boxes[empID]
 	if !ok || m.clientGen != gen {
+		h.mu.Unlock()
 		return
 	}
 	m.clientConnected = false
 	m.lastActivity = time.Now()
 	h.sfu.ClosePublisher(empID)
-	if m.wanted {
-		return
+	if !m.wanted {
+		h.unmarkStreamLocked(m)
 	}
-	h.unmarkStreamLocked(m)
+	cluster := h.cluster
+	instanceID := h.cfg.InstanceID
+	h.mu.Unlock()
+
+	if cluster != nil && instanceID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := cluster.ClearPublisher(ctx, empID, instanceID); err != nil {
+			log.Printf("[live-stream] ClearPublisher employee=%s: %v", empID, err)
+		}
+	}
 }
 
 // SetCapability stores the client's hello advertisement.
@@ -349,6 +436,30 @@ func (h *Hub) SetCapability(empID string, cap Capability) {
 	m := h.getOrCreateLocked(empID)
 	m.cap = cap
 	m.lastActivity = time.Now()
+}
+
+// CanSubscribe reports whether Subscribe would succeed without mutating state.
+// Used to return HTTP 429 before WebSocket Upgrade.
+func (h *Hub) CanSubscribe(empID string) error {
+	if !h.cfg.Enabled {
+		return ErrDisabled
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	m := h.boxes[empID]
+	if m != nil && len(m.watchers) >= h.cfg.MaxWatchersPerEmployee {
+		return ErrTooManyWatchers
+	}
+	// First watcher would call markStreamLocked
+	if m == nil || !m.wanted {
+		if m == nil || !m.countsAsStream {
+			if h.streamingCount >= h.cfg.MaxStreams {
+				return ErrTooManyStreams
+			}
+		}
+	}
+	return nil
 }
 
 // Subscribe attaches a watcher. First watcher marks the stream wanted and may send start.
@@ -454,19 +565,45 @@ func (h *Hub) IssueWatchTicket(userID, employeeID string) (ticket string, expire
 		return "", 0, err
 	}
 	ticket = hex.EncodeToString(raw[:])
+	expiresInSec = int(watchTicketTTL.Seconds())
+
+	if h.cluster != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := h.cluster.StoreWatchTicket(ctx, ticket, userID, employeeID); err != nil {
+			if err.Error() == ErrTooManyTickets.Error() {
+				return "", 0, ErrTooManyTickets
+			}
+			return "", 0, err
+		}
+		return ticket, expiresInSec, nil
+	}
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if len(h.tickets) >= maxPendingTickets {
+		return "", 0, ErrTooManyTickets
+	}
 	h.tickets[ticket] = watchTicket{
 		EmployeeID: employeeID,
 		UserID:     userID,
 		ExpiresAt:  time.Now().Add(watchTicketTTL),
 	}
-	return ticket, int(watchTicketTTL.Seconds()), nil
+	return ticket, expiresInSec, nil
 }
 
 // ConsumeWatchTicket validates and burns a ticket.
 func (h *Hub) ConsumeWatchTicket(ticket, employeeID string) (userID string, err error) {
+	if h.cluster != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		uid, err := h.cluster.ConsumeWatchTicket(ctx, ticket, employeeID)
+		if err != nil {
+			return "", ErrInvalidTicket
+		}
+		return uid, nil
+	}
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -480,4 +617,26 @@ func (h *Hub) ConsumeWatchTicket(ticket, employeeID string) (userID string, err 
 	}
 	delete(h.tickets, ticket)
 	return t.UserID, nil
+}
+
+// ResolveWatchTarget returns a redirect URL when the publisher lives on another
+// instance. Empty string means serve locally. Ticket must NOT be consumed yet.
+func (h *Hub) ResolveWatchTarget(empID string) (redirectURL string, err error) {
+	if h.cluster == nil || h.cfg.InstanceID == "" {
+		return "", nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	owner, ok, err := h.cluster.LookupPublisher(ctx, empID)
+	if err != nil || !ok || owner == "" || owner == h.cfg.InstanceID {
+		return "", err
+	}
+	base, err := h.cluster.GetInstanceURL(ctx, owner)
+	if err != nil {
+		return "", err
+	}
+	if base == "" {
+		return "", ErrRemotePublisher
+	}
+	return base, nil
 }

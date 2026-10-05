@@ -1,10 +1,12 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +26,10 @@ const (
 	wsWriteWait            = 10 * time.Second
 	wsPongWait             = 90 * time.Second
 	wsPingPeriod           = 30 * time.Second
+	wsMaxSocketLife        = 4 * time.Hour
+	wsTokenRecheck         = 5 * time.Minute
+	maxConcurrentOffers    = 32
+	uplinkProbeMaxBytes    = 512 * 1024
 )
 
 // StreamHandler serves live-stream WebRTC signaling + REST endpoints.
@@ -33,17 +39,21 @@ type StreamHandler struct {
 	employeeRepo     *repository.EmployeeRepo
 	termsConsentRepo *repository.TermsConsentRepo
 	taRepo           *repository.TimeAttendanceRepo
+	deviceRepo       *repository.DeviceRepo // optional — DeviceAuth re-check on push sockets
 	allowedOrigins   map[string]bool
 	upgrader         websocket.Upgrader
+	offerSem         chan struct{}
 }
 
 // NewStreamHandler constructs the handler. presence may be nil (falls back to heartbeat online).
+// deviceRepo may be nil (skips post-upgrade device re-validation on push sockets).
 func NewStreamHandler(
 	hub *stream.Hub,
 	presence *ws.Hub,
 	employeeRepo *repository.EmployeeRepo,
 	termsConsentRepo *repository.TermsConsentRepo,
 	taRepo *repository.TimeAttendanceRepo,
+	deviceRepo *repository.DeviceRepo,
 	allowedOrigins []string,
 ) *StreamHandler {
 	originSet := make(map[string]bool, len(allowedOrigins))
@@ -56,7 +66,9 @@ func NewStreamHandler(
 		employeeRepo:     employeeRepo,
 		termsConsentRepo: termsConsentRepo,
 		taRepo:           taRepo,
+		deviceRepo:       deviceRepo,
 		allowedOrigins:   originSet,
+		offerSem:         make(chan struct{}, maxConcurrentOffers),
 	}
 	h.upgrader = websocket.Upgrader{
 		ReadBufferSize:  4096,
@@ -64,10 +76,13 @@ func NewStreamHandler(
 		CheckOrigin: func(r *http.Request) bool {
 			origin := r.Header.Get("Origin")
 			if origin == "" {
+				// Non-browser clients (desktop) omit Origin.
 				return true
 			}
+			// Fail closed: empty allow-list must not accept arbitrary browser Origins (CSWSH).
 			if len(h.allowedOrigins) == 0 {
-				return true
+				log.Printf("[live-stream] CheckOrigin rejected origin=%q (no CORS_ALLOWED_ORIGINS configured)", origin)
+				return false
 			}
 			if h.allowedOrigins[origin] {
 				return true
@@ -127,10 +142,7 @@ func (h *StreamHandler) ListEmployees(c echo.Context) error {
 		wsConnected := presenceOn && h.presence.IsConnected(e.EmployeeID)
 		hb, hasHB := heartbeats[e.EmployeeID]
 		hbOnline := hasHB && now.Sub(hb.UTC()) <= liveStreamOnlineWindow
-		online := wsConnected
-		if !presenceOn {
-			online = hbOnline
-		}
+		online := employeeLiveOnline(presenceOn, wsConnected, hbOnline)
 		out = append(out, LiveStreamEmployee{
 			EmployeeID:      e.EmployeeID,
 			Name:            e.Name,
@@ -144,6 +156,33 @@ func (h *StreamHandler) ListEmployees(c echo.Context) error {
 		})
 	}
 	return c.JSON(http.StatusOK, map[string]interface{}{"data": out, "total": len(out)})
+}
+
+// employeeLiveOnline chooses Online for the live-stream rail.
+// When presence WS is enabled, a live control socket is authoritative (WsConnected).
+// When presence is disabled, fall back to app_status last_heartbeat_at within the online window.
+func employeeLiveOnline(presenceEnabled, wsConnected, hbOnline bool) bool {
+	if presenceEnabled {
+		return wsConnected
+	}
+	return hbOnline
+}
+
+// deviceStillActive re-checks a DeviceAuth device after WS upgrade (F14c).
+// Missing deviceID (legacy employee JWT) or nil repo → treat as still active;
+// max socket lifetime still bounds the connection.
+func (h *StreamHandler) deviceStillActive(deviceID string) bool {
+	if deviceID == "" || h.deviceRepo == nil {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ok, err := h.deviceRepo.IsActive(ctx, deviceID)
+	if err != nil {
+		log.Printf("[live-stream] device re-check error device=%s: %v", deviceID, err)
+		return true // transient DB errors must not drop live publishers
+	}
+	return ok
 }
 
 // IssueWatchTicket handles GET /api/v1/live-stream/watch-ticket?employeeId=.
@@ -192,25 +231,57 @@ func (h *StreamHandler) IssueWatchTicket(c echo.Context) error {
 		})
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"ticket":     ticket,
 		"expiresIn":  expiresIn,
 		"iceServers": h.hub.ICEServers(),
-	})
+	}
+	// Phase 2: when the publisher SFU lives on another instance, tell the web
+	// client which base URL to open the watch WebSocket against.
+	if base, err := h.hub.ResolveWatchTarget(empID); err != nil {
+		log.Printf("[live-stream] ResolveWatchTarget employee=%s: %v", empID, err)
+	} else if base != "" {
+		resp["watchBaseUrl"] = base
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// UplinkProbe handles POST /api/v1/live-stream/uplink-probe (DeviceAuth).
+// Discards up to 512 KiB so the client can time a small upload benchmark.
+func (h *StreamHandler) UplinkProbe(c echo.Context) error {
+	if !h.hub.Config().Enabled {
+		return c.JSON(http.StatusServiceUnavailable, dto.APIError{
+			Code: http.StatusServiceUnavailable, Message: "Live stream is disabled",
+		})
+	}
+	r := c.Request().Body
+	if r == nil {
+		return c.NoContent(http.StatusNoContent)
+	}
+	defer r.Close()
+	limited := http.MaxBytesReader(c.Response(), r, uplinkProbeMaxBytes)
+	buf := make([]byte, 32*1024)
+	for {
+		_, err := limited.Read(buf)
+		if err != nil {
+			break
+		}
+	}
+	return c.NoContent(http.StatusNoContent)
 }
 
 type signalMsg struct {
-	Type             string               `json:"type"`
-	SDP              string               `json:"sdp,omitempty"`
-	Candidate        string               `json:"candidate,omitempty"`
-	SDPMLineIndex    *uint16              `json:"sdpMLineIndex,omitempty"`
-	SDPMid           *string              `json:"sdpMid,omitempty"`
-	Index            int                  `json:"index,omitempty"`
-	Platform         string               `json:"platform,omitempty"`
-	StreamAvailable  bool                 `json:"streamAvailable,omitempty"`
-	Version          string               `json:"version,omitempty"`
-	SelectedMonitor  int                  `json:"selectedMonitor,omitempty"`
-	Monitors         []stream.MonitorInfo `json:"monitors,omitempty"`
+	Type            string               `json:"type"`
+	SDP             string               `json:"sdp,omitempty"`
+	Candidate       string               `json:"candidate,omitempty"`
+	SDPMLineIndex   *uint16              `json:"sdpMLineIndex,omitempty"`
+	SDPMid          *string              `json:"sdpMid,omitempty"`
+	Index           int                  `json:"index,omitempty"`
+	Platform        string               `json:"platform,omitempty"`
+	StreamAvailable bool                 `json:"streamAvailable,omitempty"`
+	Version         string               `json:"version,omitempty"`
+	SelectedMonitor int                  `json:"selectedMonitor,omitempty"`
+	Monitors        []stream.MonitorInfo `json:"monitors,omitempty"`
 }
 
 // Push handles GET /api/v1/live-stream/push (DeviceAuth) — WebRTC publisher signaling.
@@ -226,6 +297,7 @@ func (h *StreamHandler) Push(c echo.Context) error {
 			Code: http.StatusUnauthorized, Message: "Unauthorized employee context",
 		})
 	}
+	deviceID, _ := c.Get("device_id").(string)
 	accepted, err := h.termsConsentRepo.HasAccepted(c.Request().Context(), empID, stream.FeatureID, "")
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, dto.APIError{
@@ -278,6 +350,8 @@ func (h *StreamHandler) Push(c echo.Context) error {
 		defer closeDone()
 		ticker := time.NewTicker(wsPingPeriod)
 		defer ticker.Stop()
+		recheck := time.NewTicker(wsTokenRecheck)
+		defer recheck.Stop()
 		for {
 			select {
 			case ev, ok := <-ctrl:
@@ -299,6 +373,12 @@ func (h *StreamHandler) Push(c echo.Context) error {
 				if err != nil {
 					return
 				}
+			case <-recheck.C:
+				if !h.deviceStillActive(deviceID) {
+					log.Printf("[live-stream] push device revoked employee=%s device=%s — closing", empID, deviceID)
+					_ = conn.Close()
+					return
+				}
 			case <-done:
 				return
 			}
@@ -310,6 +390,12 @@ func (h *StreamHandler) Push(c echo.Context) error {
 		_ = conn.SetReadDeadline(time.Now().Add(wsPongWait))
 		return nil
 	})
+
+	lifeTimer := time.AfterFunc(wsMaxSocketLife, func() {
+		log.Printf("[live-stream] push max lifetime employee=%s — closing", empID)
+		_ = conn.Close()
+	})
+	defer lifeTimer.Stop()
 
 	for {
 		_, data, err := conn.ReadMessage()
@@ -333,8 +419,8 @@ func (h *StreamHandler) Push(c echo.Context) error {
 				Monitors:        msg.Monitors,
 				SelectedMonitor: msg.SelectedMonitor,
 			})
-			log.Printf("[live-stream] hello employee=%s platform=%s available=%v monitors=%d",
-				empID, msg.Platform, msg.StreamAvailable, len(msg.Monitors))
+			log.Printf("[live-stream] hello employee=%s platform=%s available=%v monitors=%d version=%s",
+				empID, msg.Platform, msg.StreamAvailable, len(msg.Monitors), msg.Version)
 		case "offer":
 			answer, err := h.hub.SFU().AcceptPublisherOffer(empID, msg.SDP, func(c webrtc.ICECandidateInit) {
 				payload := map[string]interface{}{
@@ -398,7 +484,20 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 			Code: http.StatusBadRequest, Message: "employeeId and ticket are required",
 		})
 	}
-	if _, err := h.hub.ConsumeWatchTicket(ticket, empID); err != nil {
+	// Route BEFORE burning the ticket so Redis can redirect to the publisher instance.
+	if base, err := h.hub.ResolveWatchTarget(empID); err != nil {
+		return c.JSON(http.StatusServiceUnavailable, dto.APIError{
+			Code: http.StatusServiceUnavailable, Message: err.Error(),
+		})
+	} else if base != "" {
+		q := url.Values{}
+		q.Set("employeeId", empID)
+		q.Set("ticket", ticket)
+		loc := base + "/api/v1/live-stream/watch?" + q.Encode()
+		return c.Redirect(http.StatusTemporaryRedirect, loc)
+	}
+	watcherUserID, err := h.hub.ConsumeWatchTicket(ticket, empID)
+	if err != nil {
 		return c.JSON(http.StatusUnauthorized, dto.APIError{
 			Code: http.StatusUnauthorized, Message: "invalid_or_expired_ticket",
 		})
@@ -420,6 +519,16 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 		})
 	}
 
+	if err := h.hub.CanSubscribe(empID); err != nil {
+		status := http.StatusServiceUnavailable
+		if errors.Is(err, stream.ErrTooManyWatchers) || errors.Is(err, stream.ErrTooManyStreams) {
+			status = http.StatusTooManyRequests
+		}
+		return c.JSON(status, dto.APIError{
+			Code: status, Message: err.Error(),
+		})
+	}
+
 	conn, err := h.upgrader.Upgrade(c.Response(), c.Request(), nil)
 	if err != nil {
 		log.Printf("[live-stream] Watch upgrade: %v", err)
@@ -434,7 +543,7 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 	}
 	defer h.hub.Unsubscribe(empID, watcherID)
 
-	log.Printf("[live-stream] watch connected employee=%s watcher=%d (webrtc)", empID, watcherID)
+	log.Printf("[live-stream] watch connected employee=%s watcher=%d user=%s (webrtc)", empID, watcherID, watcherUserID)
 
 	var writeMu sync.Mutex
 	write := func(v interface{}) error {
@@ -492,6 +601,12 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 		return nil
 	})
 
+	lifeTimer := time.AfterFunc(wsMaxSocketLife, func() {
+		log.Printf("[live-stream] watch max lifetime employee=%s watcher=%d — closing", empID, watcherID)
+		_ = conn.Close()
+	})
+	defer lifeTimer.Stop()
+
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
@@ -510,7 +625,14 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 			h.hub.SelectMonitor(empID, msg.Index)
 		case "offer":
 			sdp := msg.SDP
+			select {
+			case h.offerSem <- struct{}{}:
+			default:
+				_ = write(map[string]string{"type": "error", "code": "too_many_offers"})
+				continue
+			}
 			go func() {
+				defer func() { <-h.offerSem }()
 				h.hub.SFU().UnwatchTrackReady(empID, watcherID)
 				answer, withTrack, err := h.hub.SFU().AcceptSubscriberOffer(empID, watcherID, sdp, func(c webrtc.ICECandidateInit) {
 					payload := map[string]interface{}{
@@ -536,6 +658,8 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 				}
 				_ = write(map[string]string{"type": "answer", "sdp": answer})
 				if withTrack {
+					// Late joiner: VP8 decoder needs an IDR or the tile stays LIVE/black.
+					h.hub.NudgePublisherKeyframe(empID)
 					return
 				}
 				// Answer had no media — wait for publisher track, then one renegotiate.

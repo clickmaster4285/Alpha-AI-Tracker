@@ -212,6 +212,7 @@ public class LogCollectorService : BackgroundService
         _ = _eventRecorder.RecordAsync(SessionEventTypes.PowerOn);
         _scheduleCache.RequestImmediatePull();
         _attendanceAggregator.RequestImmediateAggregation();
+        _ = PersistInstalledClientVersionAsync();
 
         if (OperatingSystem.IsWindows())
         {
@@ -224,6 +225,29 @@ public class LogCollectorService : BackgroundService
             {
                 _logger.LogDebug(ex, "Failed to set Windows execution state");
             }
+        }
+    }
+
+    /// <summary>
+    /// After reinstall/upgrade the employee stays logged in (SQLite credentials), so
+    /// employee-login never re-runs and <c>employee_devices.client_version</c> used to
+    /// stay stale. Writing app_status.client_version with is_synced=0 queues a sync, and
+    /// DeviceAuth X-Client-Version headers refresh the device row on every request.
+    /// </summary>
+    private async Task PersistInstalledClientVersionAsync()
+    {
+        try
+        {
+            var version = AppInfo.Version;
+            var previous = await _store.GetStatusAsync("client_version", CancellationToken.None);
+            if (string.Equals(previous, version, StringComparison.Ordinal))
+                return;
+            await _store.SetStatusAsync("client_version", version, CancellationToken.None);
+            _logger.LogInformation("Client version status updated {Prev} → {Version} (queued for sync)", previous ?? "(none)", version);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "PersistInstalledClientVersionAsync failed");
         }
     }
 

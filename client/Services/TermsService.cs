@@ -410,6 +410,7 @@ public sealed class TermsService : BackgroundService
         else
             request.Headers.Authorization =
                 new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", employee.Token);
+        ClientIdentityHeaders.Apply(request);
     }
 
     /// <summary>SHA-256 of normalized (heading + body): trimmed, CRLF→LF, tag-whitespace
