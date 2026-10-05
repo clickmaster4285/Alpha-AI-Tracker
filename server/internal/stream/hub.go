@@ -127,6 +127,8 @@ type Hub struct {
 	streamingCount int
 	tickets        map[string]watchTicket
 	cluster        ClusterBackend
+	// empID → last force_keyframe time (throttles PLI/ctrl spam).
+	lastKeyframe sync.Map
 
 	stopIdle chan struct{}
 	wg       sync.WaitGroup
@@ -154,27 +156,33 @@ func NewHub(cfg Config) *Hub {
 		tickets:  make(map[string]watchTicket),
 		stopIdle: make(chan struct{}),
 	}
-	// One-shot IDR request when the publisher track becomes ready (late joiners).
-	// Throttled so rapid republish cannot spam the ctrl channel.
-	var lastKF sync.Map // empID → time.Time
+	// IDR when the publisher track first becomes ready, and again when a watcher
+	// attaches with media (late joiner needs a fresh keyframe or the tile stays
+	// LIVE with — FPS / black until the next natural I-frame — which some Win11
+	// sessions never decode without an explicit ForceKeyFrame).
 	h.sfu.SetPublisherPLIHook(func(empID string) {
-		if v, ok := lastKF.Load(empID); ok {
-			if t, _ := v.(time.Time); time.Since(t) < 8*time.Second {
-				return
-			}
-		}
-		lastKF.Store(empID, time.Now())
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		m, ok := h.boxes[empID]
-		if !ok || !m.clientConnected {
-			return
-		}
-		h.sendCtrlLocked(m, "force_keyframe")
+		h.NudgePublisherKeyframe(empID)
 	})
 	h.wg.Add(1)
 	go h.idleLoop()
 	return h
+}
+
+// NudgePublisherKeyframe asks the desktop client to ForceKeyFrame (2s throttle).
+func (h *Hub) NudgePublisherKeyframe(empID string) {
+	if v, ok := h.lastKeyframe.Load(empID); ok {
+		if t, _ := v.(time.Time); time.Since(t) < 2*time.Second {
+			return
+		}
+	}
+	h.lastKeyframe.Store(empID, time.Now())
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	m, ok := h.boxes[empID]
+	if !ok || !m.clientConnected {
+		return
+	}
+	h.sendCtrlLocked(m, "force_keyframe")
 }
 
 // SetCluster attaches Redis-backed tickets + publisher routing (nil = local-only).

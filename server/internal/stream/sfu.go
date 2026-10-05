@@ -215,15 +215,16 @@ func (s *SFU) CloseRoom(empID string) {
 }
 
 // WatchTrackReady returns a one-shot channel that fires when a publisher track
-// becomes available AFTER this call. If a track is already present, the channel
-// stays idle (subscriber answer should already include it).
+// becomes available. If a track is already present (race: arrived after a
+// withTrack=false answer), the channel is signaled immediately so the watcher
+// can renegotiate — leaving it idle permanently blanked LIVE tiles.
 func (s *SFU) WatchTrackReady(empID string, watcherID uint64) <-chan struct{} {
 	r := s.getOrCreateRoom(empID)
 	ch := make(chan struct{}, 1)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.track != nil {
-		// Already publishing — no late renegotiation needed.
+		ch <- struct{}{}
 		return ch
 	}
 	if r.trackReadyListeners == nil {

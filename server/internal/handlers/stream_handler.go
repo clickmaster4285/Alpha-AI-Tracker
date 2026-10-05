@@ -658,6 +658,8 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 				}
 				_ = write(map[string]string{"type": "answer", "sdp": answer})
 				if withTrack {
+					// Late joiner: VP8 decoder needs an IDR or the tile stays LIVE/black.
+					h.hub.NudgePublisherKeyframe(empID)
 					return
 				}
 				// Answer had no media — wait for publisher track, then one renegotiate.

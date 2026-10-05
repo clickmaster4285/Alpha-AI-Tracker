@@ -172,6 +172,16 @@ export function useLiveStreamSocket(
         }
         liveRef.current = true;
         setState((s) => ({ ...s, status: 'live', streaming: true }));
+        // LIVE + black / — FPS: track attached but no decoded frames (missed IDR).
+        // One recovery renegotiate after 5s if videoWidth stays 0.
+        window.setTimeout(() => {
+          if (cancelled || makingOffer.current) return;
+          const v = videoHolder.current.current;
+          if (!liveRef.current || !v || v.videoWidth > 0) return;
+          if (ws.readyState !== WebSocket.OPEN) return;
+          console.warn('[live-stream] live but no frames — renegotiating', employeeId);
+          void createOffer(ws, true);
+        }, 5000);
       };
 
       pc.onicecandidate = (ev) => {
