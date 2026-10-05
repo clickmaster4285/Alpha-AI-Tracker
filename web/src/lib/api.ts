@@ -1336,8 +1336,14 @@ export interface IceServerConfig {
 }
 
 export const liveStreamApi = {
-  employees: () =>
-    request<{ data: LiveStreamEmployee[]; total: number }>('/live-stream/employees'),
+  employees: (params?: {
+    onlineOnly?: boolean;
+    limit?: number;
+    departmentId?: number;
+  }) =>
+    request<{ data: LiveStreamEmployee[]; total: number }>('/live-stream/employees', {
+      params: params as Record<string, string | number | boolean | undefined>,
+    }),
   watchTicket: (employeeId: string) =>
     request<{
       ticket: string;
@@ -1346,6 +1352,80 @@ export const liveStreamApi = {
       /** Phase 2: publisher SFU on another instance — open the watch WS here. */
       watchBaseUrl?: string;
     }>('/live-stream/watch-ticket', { params: { employeeId } }),
+};
+
+// ──────────────────────────
+// Dashboard summary (home)
+// ──────────────────────────
+
+export interface DashboardVersionRow {
+  version: string;
+  count: number;
+}
+
+export interface DashboardTopApp {
+  appDisplayName: string;
+  processName: string;
+  sessionCount: number;
+  openNow: number;
+}
+
+export interface DashboardTopDomain {
+  domain: string;
+  visits: number;
+}
+
+export interface DashboardRecentSession {
+  id: string;
+  employeeId: string;
+  employeeName: string;
+  appDisplayName: string;
+  processName: string;
+  status: string;
+  startedAt: string;
+  endedAt?: string | null;
+  lastSyncAt?: string | null;
+}
+
+export interface DashboardSummaryResponse {
+  range: { from: string; to: string };
+  employees: { total: number; tracked: number; untracked: number };
+  activity: {
+    sessions: number;
+    webPages: number;
+    openSessions: number;
+    staleSessions: number;
+  };
+  monitoring: { unclassifiedApps: number; unclassifiedSites: number };
+  devices: {
+    active: number;
+    seen15m: number;
+    seen24h: number;
+    stale7d: number;
+    versions: DashboardVersionRow[];
+  };
+  live: {
+    online: number;
+    streaming: number;
+    consentMissing: number;
+    presenceAvailable: boolean;
+  };
+  topApps: DashboardTopApp[];
+  topDomains: DashboardTopDomain[];
+  recentSessions: DashboardRecentSession[];
+}
+
+export const dashboardApi = {
+  summary: (params: {
+    from: string;
+    to: string;
+    departmentId?: number;
+    topN?: number;
+    recentLimit?: number;
+  }) =>
+    request<DashboardSummaryResponse>('/dashboard/summary', {
+      params: params as Record<string, string | number | undefined>,
+    }),
 };
 
 export { ApiError };

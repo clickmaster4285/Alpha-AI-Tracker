@@ -1,7 +1,13 @@
 # Web Architecture — Alpha AI Tracker Dashboard
 
-> **Last audited:** 2026-10-03 (live stream V3 + Client Version via DeviceAuth)
+> **Last audited:** 2026-10-05 (dashboard summary-first home)
 > **Changelog:**
+> - 2026-10-05: **Dashboard home redesign — summary-first.**
+>   `/dashboard` consumes `dashboardApi.summary` + capped
+>   `liveStreamApi.employees({ onlineOnly, limit })` + departments filter.
+>   URL-synced `preset`/`from`/`to`/`departmentId`; per-widget skeletons; attention strip;
+>   fleet/classification/top apps/domains/recent; dismissible download strip. Components under
+>   `components/dashboard/`. Verified: `npx tsc --noEmit`; `next build`.
 > - 2026-10-03: **Client Version on employees/live-stream refreshes without re-login (server+client).**
 >   Web still reads `employee_devices.client_version` as before; server `TouchLastSeen` now
 >   updates version/platform from DeviceAuth headers so a reinstall of 1.2.33+ shows immediately.
@@ -394,7 +400,7 @@ in the `updateMutation`).
 |---|---|---|---|
 | `/login` | Login | Server (auth) | ✅ |
 | `/unauthorized` | Access denied (RouteGuard target) | — | ✅ |
-| `/dashboard` | Dashboard | Server (`GET /employees`, `/departments`, `/app-sessions?dateFrom=`, `/app-items?itemType=browser_tab&dateFrom=`) | ✅ |
+| `/dashboard` | Dashboard | Server (`GET /dashboard/summary` + capped `GET /live-stream/employees?onlineOnly&limit` + `/departments`) | ✅ |
 | `/employees` | Employee list (hides the "Login Credential" dropdown item when `emp.hasUserLogin` is true; `updateMutation` propagates name/email to the linked user via `usersApi.update` when the server's `UPDATE…RETURNING` reports `hasUserLogin`) | Server | ✅ |
 | `/employees/activity` | Activity status | Honest empty state (no endpoint) | ❌ |
 | `/employee-journey/timeline` | Session timeline | Server (`GET /app-sessions`, infinite scroll) | ✅ |

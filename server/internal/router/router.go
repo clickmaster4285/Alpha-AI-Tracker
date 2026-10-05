@@ -31,6 +31,7 @@ func Setup(
 	termsContentHandler *handlers.TermsContentHandler,
 	streamHandler *handlers.StreamHandler,
 	wsHandler *handlers.WsHandler,
+	dashboardHandler *handlers.DashboardHandler,
 ) {
 	// ─────────────────────────────
 	// Global Middleware
@@ -164,6 +165,10 @@ func Setup(
 	protected.POST("/devices/:id/revoke", authHandler.RevokeDevice)
 
 	// App Sessions listing (protected — web admin access)
+	if dashboardHandler != nil {
+		protected.GET("/dashboard/summary", dashboardHandler.GetSummary)
+	}
+
 	protected.GET("/app-sessions/usage/sessions", newSchemaHandler.ListAppSessionsForApp)
 	protected.GET("/app-sessions/usage", newSchemaHandler.ListAppSessionsUsage)
 	protected.GET("/app-sessions", newSchemaHandler.ListAppSessions)
