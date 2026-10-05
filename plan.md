@@ -1,268 +1,358 @@
 # Dashboard Redesign Plan
 
-> **Scope:** `web/src/app/(app)/dashboard/page.tsx` + new `web/src/components/dashboard/*`
-> **Goal:** Turn the dashboard into a dynamic, user-friendly ops overview that scales with real data — not another mock page.
-> **Constraint:** Prefer live APIs already in the product. No fake productivity scores. Scaffolding endpoints stay honest empty/coming-soon, never hardcoded charts like `/executive-dashboard`.
+> **Scope:** `web/src/app/(app)/dashboard/page.tsx` + new `web/src/components/dashboard/*`  
+> **Goal:** Ops command center for admins — live data only, actionable, scalable.  
+> **Audited:** 2026-10-05 against live Postgres `alpha_ai_tracker` + web/server API surface.  
+> **Constraint:** No fake productivity / executive scores. Scaffolding pages are quick-links at most.
 
 ---
 
-## 1. Why redesign
+## 0. Live DB inventory (what the dashboard should actually show)
 
-Today’s dashboard is a thin shell:
+Snapshot from the running DB (soft-deleted rows excluded where applicable):
+
+| Table / signal | Live count | Dashboard relevance |
+|---|---:|---|
+| `employees` | **53** | Headcount KPI |
+| · tracked (`tracking_status='tracked'`) | **8** | Fleet onboarding gap — **primary action** |
+| · untracked | **45** | CTA → generate secret / install client |
+| · `is_online = true` (DB flag) | **8** | Stale vs presence — **do not trust alone** |
+| `departments` | **12** | Dept tile + optional headcount bar |
+| `employee_devices` (active) | **11** | Fleet health / versions |
+| · seen last 15 min | **2** | True “recently syncing” signal |
+| · seen last 24 h | **4** | |
+| · stale ≥ 7 d | **5** | “Needs attention” |
+| Client versions in field | 1.0.0×4, 1.2.34×3, mixed older | Version fragmentation tile |
+| `app_sessions` | **3,509** | Activity core |
+| · today / 24h | **186** | KPI |
+| · `ACTIVE` open | **21** | “Apps open now” |
+| · `STALE` | **18** | Session health (orphan risk) |
+| · `CLOSED` | **3,470** | |
+| `app_items` | **94,113** | Web + journey volume |
+| · browser_tab today | **827** | KPI |
+| · browser_navigation today | **690** | Secondary |
+| `installed_applications` | **278** | Classification backlog |
+| · unclassified (type OR category null) | **278 (100%)** | **High-value admin task** |
+| `monitoring_sites` | **197** | |
+| · unclassified | **197 (100%)** | Same backlog |
+| `monitoring_types` / `categories` | 3 / **0** | Types seeded; categories empty |
+| `session_events` (today) | idle/power/lock mix | Attendance-ish raw fuel — **no org API yet** |
+| `location_samples` | **0** | Skip GPS widgets |
+| `company_holidays` | **0** | Skip holiday widget |
+| `users` / `roles` | 1 / 1 | Not workforce KPIs |
+
+**Top apps today (org SQL):** Chrome 79 · VS Code 21 · pgAdmin 14 · Search 13 · Edge 12…  
+**Top domains today:** github.com · google.com · LAN hosts · alphamonitoring… · chatgpt.com · youtube.com · web.whatsapp.com  
+**Open sessions now:** concentrated on 2 employees (MU-17, MU-90).
+
+### What this means for the home page
+
+1. **Fleet gap first** — 45/53 untracked dominates; dashboard must push install/track, not fake productivity.
+2. **Activity is rich** — sessions + web tabs today justify Top Apps / Recent / Web KPIs immediately.
+3. **Classification is empty** — Configuration backlog widget is more useful than a blank “Productive/Unproductive” card.
+4. **Presence ≠ `employees.is_online`** — devices seen_15m (2) ≠ online flag (8). Use `GET /live-stream/employees` for Online Now.
+5. **GPS / holidays / DLP / shadow-IT / AI / executive scores** — empty or scaffolding; keep off the data plane.
+6. **Attendance / hours-insights** — live per-employee only; org rollup needs a new aggregate (don’t N+1 53×).
+
+---
+
+## 1. Why redesign (current page)
 
 | Current piece | Problem |
 |---|---|
-| Full-page `Loader2` while 5 queries load | Feels slow; one slow call blocks everything |
-| 4 count-only `StatsCard`s | No trends, no actions, no “what do I do next?” |
-| Giant `DownloadAppSection` at top | Dominates the first viewport after first install |
-| “Productive / Unproductive” empty card | Dead weight; no aggregate endpoint exists |
-| 5 parallel `perPage: 1` list calls | Works for counts but won’t scale to richer widgets |
-| No date / department filter | Breaks the URL-Synced Filters Rule used elsewhere |
-| No online / live-stream signal | Presence + live-stream APIs already exist, unused here |
-
-Admins need a **command center**: who’s online, what’s happening today, where to dig in next — not four numbers and a download banner.
+| Full-page `Loader2` for 5 queries | One slow call blanks everything |
+| 4 count-only tiles | Misses the real story (45 untracked, 100% unclassified, online now) |
+| Giant `DownloadAppSection` hero | Correct for day-0, wrong every day after |
+| Productive / Unproductive empty card | No aggregate; with 0 classifications it would stay empty forever |
+| No date / department URL filters | Breaks URL-Synced Filters Rule |
+| Ignores live-stream + monitoring APIs | Best live signals unused |
 
 ---
 
 ## 2. Design principles
 
-1. **Live data only** — every number comes from an API. If data isn’t available, show a clear empty/coming-soon state (never invent scores).
-2. **Composable widgets** — each dashboard block is its own component + query. One widget failing never blanks the whole page.
-3. **Skeleton over spinner** — per-widget loading skeletons; no full-page gate.
-4. **URL is the filter source of truth** — date preset (+ optional department) via `useUrlQueryState` / `useUrlActivityFilter` (same rules as journey pages).
-5. **Actionable** — every widget links into a real module (Employees, Journey, Live Stream, Attendance, Configuration).
-6. **Scalable data path** — Phase A composes existing endpoints; Phase B adds one server aggregate so the page stays fast as employee count grows.
-7. **RBAC-aware** — hide widgets whose target module the user can’t access (`usePermissions` / `canAccess`).
-8. **Stay in the existing design system** — `StatsCard`, shadcn, Tailwind tokens, framer-motion delays already used on the page. Don’t invent a second visual language.
+1. **Live data only** — every number from an API; empty/coming-soon when missing.
+2. **Composable widgets** — own query + skeleton + error; one failure never blanks the page.
+3. **Skeleton over spinner** — per-widget loading.
+4. **URL filters** — `preset` / `from` / `to` / optional `departmentId` via `useUrlQueryState` / `useUrlActivityFilter`.
+5. **Actionable** — every widget deep-links to a real live module.
+6. **Presence from live-stream list** — not `Employee.isOnline`.
+7. **No N+1** — never fan out attendance/hours per employee on the home page.
+8. **RBAC-aware** — hide widgets whose module the user can’t access.
+9. **Existing design system** — `StatsCard`, shadcn, Tailwind tokens, light motion.
 
 ---
 
-## 3. What to remove / demote / keep
+## 3. Feature readiness matrix (other modules)
 
-### Remove
-- The full-width **Productive / Unproductive** empty card (and its journey-link footer). Productivity belongs behind a real aggregate later, or a dedicated page — not a permanent dead zone on home.
+### READY now (put on dashboard as data)
 
-### Demote
-- **`DownloadAppSection`** — move from hero position to a collapsible / dismissible footer strip (or Settings → Tracking). First-time admins still need it; daily users don’t need it above the fold. Prefer `compact` variant + local dismiss (`sessionStorage` key is OK for UI chrome only; no mock business data).
-
-### Keep (enhanced)
-- Employee / department / activity **count tiles** — but make them richer (tracked split, click-through, optional sparkline later).
-- Link-outs to Employee Journey routes (as secondary CTAs inside relevant widgets, not a standalone empty card).
-
----
-
-## 4. Target information architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ Header: greeting + date-range filter (URL-synced)               │
-├──────────┬──────────┬──────────┬──────────┬──────────┬──────────┤
-│ Employees│ Online   │ Sessions │ Web tabs │ Depts    │ Live     │
-│ total    │ now      │ (range)  │ (range)  │ count    │ streaming│
-├─────────────────────────────┬───────────────────────────────────┤
-│ Who’s Online (presence)     │ Quick Actions                     │
-│ liveStreamApi.employees     │ Employees / Live / Journey / …    │
-├─────────────────────────────┴───────────────────────────────────┤
-│ Recent Activity (latest app sessions, infinite or capped list)  │
-├─────────────────────────────┬───────────────────────────────────┤
-│ Top Apps (usage aggregate)  │ Top Sites (app-items by domain)*  │
-├─────────────────────────────┴───────────────────────────────────┤
-│ Fleet health: tracked vs untracked, stale client versions**     │
-├─────────────────────────────────────────────────────────────────┤
-│ [Dismissible] Download desktop app (compact)                    │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-\* Top Sites may start as “most recent browser_tab domains” from existing `appItemsApi.list` until a domain-aggregate endpoint exists.  
-\*\* Client version already lands on `Employee.clientVersion` / live-stream device rows — surface “unknown / outdated” lightly, don’t build a version-policy engine in Phase A.
-
----
-
-## 5. Widget catalog (components)
-
-Put all new UI under `web/src/components/dashboard/`:
-
-| Component | Job | Data source (Phase A) | Click-through |
-|---|---|---|---|
-| `DashboardHeader` | Title, short subtitle, date preset control | URL state only | — |
-| `DashboardStatGrid` | 5–6 KPI tiles | employees + departments + sessions + items + live-stream | Matching module |
-| `OnlineNowPanel` | Online / streaming employees (avatar list) | `liveStreamApi.employees()` | `/live-stream?ids=` / journey |
-| `QuickActions` | 4–6 permission-gated shortcuts | none | fixed routes |
-| `RecentSessions` | Latest sessions across org (or empty if no `employeeId` filter) | `appSessionsApi.list` | `/employee-journey/timeline?employeeId=` |
-| `TopAppsWidget` | Top apps by duration in range | `appSessionsApi.usage` (needs `employeeId` today — see §6) | `/employee-journey/apps` |
-| `ClassificationPulse` | Unclassified apps/sites counts | `monitoringApi` list totals / filters | `/configuration/apps` · `/websites` |
-| `FleetHealthCard` | Tracked vs untracked + optional version note | `employeesApi.list` status filters | `/employees` |
-| `DownloadAppStrip` | Compact dismissible installer CTA | GitHub release (existing) | dialog |
-
-Each widget owns:
-- its `useQuery` (or receives data from a thin `useDashboardData` facade),
-- loading skeleton,
-- error + empty states,
-- optional `module` gate.
-
-Page file stays thin: layout + filter state + composition only.
-
----
-
-## 6. Data strategy
-
-### Phase A — Web-only, existing APIs (ship first)
-
-Use what already works:
-
-| Need | Endpoint | Notes |
+| Info | Source | Notes |
 |---|---|---|
-| Totals | `employeesApi.list({ perPage: 1, status? })` | Keep count pattern |
-| Departments | `departmentsApi.list()` | Already unpaged |
-| Sessions / web in range | `appSessionsApi.list` / `appItemsApi.list` with `dateFrom`/`dateTo` | Drive from URL preset |
-| Online / streaming | `liveStreamApi.employees()` | Poll ~10–15s (`staleTime`/`refetchInterval`) like live-stream page, lighter cadence |
-| Classification backlog | `monitoringApi` apps/websites with unclassified filter | Count from `total` |
-| Attendance today | **Skip org-wide** in Phase A | `attendanceApi` is per-`employeeId` only — don’t N+1 |
+| Employees total / tracked / untracked | `employeesApi.list({ status, perPage: 1 })` | Matches DB 53 / 8 / 45 |
+| Departments (+ headcounts) | `departmentsApi.list()` | 12 depts; `employeeCount` on rows |
+| Sessions in date range | `appSessionsApi.list` **org-wide** (`employeeId` optional) | Indexed `started_at` |
+| Browser tabs in range | `appItemsApi.list({ itemType: 'browser_tab' })` org-wide | |
+| Open / usage rollup | `appSessionsApi.usage` **org-wide** (`employeeId` optional) | `openSessionCount`, `totalSessionCount`, top rows |
+| Online / streaming / consent gaps | `liveStreamApi.employees()` | Prefer over DB `is_online` |
+| Unclassified apps / sites | `monitoringApi.apps/websites.list({ unclassified: true, perPage: 1 })` | Live DB: 278 / 197 |
+| Client version (weak) | `Employee.clientVersion` on employee list page | No org device list in `api.ts` yet |
+| Shifts count | `shiftsApi.listAll()` | Config context only |
 
-**Gaps to handle honestly in Phase A:**
+### PARTIAL (deep-link only until aggregate exists)
 
-1. **`appSessionsApi.usage` is employee-scoped today** — Top Apps either (a) requires a department/employee filter, or (b) is deferred until Phase B. Prefer (b) over hammering every employee.
-2. **Recent Sessions org-wide** — `GET /app-sessions` already supports listing without employee filter (confirm in handler); if not, show the widget only when an employee is selected, or defer.
-3. **No productivity %** — do not revive the empty Productive/Unproductive card or copy executive-dashboard mock bars.
+| Feature | Why not a home KPI yet |
+|---|---|
+| Attendance today present/late/absent | `attendanceApi.today/range` **requires `employeeId`** — page already N+1s up to 100 |
+| Hours insights productive split | `GET /hours-insights` **requires `employeeId`** |
+| Device `lastSeenAt` / platform distribution | Server `GET /employees/:id/devices` exists; **no web `devicesApi`**, no org endpoint |
+| Session events (idle/power) | Sync-only; no admin list/aggregate |
+| Location / geofence | Tables exist; `location_samples=0`; UI gated `LOCATION_UI_ENABLED=false` |
+| Terms consent | Per-employee; consent-missing already on live-stream list |
 
-### Phase B — Server aggregate (scalability)
+### SCAFFOLDING — quick-links only (never data tiles)
 
-Add **one** JWT-protected endpoint, e.g.:
+`/executive-dashboard` (hardcoded), `/shadow-it`, `/dlp-alerts`, `/dlp-rules`, `/productivity-scoring`, `/ai-summary`, `/reports`, `/screenshots`, `/employees/activity`, `/logs/insights`, `/logs/graphical`, `/configuration/productivity-rules`, KPIs/goals/projects/emails/charts/*, billing mocks.
+
+**Live destinations for Quick Actions:** Employees, Departments, Live Stream, Session Timeline, App Usage, Web Activity, Configuration Apps/Websites, Attendance (per-employee page), Hours Insights (per-employee).
+
+---
+
+## 4. Information the dashboard SHOULD show (ranked)
+
+### Tier A — ship in Phase 0–1 (proven in DB + APIs)
+
+1. **Workforce KPIs** — Total · Tracked · Untracked (emphasize untracked CTA).
+2. **Activity KPIs** — App sessions (range) · Web tabs (range) · Open sessions now (`usage.openSessionCount` or ACTIVE count).
+3. **Presence KPI** — Online now · Streaming now (from live-stream list).
+4. **Departments** — count; optional mini list of top depts by `employeeCount` (Marketing 31, Web-Dev 13…).
+5. **Online Now panel** — avatars/names from `liveStreamApi.employees`, link to theater/`?ids=`.
+6. **Fleet Health** — tracked/untracked + “X devices on old client versions” (from employee list `clientVersion` sample, honest about incompleteness).
+7. **Classification backlog** — unclassified apps/sites totals → Configuration.
+8. **Quick Actions** — permission-gated links to live modules only.
+9. **Dismissible download strip** — footer, not hero.
+
+### Tier B — Phase 2 (org-wide lists already work)
+
+10. **Recent Sessions** — `appSessionsApi.list` org-wide, capped (e.g. 10), `SessionStatusBadge`, deep-link journey.
+11. **Top Apps** — `appSessionsApi.usage` org-wide, `perPage: 5–8`, date range from URL (DB already proves Chrome/VS Code/…).
+12. **STALE session callout** — count of `status=STALE` if cheap (usage or dedicated filter); else fold into Fleet/Activity footnote.
+
+### Tier C — Phase 3 server summary (scale + missing joins)
+
+13. **Top Domains** — needs SQL `GROUP BY domain` (list API doesn’t aggregate).
+14. **Single `GET /dashboard/summary`** — collapse KPI fan-out; include top apps/domains + unclassified + open/stale.
+15. **Org attendance today** — present/late/absent (new aggregate over schedules + session_events).
+16. **Org hours-insights rollup** — productive/unproductive once classifications exist (today 0% classified → scores would be meaningless).
+17. **Fleet device summary** — last_seen buckets + version histogram from `employee_devices` (DB already has it).
+
+### Explicitly OUT of the dashboard data plane
+
+- Productive % / org productivity score / cost-per-hour (executive mock).
+- DLP / Shadow IT / AI summary / custom reports.
+- GPS map / geofence alerts (empty + UI gated).
+- Holidays strip (table empty; not home-critical).
+- Screenshot wall.
+
+---
+
+## 5. Target layout
 
 ```
-GET /api/v1/dashboard/summary?from=&to=&departmentId=
+┌──────────────────────────────────────────────────────────────────┐
+│ Header: title + date preset (URL) [+ optional department]        │
+├────────┬────────┬────────┬────────┬────────┬─────────────────────┤
+│ Total  │Tracked │Online  │Sessions│Web tabs│ Open sessions       │
+│ emps   │/Untrk  │ now    │(range) │(range) │ now                 │
+├────────────────────────────┬─────────────────────────────────────┤
+│ Who’s Online (presence)    │ Fleet Health                         │
+│ live-stream employees      │ untracked · stale clients · versions │
+├────────────────────────────┴─────────────────────────────────────┤
+│ Classification backlog     │ Quick Actions (live modules only)    │
+│ apps + sites unclassified  │ Employees · Live · Journey · Config  │
+├────────────────────────────┬─────────────────────────────────────┤
+│ Top Apps (usage, range)    │ Recent Sessions (status badges)      │
+├────────────────────────────┴─────────────────────────────────────┤
+│ [Dismissible] Download desktop app (compact)                     │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-Returns a single payload shaped for the home page:
+Later (Phase 3): Top Domains column beside Top Apps; Attendance Today strip when aggregate lands.
+
+---
+
+## 6. Widget catalog (`web/src/components/dashboard/`)
+
+| Component | Job | Phase A source | Click-through |
+|---|---|---|---|
+| `DashboardHeader` | Title + URL date/dept filters | URL only | — |
+| `DashboardStatGrid` | Tier A KPI tiles | employees ×2, sessions, items, live-stream, usage | matching modules |
+| `OnlineNowPanel` | Online / streaming list | `liveStreamApi.employees` (poll 10–15s) | `/live-stream` |
+| `FleetHealthCard` | Untracked + version note | employees tracked/untracked + list sample | `/employees` |
+| `ClassificationPulse` | Unclassified apps/sites | `monitoringApi` `unclassified=true` totals | `/configuration/apps` · `/websites` |
+| `QuickActions` | RBAC-gated shortcuts | none | live routes only |
+| `TopAppsWidget` | Top apps in range | `appSessionsApi.usage` org-wide | `/employee-journey/apps` |
+| `RecentSessions` | Latest sessions | `appSessionsApi.list` org-wide | `/employee-journey/timeline?employeeId=` |
+| `DownloadAppStrip` | Compact dismissible CTA | existing GitHub fetch | dialog |
+| `TopDomainsWidget` | Top sites | **Phase 3** summary SQL | `/employee-journey/web` |
+| `AttendanceTodayStrip` | Present/late/absent | **Phase 3** aggregate | `/attendance` |
+
+Each widget: own `useQuery`, skeleton, empty/error, optional `module` gate. Page stays a thin composition shell.
+
+---
+
+## 7. Data strategy
+
+### Phase A — compose existing APIs (no server change)
+
+| Need | Call | Verified |
+|---|---|---|
+| Headcount splits | `employeesApi.list({ perPage:1, status? })` | DB 53/8/45 |
+| Depts | `departmentsApi.list()` | 12 rows |
+| Sessions / tabs in range | list APIs + `dateFrom`/`dateTo` | org-wide OK |
+| Open sessions | `appSessionsApi.usage` → `openSessionCount` | org-wide OK |
+| Top apps | `appSessionsApi.usage` + small `perPage` | org-wide OK (was wrongly assumed employee-only) |
+| Online / streaming | `liveStreamApi.employees()` | presence contract |
+| Unclassified | monitoring list `unclassified=true` | 278 / 197 |
+| Attendance / hours org | **skip** | would N+1 |
+
+**Do not** use `Employee.isOnline` for “Online now”.  
+**Do not** show productivity % until classifications + hours org rollup exist (today: 0 classified apps).
+
+### Phase B — `GET /api/v1/dashboard/summary` (JWT `protected`)
+
+One payload for scale (94k `app_items` already; fan-out will hurt):
 
 ```json
 {
-  "employees": { "total": 0, "tracked": 0, "untracked": 0, "online": 0 },
-  "activity": {
-    "sessions": 0,
-    "webPages": 0,
-    "topApps": [{ "name": "", "processName": "", "durationSeconds": 0, "sessionCount": 0 }],
-    "topDomains": [{ "domain": "", "visits": 0 }]
+  "employees": { "total": 53, "tracked": 8, "untracked": 45 },
+  "devices": {
+    "active": 11,
+    "seen15m": 2,
+    "seen24h": 4,
+    "stale7d": 5,
+    "versions": [{ "version": "1.2.34", "count": 3 }]
   },
-  "monitoring": { "unclassifiedApps": 0, "unclassifiedSites": 0 },
-  "live": { "streaming": 0, "wsConnected": 0 }
+  "activity": {
+    "sessions": 186,
+    "webPages": 827,
+    "openSessions": 21,
+    "staleSessions": 18,
+    "topApps": [{ "name": "Google Chrome", "sessionCount": 79, "openNow": 4 }],
+    "topDomains": [{ "domain": "github.com", "visits": 100 }]
+  },
+  "monitoring": { "unclassifiedApps": 278, "unclassifiedSites": 197 },
+  "live": { "online": 0, "streaming": 0, "consentMissing": 0 }
 }
 ```
 
-Rules:
-- One round-trip; indexes already on `app_sessions` / `app_items` cover date windows.
-- Top-N capped (e.g. 5) in SQL — never return raw row floods to the dashboard.
-- Online counts may still come from the live-stream/presence path (or Redis) so the summary doesn’t fight the presence contract.
-- Web switches widgets to `dashboardApi.summary` while keeping `liveStreamApi.employees` for the avatar list (needs names).
+- Date + optional `departmentId` query params.  
+- Top-N capped in SQL (`LIMIT 5–8`).  
+- Use indexes already on `app_sessions` / `app_items` (emp+started/opened).  
+- `live.*` may still be filled from presence/Redis to match live-stream semantics.  
+- Web keeps `liveStreamApi.employees` for the avatar list; summary owns the counts/tops.
 
-Phase B is the **scalability** story; Phase A must still feel useful without it.
+### Phase C — later aggregates (separate tickets)
+
+- `GET /attendance/summary?date=` — org present/late/absent.  
+- `GET /hours-insights/org` — only valuable after Configuration classification work.  
+- Wire `devicesApi` or fold devices into summary (prefer summary).
 
 ---
 
-## 7. UX details
+## 8. UX details
 
-### Filters (URL-Synced Filters Rule)
-- Keys: `preset=today|7d|30d|all|custom`, `from`, `to`, optional `departmentId`.
-- Default: **Today** (local day bounds), matching journey pages.
-- No Clear-X on search; department clear = “All departments”.
-- Wrap page in `<Suspense>` because of `useSearchParams`.
+### Filters
+- `preset=today|7d|30d|all|custom`, `from`, `to`, optional `departmentId`.  
+- Default **Today** (local day bounds).  
+- `<Suspense>` around the page body.
 
-### Loading
-- Grid of skeletons matching tile/widget geometry.
-- Widgets appear independently as queries resolve (`isLoading` per card).
-
-### Empty states
-- Zero employees → CTA to `/employees` + compact download strip.
-- Zero activity in range → “No activity in this period” + link to widen preset.
-- Zero online → calm empty, not an error.
+### Loading / empty
+- Per-widget skeletons.  
+- Zero tracked employees → strong CTA: download strip + `/employees`.  
+- Zero online → calm empty (not an error).  
+- 100% unclassified → ClassificationPulse is a warning style, not empty.
 
 ### Density
-- Desktop: 12-col grid; KPI row full width; Online + Quick Actions side-by-side; Recent Activity full width; Top/Classification secondary row.
-- Mobile: single column; Online list capped + “View all”.
-
-### Motion
-- Keep light entrance delays on KPI tiles (existing `StatsCard` pattern).
-- No decorative chart animation without real data.
+- Desktop 12-col; KPI row; Online + Fleet side-by-side; Classification + Quick Actions; Top Apps + Recent.  
+- Mobile single column; Online capped + “View all”.
 
 ### Permissions
-- Hide Live / Journey / Configuration widgets when `canAccess` is false.
-- Dashboard module itself stays the landing page for any authenticated admin who can see it.
+- Hide Live / Journey / Configuration / Attendance links when `canAccess` is false.
 
 ---
 
-## 8. Implementation phases
+## 9. Implementation phases
 
-### Phase 0 — Structure (half day)
-1. Extract page into composition shell.
-2. Create `components/dashboard/` folder + barrel.
-3. Move Download strip to bottom; add dismiss.
-4. Delete Productive/Unproductive empty card.
-5. Add URL date preset + skeletons.
+### Phase 0 — Structure
+1. Thin page shell + `components/dashboard/`.  
+2. Remove Productive/Unproductive card.  
+3. Download → dismissible footer (`compact`).  
+4. URL date preset + skeletons.
 
-### Phase 1 — KPI + presence (1 day)
-1. `DashboardStatGrid` with independent queries + click-through.
-2. `OnlineNowPanel` from `liveStreamApi.employees`.
-3. `QuickActions` + `FleetHealthCard`.
-4. Verify: `npx tsc --noEmit`, `next build`, manual load with 0 and N employees.
+### Phase 1 — KPIs + presence + fleet + classification
+1. `DashboardStatGrid` (independent queries, click-through).  
+2. `OnlineNowPanel` (`liveStreamApi`).  
+3. `FleetHealthCard` + `ClassificationPulse` + `QuickActions`.  
+4. Verify against live DB totals (53 / 8 / 45, 278 / 197 unclassified).  
+5. `npx tsc --noEmit`, `next build`.
 
-### Phase 2 — Activity widgets (1–2 days)
-1. `RecentSessions` (org or filtered).
-2. `ClassificationPulse` from monitoring APIs.
-3. Top Apps/Sites only if data path is honest; otherwise stub with “Needs aggregate endpoint” empty (no fake chart).
-4. Wire deep-links with `employeeId` where relevant.
+### Phase 2 — Activity widgets
+1. `TopAppsWidget` via org `usage`.  
+2. `RecentSessions` via org list + `SessionStatusBadge`.  
+3. Deep-links with `employeeId`.
 
-### Phase 3 — Server summary (1–2 days, optional but recommended before large fleets)
-1. `DashboardService` + handler + route under JWT group.
-2. SQL aggregates + top-N.
-3. Web `dashboardApi.summary`; collapse Phase A fan-out.
-4. `go build` / `go vet`; smoke against live DB.
+### Phase 3 — Server summary (recommended soon — 94k items)
+1. `DashboardService` + handler + `GET /dashboard/summary`.  
+2. Top domains + device version histogram + stale session counts.  
+3. Web `dashboardApi.summary`; collapse fan-out.  
+4. `go build` / `go vet`; smoke SQL against live DB.
 
-### Out of scope (explicit)
-- Rebuilding `/executive-dashboard` mock charts.
-- Org-wide attendance heatmaps (needs new attendance aggregate).
-- AI summary / productivity scoring integration until those backends exist.
-- Client/installer changes (web-only feature).
-
----
-
-## 9. File touch list (expected)
-
-**Web (Phase 0–2)**
-- `web/src/app/(app)/dashboard/page.tsx` — thin shell
-- `web/src/components/dashboard/*` — new widgets
-- `web/src/lib/api.ts` — only if Phase 3 adds `dashboardApi`
-- Possibly reuse `StatsCard`, `EmptyState`, `SessionStatusBadge`, `useUrlActivityFilter`
-
-**Server (Phase 3 only)**
-- `server/internal/handlers/dashboard_handler.go` (new)
-- `server/internal/services/dashboard_service.go` (new)
-- `server/internal/repository/…` aggregate queries
-- `server/internal/router/router.go` — `GET /dashboard/summary` on `protected`
-
-No migrations expected if aggregates use existing tables/indexes.
+### Out of scope
+- Executive/shadow-IT/DLP/AI/productivity mock tiles.  
+- Org attendance/hours until Phase C.  
+- GPS widgets while samples=0 / UI gated.  
+- Client/installer changes.
 
 ---
 
-## 10. Acceptance criteria
+## 10. File touch list
 
-- [ ] First paint shows skeletons, not a centered spinner.
-- [ ] KPI numbers match existing list totals for the same filters.
-- [ ] Online panel reflects `liveStreamApi` presence without opening WebRTC.
-- [ ] Date preset changes URL and re-keys queries.
-- [ ] Download banner is not the visual hero; can be dismissed for the session.
-- [ ] Productive/Unproductive dead card is gone.
-- [ ] No hardcoded mock series (unlike current executive dashboard).
-- [ ] Widgets respect RBAC (hidden when module inaccessible).
-- [ ] `npx tsc --noEmit` clean; `next build` registers `/dashboard`.
-- [ ] (Phase 3) Single summary request replaces the multi-count fan-out for KPIs/top lists.
+**Web (0–2):**  
+`web/src/app/(app)/dashboard/page.tsx`, `web/src/components/dashboard/*`, reuse `StatsCard` / `EmptyState` / `SessionStatusBadge` / `useUrlActivityFilter`.
+
+**Web + Server (3):**  
+`web/src/lib/api.ts` (`dashboardApi`),  
+`server/internal/handlers/dashboard_handler.go`,  
+`server/internal/services/dashboard_service.go`,  
+repo aggregate queries,  
+`server/internal/router/router.go` (`protected` group).
+
+No migrations if Phase 3 only aggregates existing tables.
 
 ---
 
-## 11. Suggested default build order
+## 11. Acceptance criteria
 
-1. Approve this plan (adjust widget set if you want attendance/GPS later).
-2. Implement Phase 0 + 1 (structure, KPIs, online, quick actions).
-3. Implement Phase 2 activity/classification.
-4. Decide Phase 3 based on real employee volume / page load feel.
+- [ ] Skeletons, not a full-page spinner.  
+- [ ] KPIs match live list totals for the same filters (spot-check vs DB: 53 / 8 / 45).  
+- [ ] Untracked and unclassified are visually first-class (the real admin pain today).  
+- [ ] Online panel uses live-stream presence, not `is_online`.  
+- [ ] Top Apps renders real org usage for Today (Chrome etc.), no mock series.  
+- [ ] Productive/Unproductive dead card gone; no executive fake charts.  
+- [ ] Download strip dismissed to footer / session-dismissible.  
+- [ ] URL date preset re-keys queries; page wrapped in Suspense.  
+- [ ] RBAC hides inaccessible module widgets/links.  
+- [ ] `npx tsc --noEmit` clean; `next build` ok.  
+- [ ] (Phase 3) One summary call feeds KPIs + top apps/domains + device buckets.
 
-When you say go, start with Phase 0 + 1 unless you want Phase 3 (server summary) first.
+---
+
+## 12. Build order
+
+1. **Phase 0 + 1** — structure, KPIs, online, fleet, classification (highest value vs current empty shell).  
+2. **Phase 2** — Top Apps + Recent Sessions.  
+3. **Phase 3** — `dashboard/summary` once fan-out or Top Domains is needed (recommended given 94k `app_items`).  
+4. **Phase C** — attendance/hours org aggregates only after Product wants them (and after classification starts filling).
+
+Say **go** to start Phase 0 + 1.
