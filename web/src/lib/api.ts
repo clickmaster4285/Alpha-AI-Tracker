@@ -1007,10 +1007,13 @@ export interface AttendanceRangeResponse {
   totalPages: number;
 }
 
+export type HolidayStatus = 'pending' | 'approved' | 'rejected';
+
 export interface Holiday {
   id: number;
   date: string;
   label: string;
+  status: HolidayStatus;
 }
 
 export interface HolidayListResponse {
@@ -1021,6 +1024,7 @@ export interface HolidayListResponse {
 export interface HolidayInput {
   date: string;
   label: string;
+  status: HolidayStatus;
 }
 
 export const attendanceApi = {

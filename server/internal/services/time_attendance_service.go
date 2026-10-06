@@ -56,11 +56,11 @@ func (s *TimeAttendanceService) ListHolidays(ctx context.Context) ([]dto.Holiday
 }
 
 func (s *TimeAttendanceService) CreateHoliday(ctx context.Context, input dto.HolidayInput) (*dto.HolidayResponse, error) {
-	date, label, err := validateHoliday(input)
+	date, label, status, err := validateHoliday(input, true)
 	if err != nil {
 		return nil, err
 	}
-	row, err := s.repo.CreateHoliday(ctx, date, label)
+	row, err := s.repo.CreateHoliday(ctx, date, label, status)
 	if err != nil {
 		return nil, err
 	}
@@ -69,11 +69,11 @@ func (s *TimeAttendanceService) CreateHoliday(ctx context.Context, input dto.Hol
 }
 
 func (s *TimeAttendanceService) UpdateHoliday(ctx context.Context, id int, input dto.HolidayInput) (*dto.HolidayResponse, error) {
-	date, label, err := validateHoliday(input)
+	date, label, status, err := validateHoliday(input, false)
 	if err != nil {
 		return nil, err
 	}
-	row, err := s.repo.UpdateHoliday(ctx, id, date, label)
+	row, err := s.repo.UpdateHoliday(ctx, id, date, label, status)
 	if err != nil || row == nil {
 		return nil, err
 	}
@@ -373,16 +373,29 @@ func inactiveSeconds(events []models.SessionEvent, start, end time.Time) float64
 	return math.Max(0, total)
 }
 
-func validateHoliday(input dto.HolidayInput) (time.Time, string, error) {
+func validateHoliday(input dto.HolidayInput, isCreate bool) (time.Time, string, string, error) {
 	date, err := time.Parse("2006-01-02", input.Date)
 	if err != nil {
-		return time.Time{}, "", fmt.Errorf("date must be YYYY-MM-DD")
+		return time.Time{}, "", "", fmt.Errorf("date must be YYYY-MM-DD")
 	}
 	label := strings.TrimSpace(input.Label)
 	if label == "" {
-		return time.Time{}, "", fmt.Errorf("holiday label is required")
+		return time.Time{}, "", "", fmt.Errorf("holiday label is required")
 	}
-	return date, label, nil
+	status := strings.ToLower(strings.TrimSpace(input.Status))
+	if status == "" {
+		if isCreate {
+			status = "pending"
+		} else {
+			return time.Time{}, "", "", fmt.Errorf("status is required")
+		}
+	}
+	switch status {
+	case "pending", "approved", "rejected":
+	default:
+		return time.Time{}, "", "", fmt.Errorf("status must be pending, approved, or rejected")
+	}
+	return date, label, status, nil
 }
 
 func holidayResponses(rows []repository.HolidayRecord) []dto.HolidayResponse {
@@ -394,7 +407,13 @@ func holidayResponses(rows []repository.HolidayRecord) []dto.HolidayResponse {
 }
 
 func holidayResponse(row repository.HolidayRecord) dto.HolidayResponse {
-	return dto.HolidayResponse{ID: row.ID, Date: row.Date.Format("2006-01-02"), Label: row.Label}
+	status := row.Status
+	if status == "" {
+		status = "approved"
+	}
+	return dto.HolidayResponse{
+		ID: row.ID, Date: row.Date.Format("2006-01-02"), Label: row.Label, Status: status,
+	}
 }
 
 func maxTime(a, b time.Time) time.Time {
