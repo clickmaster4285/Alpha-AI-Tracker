@@ -10,7 +10,7 @@ import {
   Building2, Target, Shield, Radio, Mail, FolderKanban, Sparkles,
   Clock, Settings, ChevronLeft, ChevronDown, ChevronRight, X,
   ClipboardList, UserCheck, MapPin, Trophy, FileBarChart, AlertTriangle,
-  Eye, Briefcase, CalendarDays, Navigation, Route,
+  Eye, CalendarDays, Navigation, Route,
   Monitor,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
@@ -51,12 +51,6 @@ const navSections: NavSection[] = [
         icon: LayoutDashboard,
         path: "/dashboard",
         module: "dashboard",
-      },
-      {
-        label: "Employee Portal",
-        icon: Briefcase,
-        path: "/employee-portal",
-        module: "employee-portal",
       },
     ],
   },

@@ -294,7 +294,6 @@ web/
             ├── shadow-it/          # Shadow IT (mock data)
             ├── ai-summary/         # AI Summary (mock data)
             ├── onboarding/         # Onboarding (mock data)
-            ├── employee-portal/    # Employee portal (mock data)
             ├── projects/           # Projects (mock data)
             │
             └── settings/
@@ -443,7 +442,6 @@ in the `updateMutation`).
 | `/projects` | Projects | Hardcoded demo data (scaffolding) | ❌ |
 | `/ai-summary` | AI Summary | Honest empty state (no endpoint) | ❌ |
 | `/onboarding` | Onboarding | Hardcoded demo data (scaffolding) | ❌ |
-| `/employee-portal` | Employee portal | Hardcoded demo data (scaffolding) | ❌ |
 | `/settings` | General settings | Static hub page | ❌ |
 | `/settings/tracking` | Tracking settings | In-memory session state only (explicit non-persistence notice) | ❌ |
 | `/settings/user-management` | User management (CRUD + role assignment, infinite scroll; create-from-employee form locks `name`/`email`/`employeeId` and excludes the `company_admin` role; new per-row **Edit** button opens the same dialog in edit mode via `?edit=1&userId=…` — **hidden for the system `company_admin` user**; password + confirm-password with eye toggles; on save, if the edited user has an `employeeId` the client also calls `employeesApi.update` to sync name/email to the attached employee) | Server (`/users`, `/roles`, `/employees`) | ✅ |

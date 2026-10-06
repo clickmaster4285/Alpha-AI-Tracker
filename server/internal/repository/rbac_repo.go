@@ -57,6 +57,16 @@ func (r *RBACRepo) UpsertSubmodule(ctx context.Context, moduleID int, key, name,
 	return id, nil
 }
 
+// DeleteSubmoduleByKey removes a catalog key and its role grants (FK cascade).
+// Used when a submodule leaves the product so existing databases drop it on boot.
+func (r *RBACRepo) DeleteSubmoduleByKey(ctx context.Context, key string) error {
+	_, err := r.pool.Exec(ctx, `DELETE FROM submodules WHERE key = $1`, key)
+	if err != nil {
+		return fmt.Errorf("delete submodule %s: %w", key, err)
+	}
+	return nil
+}
+
 // EnsureRole creates the role when missing (never renames an existing one), returning its id.
 func (r *RBACRepo) EnsureRole(ctx context.Context, name, description string, isSystem bool) (int, error) {
 	var id int

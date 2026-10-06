@@ -31,7 +31,6 @@ const pageTitles: Record<string, string> = {
   "/settings": "Settings",
   "/settings/tracking": "Tracking Settings",
   "/onboarding": "Onboarding",
-  "/employee-portal": "Employee Portal",
   "/timesheets": "Timesheets",
   "/attendance": "Attendance Log",
   "/shifts": "Shift Management",
