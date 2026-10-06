@@ -41,7 +41,6 @@ var rbacCatalog = []moduleSeed{
 		Key: "hr", Name: "HR", SortOrder: 2,
 		Submodules: []submodulesSeed{
 			{Key: "users", Name: "Employees", Route: "/employees"},
-			{Key: "users/activity", Name: "Activity Status", Route: "/employees/activity"},
 			{Key: "departments", Name: "Departments", Route: "/departments"},
 			{Key: "roles", Name: "Roles", Route: "/roles"},
 			{Key: "kpis", Name: "KPIs & KRAs", Route: "/kpis"},
@@ -149,7 +148,7 @@ func (s *RBACService) SeedCatalog(ctx context.Context) error {
 	}
 
 	// Drop permissions for routes that left the product. Idempotent on every boot.
-	for _, key := range []string{"employee-portal"} {
+	for _, key := range []string{"employee-portal", "users/activity"} {
 		if err := s.repo.DeleteSubmoduleByKey(ctx, key); err != nil {
 			return err
 		}

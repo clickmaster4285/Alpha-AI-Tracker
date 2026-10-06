@@ -9,7 +9,6 @@ import TopBar from "./TopBar";
 const pageTitles: Record<string, string> = {
   "/dashboard": "Dashboard",
   "/employees": "Employees",
-  "/employees/activity": "User Activity Status",
   "/apps": "Apps and Websites",
   "/configuration/apps": "Applications",
   "/configuration/websites": "Websites",

@@ -69,11 +69,6 @@ const navSections: NavSection[] = [
             module: "users",
           },
           {
-            label: "Activity Status",
-            path: "/employees/activity",
-            module: "users/activity",
-          },
-          {
             label: "Departments",
             path: "/departments",
             module: "departments",

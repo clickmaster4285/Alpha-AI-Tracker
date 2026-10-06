@@ -246,10 +246,9 @@ web/
             ├── layout.tsx       # Wraps children with ProtectedRoute + AppLayout
             │
             ├── dashboard/       # Dashboard: stats cards, best performer, chart (mock data)
-            ├── employees/       # Employees list: CRUD via real API, generate secret dialog,
-            │   └── activity/    #   action menu deep-links to Journey/Device Specs
-            │                    #   (activity status: mock data; the /employees/[id] detail
-            │                    #   page was removed 2026-08-18 — see Employee Journey/Device Specs)
+            ├── employees/       # Employees list: CRUD via real API, generate secret dialog;
+            │                    #   action menu deep-links to Journey/Device Specs
+            │                    #   (/employees/[id] detail page removed 2026-08-18)
             ├── departments/     # Department CRUD via real API
             │
             ├── employee-journey/# Per-employee journey, shared EmployeePage shell + picker
@@ -401,7 +400,6 @@ in the `updateMutation`).
 | `/unauthorized` | Access denied (RouteGuard target) | — | ✅ |
 | `/dashboard` | Dashboard | Server (`GET /dashboard/summary` + capped `GET /live-stream/employees?onlineOnly&limit` + `/departments`) | ✅ |
 | `/employees` | Employee list (hides the "Login Credential" dropdown item when `emp.hasUserLogin` is true; `updateMutation` propagates name/email to the linked user via `usersApi.update` when the server's `UPDATE…RETURNING` reports `hasUserLogin`) | Server | ✅ |
-| `/employees/activity` | Activity status | Honest empty state (no endpoint) | ❌ |
 | `/employee-journey/timeline` | Session timeline | Server (`GET /app-sessions`, infinite scroll) | ✅ |
 | `/employee-journey/apps` | App usage | Server (`GET /app-sessions/usage` per-app aggregate + `GET /app-sessions/usage/sessions` per-app paginated list, fired on chevron expand since 2026-09-04) | ✅ |
 | `/employee-journey/web` | Web activity | Server (`GET /app-items?itemType=browser_tab`) | ✅ |
