@@ -24,6 +24,7 @@ import {
 } from 'recharts';
 import ActivityFilters from '@/components/journey/ActivityFilters';
 import EmptyState from '@/components/employees/EmptyState';
+import EmployeeSelector from '@/components/EmployeeSelector';
 import StatsCard from '@/components/ui/StatsCard';
 import {
   Select,
@@ -35,7 +36,6 @@ import {
 import { useUrlActivityFilter } from '@/hooks/use-url-activity-filter';
 import {
   departmentsApi,
-  employeesApi,
   logGraphicalApi,
   type LogGraphicalResponse,
 } from '@/lib/api';
@@ -103,17 +103,6 @@ function GraphicalInner() {
       ? departments.find((d) => d.id === departmentId)?.name
       : undefined;
 
-  const employeesQuery = useQuery({
-    queryKey: ['logs-graphical', 'employees', departmentName ?? null],
-    queryFn: () =>
-      employeesApi.list({
-        perPage: 100,
-        department: departmentName,
-      }),
-    staleTime: 5 * 60_000,
-  });
-
-  const employees = employeesQuery.data?.data ?? [];
   const data = chartQuery.data;
 
   return (
@@ -157,22 +146,13 @@ function GraphicalInner() {
                 ))}
               </SelectContent>
             </Select>
-            <Select
-              value={employeeId ?? 'all'}
-              onValueChange={(value) => setExtra({ employeeId: value === 'all' ? '' : value })}
-            >
-              <SelectTrigger className="h-9 w-full bg-background sm:w-56" aria-label="Employee">
-                <SelectValue placeholder="All employees" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All employees</SelectItem>
-                {employees.map((e) => (
-                  <SelectItem key={e.employeeId} value={e.employeeId}>
-                    {e.name} ({e.employeeId})
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <EmployeeSelector
+              value={employeeId ?? ''}
+              allowAll
+              department={departmentName}
+              className="max-w-none sm:w-64 bg-background"
+              onChange={(emp) => setExtra({ employeeId: emp?.employeeId ?? '' })}
+            />
           </div>
           <ActivityFilters
             value={filter}
