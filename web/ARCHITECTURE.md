@@ -266,7 +266,7 @@ web/
             ├── logs/
             │   ├── comprehensive/  # Activity logs with filtering (real API)
             │   ├── insights/       # Log insights digest (live GET /logs/insights)
-            │   └── graphical/      # Graphical logs (mock data)
+            │   └── graphical/      # Graphical logs (live GET /logs/graphical)
             │
             ├── charts/
             │   ├── productivity/   # Productivity chart (mock data)
@@ -413,7 +413,7 @@ in the `updateMutation`).
 | `/roles` | Roles + per-submodule permission toggles | Server (`GET /modules`, `/roles` CRUD) | ✅ |
 | `/logs/comprehensive` | Activity logs | Server | ✅ |
 | `/logs/insights` | Log insights digest (metrics, productivity mix, top apps/domains, idle outliers, rule-based findings) | Server (`GET /logs/insights` — `from`/`to` + optional `departmentId`/`employeeId`) | ✅ |
-| `/logs/graphical` | Graphical logs | Honest empty state (no endpoint) | ❌ |
+| `/logs/graphical` | Graphical logs (activity + productivity time series, top apps/domains) | Server (`GET /logs/graphical` — `from`/`to` + optional `departmentId`/`employeeId`; hour/day buckets) | ✅ |
 | `/charts/productivity` | Productivity chart | Hardcoded Recharts demo data | ❌ |
 | `/charts/activity` | Activity chart | Hardcoded Recharts demo data | ❌ |
 | `/configuration/apps` | Applications classification | Server (`GET/PATCH /monitoring/apps`) | ✅ |

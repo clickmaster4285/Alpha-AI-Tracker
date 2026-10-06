@@ -33,6 +33,7 @@ func Setup(
 	wsHandler *handlers.WsHandler,
 	dashboardHandler *handlers.DashboardHandler,
 	logInsightsHandler *handlers.LogInsightsHandler,
+	logGraphicalHandler *handlers.LogGraphicalHandler,
 ) {
 	// ─────────────────────────────
 	// Global Middleware
@@ -171,6 +172,9 @@ func Setup(
 	}
 	if logInsightsHandler != nil {
 		protected.GET("/logs/insights", logInsightsHandler.GetInsights)
+	}
+	if logGraphicalHandler != nil {
+		protected.GET("/logs/graphical", logGraphicalHandler.GetGraphical)
 	}
 
 	protected.GET("/app-sessions/usage/sessions", newSchemaHandler.ListAppSessionsForApp)

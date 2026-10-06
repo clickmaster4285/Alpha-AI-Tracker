@@ -1489,4 +1489,55 @@ export const logInsightsApi = {
     }),
 };
 
+// ──────────────────────────
+// Log Graphical (charts)
+// ──────────────────────────
+
+export interface LogGraphicalActivityPt {
+  bucket: string;
+  at: string;
+  sessions: number;
+  webPages: number;
+  idleEvents: number;
+}
+
+export interface LogGraphicalProductivityPt {
+  bucket: string;
+  at: string;
+  productiveSeconds: number;
+  unproductiveSeconds: number;
+  neutralSeconds: number;
+}
+
+export interface LogGraphicalResponse {
+  range: { from: string; to: string };
+  bucket: 'hour' | 'day' | string;
+  summary: {
+    sessions: number;
+    webPages: number;
+    idleEvents: number;
+    totalSeconds: number;
+    productiveSeconds: number;
+    unproductiveSeconds: number;
+    neutralSeconds: number;
+  };
+  activity: LogGraphicalActivityPt[];
+  productivity: LogGraphicalProductivityPt[];
+  topApps: DashboardTopApp[];
+  topDomains: DashboardTopDomain[];
+}
+
+export const logGraphicalApi = {
+  get: (params: {
+    from: string;
+    to: string;
+    departmentId?: number;
+    employeeId?: string;
+    topN?: number;
+  }) =>
+    request<LogGraphicalResponse>('/logs/graphical', {
+      params: params as Record<string, string | number | undefined>,
+    }),
+};
+
 export { ApiError };

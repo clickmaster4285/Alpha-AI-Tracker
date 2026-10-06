@@ -1,7 +1,12 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-10-05 (dashboard summary)
+> **Last audited:** 2026-10-06 (logs insights + graphical)
 > **Changelog:**
+> - 2026-10-06: **Log Insights + Graphical Logs aggregates.** JWT `GET /api/v1/logs/insights`
+>   and `GET /api/v1/logs/graphical` (`from`/`to` + optional `departmentId`/`employeeId`).
+>   Insights = digest (metrics, productivity mix, top apps/domains, outliers, highlights).
+>   Graphical = hour/day time series (activity + classified productivity) + top bars.
+>   Verified: `go build`/`go vet`; web `npx tsc --noEmit`.
 > - 2026-10-05: **Dashboard summary aggregate + live-stream list caps.**
 >   JWT `GET /api/v1/dashboard/summary?from&to&departmentId` (`DashboardHandler` /
 >   `DashboardService` / `DashboardRepo`) returns employees, activity, monitoring,

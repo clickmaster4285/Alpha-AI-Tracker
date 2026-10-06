@@ -192,6 +192,10 @@ func main() {
 	logInsightsService := services.NewLogInsightsService(logInsightsRepo)
 	logInsightsHandler := handlers.NewLogInsightsHandler(logInsightsService)
 
+	logGraphicalRepo := repository.NewLogGraphicalRepo(pool)
+	logGraphicalService := services.NewLogGraphicalService(logGraphicalRepo)
+	logGraphicalHandler := handlers.NewLogGraphicalHandler(logGraphicalService)
+
 	// ────────────────
 	// Seed RBAC catalog (modules, submodules, system role) — idempotent
 	// ────────────────
@@ -237,7 +241,7 @@ func main() {
 	e.HideBanner = true
 	e.HidePort = true
 
-	router.Setup(e, cfg, authService, deviceRepo, userRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler, rbacHandler, shiftHandler, timeAttendanceHandler, geofenceHandler, termsConsentHandler, termsContentHandler, streamHandler, wsHandler, dashboardHandler, logInsightsHandler)
+	router.Setup(e, cfg, authService, deviceRepo, userRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler, rbacHandler, shiftHandler, timeAttendanceHandler, geofenceHandler, termsConsentHandler, termsContentHandler, streamHandler, wsHandler, dashboardHandler, logInsightsHandler, logGraphicalHandler)
 
 	// ────────────────
 	// Graceful Shutdown
