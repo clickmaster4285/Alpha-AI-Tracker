@@ -3,7 +3,7 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Suspense } from 'react';
-import { Loader2, X } from 'lucide-react';
+import { Building2, LayoutDashboard, Loader2, X } from 'lucide-react';
 import DownloadAppSection from '@/components/DownloadAppSection';
 import ActivityFilters from '@/components/journey/ActivityFilters';
 import {
@@ -88,14 +88,40 @@ function DashboardInner() {
   const summary = summaryQuery.data;
   const can = (module: string) => canAccess(role, module);
 
+  const departments = departmentsQuery.data?.departments ?? [];
+
   return (
     <div className="space-y-6 animate-fade-in">
-      <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4">
-        <div>
-
+      <header className="rounded-xl border border-border bg-card shadow-card">
+        <div className="flex items-start gap-3 px-4 py-4 sm:px-5">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl gradient-primary">
+            <LayoutDashboard className="h-5 w-5 text-primary-foreground" />
+          </div>
+          <div className="min-w-0">
+            <h2 className="font-display text-lg font-bold leading-tight text-foreground">Overview</h2>
+            <p className="mt-1 max-w-2xl text-sm leading-relaxed text-muted-foreground">
+              Workforce, productivity, attendance, and activity for the period and department you select.
+            </p>
+          </div>
         </div>
-        <div className="flex flex-col sm:flex-row gap-3 sm:items-center">
-          
+        <div className="flex flex-col gap-3 border-t border-border px-4 py-3 sm:px-5 lg:flex-row lg:flex-wrap lg:items-center lg:justify-between">
+          <Select
+            value={departmentId ? String(departmentId) : 'all'}
+            onValueChange={(value) => setDepartmentId(value === 'all' ? undefined : Number(value))}
+          >
+            <SelectTrigger className="relative h-9 w-full bg-background pl-9 sm:w-56" aria-label="Department">
+              <Building2 className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              <SelectValue placeholder="All departments" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All departments</SelectItem>
+              {departments.map((department) => (
+                <SelectItem key={department.id} value={String(department.id)}>
+                  {department.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <ActivityFilters
             value={filter}
             onChange={setFilter}
@@ -104,7 +130,7 @@ function DashboardInner() {
             searchShow={false}
           />
         </div>
-      </div>
+      </header>
 
       <DashboardStatGrid
         summary={summary}
