@@ -1,7 +1,13 @@
 # Web Architecture — Alpha AI Tracker Dashboard
 
-> **Last audited:** 2026-10-03 (live stream V3 + Client Version via DeviceAuth)
+> **Last audited:** 2026-10-05 (dashboard summary-first home)
 > **Changelog:**
+> - 2026-10-05: **Dashboard home redesign — summary-first.**
+>   `/dashboard` consumes `dashboardApi.summary` + capped
+>   `liveStreamApi.employees({ onlineOnly, limit })` + departments filter.
+>   URL-synced `preset`/`from`/`to`/`departmentId`; per-widget skeletons; attention strip;
+>   fleet/classification/top apps/domains/recent; dismissible download strip. Components under
+>   `components/dashboard/`. Verified: `npx tsc --noEmit`; `next build`.
 > - 2026-10-03: **Client Version on employees/live-stream refreshes without re-login (server+client).**
 >   Web still reads `employee_devices.client_version` as before; server `TouchLastSeen` now
 >   updates version/platform from DeviceAuth headers so a reinstall of 1.2.33+ shows immediately.
@@ -240,10 +246,9 @@ web/
             ├── layout.tsx       # Wraps children with ProtectedRoute + AppLayout
             │
             ├── dashboard/       # Dashboard: stats cards, best performer, chart (mock data)
-            ├── employees/       # Employees list: CRUD via real API, generate secret dialog,
-            │   └── activity/    #   action menu deep-links to Journey/Device Specs
-            │                    #   (activity status: mock data; the /employees/[id] detail
-            │                    #   page was removed 2026-08-18 — see Employee Journey/Device Specs)
+            ├── employees/       # Employees list: CRUD via real API, generate secret dialog;
+            │                    #   action menu deep-links to Journey/Device Specs
+            │                    #   (/employees/[id] detail page removed 2026-08-18)
             ├── departments/     # Department CRUD via real API
             │
             ├── employee-journey/# Per-employee journey, shared EmployeePage shell + picker
@@ -260,8 +265,8 @@ web/
             │
             ├── logs/
             │   ├── comprehensive/  # Activity logs with filtering (real API)
-            │   ├── insights/       # User insights (mock data)
-            │   └── graphical/      # Graphical logs (mock data)
+            │   ├── insights/       # Log insights digest (live GET /logs/insights)
+            │   └── graphical/      # Graphical logs (live GET /logs/graphical)
             │
             ├── charts/
             │   ├── productivity/   # Productivity chart (mock data)
@@ -288,7 +293,6 @@ web/
             ├── shadow-it/          # Shadow IT (mock data)
             ├── ai-summary/         # AI Summary (mock data)
             ├── onboarding/         # Onboarding (mock data)
-            ├── employee-portal/    # Employee portal (mock data)
             ├── projects/           # Projects (mock data)
             │
             └── settings/
@@ -394,9 +398,8 @@ in the `updateMutation`).
 |---|---|---|---|
 | `/login` | Login | Server (auth) | ✅ |
 | `/unauthorized` | Access denied (RouteGuard target) | — | ✅ |
-| `/dashboard` | Dashboard | Server (`GET /employees`, `/departments`, `/app-sessions?dateFrom=`, `/app-items?itemType=browser_tab&dateFrom=`) | ✅ |
+| `/dashboard` | Dashboard | Server (`GET /dashboard/summary` + capped `GET /live-stream/employees?onlineOnly&limit` + `/departments`) | ✅ |
 | `/employees` | Employee list (hides the "Login Credential" dropdown item when `emp.hasUserLogin` is true; `updateMutation` propagates name/email to the linked user via `usersApi.update` when the server's `UPDATE…RETURNING` reports `hasUserLogin`) | Server | ✅ |
-| `/employees/activity` | Activity status | Honest empty state (no endpoint) | ❌ |
 | `/employee-journey/timeline` | Session timeline | Server (`GET /app-sessions`, infinite scroll) | ✅ |
 | `/employee-journey/apps` | App usage | Server (`GET /app-sessions/usage` per-app aggregate + `GET /app-sessions/usage/sessions` per-app paginated list, fired on chevron expand since 2026-09-04) | ✅ |
 | `/employee-journey/web` | Web activity | Server (`GET /app-items?itemType=browser_tab`) | ✅ |
@@ -409,8 +412,8 @@ in the `updateMutation`).
 | `/departments` | Departments | Server | ✅ |
 | `/roles` | Roles + per-submodule permission toggles | Server (`GET /modules`, `/roles` CRUD) | ✅ |
 | `/logs/comprehensive` | Activity logs | Server | ✅ |
-| `/logs/insights` | Log insights | Honest empty state (no endpoint) | ❌ |
-| `/logs/graphical` | Graphical logs | Honest empty state (no endpoint) | ❌ |
+| `/logs/insights` | Log insights digest (metrics, productivity mix, top apps/domains, idle outliers, rule-based findings) | Server (`GET /logs/insights` — `from`/`to` + optional `departmentId`/`employeeId`) | ✅ |
+| `/logs/graphical` | Graphical logs (activity + productivity time series, top apps/domains) | Server (`GET /logs/graphical` — `from`/`to` + optional `departmentId`/`employeeId`; hour/day buckets) | ✅ |
 | `/charts/productivity` | Productivity chart | Hardcoded Recharts demo data | ❌ |
 | `/charts/activity` | Activity chart | Hardcoded Recharts demo data | ❌ |
 | `/configuration/apps` | Applications classification | Server (`GET/PATCH /monitoring/apps`) | ✅ |
@@ -437,7 +440,6 @@ in the `updateMutation`).
 | `/projects` | Projects | Hardcoded demo data (scaffolding) | ❌ |
 | `/ai-summary` | AI Summary | Honest empty state (no endpoint) | ❌ |
 | `/onboarding` | Onboarding | Hardcoded demo data (scaffolding) | ❌ |
-| `/employee-portal` | Employee portal | Hardcoded demo data (scaffolding) | ❌ |
 | `/settings` | General settings | Static hub page | ❌ |
 | `/settings/tracking` | Tracking settings | In-memory session state only (explicit non-persistence notice) | ❌ |
 | `/settings/user-management` | User management (CRUD + role assignment, infinite scroll; create-from-employee form locks `name`/`email`/`employeeId` and excludes the `company_admin` role; new per-row **Edit** button opens the same dialog in edit mode via `?edit=1&userId=…` — **hidden for the system `company_admin` user**; password + confirm-password with eye toggles; on save, if the edited user has an `employeeId` the client also calls `employeesApi.update` to sync name/email to the attached employee) | Server (`/users`, `/roles`, `/employees`) | ✅ |

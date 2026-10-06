@@ -1,7 +1,17 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-10-03
+> **Last audited:** 2026-10-05
 > **Changelog:**
+>
+> - 2026-10-05: **Web dashboard redesign — summary-first home (server + web).**
+>   New JWT `GET /api/v1/dashboard/summary` (date range + optional `departmentId`) returns
+>   employees/activity/monitoring/devices/live counts + bounded topApps/topDomains/recentSessions
+>   in one request (errgroup SQL; migration **042** `idx_app_items_type_opened` +
+>   `idx_employee_devices_last_seen`). Presence list: `GET /live-stream/employees?onlineOnly&limit`
+>   (backward compatible). Web `/dashboard` uses `dashboardApi.summary` + capped presence poll +
+>   URL filters; no list-API fan-out; download strip dismissible. Client/installer N/A. Verified:
+>   `go build`/`go vet`; `go test ./internal/services/ -run Dashboard`; `npx tsc --noEmit`;
+>   `next build`.
 >
 > - 2026-10-03: **Live stream post-Phase-3 — Win11 blank preview (FA-27) + stale Client Version.**
 >   Root cause of FA-27 `LIVE` + `--- FPS` / SFU `withTrack=false`: Win11 GDI capture

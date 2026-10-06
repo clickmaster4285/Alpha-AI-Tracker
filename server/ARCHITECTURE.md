@@ -1,7 +1,20 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-10-03 (DeviceAuth Client Version refresh + Phase 0–3)
+> **Last audited:** 2026-10-06 (logs insights + graphical)
 > **Changelog:**
+> - 2026-10-06: **Log Insights + Graphical Logs aggregates.** JWT `GET /api/v1/logs/insights`
+>   and `GET /api/v1/logs/graphical` (`from`/`to` + optional `departmentId`/`employeeId`).
+>   Insights = digest (metrics, productivity mix, top apps/domains, outliers, highlights).
+>   Graphical = hour/day time series (activity + classified productivity) + top bars.
+>   Verified: `go build`/`go vet`; web `npx tsc --noEmit`.
+> - 2026-10-05: **Dashboard summary aggregate + live-stream list caps.**
+>   JWT `GET /api/v1/dashboard/summary?from&to&departmentId` (`DashboardHandler` /
+>   `DashboardService` / `DashboardRepo`) returns employees, activity, monitoring,
+>   devices, live counts, topApps, topDomains, recentSessions (bounded Top-N). Migration
+>   **042** adds `idx_app_items_type_opened` and `idx_employee_devices_last_seen`.
+>   `GET /live-stream/employees` accepts optional `onlineOnly`, `limit` (max 50),
+>   `departmentId` (omitted = legacy full list). Verified: `go build`/`go vet`;
+>   `go test ./internal/services/ -run Dashboard`.
 > - 2026-10-03: **DeviceAuth refreshes `employee_devices.client_version` without re-login.**
 >   `TouchLastSeen(deviceID, clientVersion, platform)` updates `client_version`/`platform` when
 >   DeviceAuth requests carry `X-Client-Version` / `X-Client-Platform` (optional; empty leaves

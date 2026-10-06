@@ -22,9 +22,10 @@ type ScheduleRecord struct {
 }
 
 type HolidayRecord struct {
-	ID    int
-	Date  time.Time
-	Label string
+	ID     int
+	Date   time.Time
+	Label  string
+	Status string
 }
 
 type TimeAttendanceRepo struct {
@@ -56,11 +57,14 @@ func (r *TimeAttendanceRepo) GetScheduleForEmployee(ctx context.Context, employe
 	return &row, nil
 }
 
+// ListHolidays returns APPROVED holidays in [from, to] for schedule mirror + attendance.
 func (r *TimeAttendanceRepo) ListHolidays(ctx context.Context, from, to time.Time) ([]HolidayRecord, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, holiday_date, label
+		SELECT id, holiday_date, label, status
 		FROM company_holidays
-		WHERE deleted_at IS NULL AND holiday_date >= $1::DATE AND holiday_date <= $2::DATE
+		WHERE deleted_at IS NULL
+		  AND status = 'approved'
+		  AND holiday_date >= $1::DATE AND holiday_date <= $2::DATE
 		ORDER BY holiday_date ASC
 	`, from, to)
 	if err != nil {
@@ -71,7 +75,7 @@ func (r *TimeAttendanceRepo) ListHolidays(ctx context.Context, from, to time.Tim
 	result := make([]HolidayRecord, 0)
 	for rows.Next() {
 		var h HolidayRecord
-		if err := rows.Scan(&h.ID, &h.Date, &h.Label); err != nil {
+		if err := rows.Scan(&h.ID, &h.Date, &h.Label, &h.Status); err != nil {
 			return nil, fmt.Errorf("scan holiday: %w", err)
 		}
 		result = append(result, h)
@@ -79,9 +83,10 @@ func (r *TimeAttendanceRepo) ListHolidays(ctx context.Context, from, to time.Tim
 	return result, rows.Err()
 }
 
+// ListAllHolidays returns every non-deleted holiday for the admin UI (all statuses).
 func (r *TimeAttendanceRepo) ListAllHolidays(ctx context.Context) ([]HolidayRecord, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, holiday_date, label
+		SELECT id, holiday_date, label, status
 		FROM company_holidays
 		WHERE deleted_at IS NULL
 		ORDER BY holiday_date ASC
@@ -94,7 +99,7 @@ func (r *TimeAttendanceRepo) ListAllHolidays(ctx context.Context) ([]HolidayReco
 	result := make([]HolidayRecord, 0)
 	for rows.Next() {
 		var h HolidayRecord
-		if err := rows.Scan(&h.ID, &h.Date, &h.Label); err != nil {
+		if err := rows.Scan(&h.ID, &h.Date, &h.Label, &h.Status); err != nil {
 			return nil, fmt.Errorf("scan holiday: %w", err)
 		}
 		result = append(result, h)
@@ -102,26 +107,26 @@ func (r *TimeAttendanceRepo) ListAllHolidays(ctx context.Context) ([]HolidayReco
 	return result, rows.Err()
 }
 
-func (r *TimeAttendanceRepo) CreateHoliday(ctx context.Context, date time.Time, label string) (*HolidayRecord, error) {
+func (r *TimeAttendanceRepo) CreateHoliday(ctx context.Context, date time.Time, label, status string) (*HolidayRecord, error) {
 	var h HolidayRecord
 	err := r.pool.QueryRow(ctx, `
-		INSERT INTO company_holidays (holiday_date, label)
-		VALUES ($1::DATE, $2)
-		RETURNING id, holiday_date, label
-	`, date, label).Scan(&h.ID, &h.Date, &h.Label)
+		INSERT INTO company_holidays (holiday_date, label, status)
+		VALUES ($1::DATE, $2, $3)
+		RETURNING id, holiday_date, label, status
+	`, date, label, status).Scan(&h.ID, &h.Date, &h.Label, &h.Status)
 	if err != nil {
 		return nil, fmt.Errorf("create holiday: %w", err)
 	}
 	return &h, nil
 }
 
-func (r *TimeAttendanceRepo) UpdateHoliday(ctx context.Context, id int, date time.Time, label string) (*HolidayRecord, error) {
+func (r *TimeAttendanceRepo) UpdateHoliday(ctx context.Context, id int, date time.Time, label, status string) (*HolidayRecord, error) {
 	var h HolidayRecord
 	err := r.pool.QueryRow(ctx, `
-		UPDATE company_holidays SET holiday_date = $2::DATE, label = $3
+		UPDATE company_holidays SET holiday_date = $2::DATE, label = $3, status = $4
 		WHERE id = $1 AND deleted_at IS NULL
-		RETURNING id, holiday_date, label
-	`, id, date, label).Scan(&h.ID, &h.Date, &h.Label)
+		RETURNING id, holiday_date, label, status
+	`, id, date, label, status).Scan(&h.ID, &h.Date, &h.Label, &h.Status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

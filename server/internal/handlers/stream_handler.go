@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -108,11 +109,42 @@ type LiveStreamEmployee struct {
 }
 
 // ListEmployees handles GET /api/v1/live-stream/employees (JWTAuth).
+// Optional query params (backward compatible when omitted):
+//   - onlineOnly=true — return only online employees
+//   - limit=N — cap returned rows (default unlimited; max 50 when set)
+//   - departmentId=N — filter by employees.department_id
+// When onlineOnly or limit is used, `total` is the full matching online count
+// (not the truncated page length) so dashboards can show "Online · N".
 func (h *StreamHandler) ListEmployees(c echo.Context) error {
 	if !h.hub.Config().Enabled {
 		return c.JSON(http.StatusServiceUnavailable, dto.APIError{
 			Code: http.StatusServiceUnavailable, Message: "Live stream is disabled",
 		})
+	}
+
+	onlineOnly := strings.EqualFold(c.QueryParam("onlineOnly"), "true") || c.QueryParam("onlineOnly") == "1"
+	limit := 0
+	if raw := c.QueryParam("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			return c.JSON(http.StatusBadRequest, dto.APIError{
+				Code: http.StatusBadRequest, Message: "invalid limit",
+			})
+		}
+		if n > 50 {
+			n = 50
+		}
+		limit = n
+	}
+	var departmentID *int
+	if raw := c.QueryParam("departmentId"); raw != "" {
+		id, err := strconv.Atoi(raw)
+		if err != nil || id < 1 {
+			return c.JSON(http.StatusBadRequest, dto.APIError{
+				Code: http.StatusBadRequest, Message: "invalid departmentId",
+			})
+		}
+		departmentID = &id
 	}
 
 	employees, err := h.employeeRepo.ListAll(c.Request().Context())
@@ -137,13 +169,23 @@ func (h *StreamHandler) ListEmployees(c echo.Context) error {
 	now := time.Now().UTC()
 	presenceOn := h.presence != nil && h.presence.Config().Enabled
 	out := make([]LiveStreamEmployee, 0, len(employees))
+	onlineTotal := 0
 	for _, e := range employees {
+		if departmentID != nil && e.DepartmentID != *departmentID {
+			continue
+		}
 		snap := h.hub.Snapshot(e.EmployeeID)
 		wsConnected := presenceOn && h.presence.IsConnected(e.EmployeeID)
 		hb, hasHB := heartbeats[e.EmployeeID]
 		hbOnline := hasHB && now.Sub(hb.UTC()) <= liveStreamOnlineWindow
 		online := employeeLiveOnline(presenceOn, wsConnected, hbOnline)
-		out = append(out, LiveStreamEmployee{
+		if online {
+			onlineTotal++
+		}
+		if onlineOnly && !online {
+			continue
+		}
+		row := LiveStreamEmployee{
 			EmployeeID:      e.EmployeeID,
 			Name:            e.Name,
 			Department:      e.Department,
@@ -153,9 +195,29 @@ func (h *StreamHandler) ListEmployees(c echo.Context) error {
 			StreamAvailable: snap.StreamAvailable,
 			ClientConnected: snap.ClientConnected,
 			ConsentMissing:  !accepted[e.EmployeeID],
-		})
+		}
+		if limit > 0 && len(out) >= limit {
+			continue
+		}
+		out = append(out, row)
 	}
-	return c.JSON(http.StatusOK, map[string]interface{}{"data": out, "total": len(out)})
+
+	total := len(out)
+	if onlineOnly || limit > 0 {
+		if onlineOnly {
+			total = onlineTotal
+		} else {
+			// limit without onlineOnly: total is full filtered set before truncate
+			total = 0
+			for _, e := range employees {
+				if departmentID != nil && e.DepartmentID != *departmentID {
+					continue
+				}
+				total++
+			}
+		}
+	}
+	return c.JSON(http.StatusOK, map[string]interface{}{"data": out, "total": total})
 }
 
 // employeeLiveOnline chooses Online for the live-stream rail.

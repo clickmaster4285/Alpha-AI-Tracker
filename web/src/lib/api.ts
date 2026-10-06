@@ -1007,10 +1007,13 @@ export interface AttendanceRangeResponse {
   totalPages: number;
 }
 
+export type HolidayStatus = 'pending' | 'approved' | 'rejected';
+
 export interface Holiday {
   id: number;
   date: string;
   label: string;
+  status: HolidayStatus;
 }
 
 export interface HolidayListResponse {
@@ -1021,6 +1024,7 @@ export interface HolidayListResponse {
 export interface HolidayInput {
   date: string;
   label: string;
+  status: HolidayStatus;
 }
 
 export const attendanceApi = {
@@ -1336,8 +1340,14 @@ export interface IceServerConfig {
 }
 
 export const liveStreamApi = {
-  employees: () =>
-    request<{ data: LiveStreamEmployee[]; total: number }>('/live-stream/employees'),
+  employees: (params?: {
+    onlineOnly?: boolean;
+    limit?: number;
+    departmentId?: number;
+  }) =>
+    request<{ data: LiveStreamEmployee[]; total: number }>('/live-stream/employees', {
+      params: params as Record<string, string | number | boolean | undefined>,
+    }),
   watchTicket: (employeeId: string) =>
     request<{
       ticket: string;
@@ -1346,6 +1356,188 @@ export const liveStreamApi = {
       /** Phase 2: publisher SFU on another instance — open the watch WS here. */
       watchBaseUrl?: string;
     }>('/live-stream/watch-ticket', { params: { employeeId } }),
+};
+
+// ──────────────────────────
+// Dashboard summary (home)
+// ──────────────────────────
+
+export interface DashboardVersionRow {
+  version: string;
+  count: number;
+}
+
+export interface DashboardTopApp {
+  appDisplayName: string;
+  processName: string;
+  sessionCount: number;
+  openNow: number;
+}
+
+export interface DashboardTopDomain {
+  domain: string;
+  visits: number;
+}
+
+export interface DashboardRecentSession {
+  id: string;
+  employeeId: string;
+  employeeName: string;
+  appDisplayName: string;
+  processName: string;
+  status: string;
+  startedAt: string;
+  endedAt?: string | null;
+  lastSyncAt?: string | null;
+}
+
+export interface DashboardSummaryResponse {
+  range: { from: string; to: string };
+  employees: { total: number; tracked: number; untracked: number };
+  activity: {
+    sessions: number;
+    webPages: number;
+    openSessions: number;
+    staleSessions: number;
+  };
+  monitoring: { unclassifiedApps: number; unclassifiedSites: number };
+  devices: {
+    active: number;
+    seen15m: number;
+    seen24h: number;
+    stale7d: number;
+    versions: DashboardVersionRow[];
+  };
+  live: {
+    online: number;
+    streaming: number;
+    consentMissing: number;
+    presenceAvailable: boolean;
+  };
+  topApps: DashboardTopApp[];
+  topDomains: DashboardTopDomain[];
+  recentSessions: DashboardRecentSession[];
+}
+
+export const dashboardApi = {
+  summary: (params: {
+    from: string;
+    to: string;
+    departmentId?: number;
+    topN?: number;
+    recentLimit?: number;
+  }) =>
+    request<DashboardSummaryResponse>('/dashboard/summary', {
+      params: params as Record<string, string | number | undefined>,
+    }),
+};
+
+// ──────────────────────────
+// Log Insights (digest)
+// ──────────────────────────
+
+export interface LogInsightsHighlight {
+  severity: 'info' | 'warning' | 'success';
+  title: string;
+  detail: string;
+}
+
+export interface LogInsightsOutlier {
+  employeeId: string;
+  employeeName: string;
+  kind: 'idle' | 'sessions' | 'web' | string;
+  value: number;
+  label: string;
+}
+
+export interface LogInsightsResponse {
+  range: { from: string; to: string };
+  metrics: {
+    sessions: number;
+    webPages: number;
+    activeEmployees: number;
+    openSessions: number;
+    staleSessions: number;
+    idleEvents: number;
+    employeesWithIdle: number;
+  };
+  productivity: {
+    totalSeconds: number;
+    productiveSeconds: number;
+    unproductiveSeconds: number;
+    neutralSeconds: number;
+    productivePct: number;
+    unproductivePct: number;
+    neutralPct: number;
+  };
+  topApps: DashboardTopApp[];
+  topDomains: DashboardTopDomain[];
+  outliers: LogInsightsOutlier[];
+  highlights: LogInsightsHighlight[];
+}
+
+export const logInsightsApi = {
+  get: (params: {
+    from: string;
+    to: string;
+    departmentId?: number;
+    employeeId?: string;
+    topN?: number;
+  }) =>
+    request<LogInsightsResponse>('/logs/insights', {
+      params: params as Record<string, string | number | undefined>,
+    }),
+};
+
+// ──────────────────────────
+// Log Graphical (charts)
+// ──────────────────────────
+
+export interface LogGraphicalActivityPt {
+  bucket: string;
+  at: string;
+  sessions: number;
+  webPages: number;
+  idleEvents: number;
+}
+
+export interface LogGraphicalProductivityPt {
+  bucket: string;
+  at: string;
+  productiveSeconds: number;
+  unproductiveSeconds: number;
+  neutralSeconds: number;
+}
+
+export interface LogGraphicalResponse {
+  range: { from: string; to: string };
+  bucket: 'hour' | 'day' | string;
+  summary: {
+    sessions: number;
+    webPages: number;
+    idleEvents: number;
+    totalSeconds: number;
+    productiveSeconds: number;
+    unproductiveSeconds: number;
+    neutralSeconds: number;
+  };
+  activity: LogGraphicalActivityPt[];
+  productivity: LogGraphicalProductivityPt[];
+  topApps: DashboardTopApp[];
+  topDomains: DashboardTopDomain[];
+}
+
+export const logGraphicalApi = {
+  get: (params: {
+    from: string;
+    to: string;
+    departmentId?: number;
+    employeeId?: string;
+    topN?: number;
+  }) =>
+    request<LogGraphicalResponse>('/logs/graphical', {
+      params: params as Record<string, string | number | undefined>,
+    }),
 };
 
 export { ApiError };

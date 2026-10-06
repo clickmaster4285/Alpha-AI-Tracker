@@ -3,14 +3,16 @@ package dto
 import "time"
 
 type HolidayResponse struct {
-	ID    int    `json:"id"`
-	Date  string `json:"date"`
-	Label string `json:"label"`
+	ID     int    `json:"id"`
+	Date   string `json:"date"`
+	Label  string `json:"label"`
+	Status string `json:"status"` // pending | approved | rejected
 }
 
 type HolidayInput struct {
-	Date  string `json:"date"`
-	Label string `json:"label"`
+	Date   string `json:"date"`
+	Label  string `json:"label"`
+	Status string `json:"status"` // pending | approved | rejected; empty → pending on create
 }
 
 type ScheduleResponse struct {

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "@/globals.css";
 import { Providers } from "@/components/providers";
+import { ReactScan } from "@/components/ReactScan";
 
 export const metadata: Metadata = {
   title: "Alpha AI Tracking, Monitoring & Productivity System",
@@ -28,6 +29,7 @@ export default function RootLayout({
         <link rel="apple-touch-icon" href="/app-logo.png" />
       </head>
       <body>
+        <ReactScan />
         <Providers>{children}</Providers>
       </body>
     </html>

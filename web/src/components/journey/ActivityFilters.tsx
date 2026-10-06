@@ -90,9 +90,13 @@ interface ActivityFiltersProps {
    * "Monday's row" for a Tuesday–Wednesday range.
    */
   singleDay?: boolean;
+  /**
+   * Show the search input.
+   */
+  searchShow?: boolean;
 }
 
-export default function ActivityFilters({ value, onChange, loading, availablePresets, singleDay }: ActivityFiltersProps) {
+export default function ActivityFilters({ value, onChange, loading, availablePresets, singleDay, searchShow = true }: ActivityFiltersProps) {
   const [searchInput, setSearchInput] = useState(value.search);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -154,7 +158,9 @@ export default function ActivityFilters({ value, onChange, loading, availablePre
   return (
     <div className="flex flex-wrap items-center gap-2">
       {/* Search */}
+      {searchShow && (
       <div className="relative flex items-center">
+        
         <Search className="w-4 h-4 text-muted-foreground absolute left-3" />
         <input
           value={searchInput}
@@ -166,7 +172,7 @@ export default function ActivityFilters({ value, onChange, loading, availablePre
             the loading spinner when a query is in flight. */}
         {loading && <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground absolute right-3" />}
       </div>
-
+)}
       {/* Date presets */}
       <div className="flex items-center gap-1 flex-wrap">
         {visiblePresets.map(key => {

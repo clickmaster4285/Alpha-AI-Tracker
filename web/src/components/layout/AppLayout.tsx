@@ -9,7 +9,6 @@ import TopBar from "./TopBar";
 const pageTitles: Record<string, string> = {
   "/dashboard": "Dashboard",
   "/employees": "Employees",
-  "/employees/activity": "User Activity Status",
   "/apps": "Apps and Websites",
   "/configuration/apps": "Applications",
   "/configuration/websites": "Websites",
@@ -31,7 +30,6 @@ const pageTitles: Record<string, string> = {
   "/settings": "Settings",
   "/settings/tracking": "Tracking Settings",
   "/onboarding": "Onboarding",
-  "/employee-portal": "Employee Portal",
   "/timesheets": "Timesheets",
   "/attendance": "Attendance Log",
   "/shifts": "Shift Management",

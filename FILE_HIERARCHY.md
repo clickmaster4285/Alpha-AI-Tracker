@@ -215,8 +215,8 @@ web/
     ├── app/
     │   ├── login/ mfa/ forgot-password/ reset-password/ unauthorized/    unauthenticated routes
     │   └── (app)/              ⭐ ~30 authenticated sections, sidebar-wrapped:
-    │       ├── dashboard · executive-dashboard · employee-portal
-    │       ├── employees (+ activity) · departments · roles · onboarding
+    │       ├── dashboard · executive-dashboard
+    │       ├── employees · departments · roles · onboarding
     │       │                       (/employees/[id] detail page removed 2026-08-18;
     │       │                        /roles is a real-API CRUD page since 2026-08-25)
     │       ├── employee-journey    per-employee journey behind the shared EmployeePage shell +
