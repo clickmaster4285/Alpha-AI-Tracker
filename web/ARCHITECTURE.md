@@ -265,7 +265,7 @@ web/
             │
             ├── logs/
             │   ├── comprehensive/  # Activity logs with filtering (real API)
-            │   ├── insights/       # User insights (mock data)
+            │   ├── insights/       # Log insights digest (live GET /logs/insights)
             │   └── graphical/      # Graphical logs (mock data)
             │
             ├── charts/
@@ -412,7 +412,7 @@ in the `updateMutation`).
 | `/departments` | Departments | Server | ✅ |
 | `/roles` | Roles + per-submodule permission toggles | Server (`GET /modules`, `/roles` CRUD) | ✅ |
 | `/logs/comprehensive` | Activity logs | Server | ✅ |
-| `/logs/insights` | Log insights | Honest empty state (no endpoint) | ❌ |
+| `/logs/insights` | Log insights digest (metrics, productivity mix, top apps/domains, idle outliers, rule-based findings) | Server (`GET /logs/insights` — `from`/`to` + optional `departmentId`/`employeeId`) | ✅ |
 | `/logs/graphical` | Graphical logs | Honest empty state (no endpoint) | ❌ |
 | `/charts/productivity` | Productivity chart | Hardcoded Recharts demo data | ❌ |
 | `/charts/activity` | Activity chart | Hardcoded Recharts demo data | ❌ |

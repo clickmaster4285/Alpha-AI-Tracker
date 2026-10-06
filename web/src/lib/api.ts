@@ -1432,4 +1432,61 @@ export const dashboardApi = {
     }),
 };
 
+// ──────────────────────────
+// Log Insights (digest)
+// ──────────────────────────
+
+export interface LogInsightsHighlight {
+  severity: 'info' | 'warning' | 'success';
+  title: string;
+  detail: string;
+}
+
+export interface LogInsightsOutlier {
+  employeeId: string;
+  employeeName: string;
+  kind: 'idle' | 'sessions' | 'web' | string;
+  value: number;
+  label: string;
+}
+
+export interface LogInsightsResponse {
+  range: { from: string; to: string };
+  metrics: {
+    sessions: number;
+    webPages: number;
+    activeEmployees: number;
+    openSessions: number;
+    staleSessions: number;
+    idleEvents: number;
+    employeesWithIdle: number;
+  };
+  productivity: {
+    totalSeconds: number;
+    productiveSeconds: number;
+    unproductiveSeconds: number;
+    neutralSeconds: number;
+    productivePct: number;
+    unproductivePct: number;
+    neutralPct: number;
+  };
+  topApps: DashboardTopApp[];
+  topDomains: DashboardTopDomain[];
+  outliers: LogInsightsOutlier[];
+  highlights: LogInsightsHighlight[];
+}
+
+export const logInsightsApi = {
+  get: (params: {
+    from: string;
+    to: string;
+    departmentId?: number;
+    employeeId?: string;
+    topN?: number;
+  }) =>
+    request<LogInsightsResponse>('/logs/insights', {
+      params: params as Record<string, string | number | undefined>,
+    }),
+};
+
 export { ApiError };

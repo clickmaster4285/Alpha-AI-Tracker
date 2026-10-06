@@ -32,6 +32,7 @@ func Setup(
 	streamHandler *handlers.StreamHandler,
 	wsHandler *handlers.WsHandler,
 	dashboardHandler *handlers.DashboardHandler,
+	logInsightsHandler *handlers.LogInsightsHandler,
 ) {
 	// ─────────────────────────────
 	// Global Middleware
@@ -167,6 +168,9 @@ func Setup(
 	// App Sessions listing (protected — web admin access)
 	if dashboardHandler != nil {
 		protected.GET("/dashboard/summary", dashboardHandler.GetSummary)
+	}
+	if logInsightsHandler != nil {
+		protected.GET("/logs/insights", logInsightsHandler.GetInsights)
 	}
 
 	protected.GET("/app-sessions/usage/sessions", newSchemaHandler.ListAppSessionsForApp)
