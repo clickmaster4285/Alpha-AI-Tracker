@@ -95,25 +95,13 @@ function DashboardInner() {
 
         </div>
         <div className="flex flex-col sm:flex-row gap-3 sm:items-center">
-          <Select
-            value={departmentId ? String(departmentId) : 'all'}
-            onValueChange={(v) => setDepartmentId(v === 'all' ? undefined : Number(v))}
-          >
-            <SelectTrigger className="w-[200px]">
-              <SelectValue placeholder="All departments" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All departments</SelectItem>
-              {(departmentsQuery.data?.departments ?? []).map((d) => (
-                <SelectItem key={d.id} value={String(d.id)}>{d.name}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          
           <ActivityFilters
             value={filter}
             onChange={setFilter}
             loading={summaryQuery.isFetching}
             availablePresets={['today', 'yesterday', '7d', '30d', 'all']}
+            searchShow={false}
           />
         </div>
       </div>
