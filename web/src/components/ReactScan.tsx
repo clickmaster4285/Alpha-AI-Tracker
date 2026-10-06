@@ -4,8 +4,8 @@
 import { scan } from "react-scan";
 
 scan({
-  enabled: process.env.NODE_ENV === "development",
-  showToolbar: true,
+  enabled: process.env.NEXT_PUBLIC_NODE_ENV === "development",
+  showToolbar: process.env.NEXT_PUBLIC_NODE_ENV === "development",
 });
 
 /** Dev-only render highlighter. No-op in production. */
