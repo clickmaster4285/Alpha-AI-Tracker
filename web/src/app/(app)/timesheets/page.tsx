@@ -2,7 +2,7 @@
 
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
-import { Clock, Loader2 } from 'lucide-react';
+import { Clock, ListTree, Loader2 } from 'lucide-react';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import EmployeeSelector from '@/components/EmployeeSelector';
 import EmptyState from '@/components/employees/EmptyState';
@@ -16,6 +16,8 @@ import {
 } from '@/lib/api';
 import { formatDateTimeInZone, formatSeconds } from '@/lib/format';
 import { useUrlActivityFilter } from '@/hooks/use-url-activity-filter';
+import { Button } from '@/components/ui/button';
+import DayEventsDialog from '@/components/timesheets/DayEventsDialog';
 
 const PER_PAGE = 31;
 
@@ -47,6 +49,16 @@ function isoToYmd(iso: string | undefined): string {
   if (Number.isNaN(d.getTime())) return '';
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** Attendance range is computed per day and capped at 366 inclusive days. */
+function lastNDaysYmd(daysInclusive: number): { from: string; to: string } {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const ymd = (d: Date) =>
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const to = new Date();
+  const from = new Date(to.getFullYear(), to.getMonth(), to.getDate() - (daysInclusive - 1));
+  return { from: ymd(from), to: ymd(to) };
 }
 
 export default function TimesheetsPage() {
@@ -97,8 +109,14 @@ function TimesheetsPageInner() {
 
   // Server expects YYYY-MM-DD; ActivityFilter stores ISO. Convert at the call
   // site (memoized so the query key only changes when the date really changed).
-  const from = useMemo(() => isoToYmd(filter.dateFrom), [filter.dateFrom]);
-  const to = useMemo(() => isoToYmd(filter.dateTo), [filter.dateTo]);
+  const { from, to } = useMemo(() => {
+    const start = isoToYmd(filter.dateFrom);
+    const end = isoToYmd(filter.dateTo);
+    if (filter.preset === 'all' || !start || !end) {
+      return lastNDaysYmd(366);
+    }
+    return { from: start, to: end };
+  }, [filter.preset, filter.dateFrom, filter.dateTo]);
 
   const { data: employeesData } = useQuery({
     queryKey: ['employees', 'selector'],
@@ -129,7 +147,16 @@ function TimesheetsPageInner() {
           above the table so the search input never loses focus on
           loading/error/empty states. Same component as /employee-journey/apps
           and the other journey pages. */}
-          <ActivityFilters value={filter} onChange={setFilter} />
+          <ActivityFilters
+            value={filter}
+            onChange={setFilter}
+            availablePresets={['today', 'yesterday', '7d', '30d', 'all']}
+          />
+          {filter.preset === 'all' && (
+            <p className="text-xs text-muted-foreground">
+              All time is capped at the last 366 days (one row per calendar day).
+            </p>
+          )}
 
         </div>
 
@@ -169,6 +196,8 @@ function TimesheetBody({
   to: string;
   search: string;
 }) {
+  const [detailRow, setDetailRow] = useState<AttendanceRecord | null>(null);
+
   const {
     data,
     isLoading,
@@ -259,11 +288,11 @@ function TimesheetBody({
       </div>
 
       <div className="bg-card rounded-xl border border-border overflow-x-auto">
-        <table className="w-full min-w-[960px]">
+        <table className="w-full min-w-[1080px]">
           <thead>
             <tr className="border-b border-border">
-              {['Date', 'Clock In', 'Clock Out', 'Active', 'Idle', 'Off Shift', 'Status'].map(h => (
-                <th key={h} className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground">{h}</th>
+              {['Date', 'Clock In', 'Clock Out', 'Active', 'Idle', 'Off Shift', 'Status', ''].map(h => (
+                <th key={h || 'actions'} className="text-left px-4 py-3 text-sm font-semibold text-muted-foreground">{h}</th>
               ))}
             </tr>
           </thead>
@@ -287,6 +316,18 @@ function TimesheetBody({
                     {STATUS_LABEL[row.status]}
                   </span>
                 </td>
+                <td className="px-4 py-3">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-8"
+                    onClick={() => setDetailRow(row)}
+                  >
+                    <ListTree className="h-3.5 w-3.5" />
+                    Events
+                  </Button>
+                </td>
               </motion.tr>
             ))}
           </tbody>
@@ -308,6 +349,13 @@ function TimesheetBody({
           Showing all {total.toLocaleString()} day{total === 1 ? '' : 's'} for {employee.name}
         </p>
       )}
+
+      <DayEventsDialog
+        open={Boolean(detailRow)}
+        onOpenChange={(open) => { if (!open) setDetailRow(null); }}
+        employeeName={employee.name}
+        row={detailRow}
+      />
     </>
   );
 }

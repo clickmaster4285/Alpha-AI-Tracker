@@ -199,6 +199,39 @@ func (r *TimeAttendanceRepo) ListSessionEvents(
 	return result, rows.Err()
 }
 
+// ListDaySessionEvents returns events that occurred in [from, to) — no prior-state rows.
+func (r *TimeAttendanceRepo) ListDaySessionEvents(
+	ctx context.Context, employeeID string, from, to time.Time,
+) ([]models.SessionEvent, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, employee_id, event_type, os_username, event_at,
+		       event_count, COALESCE(first_at, event_at) AS first_at,
+		       COALESCE(last_at, event_at) AS last_at, synced_at, created_at
+		FROM session_events
+		WHERE employee_id = $1 AND deleted_at IS NULL
+		  AND event_at >= $2 AND event_at < $3
+		ORDER BY event_at ASC
+		LIMIT 1000
+	`, employeeID, from, to)
+	if err != nil {
+		return nil, fmt.Errorf("list day session events: %w", err)
+	}
+	defer rows.Close()
+
+	result := make([]models.SessionEvent, 0)
+	for rows.Next() {
+		var e models.SessionEvent
+		if err := rows.Scan(
+			&e.ID, &e.EmployeeID, &e.EventType, &e.OsUsername, &e.EventAt,
+			&e.EventCount, &e.FirstAt, &e.LastAt, &e.SyncedAt, &e.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan day session event: %w", err)
+		}
+		result = append(result, e)
+	}
+	return result, rows.Err()
+}
+
 func (r *TimeAttendanceRepo) GetLastHeartbeat(ctx context.Context, employeeID string) (*time.Time, error) {
 	var value string
 	err := r.pool.QueryRow(ctx, `

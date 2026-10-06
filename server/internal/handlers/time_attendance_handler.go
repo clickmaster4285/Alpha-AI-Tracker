@@ -110,6 +110,22 @@ func (h *TimeAttendanceHandler) GetToday(c echo.Context) error {
 	return c.JSON(http.StatusOK, result)
 }
 
+func (h *TimeAttendanceHandler) GetDayEvents(c echo.Context) error {
+	employeeID := strings.TrimSpace(c.QueryParam("employeeId"))
+	if employeeID == "" {
+		return apiError(c, http.StatusBadRequest, "employeeId is required", "")
+	}
+	date := strings.TrimSpace(c.QueryParam("date"))
+	if date == "" {
+		return apiError(c, http.StatusBadRequest, "date is required", "")
+	}
+	result, err := h.service.DaySessionEvents(c.Request().Context(), employeeID, date)
+	if err != nil {
+		return apiError(c, http.StatusBadRequest, "Failed to load day events", err.Error())
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
 func (h *TimeAttendanceHandler) GetRange(c echo.Context) error {
 	employeeID := strings.TrimSpace(c.QueryParam("employeeId"))
 	if employeeID == "" {

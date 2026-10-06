@@ -245,6 +245,7 @@ func Setup(
 	holidays.DELETE("/:id", timeAttendanceHandler.DeleteHoliday)
 
 	protected.GET("/attendance/today", timeAttendanceHandler.GetToday)
+	protected.GET("/attendance/events", timeAttendanceHandler.GetDayEvents)
 	protected.GET("/attendance/range", timeAttendanceHandler.GetRange)
 
 	// Terms & Conditions — web-admin surface. The client-facing consent sync and

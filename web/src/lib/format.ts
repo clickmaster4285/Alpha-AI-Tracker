@@ -39,6 +39,21 @@ export function formatDateTimeInZone(iso?: string | null, timeZone?: string | nu
   return formatDateTime(iso);
 }
 
+/** Clock time in the shift IANA timezone (hours:minutes:seconds). */
+export function formatTimeInZone(iso?: string | null, timeZone?: string | null): string {
+  if (!iso) return '—';
+  const options: Intl.DateTimeFormatOptions = {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  };
+  try {
+    return new Date(iso).toLocaleTimeString(undefined, timeZone ? { ...options, timeZone } : options);
+  } catch {
+    return new Date(iso).toLocaleTimeString(undefined, options);
+  }
+}
+
 export function formatDuration(start: string, end: string): string {
   const diff = new Date(end).getTime() - new Date(start).getTime();
   const mins = Math.floor(diff / 60000);

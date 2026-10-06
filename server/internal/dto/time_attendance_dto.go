@@ -45,3 +45,12 @@ type AttendanceRangeResponse struct {
 	PerPage    int                  `json:"perPage"`
 	TotalPages int                  `json:"totalPages"`
 }
+
+// DaySessionEventsResponse is the JWT list of session_events for one work day.
+type DaySessionEventsResponse struct {
+	EmployeeID string                 `json:"employeeId"`
+	WorkDate   string                 `json:"workDate"`
+	Timezone   string                 `json:"timezone"`
+	Data       []SessionEventResponse `json:"data"`
+	Total      int                    `json:"total"`
+}
