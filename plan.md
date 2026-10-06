@@ -1,10 +1,11 @@
-# Dashboard — Final Production Architecture & Implementation Plan
+# Employee Portal — Final Production Architecture & Implementation Plan
 
 > **Status:** Plan only — **do not implement until this document is approved.**  
-> **Scope:** Admin home `/dashboard` (web) + required server contracts. **Client/installer: N/A.**  
+> **Scope:** Web `/employee-portal` (mock → live) + required server contracts. **Client/installer: N/A.**  
 > **Execution:** Follow [`prompt.md`](./prompt.md) + [`AGENTS.md`](./AGENTS.md) mandatory rules.  
-> **Replaces:** Prior plans that composed many list APIs first and deferred `GET /dashboard/summary`.  
-> **Audited:** 2026-10-05 against live `alpha_ai_tracker` DB, `server/internal/{handlers,repository,router}`, `web/src/lib/api.ts`.
+> **Product north star:** [`newrequirment.md`](./newrequirment.md) §§43–48 (employee dashboard + Activity Productivity terminology).  
+> **Replaces:** Prior `plan.md` (admin `/dashboard` summary-first — already implemented).  
+> **Audited:** 2026-10-06 against `web/src/app/(app)/employee-portal/page.tsx`, `hours-insights` + attendance handlers/repos, `auth/profile`, RBAC catalog, migrations `020`/`023`/`028`/`031`/`032`, `web/src/lib/api.ts`.
 
 ---
 
@@ -17,7 +18,7 @@
 | **Now** | Plan / architecture lock (read-only vs product code). |
 | **After approval** | **Implement/build** — complete the change, verify with project commands, hand off. Do not stop at a second proposal. |
 
-Instruction priority (from `prompt.md`):
+Instruction priority:
 
 1. Current user requirements (this plan + any follow-up).  
 2. `AGENTS.md` mandatory workspace rules.  
@@ -25,540 +26,456 @@ Instruction priority (from `prompt.md`):
 4. `prompt.md` operating contract.  
 5. Existing code patterns (handler → service → repo → DTO; `api.ts` → React Query).
 
-`AGENTS.md` is the source of truth for architecture and known risks. Do not invent unsupported interfaces or copy assumptions when repository evidence exists.
-
 ### 0.2 AGENTS.md rules that bind this feature
 
-| Rule | How it applies to dashboard |
+| Rule | How it applies to Employee Portal |
 |---|---|
-| **Client-vs-Web API Auth Separation** | `GET /dashboard/summary` and presence list for admins mount under **`JWTAuth` / `protected`** only. Never `DeviceAuth` / `syncGroup`. Do not read `employee_id` from Echo context in the summary handler. |
-| **URL-Synced Filters** | Filters live in the URL (`preset` / `from` / `to` / `departmentId`). React Query keys derive from URL. Debounced local mirrors for inputs (~400 ms). **No Clear (X)** on date/search — clear = default preset or empty input. `<Suspense>` around `useSearchParams`. **Never** `router.push`/`replace` inside a `setState` updater. |
-| **Web Infinite-Scroll** | Applies to full list/table pages. Dashboard **Recent Sessions** is a **bounded Top-N slice inside summary** (≤10–25), not a paginated list page — **no Next/Previous**, no infinite scroll widget. Deep-link to `/employee-journey/timeline` for full lists (those pages already infinite-scroll). |
-| **Server-Projected Flags / fields** | `recentSessions[].employeeName` (and any cross-table boolean later) must be projected in the **same SQL** as the row — never a second frontend fetch per session. Same spirit as `Employee.hasUserLogin`. |
-| **Live stream / presence** | Online semantics reuse existing `employeeLiveOnline` (presence WS authoritative when enabled; else heartbeat window). Do not invent a parallel online model. Extend `GET /live-stream/employees` params; keep JWT admin route. |
-| **Installer-Parity** | **N/A** — server + web only. No `config.enc`, no client publish. |
-| **No hardcoded software names** | Top Apps/Domains are data-driven from DB aggregates — never a product-name allowlist. |
-| **Branding single source** | N/A unless UI copy hardcodes product name; reuse existing `APP_SHORT_NAME` / config helpers if needed. |
-| **Cross-service contract sync** | Migration (if any) → repo SQL → DTO/model → handler → `web/src/lib/api.ts` types → UI — **same PR / same delivery**. |
-| **Docs handoff** | After landing: changelog entries in `AGENTS.md`, `server/ARCHITECTURE.md`, `web/ARCHITECTURE.md` (per `prompt.md` live-stream/server/web contract note). |
+| **Client-vs-Web API Auth Separation** | All portal reads mount under **`JWTAuth` / `protected`**. Never `DeviceAuth`. Do not read `employee_id` from Echo context (that key is DeviceAuth-only). Resolve employee from JWT `user_id` → `users.employee_id` in the **service**, or accept explicit `?employeeId=` for admin override (see §2). |
+| **URL-Synced Filters** | Date preset / range in URL (`preset` / `from` / `to`). Optional admin override `employeeId` in URL. React Query keys derive from URL. Debounced local mirrors. **No Clear (X)** on date/search. `<Suspense>` around `useSearchParams`. **Never** `router.push`/`replace` inside a `setState` updater. |
+| **Web Infinite-Scroll** | Portal is a **summary dashboard**, not a list page. Top apps = bounded Top-N inside summary (≤10). No Next/Previous. Deep-link to `/employee-journey/*` / `/hours-insights` for full detail. |
+| **Server-Projected Flags / fields** | Cross-table labels (employee name, app type/color, attendance status) projected in the **same SQL/response** as the aggregate — never N+1 from the frontend. |
+| **Installer-Parity** | **N/A** — server + web only. |
+| **No hardcoded software names** | Top apps come from DB + `monitoring_types` classification — never a product-name allowlist. |
+| **Cross-service contract sync** | Migration (if any) → repo → DTO → handler → `api.ts` → UI — same delivery. |
+| **Docs handoff** | After landing: changelog in `AGENTS.md`, `server/ARCHITECTURE.md`, `web/ARCHITECTURE.md`. |
 
-### 0.3 Safety and scope (`prompt.md`)
+### 0.3 Safety and scope
 
 - Preserve unrelated local changes.  
-- Never expose or commit secrets (`.env`, tokens).  
-- **No commit / push / PR / amend / branch** unless the user explicitly asks.  
-- No adjacent refactors (do not “fix” executive-dashboard, attendance N+1 page, etc. in this ticket).  
-- Do not disable analyzers, validation, hooks, or tests to hide failures.  
-- Smallest complete solution consistent with existing Echo layering and Next patterns.  
-- When blocked (DB auth, live-stream flag off, missing index evidence), report the exact blocker once.
+- Never expose or commit secrets.  
+- **No commit / push / PR** unless the user explicitly asks.  
+- Do **not** implement full Productivity Rules engine (`productivity_rule_sets`), Goals CRUD, or PDF export in this ticket (see §5 Out of scope).  
+- Do **not** refactor `/hours-insights`, `/productivity-scoring`, or `/goals` beyond what portal needs to reuse.  
+- Smallest complete solution; report blockers once (e.g. user has no linked employee).
 
-### 0.4 Verification commands (must run before claiming done)
+### 0.4 Verification commands (before claiming done)
 
 | Service | Commands |
 |---|---|
-| Server | `go build` (or project `make` equivalent), `go vet`, relevant package tests |
-| Web | `npx tsc --noEmit`, `next build` (and lint if already used in repo workflow) |
-| Cross-service | Confirm JSON field names match `api.ts` ↔ Go DTOs (camelCase) |
-| Client | **Skip** (unchanged) |
+| Server | `go build`, `go vet`, relevant package tests (new portal summary if added) |
+| Web | `npx tsc --noEmit`, `next build` |
+| Cross-service | JSON camelCase match `api.ts` ↔ Go DTOs |
+| Client | **Skip** |
 
-Do not claim a check passed unless it was run successfully (`prompt.md` Verification).
+### 0.5 Definition of done
 
-### 0.5 Definition of done (`prompt.md` + this feature)
-
-A delivery is done only when:
-
-1. Requested dashboard behavior is implemented (summary-first topology).  
-2. Relevant checks above pass (or failures clearly reported).  
-3. Cross-service contracts synchronized; Installer-Parity N/A stated.  
-4. No unrelated user work overwritten.  
-5. Docs changelogs updated (`AGENTS.md`, `server/ARCHITECTURE.md`, `web/ARCHITECTURE.md`).  
-6. Final response states result, verification evidence, and any required user action.
+1. `/employee-portal` renders **live** data for a resolvable employee (no hardcoded weekly scores / fake goals / fake apps).  
+2. Honest empty / unlinked-employee states (no mock fallback numbers).  
+3. Checks in §0.4 pass.  
+4. Contracts + docs updated.  
+5. Terminology uses **Activity Productivity / Focus Score** — never “Employee Performance” (`newrequirment.md` §48).
 
 ---
 
-## Changelog vs previous plan
+## 1. Current state (evidence)
 
-| Decision | Previous plan | This plan |
+### 1.1 Web page today
+
+`web/src/app/(app)/employee-portal/page.tsx` is **100% scaffolding**:
+
+| Widget | Mock value | Backend today |
 |---|---|---|
-| Data path | Phase A: 6–10 frontend list calls; Phase B: summary later | **Summary-first** — implement `GET /dashboard/summary` before UI widgets |
-| Top Apps | Reuse `appSessionsApi.usage` org-wide | **Do not** — usage runs heavy island/window SQL; summary uses bounded Top-N |
-| Top Domains | Deferred | In **summary from day one** (no list API aggregate) |
-| Device health | Employee-list sampling | **`summary.devices`** SQL (org devices API not in `api.ts`) |
-| Online Now | Full `liveStreamApi.employees()` poll | Live **counts** in summary; **capped** presence list |
-| Live vs historical | Mixed | **Strict split** |
-| Temporary architecture | Planned then replaced | **Forbidden** |
-| Execution | Ad-hoc | Bound to **`prompt.md` + AGENTS.md`** (auth group, URL filters, docs, verify) |
+| My Productivity Score | `84` / “Good” | **No** score API; hours-insights has productive/unproductive/neutral seconds |
+| My Focus Time | `5h 42m` | `app_sessions.foreground_seconds` exists; hours-insights only exposes **ratio** `focusScore` (fg/(fg+bg)×100), not absolute hours |
+| Apps Used Today | `8` / “6 productive” | hours-insights `appCount` + type breakdown |
+| My Peak Hour | `10:00 AM` | **No** peak-hour aggregate |
+| Attendance | `Present` / “On time” | `GET /attendance/today?employeeId=` |
+| Weekly Productivity chart | 0–100 score series + “+8%” | hours-insights `chart[]` is **seconds by type**, not score |
+| My Goals | 3 progress bars | **No** table/API (`/goals` also mock) |
+| Top Apps Today | names + Productive badges | hours-insights `topApps[]` with `type` |
+| Weekly Summary | active/idle/avg score + Export PDF | attendance `/range` can sum active/idle; score + PDF **missing** |
 
-**Kept:** no fake productivity/executive/DLP/AI/GPS; presence ≠ `employees.is_online`; classification backlog; skeletons; URL filters; RBAC-aware widgets; Quick Actions; dismissible download strip; “who needs attention.”
+Nav: sidebar General → Employee Portal (`module: "employee-portal"`). Docs already mark it mock (`web/ARCHITECTURE.md`).
 
----
+### 1.2 Identity / RBAC
 
-## 1. Product goal
-
-The dashboard answers four questions in one screen:
-
-| Question | Examples |
+| Piece | Status |
 |---|---|
-| **A. Who needs attention?** | Untracked employees · unclassified apps/sites · stale devices · stale sessions |
-| **B. Who is online now?** | Presence-backed online / streaming (not DB `is_online`) |
-| **C. What is happening?** | Sessions · web tabs · open sessions · Top Apps · Top Domains · Recent Sessions |
-| **D. What should I do?** | Quick Actions → **live** modules only |
+| `users.employee_id` | EXISTS (UNIQUE) |
+| `GET /auth/profile` → `employee` | EXISTS — loads linked employee when `employeeId` non-empty |
+| RBAC key `employee-portal` | Seeded in `RBACService.rbacCatalog` (General) |
+| RouteGuard | Client-side grant only; **no** server role middleware yet |
+| Self-scoped portal API | **MISSING** — every aggregate takes explicit `?employeeId=` |
+| “May only read own employee” enforcement | **MISSING** (any JWT caller can pass any `employeeId` today) |
 
-Target scale: hundreds → **thousands** of employees; large `app_sessions`; **millions** of `app_items`; concurrent admins; fast first paint; **minimal HTTP round-trips** for historical KPIs.
+### 1.3 Best existing APIs (reuse, do not reinvent)
 
----
+| API | Why it matters |
+|---|---|
+| **`GET /api/v1/hours-insights`** | Employee + range; productive/unproductive/neutral seconds; `focusScore` ratio; `appCount`; `topApps` with classification; daily/hourly `chart` buckets. Classification joins `installed_applications` ↔ `monitoring_types`. |
+| **`GET /api/v1/attendance/today`** | Status (`present`/`late`/`absent`/`off_shift`/`unknown`), `lateMinutes`, `timezone`, active/idle for today. |
+| **`GET /api/v1/attendance/range`** | Per-day `activeSeconds` / `idleSeconds` for weekly summary totals. |
+| **`GET /api/v1/auth/profile`** | Resolve “me” → linked `employee.employeeId`. |
+| **`GET /api/v1/dashboard/summary`** | **Wrong shape** — org-wide, no classification badges, no attendance, no focus hours. Do **not** power the portal from it. |
 
-## 2. Hard rules (non-negotiable)
+### 1.4 DB surfaces (relevant)
 
-1. **Frontend-consumable contracts only.** Postgres alone is never enough. If `api.ts` + a JWT route cannot deliver filters/aggregates/bounded payload, classify **`NOT AVAILABLE FOR DASHBOARD`** until an endpoint is in this plan.  
-2. **No frontend N+1.**  
-3. **No temporary fan-out architecture.**  
-4. **No fake metrics.**  
-5. **Live ≠ historical.**  
-6. **Bounded payloads** (Top-N / recent LIMIT; SQL `COUNT`/`FILTER`).  
-7. **Server-side aggregation** only.  
-8. **JWT `protected` only** for new admin dashboard APIs (`AGENTS.md` Client-vs-Web rule).  
-9. **Contracts + docs land with code** (`prompt.md` Definition of done).
+| Table | Use |
+|---|---|
+| `users.employee_id` | Self-resolve |
+| `app_sessions` | Duration + `foreground_seconds` / `background_seconds` (mig **020**), status lifecycle (**031**), indexes **022/032** |
+| `installed_applications.type_id` + `monitoring_types` | Productive / Unproductive / Neutral (mig **023**) |
+| `app_items` + `monitoring_sites` | Website classification (hours-insights already mixes sites into top items) |
+| `session_events` + `shifts` + `company_holidays` | Attendance computed on read (mig **028**) — **no** server `daily_attendance` table |
 
----
+**Absent:** `goals`, `productivity_rule_sets`, `productivity_scores`, PDF artifacts.
 
-## 3. Dashboard data contract audit
+### 1.5 Product formula gap (critical)
 
-Legend: **Frontend usable?** = in `web/src/lib/api.ts` with needed fields. **Scalable for home?** = safe as *primary* dashboard path at 1k+ employees / large activity tables.
+[`newrequirment.md`](./newrequirment.md) V1 score:
 
-| Dashboard data | Backend source | Existing API | Frontend usable? | Scalable for home? | Final solution |
-|---|---|---|---|---|---|
-| Employee total | `employees` | `GET /employees` → `employeesApi.list` | **Yes** | **No** (extra trips) | **`dashboard/summary.employees.total`** |
-| Tracked / untracked | `tracking_status` | `list({ status })` | **Yes** | **No** | **`summary.employees.tracked/untracked`** |
-| Online count | presence + heartbeat | `GET /live-stream/employees` | **Yes** if enabled | **No** (full org every poll; 503 if off) | **`summary.live.online`** |
-| Online names | same | same full list | **Yes** | **No** at thousands | **`?onlineOnly&limit`** on same JWT route (§5.2) |
-| Streaming / consent missing | SFU + terms | same | **Yes** | Counts in summary | **`summary.live.*`** |
-| `employees.is_online` | DB login flag | on `Employee` | Yes | **Wrong signal** | **Do not use** |
-| Open sessions | ACTIVE rows | `usage.openSessionCount` | **Yes** | **No** (heavy usage SQL) | **`summary.activity.openSessions`** |
-| Stale sessions | `STALE` | No status filter | **No** | n/a | **`summary.activity.staleSessions`** |
-| Sessions in range | `started_at` | `appSessionsApi.list` → `total` | **Yes** | **Weak**; no `departmentId` | **`summary.activity.sessions`** |
-| Web tabs in range | `browser_tab` | `appItemsApi.list` → `total` | **Yes** | **Weak** at millions | **`summary.activity.webPages`** + index |
-| Top Apps | GROUP BY sessions | `appSessionsApi.usage` | **Yes** | **No for home** | **`summary.topApps[]`** light Top-N |
-| Top Domains | `app_items.domain` | **None** | **No** | n/a | **`summary.topDomains[]`** (new) |
-| Unclassified apps/sites | monitoring tables | `monitoringApi.*.list({ unclassified })` | **Yes** | OK alone, bad in fan-out | **`summary.monitoring.*`** |
-| Device health / versions | `employee_devices` | Per-emp `GET /employees/:id/devices` only; **no `devicesApi`** | **No (org)** | n/a | **`summary.devices`** (new) |
-| Recent sessions | `app_sessions` | `list({ perPage:10 })` | **Yes** | Prefer embed | **`summary.recentSessions[]`** + projected `employeeName` |
-| Department options | `departments` | `departmentsApi.list()` | **Yes** | **Yes** | Separate cached call |
-| Org attendance | schedules + events | `attendanceApi` requires `employeeId` | **No (org)** | N+1 | **`NOT AVAILABLE FOR DASHBOARD`** |
-| Org hours / productivity % | hours-insights | requires `employeeId` | **No (org)** | N+1 | **`NOT AVAILABLE FOR DASHBOARD`** |
-| GPS / DLP / Shadow IT / AI / Exec | — | gated / scaffolding | No | — | **Out** |
-
-### Audit conclusions
-
-1. List APIs are not the production home backend.  
-2. Top Domains + org Device Health are **NOT AVAILABLE** without summary SQL.  
-3. Full live-stream employee list is not a scale-safe Online Now feed.  
-4. **Final topology is mandatory from Phase 1** (summary + capped presence + departments).
-
----
-
-## 4. Final request topology (production)
-
-```
-Browser /dashboard
- │
- ├─① GET /api/v1/dashboard/summary?from&to&departmentId     [JWT protected]
- │     • employees, activity, monitoring, devices, live counts
- │     • topApps, topDomains, recentSessions (bounded)
- │     • React Query key = URL filters; staleTime 30–60s
- │     • refetch on filter change — NOT on presence timer
- │
- ├─② GET /api/v1/live-stream/employees?onlineOnly=true&limit=24  [JWT protected]
- │     • Online Now names only; refetchInterval 10–15s (tab visible)
- │     • 503 if live-stream disabled → panel empty/disabled
- │
- └─③ GET /api/v1/departments   [JWT protected]
-       • filter dropdown; staleTime 5–10 min
+```text
+Activity Productivity = Productive ÷ Classified × 100
+Focus Score           = Foreground ÷ (Foreground + Background) × 100   (separate metric)
+Thresholds            = Excellent 80–100 / Good 60–79 / Average 40–59 / Poor 0–39
 ```
 
-**Target ≤ 3 HTTP calls.** Forbidden: multi-count fan-out + org-wide `usage` + full live list as the home data plane.
+Today hours-insights:
+
+- Treats **unclassified as Neutral** (`type_name IS NULL → neutral_sec`).  
+- Exposes `focusScore` as fg/(fg+bg) ratio only.  
+- Does **not** expose absolute `foregroundSeconds` / `backgroundSeconds` on the summary DTO (computed internally then discarded except as ratio).  
+- Does **not** expose a named Activity Productivity percentage.
+
+Full configurable Productivity Rules (`productivity_rule_sets`, browser overlap, unclassified include/exclude) is a **separate epic** — out of portal V1 scope. Portal V1 uses a **documented interim formula** locked in §3.
 
 ---
 
-## 5. Final API contracts
+## 2. Product decisions (locked for this plan)
 
-### 5.1 `GET /api/v1/dashboard/summary` (new)
+### 2.1 Audience: self-first portal
 
-**Auth:** `JWTAuth` / `protected` group in `router.go` — **web admin only** (`AGENTS.md` Client-vs-Web).  
-**Consumer:** `web` via Next rewrite + `dashboardApi` in `api.ts`.  
-**Not for:** desktop client.
+| Mode | Behavior |
+|---|---|
+| **Default** | Resolve employee from logged-in user (`auth/profile` → `employee.employeeId`). Page title/subtitle show that employee’s name. |
+| **Unlinked user** | Honest empty state: “Your account is not linked to an employee record.” CTA → Profile / ask admin. **No fake KPIs.** |
+| **Admin override (optional, V1.1)** | URL `?employeeId=EMP-…` allowed when caller has `employee-portal` grant — same pattern as Hours Insights picker. V1 may ship **self-only** and add picker later without API break if summary accepts optional `employeeId` with server fallback to “me”. |
 
-**Query**
+**Recommendation for implementation:** ship **self + optional `?employeeId=`** in one summary endpoint so managers can deep-link without a second API. Server resolves:
 
-| Param | Required | Notes |
+1. If `employeeId` query present → use it (JWT admin).  
+2. Else → load `users.employee_id` for `user_id` from JWT; 404/empty if blank.
+
+> Hard “own-data-only” ACL for non-admins is **not** in V1 (RBAC middleware still absent). Document as known gap; do not pretend the API is private.
+
+### 2.2 Page topology (target UI)
+
+Align mock layout with `newrequirment.md` §45 — replace fake widgets with honest activity metrics:
+
+```text
+┌─ Header: “My Activity” + date preset (Today | 7d | custom) ─────────────┐
+│ KPIs: Activity Productivity % + band | Focus Time (hours) | Focus Score % │
+│       Apps used (+ productive count) | Attendance (today always)          │
+├─ Weekly Activity Productivity (line: daily % for range) ──┬─ Top Apps ───┤
+│  (derived score per day; vs prior period delta optional)   │ classified   │
+├─ Breakdown strip: Productive / Neutral / Unproductive ────┴─ Weekly T&A ─┤
+│  (seconds + %)                                              active/idle  │
+└─ Deep links: Hours Insights · App Usage · Attendance ────────────────────┘
+```
+
+**Removed from V1 UI (were mock-only):**
+
+- My Goals (no backend) → hide section; do not show empty progress theater.  
+- Export PDF → hide button (no pipeline).  
+- Peak Hour → hide until an hourly peak query exists (Phase 3 optional).
+
+### 2.3 Interim Activity Productivity formula (V1)
+
+Until Productivity Rules ship:
+
+```text
+classifiedSeconds = productiveSeconds + unproductiveSeconds + neutralSeconds
+activityProductivity =
+  classifiedSeconds > 0
+    ? round(productiveSeconds / classifiedSeconds * 1000) / 10
+    : null   // UI: “—” + “No classified activity”
+```
+
+Notes:
+
+- Matches “Productive / Classified” with **today’s** hours-insights buckets (unclassified currently folded into Neutral).  
+- Label UI **Activity Productivity**, subtitle band from thresholds in §2.4.  
+- Tooltip must show Productive / Neutral / Unproductive seconds + formula (`newrequirment.md` §47).  
+- Do **not** call it Employee Performance.
+
+### 2.4 Threshold bands (display-only constants)
+
+| Band | Range |
+|---|---|
+| Excellent | ≥ 80 |
+| Good | ≥ 60 and &lt; 80 |
+| Average | ≥ 40 and &lt; 60 |
+| Poor | &lt; 40 |
+
+Ship as shared web helper (and mirror on server response as `productivityBand` string) — **not** DB-configured until Productivity Rules.
+
+### 2.5 Focus metrics
+
+| Metric | Definition | Source |
 |---|---|---|
-| `from` | yes (client-normalized) | Inclusive start; date-only or RFC3339 — match journey `parseTimeParam` behavior |
-| `to` | yes | **Exclusive end** (document once; align with journey pages) |
-| `departmentId` | no | Scopes employee KPIs + activity/top/recent via `employees.department_id` |
-| `topN` | no | Default **8**, max **20** (server clamp) |
-| `recentLimit` | no | Default **10**, max **25** |
+| **Focus Score** | `fg / (fg+bg) * 100` (1 decimal) | Already computed in hours-insights |
+| **Focus Time** | `SUM(foreground_seconds)` over range (display as hours) | Same SQL path; **must be added to API** |
 
-**Response (canonical camelCase — lock Go DTO tags + `api.ts` together)**
+---
 
-```json
-{
-  "range": { "from": "…", "to": "…" },
-  "employees": { "total": 0, "tracked": 0, "untracked": 0 },
-  "activity": {
-    "sessions": 0,
-    "webPages": 0,
-    "openSessions": 0,
-    "staleSessions": 0
-  },
-  "monitoring": { "unclassifiedApps": 0, "unclassifiedSites": 0 },
-  "devices": {
-    "active": 0,
-    "seen15m": 0,
-    "seen24h": 0,
-    "stale7d": 0,
-    "versions": [{ "version": "1.2.34", "count": 3 }]
-  },
-  "live": {
-    "online": 0,
-    "streaming": 0,
-    "consentMissing": 0,
-    "presenceAvailable": true
-  },
-  "topApps": [
-    {
-      "appDisplayName": "Google Chrome",
-      "processName": "chrome",
-      "sessionCount": 79,
-      "openNow": 4
-    }
-  ],
-  "topDomains": [{ "domain": "github.com", "visits": 100 }],
-  "recentSessions": [
-    {
-      "id": "…",
-      "employeeId": "MU-17",
-      "employeeName": "…",
-      "appDisplayName": "…",
-      "processName": "…",
-      "status": "ACTIVE",
-      "startedAt": "…",
-      "endedAt": null,
-      "lastSyncAt": "…"
-    }
-  ]
+## 3. Target architecture
+
+### 3.1 Preferred: one summary endpoint (summary-first)
+
+Mirror the admin dashboard lesson: **one JWT request** for the portal home, not a fan-out of list APIs.
+
+```text
+GET /api/v1/employee-portal/summary
+  Auth: JWTAuth
+  Query:
+    employeeId?   // optional; default = linked employee for JWT user
+    from? to?     // date-only or RFC3339; exclusive end for date-only (match dashboard)
+    preset?       // today | 7d | custom (server may ignore if from/to set)
+  Response: EmployeePortalSummaryResponse
+```
+
+**Why not only call hours-insights + attendance from the browser?**
+
+- Three round-trips + client-side score math duplicates product rules.  
+- Absolute focus seconds are not on the hours-insights DTO today.  
+- Attendance “today” is independent of the selected chart range.  
+- A dedicated summary keeps portal UX stable when hours-insights chart shape evolves.
+
+**Internal composition (service layer):** reuse `NewSchemaRepo.GetHoursInsights` pieces and/or extract shared SQL helpers + `TimeAttendanceService` for today + range — **do not** duplicate classification joins. Prefer thin orchestration over copy-paste SQL.
+
+### 3.2 Response contract (proposed)
+
+```ts
+// web/src/lib/api.ts — employeePortalApi.summary()
+interface EmployeePortalSummary {
+  employee: {
+    employeeId: string;
+    name: string;
+    department: string;
+  };
+  range: { from: string; to: string; label: string };
+
+  // Activity Productivity (interim formula §2.3)
+  activityProductivity: number | null;      // 0–100 or null
+  productivityBand: string | null;          // Excellent|Good|Average|Poor|null
+  productiveSeconds: number;
+  unproductiveSeconds: number;
+  neutralSeconds: number;
+  classifiedSeconds: number;
+
+  // Focus
+  focusSeconds: number;                     // SUM(foreground_seconds)
+  backgroundSeconds: number;
+  focusScore: number | null;                // fg/(fg+bg)*100
+
+  // Apps
+  appCount: number;
+  productiveAppCount: number;               // distinct apps with type Productive in range
+  topApps: Array<{
+    name: string;
+    totalSeconds: number;
+    type: string;                           // Productive|Unproductive|Neutral
+    color: string;
+    sessionCount: number;
+  }>;                                       // capped ≤ 8–10
+
+  // Trend (one point per local day in range)
+  dailyProductivity: Array<{
+    date: string;                           // YYYY-MM-DD
+    activityProductivity: number | null;
+    productiveSeconds: number;
+    unproductiveSeconds: number;
+    neutralSeconds: number;
+  }>;
+
+  // Optional vs prior equal-length window (V1 nice-to-have)
+  priorPeriodDelta: number | null;          // percentage points; null if either side null
+
+  // Attendance — always "today" in employee shift TZ (independent of chart range)
+  attendanceToday: {
+    status: string;
+    lateMinutes: number;
+    timezone: string;
+    firstActiveAt: string | null;
+    lastActiveAt: string | null;
+  } | null;
+
+  // Weekly T&A rollup for the selected range (sum of attendance days)
+  attendanceRange: {
+    activeSeconds: number;
+    idleSeconds: number;
+    presentDays: number;
+    lateDays: number;
+    absentDays: number;
+  };
 }
 ```
 
-**Rules**
+### 3.3 Alternate (fallback if summary delayed)
 
-- Top Apps = light `COUNT` Top-N (+ `openNow`); **not** `AggregateAppSessionsUsage` islands.  
-- Top Domains = `browser_tab` + non-empty `domain`, range, `GROUP BY`, `LIMIT`.  
-- `openSessions` / `staleSessions` = **now** (no date clip); label UI accordingly.  
-- `live.*` counts reuse `employeeLiveOnline` / hub / consent — integers only.  
-- `employeeName` on recent = SQL join projection (Server-Projected Fields).  
-- Errors: `dto.APIError` 400/401/500; prefer fail whole summary over fake section zeros.  
-- Server role middleware still product-wide absent — frontend `canAccess` gates widgets; do not invent dashboard-only ACL.
+Wire the page to:
 
-**Wiring (existing patterns — do not invent new stacks)**
+1. `authApi.profile()`  
+2. `hoursInsightsApi.get({ employeeId, preset/from/to })`  
+3. `attendanceApi.today` + `attendanceApi.range`  
 
-- `cmd/server/main.go`: construct handler with needed repos/presence/hub deps.  
-- `router.go`: `protected.GET("/dashboard/summary", dashboardHandler.GetSummary)`.  
-- Layering: `handlers` → `services` → `repository` + `dto`.
+…and compute Activity Productivity + Focus Time **on the client**. Acceptable only as a short intermediate; **target remains §3.1** so formula lives server-side once.
 
-**Web**
+### 3.4 Web structure
 
-```ts
-export const dashboardApi = {
-  summary: (params: {
-    from: string; to: string; departmentId?: number; topN?: number; recentLimit?: number;
-  }) => request<DashboardSummaryResponse>('/dashboard/summary', { params }),
-};
-```
-
-### 5.2 Presence list (real-time — separate JWT route)
-
-Extend existing admin route (same handler, additive query params — backward compatible when omitted):
-
-```http
-GET /api/v1/live-stream/employees?onlineOnly=true&limit=24
-```
-
-| Param | Behavior |
+| File | Role |
 |---|---|
-| `onlineOnly=true` | Only `online === true` (existing online rule) |
-| `limit` | Default 24, max 50 |
-| `departmentId` | Optional if cheap |
+| `web/src/app/(app)/employee-portal/page.tsx` | Suspense + URL filters + query → layout |
+| `web/src/components/employee-portal/*` | KPI row, trend chart, top apps, breakdown, attendance card, empty/unlinked states |
+| `web/src/lib/api.ts` | `employeePortalApi.summary` types |
+| `web/src/lib/productivity.ts` (new, small) | Band labels + format helpers (shared later with Score Card) |
 
-Response: `{ data: LiveStreamEmployee[]; total: number }` where `total` = **full online count** (not page length).  
-Omitted params → today’s full-list behavior (live-stream console unchanged).  
-Feature off → 503 (existing); panel disabled; summary `live.presenceAvailable=false`.
+Reuse existing: `StatsCard`, `ActivityFilters` / `useUrlActivityFilter`, `formatSeconds`, chart tokens from Hours Insights colors (`#10b981` / `#ef4444` / `#64748b`).
 
-**Web:** `liveStreamApi.employees(params?)` — extend, don’t fork.
+### 3.5 Server structure
 
-### 5.3 Departments (unchanged)
-
-`departmentsApi.list()` for filter options.
-
-### 5.4 Not in v1
-
-| Metric | Status |
+| Piece | Path |
 |---|---|
-| Org attendance | NOT AVAILABLE — future `GET /attendance/summary` if product asks |
-| Org hours / productive % | NOT AVAILABLE |
-| Executive / DLP / Shadow IT / AI / GPS tiles | Out |
+| Handler | `server/internal/handlers/employee_portal_handler.go` |
+| Service | `server/internal/services/employee_portal_service.go` |
+| Repo helpers | Prefer extending `new_schema_repo` / attendance service; add `employee_portal_repo.go` only if SQL diverges cleanly |
+| DTO | `server/internal/dto/employee_portal_dto.go` |
+| Route | `protected.GET("/employee-portal/summary", …)` in `router.go` |
+| Tests | Service-level formula + empty employee cases |
+
+### 3.6 Indexes
+
+Existing `idx_app_sessions_emp_started` / `idx_app_sessions_employee_started_name` + session_events indexes cover “my day / my week”. **No new migration required for V1** unless EXPLAIN on live DB shows a missing path for daily productivity buckets — then add a focused index in a numbered migration (next after latest).
+
+Phase 0 before coding: run EXPLAIN on the daily bucket query for one active `employee_id` (same discipline as dashboard plan).
 
 ---
 
-## 6. SQL & index strategy
+## 4. Implementation phases
 
-One handler → service → few SQL statements (errgroup for independent blocks). Aggregate in Postgres; never pull millions of rows into Go for grouping.
+### Phase 0 — Evidence (½ day)
 
-### 6.1 Query plan
+1. Confirm a web user with non-empty `users.employee_id` on the target DB.  
+2. EXPLAIN hours-insights-style aggregates for that employee (today + 7d).  
+3. Smoke `GET /attendance/today` + `/range` for the same id.  
+4. Lock formula §2.3 with product owner if Neutral-includes-unclassified is unacceptable — if so, **split unclassified** in SQL before UI work (small hours-insights/repo change in Phase 1).
 
-| Block | Tables | Strategy | Result size |
-|---|---|---|---|
-| Employees | `employees` | `COUNT(*) FILTER` + optional `department_id` | 1 row |
-| Sessions in range | `app_sessions` (+ emp join if dept) | `COUNT` on `started_at` window | scalar |
-| Open / stale | `app_sessions` | `COUNT FILTER` by status — **no date** | 1 row |
-| Web pages | `app_items` | `item_type='browser_tab'` + `opened_at` | scalar |
-| Top apps | `app_sessions` | `GROUP BY` name/process `ORDER BY COUNT DESC LIMIT` | ≤20 |
-| Top domains | `app_items` | `GROUP BY domain LIMIT` | ≤20 |
-| Recent | `app_sessions` ⋈ `employees` | `ORDER BY started_at DESC LIMIT` + name | ≤25 |
-| Monitoring | catalog + sites | unclassified `COUNT` (same predicates as monitoring repo) | 2 scalars |
-| Devices | `employee_devices` | last_seen buckets + version histogram `LIMIT 10` | small |
-| Live counts | presence / heartbeat / consent | in-process counts (reuse stream code paths) | 3 ints |
+**Exit:** written notes in PR/handoff; no product code required until Phase 1.
 
-### 6.2 Indexes
+### Phase 1 — Server summary contract
 
-| Need | Existing | Action |
-|---|---|---|
-| Org sessions by time | `idx_app_sessions_timestamp` etc. | **EXPLAIN** org range; add `(started_at DESC) WHERE deleted_at IS NULL` if seq-scan |
-| ACTIVE/STALE | partial active + status_sync | Add STALE partial only if EXPLAIN requires |
-| Org web tabs | `idx_app_items_emp_opened` weak org-wide | Prefer **`idx_app_items_type_opened`** `(item_type, opened_at DESC) WHERE deleted_at IS NULL` |
-| Top domains | `idx_app_items_domain` | Prefer type+time index first; widen only if measured |
-| Devices last_seen | emp_id index | Consider `(last_seen_at) WHERE revoked_at IS NULL` |
-| Employees dept | `idx_employees_department_id` | OK |
+1. Add `EmployeePortalSummary` DTO + handler + service.  
+2. Resolve employee (query override vs JWT user link).  
+3. Compose activity + focus + top apps + dailyProductivity + attendanceToday + attendanceRange.  
+4. Expose `focusSeconds` / `backgroundSeconds` (fix the hours-insights gap for portal consumers).  
+5. Unit-test: null productivity when classified=0; band thresholds; unlinked user error shape.  
+6. `go build` / `go vet` / tests green.
 
-**Migration:** only proven indexes → next sequential file (e.g. `042_dashboard_indexes.sql`). No speculative wide indexes.
+### Phase 2 — Web live page
 
-### 6.3 Caching
+1. Replace mock `page.tsx` with URL-synced filters + `useQuery(['employee-portal-summary', …])`.  
+2. KPI row + breakdown + trend + top apps + attendance + weekly T&A.  
+3. Unlinked / loading / error empty states.  
+4. Remove Goals + PDF + Peak Hour from UI.  
+5. Deep links to Hours Insights / journey / attendance with `employeeId` preserved.  
+6. `tsc --noEmit` + `next build`.
 
-| Data | Strategy |
+### Phase 3 — Polish (same ticket if cheap; else follow-up)
+
+| Item | Notes |
 |---|---|
-| Summary | v1: indexed SQL only; optional Redis TTL 30–60s later under admin concurrency |
-| Presence | no DB cache |
-| Departments | client `staleTime` 5–10 min |
-| Summary client | React Query `staleTime` 30–60s; **not** tied to 15s presence poll |
+| Prior-period delta | “+8% vs prior week” only if both windows have classified activity |
+| Peak hour | `date_trunc('hour', …)` mode over last 30 days — **optional**; hide if not shipped |
+| Self-only ACL | When server RBAC lands, restrict non-admins to linked employee |
+| Split Unclassified | Align Neutral vs Unclassified with `newrequirment.md` Method 1 |
+
+### Phase 4 — Docs handoff
+
+- `AGENTS.md` changelog entry (web + server).  
+- `server/ARCHITECTURE.md` API table row for `GET /employee-portal/summary`.  
+- `web/ARCHITECTURE.md` — mark `/employee-portal` live-API (drop “Hardcoded demo data”).
 
 ---
 
-## 7. Frontend architecture
+## 5. Explicitly out of scope (do not expand)
 
-### 7.1 Filters (URL-Synced Filters Rule — full)
-
-```
-?preset=today|7d|30d|all|custom&from=YYYY-MM-DD&to=YYYY-MM-DD&departmentId=
-```
-
-- Default **Today** (local day → ISO bounds for API).  
-- Single filter model → all summary widgets.  
-- Presence ignores date range; may honor `departmentId`.  
-- Debounced local input mirrors; no Clear-X.  
-- `<Suspense>` boundary.  
-- Router updates **outside** `setState` updaters (`useUrlQueryState` pattern already fixed for live-stream).
-
-### 7.2 Components (`web/src/components/dashboard/`)
-
-| Component | Data | States |
-|---|---|---|
-| `DashboardHeader` | URL filters | — |
-| `DashboardStatGrid` | summary KPIs | skeleton / error |
-| `AttentionStrip` | untracked / unclassified / stale | summary |
-| `OnlineNowPanel` | presence list | skeleton / empty / error / disabled |
-| `FleetHealthCard` | `summary.devices` | skeleton |
-| `ClassificationPulse` | `summary.monitoring` | skeleton |
-| `QuickActions` | `usePermissions` | — |
-| `TopAppsWidget` / `TopDomainsWidget` / `RecentSessions` | summary arrays | empty OK |
-| `DownloadAppStrip` | existing GitHub helper; session dismiss | footer |
-
-Page = composition only. Ownership: place under `web/src/components/dashboard/` per `FILE_HIERARCHY.md` / web ownership.
-
-### 7.3 Loading / error
-
-- No full-page `<Loader2 />`.  
-- Skeletons until summary resolves (consistent KPI/Top/Recent).  
-- Presence updates independently.  
-- Summary error ≠ blank Online Now.
-
-### 7.4 Refresh
-
-| Query | staleTime | refetchInterval |
-|---|---|---|
-| summary | 30–60s | off (filter / retry) |
-| presence online list | 0–5s | 10–15s, tab visible only |
-| departments | 5–10 min | off |
-
-### 7.5 RBAC
-
-Frontend `canAccess` hides Live / Journey / Configuration / Attendance actions. Dashboard module remains landing.
-
-### 7.6 Remove / demote
-
-- Delete Productive/Unproductive empty card.  
-- Download → dismissible footer (`compact`).  
-- No executive/shadow-IT/DLP/AI mock numbers.
+| Item | Why |
+|---|---|
+| Full **Productivity Rules** engine (`productivity_rule_sets`, weights, browser overlap, rule versioning) | Separate epic (`newrequirment.md` §§49–50); portal uses interim formula |
+| **Goals** CRUD / `/goals` page | No schema; leave mock or Coming Soon elsewhere |
+| **PDF export** | No generation stack |
+| Org-wide **Score Card** (`/productivity-scoring`) | Still mock; do not block portal on it |
+| Admin **Dashboard** changes | Already shipped; leave alone |
+| Client / installer / DeviceAuth routes | N/A |
+| Server RBAC middleware for all routes | Pre-existing gap; portal documents the risk |
 
 ---
 
-## 8. Implementation phases (final architecture; `prompt.md` implement workflow)
+## 6. Mapping: mock → live
 
-Phases = delivery safety. **No throwaway fan-out.** Each phase leaves shippable contracts.
-
-### Phase 0 — Contract lock + EXPLAIN (no product UI)
-
-1. [x] API audit (§3).  
-2. [x] Response contract (§5).  
-3. [ ] `EXPLAIN (ANALYZE, BUFFERS)` candidate SQL on live DB → final index list.  
-4. [ ] Confirm live-stream param extension stays backward compatible for `/live-stream` console.
-
-**Exit:** Approved plan + index list.  
-**prompt.md step:** establish current behavior (today’s dashboard fan-out) before changing it.
-
-### Phase 1 — Backend (complete server slice)
-
-Per `prompt.md` implement workflow: inspect → smallest complete server solution → verify.
-
-1. Index migration if EXPLAIN requires.  
-2. `dto` + `repository` + `service` + `handler` + `main.go` DI + `router` JWT route.  
-3. Extend `StreamHandler.ListEmployees` with `onlineOnly` / `limit` / accurate `total`.  
-4. Tests: empty org, dept filter, range validation, Top-N clamp, live-stream disabled.  
-5. `go build`, `go vet`, relevant tests.  
-6. Manual curl against running API with admin cookie.
-
-**Exit:** Final summary + presence contracts callable. Frontend may still be old.
-
-### Phase 2 — Frontend shell (summary + presence)
-
-1. `dashboardApi` + types; extend `liveStreamApi.employees`.  
-2. Rewrite `dashboard/page.tsx` + URL filters + Suspense.  
-3. StatGrid, Attention, OnlineNow, Fleet, Classification, QuickActions, Download strip.  
-4. Remove dead productivity card.  
-5. `npx tsc --noEmit`, `next build`.
-
-**Exit:** Home uses production topology (§4). No KPI list fan-out.
-
-### Phase 3 — Activity widgets (same summary payload)
-
-1. TopApps, TopDomains, RecentSessions from summary.  
-2. Deep-links to journey routes (`employeeId` where useful).  
-3. Empty states.
-
-### Phase 4 — Performance validation
-
-| Scenario | Scale | Checks |
-|---|---|---|
-| Small | ~100 emp | p95 summary budget (e.g. &lt;200ms DB on indexed path) |
-| Medium | ~500 | payload typically &lt;50–100KB |
-| Large | 1k–5k + large `app_items` | no hot seq scans; presence ≤ `limit` rows |
-
-Record: HTTP count on load (**≤3**), DB queries/summary, payload, concurrency.
-
-### Phase C (optional later — not v1)
-
-Org attendance / hours aggregates — only if product prioritizes; separate ticket.
-
-### Docs handoff (with Phase 1–2 land)
-
-Update changelogs (date + short bullet):
-
-- `AGENTS.md` — dashboard summary + presence list params; web home topology.  
-- `server/ARCHITECTURE.md` — API surface `GET /dashboard/summary`; indexes migration.  
-- `web/ARCHITECTURE.md` — `/dashboard` data source = summary + presence; retire “employees+sessions+items fan-out” row in route table.
+| Mock widget | V1 live behavior |
+|---|---|
+| My Productivity Score | **Activity Productivity** % + band from summary |
+| My Focus Time | `focusSeconds` formatted |
+| Apps Used Today | `appCount` + `productiveAppCount` |
+| My Peak Hour | **Removed** (or Phase 3) |
+| Attendance | `attendanceToday.status` + late copy |
+| Weekly Productivity chart | `dailyProductivity[].activityProductivity` line (0–100 domain; gaps as null) |
+| My Goals | **Removed** |
+| Top Apps Today | `topApps` with type badges |
+| Weekly Summary active/idle | `attendanceRange` sums |
+| Avg Productivity Score | Mean of non-null daily points **or** whole-range `activityProductivity` (prefer whole-range) |
+| Export PDF | **Removed** |
 
 ---
 
-## 9. File touch list
+## 7. Risks & mitigations
 
-**Server**  
-- `server/migrations/042_dashboard_indexes.sql` (conditional)  
-- `server/internal/dto/dashboard_dto.go`  
-- `server/internal/repository/dashboard_repo.go`  
-- `server/internal/services/dashboard_service.go`  
-- `server/internal/handlers/dashboard_handler.go`  
-- `server/internal/handlers/stream_handler.go`  
-- `server/internal/router/router.go`  
-- `server/cmd/server/main.go` (DI)  
-- tests  
+| Risk | Mitigation |
+|---|---|
+| User has no `employee_id` | Empty state; never invent scores |
+| Unclassified apps inflate Neutral | Document interim formula; Phase 3 split; tooltip shows raw seconds |
+| Fan-out / slow page | Single summary endpoint; bounded topApps; reuse indexed session queries |
+| Confusion with Focus Score vs Activity Productivity | Separate KPI tiles + copy from §48 |
+| Admin viewing another employee without ACL | Optional `employeeId`; document until RBAC middleware exists |
+| Duplicating hours-insights SQL bugs | Service orchestrates shared repo helpers; one classification join definition |
 
-**Web**  
-- `web/src/lib/api.ts`  
-- `web/src/app/(app)/dashboard/page.tsx`  
-- `web/src/components/dashboard/*`  
-- reuse `StatsCard`, `EmptyState`, `SessionStatusBadge`, `useUrlQueryState` / activity filter helpers  
+---
 
-**Docs**  
+## 8. Approval checklist
+
+Before implementation:
+
+- [ ] Approve self-first + optional `?employeeId=` resolution (§2.1)  
+- [ ] Approve interim Activity Productivity formula (§2.3) and threshold bands (§2.4)  
+- [ ] Approve removal of Goals / PDF / Peak Hour from V1 UI (§2.2)  
+- [ ] Approve new `GET /employee-portal/summary` over browser-only fan-out (§3.1)  
+- [ ] Confirm Phase 0 EXPLAIN access to the target DB  
+
+**After approval:** implement Phases 0→4 in one delivery pass unless a blocker is reported.
+
+---
+
+## 9. File touch list (expected)
+
+**Server (new/updated):**
+
+- `internal/dto/employee_portal_dto.go`  
+- `internal/handlers/employee_portal_handler.go`  
+- `internal/services/employee_portal_service.go`  
+- `internal/repository/…` (helpers or thin portal repo)  
+- `internal/router/router.go`  
+- tests under `internal/services/`  
+
+**Web:**
+
+- `src/app/(app)/employee-portal/page.tsx` (rewrite)  
+- `src/components/employee-portal/*` (new)  
+- `src/lib/api.ts` (`employeePortalApi`)  
+- `src/lib/productivity.ts` (bands/helpers)  
+
+**Docs:**
+
 - `AGENTS.md`, `server/ARCHITECTURE.md`, `web/ARCHITECTURE.md`  
 
-**Out of scope:** `client/**`, installer, executive-dashboard, attendance page N+1 rewrite, GPS UI flag flip.
-
----
-
-## 10. Acceptance criteria
-
-### Correctness
-- [ ] Every on-screen number from a real, frontend-wired JWT API.  
-- [ ] No “DB has it” without contract.  
-- [ ] Online ≠ `Employee.isOnline`.  
-- [ ] One summary → consistent KPI/Top/Recent for a filter set.  
-- [ ] No mock productivity / executive / DLP / AI / GPS tiles.  
-- [ ] `employeeName` (and similar) server-projected.
-
-### Scalability
-- [ ] No frontend N+1.  
-- [ ] Home historical path = summary only.  
-- [ ] Bounded Top-N / recent.  
-- [ ] Presence poll capped.  
-- [ ] Dept filter in SQL.
-
-### Speed
-- [ ] No full-page spinner.  
-- [ ] Summary not on presence interval.  
-- [ ] EXPLAIN-validated indexes where added.  
-- [ ] Phase 4 numbers recorded.
-
-### `prompt.md` / AGENTS compliance
-- [ ] Summary + presence under **JWT `protected`**, not DeviceAuth.  
-- [ ] URL-synced filters; Suspense; no router-inside-setState.  
-- [ ] Recent = capped summary slice (infinite-scroll rule N/A to this widget).  
-- [ ] Cross-service types synced.  
-- [ ] Docs changelogs updated.  
-- [ ] `go build` / `go vet` / `tsc` / `next build` run and reported honestly.  
-- [ ] No secrets committed; no unsolicited git commit/push/PR.  
-- [ ] Installer-Parity N/A documented in handoff.
-
----
-
-## 11. Live DB context (evidence only — not a UI data source)
-
-Snapshot 2026-10-05 — motivates widgets; **UI still uses §5 APIs only**:
-
-- 53 employees / 8 tracked / 45 untracked  
-- 186 sessions · 827 browser tabs today  
-- 278 apps + 197 sites unclassified  
-- 11 devices; version mix; 2 seen in 15m  
-- 21 ACTIVE · 18 STALE  
-- location/holidays empty  
-
----
-
-## 12. Build order
-
-1. Approve this plan.  
-2. Phase 0 — EXPLAIN + index list.  
-3. Phase 1 — backend summary + presence params + tests + verify.  
-4. Phase 2 — frontend shell on summary + Online Now + verify.  
-5. Phase 3 — Top Apps / Domains / Recent.  
-6. Phase 4 — scale validation.  
-7. Docs handoff + final report (result, evidence, user actions).
-
-**Do not implement code until approved. Do not ship list-API fan-out as an interim home.**
+**Not touched:** client/, installers, `dashboard/*`, Goals/PDF pipelines.
