@@ -1,7 +1,16 @@
 'use client';
 
-import { useRef } from 'react';
-import { Loader2, Monitor, WifiOff, ShieldAlert, Circle, X } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  Loader2,
+  Monitor,
+  WifiOff,
+  ShieldAlert,
+  Circle,
+  X,
+  Maximize2,
+  Minimize2,
+} from 'lucide-react';
 import type { LiveStreamEmployee } from '@/lib/api';
 import { useLiveStreamSocket } from '@/lib/useLiveStreamSocket';
 import { useVideoFps } from '@/hooks/use-video-fps';
@@ -16,12 +25,42 @@ export function LiveStreamWatchTile({
   onClose: () => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const tileRef = useRef<HTMLDivElement | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const canWatch = !emp?.consentMissing;
   const socket = useLiveStreamSocket(employeeId, videoRef, { enabled: canWatch });
   const fps = useVideoFps(videoRef, socket.status === 'live');
 
+  useEffect(() => {
+    const onFs = () => {
+      setIsFullscreen(document.fullscreenElement === tileRef.current);
+    };
+    document.addEventListener('fullscreenchange', onFs);
+    return () => document.removeEventListener('fullscreenchange', onFs);
+  }, []);
+
+  const toggleFullscreen = useCallback(async () => {
+    const el = tileRef.current;
+    if (!el) return;
+    try {
+      if (document.fullscreenElement === el) {
+        await document.exitFullscreen();
+      } else if (document.fullscreenElement) {
+        await document.exitFullscreen();
+        await el.requestFullscreen();
+      } else {
+        await el.requestFullscreen();
+      }
+    } catch {
+      /* browser may deny fullscreen */
+    }
+  }, []);
+
   return (
-    <div className="relative h-full w-full min-h-0 rounded-lg border border-border bg-black/80 overflow-hidden flex flex-col">
+    <div
+      ref={tileRef}
+      className="group relative h-full w-full min-h-0 rounded-lg border border-border bg-black overflow-hidden flex flex-col [:fullscreen]:h-screen [:fullscreen]:w-screen [:fullscreen]:rounded-none [:fullscreen]:border-0"
+    >
       <div className="absolute top-2 left-2 right-2 z-10 flex items-start justify-between gap-2 pointer-events-none">
         <div className="min-w-0 rounded-md bg-black/60 px-2 py-1 pointer-events-auto">
           <p className="text-xs font-medium text-white truncate">
@@ -44,27 +83,50 @@ export function LiveStreamWatchTile({
               </span>
             </>
           )}
-          {emp && socket.clientConnected && socket.monitors.length > 1 && (
-            <select
-              value={socket.selectedMonitor}
-              onChange={(e) => socket.selectMonitor(Number(e.target.value))}
-              className="h-6 max-w-[9rem] rounded border border-white/20 bg-black/70 px-1 text-[10px] text-white"
-            >
-              {socket.monitors.map((m) => (
-                <option key={m.index} value={m.index}>
-                  {m.name || `Display ${m.index + 1}`}
-                </option>
-              ))}
-            </select>
-          )}
-          <button
-            type="button"
-            onClick={onClose}
-            className="h-6 w-6 inline-flex items-center justify-center rounded bg-black/60 text-white hover:bg-black/80"
-            title="Remove"
+          <div
+            className={`flex items-center gap-1 transition-opacity ${
+              isFullscreen
+                ? 'opacity-100'
+                : 'opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto focus-within:opacity-100 focus-within:pointer-events-auto'
+            }`}
           >
-            <X className="w-3.5 h-3.5" />
-          </button>
+            {emp && socket.clientConnected && socket.monitors.length > 1 && (
+              <select
+                value={socket.selectedMonitor}
+                onChange={(e) => socket.selectMonitor(Number(e.target.value))}
+                className="h-6 max-w-[9rem] rounded border border-white/20 bg-black/70 px-1 text-[10px] text-white"
+              >
+                {socket.monitors.map((m) => (
+                  <option key={m.index} value={m.index}>
+                    {m.name || `Display ${m.index + 1}`}
+                  </option>
+                ))}
+              </select>
+            )}
+            <button
+              type="button"
+              onClick={toggleFullscreen}
+              className="h-6 w-6 inline-flex items-center justify-center rounded bg-black/60 text-white hover:bg-black/80"
+              title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+              aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+            >
+              {isFullscreen ? (
+                <Minimize2 className="w-3.5 h-3.5" />
+              ) : (
+                <Maximize2 className="w-3.5 h-3.5" />
+              )}
+            </button>
+            {!isFullscreen && (
+              <button
+                type="button"
+                onClick={onClose}
+                className="h-6 w-6 inline-flex items-center justify-center rounded bg-black/60 text-white hover:bg-black/80"
+                title="Remove"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
