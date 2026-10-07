@@ -1047,7 +1047,32 @@ export const attendanceApi = {
     request<AttendanceRangeResponse>('/attendance/range', {
       params: { employeeId, from: date, to: date, page: 1, perPage: 1 },
     }).then(r => r.data[0] ?? null),
+
+  events: (employeeId: string, date: string) =>
+    request<DaySessionEventsResponse>('/attendance/events', {
+      params: { employeeId, date },
+    }),
 };
+
+export interface SessionEventRow {
+  id: string;
+  employeeId: string;
+  eventType: string;
+  osUsername: string;
+  eventAt: string;
+  count: number;
+  firstAt: string;
+  lastAt: string;
+  syncedAt?: string | null;
+}
+
+export interface DaySessionEventsResponse {
+  employeeId: string;
+  workDate: string;
+  timezone: string;
+  data: SessionEventRow[];
+  total: number;
+}
 
 export const holidaysApi = {
   list: () => request<HolidayListResponse>('/holidays'),

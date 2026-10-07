@@ -424,7 +424,7 @@ in the `updateMutation`).
 | `/live-stream/theater` | Live stream theater | Full-bleed popout (no AppSidebar); employee sidebar + same tiles; `(live-popout)` layout | ✅ |
 | `/kpis` | KPIs & KRAs | Hardcoded demo data (scaffolding) | ❌ |
 | `/shifts` | Shift management | Server (`/shifts` CRUD; IANA timezone field; new-shift defaults to browser zone) | ✅ |
-| `/timesheets` | Timesheets | Server (`/attendance/range`; times formatted in `record.timezone`) | ✅ |
+| `/timesheets` | Timesheets | Server (`/attendance/range`; empty from/to = last 366 days; Events modal via `GET /attendance/events`) | ✅ |
 | `/attendance` | Attendance log | Server (`/attendance/range` per employee/day; status + late minutes from server) | ✅ |
 | `/gps-location` | GPS & Location | Coming Soon (`LOCATION_UI_ENABLED=false`; live code in `GpsLocationLive.tsx`) | ⏸ |
 | `/hours-insights` | Hours insights | Honest empty state (no endpoint) | ❌ |

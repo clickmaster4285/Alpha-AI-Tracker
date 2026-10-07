@@ -118,13 +118,9 @@ func (s *TimeAttendanceService) AttendanceRange(
 	if err != nil {
 		return nil, fmt.Errorf("invalid schedule timezone: %w", err)
 	}
-	from, err := time.ParseInLocation("2006-01-02", fromValue, location)
+	from, to, err := parseAttendanceRange(fromValue, toValue, location)
 	if err != nil {
-		return nil, fmt.Errorf("from must be YYYY-MM-DD")
-	}
-	to, err := time.ParseInLocation("2006-01-02", toValue, location)
-	if err != nil {
-		return nil, fmt.Errorf("to must be YYYY-MM-DD")
+		return nil, err
 	}
 	if to.Before(from) {
 		return nil, fmt.Errorf("to must not be before from")
@@ -167,6 +163,76 @@ func (s *TimeAttendanceService) AttendanceRange(
 	return &dto.AttendanceRangeResponse{
 		Data: result, Total: total, Page: page, PerPage: perPage, TotalPages: totalPages,
 	}, nil
+}
+
+func (s *TimeAttendanceService) DaySessionEvents(
+	ctx context.Context, employeeID, dateValue string,
+) (*dto.DaySessionEventsResponse, error) {
+	schedule, err := s.repo.GetScheduleForEmployee(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	timezone := "UTC"
+	if schedule != nil {
+		timezone = schedule.Timezone
+	}
+	location, err := time.LoadLocation(timezone)
+	if err != nil {
+		return nil, fmt.Errorf("invalid schedule timezone: %w", err)
+	}
+	day, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(dateValue), location)
+	if err != nil {
+		return nil, fmt.Errorf("date must be YYYY-MM-DD")
+	}
+	dayStart := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, location)
+	dayEnd := dayStart.AddDate(0, 0, 1)
+	events, err := s.repo.ListDaySessionEvents(ctx, employeeID, dayStart.UTC(), dayEnd.UTC())
+	if err != nil {
+		return nil, err
+	}
+	out := make([]dto.SessionEventResponse, 0, len(events))
+	for _, e := range events {
+		out = append(out, dto.SessionEventResponse{
+			ID:         e.ID,
+			EmployeeID: e.EmployeeID,
+			EventType:  e.EventType,
+			OsUsername: e.OsUsername,
+			EventAt:    e.EventAt,
+			Count:      e.EventCount,
+			FirstAt:    e.FirstAt,
+			LastAt:     e.LastAt,
+			SyncedAt:   e.SyncedAt,
+		})
+	}
+	return &dto.DaySessionEventsResponse{
+		EmployeeID: employeeID,
+		WorkDate:   dayStart.Format("2006-01-02"),
+		Timezone:   timezone,
+		Data:       out,
+		Total:      len(out),
+	}, nil
+}
+
+func parseAttendanceRange(fromValue, toValue string, location *time.Location) (time.Time, time.Time, error) {
+	fromRaw := strings.TrimSpace(fromValue)
+	toRaw := strings.TrimSpace(toValue)
+	// Empty bounds ("all time" on the web) map to the last 366 inclusive days —
+	// attendance is computed per calendar day and cannot span more than a year.
+	if fromRaw == "" || toRaw == "" {
+		now := time.Now().In(location)
+		to := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, location)
+		from := to.AddDate(0, 0, -365)
+		return from, to, nil
+	}
+	from, err := time.ParseInLocation("2006-01-02", fromRaw, location)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("from must be YYYY-MM-DD")
+	}
+	to, err := time.ParseInLocation("2006-01-02", toRaw, location)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("to must be YYYY-MM-DD")
+	}
+	return from, to, nil
 }
 
 func (s *TimeAttendanceService) attendanceForDay(

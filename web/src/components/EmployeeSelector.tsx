@@ -1,15 +1,25 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, ChevronDown, Loader2, Search, User } from 'lucide-react';
+import { Check, ChevronDown, Loader2, Search, User, Users } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { employeesApi, type Employee } from '@/lib/api';
+import { cn } from '@/lib/utils';
 
 interface EmployeeSelectorProps {
   value: string;
   onChange: (employee: Employee | null) => void;
   placeholder?: string;
   className?: string;
+  /** Show an "All employees" row that calls onChange(null). */
+  allowAll?: boolean;
+  allLabel?: string;
+  /** Restrict the list to this department name (client-side, on the shared cache). */
+  department?: string;
+}
+
+function matchesValue(emp: Employee, value: string): boolean {
+  return emp.id === value || emp.employeeId === value;
 }
 
 /**
@@ -22,6 +32,9 @@ export default function EmployeeSelector({
   onChange,
   placeholder = 'Select an employee…',
   className = '',
+  allowAll = false,
+  allLabel = 'All employees',
+  department,
 }: EmployeeSelectorProps) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
@@ -30,10 +43,17 @@ export default function EmployeeSelector({
   const { data, isLoading } = useQuery({
     queryKey: ['employees', 'selector'],
     queryFn: () => employeesApi.list({ page: 1, perPage: 100 }),
+    staleTime: 5 * 60_000,
   });
 
-  const employees = data?.data ?? [];
-  const selected = employees.find(e => e.id === value) ?? null;
+  const employees = useMemo(() => {
+    const rows = data?.data ?? [];
+    if (!department) return rows;
+    const d = department.toLowerCase();
+    return rows.filter(e => (e.department || '').toLowerCase() === d);
+  }, [data?.data, department]);
+
+  const selected = value ? employees.find(e => matchesValue(e, value)) ?? null : null;
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -44,6 +64,8 @@ export default function EmployeeSelector({
       e.email.toLowerCase().includes(q),
     );
   }, [employees, search]);
+
+  const showAllRow = allowAll && (!search.trim() || allLabel.toLowerCase().includes(search.trim().toLowerCase()));
 
   // Close on outside click
   useEffect(() => {
@@ -61,14 +83,26 @@ export default function EmployeeSelector({
     setSearch('');
   };
 
+  const clearAll = () => {
+    onChange(null);
+    setOpen(false);
+    setSearch('');
+  };
+
   return (
-    <div ref={rootRef} className={`relative w-full max-w-sm shrink-0 ${className}`.trim()}>
+    <div ref={rootRef} className={cn('relative w-full max-w-sm shrink-0', className)}>
       <button
         type="button"
+        aria-label="Employee"
+        aria-expanded={open}
         onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center gap-2 bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground hover:bg-muted/40 transition-colors"
+        className="w-full h-9 flex items-center gap-2 bg-card border border-border rounded-lg px-3 text-sm text-foreground hover:bg-muted/40 transition-colors"
       >
-        <User className="w-4 h-4 text-muted-foreground shrink-0" />
+        {selected ? (
+          <User className="w-4 h-4 text-muted-foreground shrink-0" />
+        ) : (
+          <Users className="w-4 h-4 text-muted-foreground shrink-0" />
+        )}
         <span className="flex-1 text-left truncate min-w-0">
           {selected ? (
             <>
@@ -76,7 +110,9 @@ export default function EmployeeSelector({
               <span className="text-muted-foreground ml-1.5 font-mono text-xs">{selected.employeeId}</span>
             </>
           ) : (
-            <span className="text-muted-foreground">{placeholder}</span>
+            <span className={allowAll ? 'text-foreground' : 'text-muted-foreground'}>
+              {allowAll ? allLabel : placeholder}
+            </span>
           )}
         </span>
         <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform shrink-0 ${open ? 'rotate-180' : ''}`} />
@@ -99,11 +135,25 @@ export default function EmployeeSelector({
               <div className="flex items-center justify-center gap-2 py-6 text-sm text-muted-foreground">
                 <Loader2 className="w-4 h-4 animate-spin" /> Loading employees…
               </div>
-            ) : filtered.length === 0 ? (
+            ) : filtered.length === 0 && !showAllRow ? (
               <p className="text-center py-6 text-sm text-muted-foreground">No employees found</p>
             ) : (
-              filtered.map(emp => {
-                const active = emp.id === value;
+              <>
+              {showAllRow && (
+                <button
+                  type="button"
+                  onClick={clearAll}
+                  className={`w-full flex items-center gap-3 rounded-lg px-2.5 py-2 text-left text-sm hover:bg-muted/40 transition-colors ${!selected ? 'bg-sidebar-accent/40' : ''}`}
+                >
+                  <div className="w-7 h-7 rounded-full flex items-center justify-center bg-muted shrink-0">
+                    <Users className="w-3.5 h-3.5 text-muted-foreground" />
+                  </div>
+                  <span className="flex-1 min-w-0 font-medium text-foreground">{allLabel}</span>
+                  {!selected && <Check className="w-4 h-4 text-primary shrink-0" />}
+                </button>
+              )}
+              {filtered.map(emp => {
+                const active = matchesValue(emp, value);
                 return (
                   <button
                     key={emp.id}
@@ -126,7 +176,8 @@ export default function EmployeeSelector({
                     {active && <Check className="w-4 h-4 text-primary shrink-0" />}
                   </button>
                 );
-              })
+              })}
+              </>
             )}
           </div>
         </div>

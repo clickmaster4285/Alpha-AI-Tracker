@@ -4,10 +4,11 @@ import { Suspense, useState, useMemo, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Search, ChevronDown, ChevronUp, Loader2, Monitor, Globe, FolderOpen, ExternalLink } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
-import { appSessionsApi, appItemsApi, employeesApi, type AppSession, type AppItem } from '@/lib/api';
+import { appSessionsApi, appItemsApi, type AppItem } from '@/lib/api';
 import { useUrlQueryState } from '@/hooks/use-url-query-state';
 import SessionStatusBadge, { sessionStatus } from '@/components/sessions/SessionStatusBadge';
 import { formatRelative } from '@/lib/format';
+import EmployeeSelector from '@/components/EmployeeSelector';
 
 export default function ComprehensiveLogs() {
   return (
@@ -42,14 +43,6 @@ function ComprehensiveLogsBody() {
 
   const [expandedSession, setExpandedSession] = useState<string | null>(null);
 
-  // Fetch employees for dropdown
-  const { data: employeesData } = useQuery({
-    queryKey: ['employees', { perPage: 100 }],
-    queryFn: () => employeesApi.list({ perPage: 100 }),
-  });
-  const employees = employeesData?.data || [];
-
-  // Fetch app sessions (replaces old activity-logs)
   const { data: sessionsData, isLoading, error } = useQuery({
     queryKey: ['app-sessions', { employeeId: selectedEmployee, search: searchQuery, page }],
     queryFn: () => appSessionsApi.list({
@@ -75,7 +68,6 @@ function ComprehensiveLogsBody() {
   });
 
   const browserNavItems = (itemsData?.data || []) as AppItem[];
-  const selectedEmp = employees.find(e => e.id === selectedEmployee);
 
   // Group URLs by session for display
   const urlsBySession = useMemo(() => {
@@ -92,16 +84,12 @@ function ComprehensiveLogsBody() {
       {/* Filters */}
       <div className="flex flex-col lg:flex-row gap-3">
         <div className="flex flex-col sm:flex-row gap-3 flex-1">
-          <select
+          <EmployeeSelector
             value={selectedEmployee}
-            onChange={e => setSelectedEmployee(e.target.value)}
-            className="bg-card border border-border rounded-lg px-3 py-2 text-sm text-foreground"
-          >
-            <option value="">All Employees</option>
-            {employees.map(e => (
-              <option key={e.id} value={e.employeeId}>{e.name} ({e.employeeId})</option>
-            ))}
-          </select>
+            allowAll
+            className="max-w-none sm:w-64"
+            onChange={(emp) => setSelectedEmployee(emp?.employeeId ?? '')}
+          />
           <div className="flex items-center bg-card border border-border rounded-lg px-3 py-2 gap-2 flex-1 max-w-sm">
             <Search className="w-4 h-4 text-muted-foreground" />
             <input

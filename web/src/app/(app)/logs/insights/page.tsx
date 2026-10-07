@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import ActivityFilters from '@/components/journey/ActivityFilters';
 import EmptyState from '@/components/employees/EmptyState';
+import EmployeeSelector from '@/components/EmployeeSelector';
 import StatsCard from '@/components/ui/StatsCard';
 import {
   Select,
@@ -100,12 +101,8 @@ function InsightsInner() {
       : undefined;
 
   const employeesQuery = useQuery({
-    queryKey: ['logs-insights', 'employees', departmentName ?? null],
-    queryFn: () =>
-      employeesApi.list({
-        perPage: 100,
-        department: departmentName,
-      }),
+    queryKey: ['employees', 'selector'],
+    queryFn: () => employeesApi.list({ page: 1, perPage: 100 }),
     staleTime: 5 * 60_000,
   });
 
@@ -158,22 +155,13 @@ function InsightsInner() {
                 ))}
               </SelectContent>
             </Select>
-            <Select
-              value={employeeId ?? 'all'}
-              onValueChange={(value) => setExtra({ employeeId: value === 'all' ? '' : value })}
-            >
-              <SelectTrigger className="h-9 w-full bg-background sm:w-56" aria-label="Employee">
-                <SelectValue placeholder="All employees" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All employees</SelectItem>
-                {employees.map((e) => (
-                  <SelectItem key={e.employeeId} value={e.employeeId}>
-                    {e.name} ({e.employeeId})
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <EmployeeSelector
+              value={employeeId ?? ''}
+              allowAll
+              department={departmentName}
+              className="max-w-none sm:w-64 bg-background"
+              onChange={(emp) => setExtra({ employeeId: emp?.employeeId ?? '' })}
+            />
           </div>
           <ActivityFilters
             value={filter}
