@@ -75,10 +75,18 @@ func (s *DlpService) CreateRule(ctx context.Context, req dto.CreateDlpRuleReques
 		return nil, fmt.Errorf("departmentIds required when applyToAll is false")
 	}
 
+	pattern := strings.TrimSpace(req.Pattern)
+	if trigger == "usb" {
+		pattern = "" // USB rules match any plug — no pattern filter
+	}
+	if trigger == "cloud_upload" && pattern == "" {
+		return nil, fmt.Errorf("pattern (domain) is required for cloud_upload rules")
+	}
+
 	rule := models.DlpRule{
 		Name:       name,
 		Trigger:    trigger,
-		Pattern:    strings.TrimSpace(req.Pattern),
+		Pattern:    pattern,
 		Action:     action,
 		Severity:   severity,
 		Enabled:    enabled,
@@ -128,6 +136,12 @@ func (s *DlpService) UpdateRule(ctx context.Context, id string, req dto.UpdateDl
 	}
 	if req.ApplyToAll != nil {
 		existing.ApplyToAll = *req.ApplyToAll
+	}
+	if existing.Trigger == "usb" {
+		existing.Pattern = ""
+	}
+	if existing.Trigger == "cloud_upload" && strings.TrimSpace(existing.Pattern) == "" {
+		return nil, fmt.Errorf("pattern (domain) is required for cloud_upload rules")
 	}
 	if !existing.ApplyToAll {
 		deps := existing.DepartmentIDs

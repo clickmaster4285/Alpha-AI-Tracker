@@ -13,6 +13,7 @@ import {
   FolderOpen,
   CloudUpload,
   Power,
+  X,
 } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -35,15 +36,26 @@ const severityStyles: Record<string, string> = {
 };
 
 const triggerMeta: Record<string, { label: string; icon: typeof Usb; hint: string }> = {
-  usb: { label: 'USB device', icon: Usb, hint: 'Alert when a USB / removable device is plugged in' },
-  file_transfer: { label: 'File transfer', icon: FolderOpen, hint: 'Alert when files are written to removable media' },
-  cloud_upload: { label: 'Cloud upload', icon: CloudUpload, hint: 'Alert when browser URLs match your pattern' },
+  usb: { label: 'USB device', icon: Usb, hint: 'Alert on any USB / removable device plug-in (no file filter)' },
+  file_transfer: { label: 'File transfer', icon: FolderOpen, hint: 'Alert when matching file extensions are written to removable media' },
+  cloud_upload: { label: 'Cloud upload', icon: CloudUpload, hint: 'Alert when the browser visits matching domains' },
 };
+
+/** Common extension presets (structural types — not product names). */
+const EXTENSION_PRESETS = [
+  '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+  '.csv', '.txt', '.zip', '.rar', '.7z',
+  '.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mov',
+  '.sql', '.json', '.xml',
+];
+
+const ADD_NEW_VALUE = '__add_new__';
 
 type FormState = {
   name: string;
   trigger: string;
-  pattern: string;
+  /** Normalized values: extensions (`.pdf`) or domains (`example.com`). Empty for USB. */
+  values: string[];
   action: string;
   severity: string;
   enabled: boolean;
@@ -54,7 +66,7 @@ type FormState = {
 const emptyForm = (): FormState => ({
   name: '',
   trigger: 'usb',
-  pattern: '',
+  values: [],
   action: 'alert_only',
   severity: 'high',
   enabled: true,
@@ -62,17 +74,170 @@ const emptyForm = (): FormState => ({
   departmentIds: [],
 });
 
+function normalizeExtension(raw: string): string | null {
+  let s = raw.trim().toLowerCase();
+  if (!s) return null;
+  if (s.startsWith('*.')) s = s.slice(1);
+  s = s.replace(/^\.+/, '');
+  s = s.replace(/[^a-z0-9]/g, '');
+  if (!s) return null;
+  return `.${s}`;
+}
+
+function normalizeDomain(raw: string): string | null {
+  let s = raw.trim().toLowerCase();
+  if (!s) return null;
+  s = s.replace(/^https?:\/\//, '');
+  s = s.split('/')[0] ?? s;
+  s = s.replace(/:\d+$/, '');
+  s = s.replace(/^\.+/, '').replace(/\.+$/, '');
+  if (!s || !s.includes('.')) return null;
+  return s;
+}
+
+function parsePatternValues(trigger: string, pattern: string | undefined): string[] {
+  const parts = (pattern ?? '').split(',').map(p => p.trim()).filter(Boolean);
+  if (trigger === 'file_transfer') {
+    return [...new Set(parts.map(normalizeExtension).filter((v): v is string => !!v))];
+  }
+  if (trigger === 'cloud_upload') {
+    return [...new Set(parts.map(normalizeDomain).filter((v): v is string => !!v))];
+  }
+  return [];
+}
+
+function serializePattern(trigger: string, values: string[]): string {
+  if (trigger === 'usb') return '';
+  return values.join(',');
+}
+
 function formFromRule(rule: DlpRule): FormState {
   return {
     name: rule.name,
     trigger: rule.trigger,
-    pattern: rule.pattern ?? '',
+    values: parsePatternValues(rule.trigger, rule.pattern),
     action: rule.action || 'alert_only',
     severity: rule.severity || 'high',
     enabled: rule.enabled,
     applyToAll: rule.applyToAll,
     departmentIds: rule.departmentIds ?? [],
   };
+}
+
+function PatternValuePicker({
+  kind,
+  values,
+  suggestions,
+  onChange,
+}: {
+  kind: 'extension' | 'domain';
+  values: string[];
+  suggestions: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const [selectKey, setSelectKey] = useState(0);
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState('');
+
+  const available = suggestions.filter(s => !values.includes(s));
+  const label = kind === 'extension' ? 'File extensions' : 'Domains';
+  const addLabel = kind === 'extension' ? 'Add extension…' : 'Add domain…';
+  const placeholder = kind === 'extension' ? 'e.g. pdf or .docx' : 'e.g. drive.google.com';
+  const requiredHint = kind === 'domain'
+    ? 'At least one domain is required.'
+    : 'Optional — leave empty to match every file on removable media.';
+
+  const commitDraft = () => {
+    const normalized = kind === 'extension' ? normalizeExtension(draft) : normalizeDomain(draft);
+    if (!normalized) {
+      toast.error(kind === 'extension'
+        ? 'Enter a valid extension (letters/numbers only)'
+        : 'Enter a valid domain (e.g. example.com)');
+      return;
+    }
+    if (!values.includes(normalized)) onChange([...values, normalized]);
+    setDraft('');
+    setAdding(false);
+    setSelectKey(k => k + 1);
+  };
+
+  return (
+    <div className="space-y-1.5">
+      <Label>{label}{kind === 'domain' ? ' *' : ''}</Label>
+      {values.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {values.map(v => (
+            <span
+              key={v}
+              className="inline-flex items-center gap-1 pl-2.5 pr-1 py-1 rounded-full text-xs font-medium border border-primary/30 bg-primary/10 text-primary"
+            >
+              {v}
+              <button
+                type="button"
+                className="p-0.5 rounded-full hover:bg-primary/20"
+                aria-label={`Remove ${v}`}
+                onClick={() => onChange(values.filter(x => x !== v))}
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      {adding ? (
+        <div className="flex gap-2">
+          <Input
+            autoFocus
+            value={draft}
+            placeholder={placeholder}
+            onChange={e => setDraft(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter') { e.preventDefault(); commitDraft(); }
+              if (e.key === 'Escape') { setAdding(false); setDraft(''); }
+            }}
+          />
+          <Button type="button" size="sm" className="shrink-0" onClick={commitDraft}>Add</Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="shrink-0"
+            onClick={() => { setAdding(false); setDraft(''); }}
+          >
+            Cancel
+          </Button>
+        </div>
+      ) : (
+        <Select
+          key={selectKey}
+          value=""
+          onValueChange={v => {
+            if (v === ADD_NEW_VALUE) {
+              setAdding(true);
+              return;
+            }
+            if (v && !values.includes(v)) onChange([...values, v]);
+            setSelectKey(k => k + 1);
+          }}
+        >
+          <SelectTrigger>
+            <SelectValue placeholder={values.length ? 'Add another…' : addLabel} />
+          </SelectTrigger>
+          <SelectContent>
+            {available.map(s => (
+              <SelectItem key={s} value={s}>{s}</SelectItem>
+            ))}
+            <SelectItem value={ADD_NEW_VALUE}>
+              <span className="flex items-center gap-1.5">
+                <Plus className="w-3.5 h-3.5" /> {addLabel}
+              </span>
+            </SelectItem>
+          </SelectContent>
+        </Select>
+      )}
+      <p className="text-[11px] text-muted-foreground">{requiredHint}</p>
+    </div>
+  );
 }
 
 export default function DLPRulesPage() {
@@ -154,12 +319,21 @@ function DlpRulesInner() {
     setForm(emptyForm());
   };
 
+  const domainSuggestions = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of rules) {
+      if (r.trigger !== 'cloud_upload') continue;
+      for (const d of parsePatternValues('cloud_upload', r.pattern)) set.add(d);
+    }
+    return [...set].sort();
+  }, [rules]);
+
   const saveMutation = useMutation({
     mutationFn: async () => {
       const body = {
         name: form.name.trim(),
         trigger: form.trigger,
-        pattern: form.pattern.trim(),
+        pattern: serializePattern(form.trigger, form.values),
         action: form.action,
         severity: form.severity,
         enabled: form.enabled,
@@ -207,7 +381,8 @@ function DlpRulesInner() {
 
   const canSave =
     form.name.trim().length > 0 &&
-    (form.applyToAll || form.departmentIds.length > 0);
+    (form.applyToAll || form.departmentIds.length > 0) &&
+    (form.trigger !== 'cloud_upload' || form.values.length > 0);
 
   return (
     <div className="space-y-5 animate-fade-in">
@@ -321,10 +496,28 @@ function DlpRulesInner() {
                     </div>
 
                     <div className="mt-3 rounded-lg bg-muted/50 border border-border/60 px-3 py-2">
-                      <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-0.5">Pattern</p>
-                      <code className="text-xs text-foreground break-all">
-                        {rule.pattern?.trim() ? rule.pattern : '(any — matches all events for this trigger)'}
-                      </code>
+                      <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1">
+                        {rule.trigger === 'usb'
+                          ? 'Scope'
+                          : rule.trigger === 'file_transfer'
+                            ? 'Extensions'
+                            : 'Domains'}
+                      </p>
+                      {rule.trigger === 'usb' ? (
+                        <p className="text-xs text-foreground">Any USB / removable device</p>
+                      ) : parsePatternValues(rule.trigger, rule.pattern).length === 0 ? (
+                        <p className="text-xs text-foreground">
+                          {rule.trigger === 'file_transfer' ? 'Any file on removable media' : '—'}
+                        </p>
+                      ) : (
+                        <div className="flex flex-wrap gap-1">
+                          {parsePatternValues(rule.trigger, rule.pattern).map(v => (
+                            <code key={v} className="text-[11px] bg-background border border-border px-1.5 py-0.5 rounded">
+                              {v}
+                            </code>
+                          ))}
+                        </div>
+                      )}
                     </div>
 
                     <div className="flex flex-wrap items-center gap-1.5 mt-3">
@@ -400,7 +593,12 @@ function DlpRulesInner() {
                     <button
                       key={value}
                       type="button"
-                      onClick={() => setForm(f => ({ ...f, trigger: value }))}
+                      onClick={() => setForm(f => ({
+                        ...f,
+                        trigger: value,
+                        // Reset values when switching trigger type — shapes differ.
+                        values: value === f.trigger ? f.values : [],
+                      }))}
                       className={cn(
                         'flex items-start gap-3 rounded-lg border px-3 py-2.5 text-left transition-all',
                         active
@@ -419,18 +617,22 @@ function DlpRulesInner() {
               </div>
             </div>
 
-            <div className="space-y-1.5">
-              <Label htmlFor="dlp-rule-pattern">Pattern</Label>
-              <Input
-                id="dlp-rule-pattern"
-                placeholder="Keywords or globs, comma-separated (empty = any)"
-                value={form.pattern}
-                onChange={e => setForm(f => ({ ...f, pattern: e.target.value }))}
+            {form.trigger === 'file_transfer' && (
+              <PatternValuePicker
+                kind="extension"
+                values={form.values}
+                suggestions={EXTENSION_PRESETS}
+                onChange={values => setForm(f => ({ ...f, values }))}
               />
-              <p className="text-[11px] text-muted-foreground">
-                Matches against device name, file path, or URL. Examples: <code className="text-[10px] bg-muted px-1 rounded">*.xlsx</code>, <code className="text-[10px] bg-muted px-1 rounded">drive.google.com</code>
-              </p>
-            </div>
+            )}
+            {form.trigger === 'cloud_upload' && (
+              <PatternValuePicker
+                kind="domain"
+                values={form.values}
+                suggestions={domainSuggestions}
+                onChange={values => setForm(f => ({ ...f, values }))}
+              />
+            )}
 
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
@@ -523,6 +725,10 @@ function DlpRulesInner() {
                 onClick={() => {
                   if (!form.name.trim()) {
                     toast.error('Name is required');
+                    return;
+                  }
+                  if (form.trigger === 'cloud_upload' && form.values.length === 0) {
+                    toast.error('Add at least one domain for cloud upload rules');
                     return;
                   }
                   if (!form.applyToAll && form.departmentIds.length === 0) {
