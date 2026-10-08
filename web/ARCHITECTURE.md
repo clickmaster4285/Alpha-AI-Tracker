@@ -1,7 +1,10 @@
 # Web Architecture — Alpha AI Tracker Dashboard
 
-> **Last audited:** 2026-10-05 (dashboard summary-first home)
+> **Last audited:** 2026-10-08 (DLP live pages)
 > **Changelog:**
+> - 2026-10-08: **DLP Alerts + Rules live APIs.** `/dlp-alerts` infinite scroll + URL
+>   filters (`q`/`status`/`severity`/`trigger`); `/dlp-rules` CRUD via `dlpRulesApi` /
+>   `dlpAlertsApi`. Mocks removed. Verified: `npx tsc --noEmit`.
 > - 2026-10-05: **Dashboard home redesign — summary-first.**
 >   `/dashboard` consumes `dashboardApi.summary` + capped
 >   `liveStreamApi.employees({ onlineOnly, limit })` + departments filter.
@@ -288,7 +291,7 @@ web/
             ├── reports/            # Reports & Analytics (mock data)
             ├── audit-log/          # Audit log (mock data)
             ├── executive-dashboard/  # Executive dashboard (mock data)
-            ├── dlp-alerts/         # DLP Alerts (mock data)
+            ├── dlp-alerts/         # DLP Alerts (live API)
             ├── dlp-rules/          # DLP Rules (mock data)
             ├── shadow-it/          # Shadow IT (mock data)
             ├── ai-summary/         # AI Summary (mock data)
@@ -433,8 +436,8 @@ in the `updateMutation`).
 | `/reports` | Reports | Hardcoded demo data (scaffolding) | ❌ |
 | `/audit-log` | Audit log | Hardcoded demo data (scaffolding) | ❌ |
 | `/executive-dashboard` | Exec dashboard | Hardcoded demo data (scaffolding) | ❌ |
-| `/dlp-alerts` | DLP Alerts | Hardcoded demo data (scaffolding) | ❌ |
-| `/dlp-rules` | DLP Rules | Hardcoded demo data (scaffolding) | ❌ |
+| `/dlp-alerts` | DLP Alerts | Live `dlpAlertsApi` + infinite scroll | ✅ |
+| `/dlp-rules` | DLP Rules | Live `dlpRulesApi` CRUD | ✅ |
 | `/shadow-it` | Shadow IT | Hardcoded demo data (scaffolding) | ❌ |
 | `/emails` | Emails & Alerts | Hardcoded demo data (scaffolding) | ❌ |
 | `/projects` | Projects | Hardcoded demo data (scaffolding) | ❌ |

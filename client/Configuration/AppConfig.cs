@@ -75,6 +75,12 @@ public class AppConfig
     public bool TermsEnabled { get; init; } = true;
     public int TermsCheckHours { get; init; } = 6;   // periodic re-fetch cadence (login + resume wake it sooner)
 
+    // ─── DLP agent (separate --dlp process) ───
+    // Main tracker publishes sensor events over IPC; the agent matches rules + syncs alerts.
+    public bool DlpEnabled { get; init; } = true;
+    /// <summary>Windows named-pipe name, or Unix socket file name under the user data dir.</summary>
+    public string DlpIpcName { get; init; } = "";
+
     // ─── GPS & Location (Phase 3, finalplan §16) ───
     // Default OFF — requires OS location permission + employee consent.
     public bool LocationEnabled { get; init; } = false;
@@ -174,6 +180,8 @@ public class AppConfig
             TaMaxLocalRows = Math.Max(1000, int.TryParse(GetEnv("ALPHA_TA_MAX_LOCAL_ROWS"), out var taMax) ? taMax : 50_000),
             TermsEnabled = GetEnv("ALPHA_TERMS_ENABLED") is not ("0" or "false" or "False"),
             TermsCheckHours = Math.Max(1, int.TryParse(GetEnv("ALPHA_TERMS_CHECK_HOURS"), out var termsHours) ? termsHours : 6),
+            DlpEnabled = GetEnv("ALPHA_DLP_ENABLED") is not ("0" or "false" or "False"),
+            DlpIpcName = GetEnv("ALPHA_DLP_IPC_NAME") ?? string.Empty,
             LocationEnabled = GetEnv("ALPHA_LOCATION_ENABLED") is ("1" or "true" or "True"),
             LocationPollSec = Math.Max(60, int.TryParse(GetEnv("ALPHA_LOCATION_POLL_SEC"), out var locPoll) ? locPoll : 300),
             LocationIpFallback = GetEnv("ALPHA_LOCATION_IP_FALLBACK") is ("1" or "true" or "True"),

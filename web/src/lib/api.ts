@@ -1341,6 +1341,88 @@ export const termsContentApi = {
 };
 
 // ──────────────────────────
+// DLP (Data Loss Prevention)
+// ──────────────────────────
+
+export interface DlpRule {
+  id: string;
+  name: string;
+  trigger: string;
+  pattern: string;
+  action: string;
+  severity: string;
+  enabled: boolean;
+  applyToAll: boolean;
+  departmentIds?: number[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DlpAlert {
+  id: string;
+  employeeId: string;
+  employeeName?: string;
+  deviceId?: string;
+  ruleId?: string;
+  trigger: string;
+  severity: string;
+  status: string;
+  fileOrUrl: string;
+  detailJson?: string;
+  assignedTo?: string;
+  notes: string;
+  eventAt: string;
+  syncedAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DlpAlertListResponse {
+  data: DlpAlert[];
+  total: number;
+  page: number;
+  perPage: number;
+  totalPages: number;
+}
+
+export const dlpRulesApi = {
+  list: () => request<{ data: DlpRule[]; total: number }>('/dlp-rules'),
+  create: (body: {
+    name: string;
+    trigger: string;
+    pattern: string;
+    action?: string;
+    severity?: string;
+    enabled?: boolean;
+    applyToAll?: boolean;
+    departmentIds?: number[];
+  }) => request<DlpRule>('/dlp-rules', { method: 'POST', body }),
+  update: (id: string, body: Record<string, unknown>) =>
+    request<DlpRule>(`/dlp-rules/${id}`, { method: 'PUT', body }),
+  delete: (id: string) =>
+    request<{ message: string }>(`/dlp-rules/${id}`, { method: 'DELETE' }),
+};
+
+export const dlpAlertsApi = {
+  list: (params?: {
+    page?: number;
+    perPage?: number;
+    status?: string;
+    severity?: string;
+    trigger?: string;
+    employeeId?: string;
+    q?: string;
+    dateFrom?: string;
+    dateTo?: string;
+  }) =>
+    request<DlpAlertListResponse>('/dlp-alerts', {
+      params: params as Record<string, string | number | boolean | undefined>,
+    }),
+  patch: (id: string, body: { status?: string; assignedTo?: string; notes?: string }) =>
+    request<DlpAlert>(`/dlp-alerts/${id}`, { method: 'PATCH', body }),
+};
+
+// ──────────────────────────
 // Live Stream API
 // ──────────────────────────
 

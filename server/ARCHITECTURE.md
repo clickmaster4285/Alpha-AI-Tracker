@@ -1,7 +1,10 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-10-06 (logs insights + graphical)
+> **Last audited:** 2026-10-08 (DLP v1)
 > **Changelog:**
+> - 2026-10-08: **DLP rules + alerts.** Migration **044**. DeviceAuth:
+>   `GET /dlp-rules/active`, `POST /dlp-alerts/sync`. JWT: `/dlp-rules` CRUD,
+>   `GET/PATCH /dlp-alerts`. Repo/service/handler: `dlp_*.go`. Verified: `go build`/`go vet`.
 > - 2026-10-06: **Log Insights + Graphical Logs aggregates.** JWT `GET /api/v1/logs/insights`
 >   and `GET /api/v1/logs/graphical` (`from`/`to` + optional `departmentId`/`employeeId`).
 >   Insights = digest (metrics, productivity mix, top apps/domains, outliers, highlights).

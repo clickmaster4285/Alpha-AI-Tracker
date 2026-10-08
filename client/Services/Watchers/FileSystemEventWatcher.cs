@@ -1,12 +1,14 @@
 using Microsoft.Extensions.Logging;
 using client.Core;
 using client.Core.DesktopEventBus;
+using client.Services.Dlp;
 
 namespace client.Services.Watchers;
 
 public class FileSystemEventWatcher : IObservableEventSource
 {
     private readonly ILogger<FileSystemEventWatcher> _logger;
+    private readonly DlpEventPublisher _dlp;
     private readonly List<FileSystemWatcher> _watchers = new();
     private bool _isActive;
 
@@ -91,9 +93,10 @@ public class FileSystemEventWatcher : IObservableEventSource
 
     private static readonly TimeSpan DebounceDelay = TimeSpan.FromMilliseconds(500);
 
-    public FileSystemEventWatcher(ILogger<FileSystemEventWatcher> logger)
+    public FileSystemEventWatcher(ILogger<FileSystemEventWatcher> logger, DlpEventPublisher dlp)
     {
         _logger = logger;
+        _dlp = dlp;
 
         // Exclude the app's own runtime data directory (DB + journals). The path is
         // deterministic — added unconditionally (the dir may not exist yet at construction;
@@ -483,6 +486,9 @@ public class FileSystemEventWatcher : IObservableEventSource
             CurrentPath = e.FullPath,
             Timestamp = now,
         };
+
+        if (eventType is "created" or "renamed" or "changed")
+            _dlp.PublishFileOnRemovable(e.FullPath);
 
         EventRaised?.Invoke(this, raw);
     }

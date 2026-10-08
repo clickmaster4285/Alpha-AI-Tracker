@@ -146,6 +146,23 @@ internal static class DatabaseSchema
         CREATE INDEX IF NOT EXISTS idx_hardware_devices_open
             ON hardware_devices(unplugged_at, bus_path);
 
+        -- DLP alerts (written by the --dlp agent process; synced via DeviceAuth).
+        CREATE TABLE IF NOT EXISTS dlp_alerts (
+            id               TEXT PRIMARY KEY,
+            rule_id          TEXT,
+            trigger          TEXT NOT NULL,
+            severity         TEXT NOT NULL DEFAULT 'medium',
+            file_or_url      TEXT NOT NULL DEFAULT '',
+            detail_json      TEXT,
+            event_at         TEXT NOT NULL,
+            is_synced        INTEGER NOT NULL DEFAULT 0,
+            synced_at        TEXT,
+            created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_dlp_alerts_unsent
+            ON dlp_alerts(is_synced, event_at);
+
         CREATE TABLE IF NOT EXISTS session_events (
             id               TEXT PRIMARY KEY,
             event_type       TEXT NOT NULL,
@@ -479,6 +496,20 @@ internal static class DatabaseSchema
             ON hardware_devices(unplugged_at, bus_path);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_hardware_devices_open_path
             ON hardware_devices(bus_path) WHERE unplugged_at IS NULL AND bus_path != '';
+        CREATE TABLE IF NOT EXISTS dlp_alerts (
+            id               TEXT PRIMARY KEY,
+            rule_id          TEXT,
+            trigger          TEXT NOT NULL,
+            severity         TEXT NOT NULL DEFAULT 'medium',
+            file_or_url      TEXT NOT NULL DEFAULT '',
+            detail_json      TEXT,
+            event_at         TEXT NOT NULL,
+            is_synced        INTEGER NOT NULL DEFAULT 0,
+            synced_at        TEXT,
+            created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_dlp_alerts_unsent
+            ON dlp_alerts(is_synced, event_at);
         -- NOTE: the v1 dedup DELETE + UNIQUE fingerprint index were REMOVED here — the
         -- rows-per-cycle lifecycle model deliberately allows multiple rows per package
         -- (one per install cycle) and a UNIQUE constraint would break reinstall history.
@@ -622,6 +653,14 @@ internal static class DatabaseSchema
         VALUES
             ($id, $device_class, $vendor, $product, $serial, $bus_path, $device_node, $plugged_at)
         ON CONFLICT(bus_path) WHERE unplugged_at IS NULL AND bus_path != '' DO NOTHING
+    ";
+
+    internal const string InsertDlpAlertSql = @"
+        INSERT INTO dlp_alerts
+            (id, rule_id, trigger, severity, file_or_url, detail_json, event_at, is_synced)
+        VALUES
+            ($id, $rule_id, $trigger, $severity, $file_or_url, $detail_json, $event_at, 0)
+        ON CONFLICT(id) DO NOTHING
     ";
 
     internal const string InsertSessionEventSql = @"

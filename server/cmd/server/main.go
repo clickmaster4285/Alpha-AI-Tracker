@@ -117,6 +117,9 @@ func main() {
 	geofenceHandler := handlers.NewGeofenceHandler(geofenceService)
 	termsConsentHandler := handlers.NewTermsConsentHandler(termsConsentRepo)
 	termsContentHandler := handlers.NewTermsContentHandler(termsContentRepo)
+	dlpRepo := repository.NewDlpRepo(pool)
+	dlpService := services.NewDlpService(dlpRepo)
+	dlpHandler := handlers.NewDlpHandler(dlpService)
 
 	iceServers := make([]stream.ICEServerConfig, 0, 2)
 	if len(cfg.LiveStream.STUNURLs) > 0 {
@@ -241,7 +244,7 @@ func main() {
 	e.HideBanner = true
 	e.HidePort = true
 
-	router.Setup(e, cfg, authService, deviceRepo, userRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler, rbacHandler, shiftHandler, timeAttendanceHandler, geofenceHandler, termsConsentHandler, termsContentHandler, streamHandler, wsHandler, dashboardHandler, logInsightsHandler, logGraphicalHandler)
+	router.Setup(e, cfg, authService, deviceRepo, userRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler, rbacHandler, shiftHandler, timeAttendanceHandler, geofenceHandler, termsConsentHandler, termsContentHandler, streamHandler, wsHandler, dashboardHandler, logInsightsHandler, logGraphicalHandler, dlpHandler)
 
 	// ────────────────
 	// Graceful Shutdown

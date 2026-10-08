@@ -2789,6 +2789,87 @@ public class SqliteLogStore : ILogStore, IDisposable
     }
 
     // ────────────────────────────────────────
+    // DLP alerts (--dlp agent)
+    // ────────────────────────────────────────
+
+    public async Task StoreDlpAlertsAsync(IReadOnlyList<DlpAlert> entries, CancellationToken ct)
+    {
+        if (_connection == null || entries.Count == 0) return;
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = DatabaseSchema.InsertDlpAlertSql;
+            var pId = cmd.Parameters.Add("$id", SqliteType.Text);
+            var pRule = cmd.Parameters.Add("$rule_id", SqliteType.Text);
+            var pTrigger = cmd.Parameters.Add("$trigger", SqliteType.Text);
+            var pSeverity = cmd.Parameters.Add("$severity", SqliteType.Text);
+            var pFile = cmd.Parameters.Add("$file_or_url", SqliteType.Text);
+            var pDetail = cmd.Parameters.Add("$detail_json", SqliteType.Text);
+            var pAt = cmd.Parameters.Add("$event_at", SqliteType.Text);
+
+            await using var tx = await _connection.BeginTransactionAsync(ct);
+            ((DbCommand)cmd).Transaction = tx;
+            foreach (var e in entries)
+            {
+                pId.Value = e.Id;
+                pRule.Value = (object?)e.RuleId ?? DBNull.Value;
+                pTrigger.Value = e.Trigger;
+                pSeverity.Value = e.Severity;
+                pFile.Value = e.FileOrUrl ?? "";
+                pDetail.Value = (object?)e.DetailJson ?? DBNull.Value;
+                pAt.Value = e.EventAt.ToUniversalTime().ToString("O");
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+            await tx.CommitAsync(ct);
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task<IReadOnlyList<DlpAlert>> GetUnsentDlpAlertsAsync(int limit, CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<DlpAlert>();
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT * FROM dlp_alerts WHERE is_synced = 0 ORDER BY event_at ASC LIMIT $limit";
+            cmd.Parameters.AddWithValue("$limit", limit);
+            var results = new List<DlpAlert>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                results.Add(new DlpAlert
+                {
+                    Id = reader["id"]?.ToString() ?? "",
+                    RuleId = reader["rule_id"] is DBNull ? null : reader["rule_id"]?.ToString(),
+                    Trigger = reader["trigger"]?.ToString() ?? "",
+                    Severity = reader["severity"]?.ToString() ?? "medium",
+                    FileOrUrl = reader["file_or_url"]?.ToString() ?? "",
+                    DetailJson = reader["detail_json"] is DBNull ? null : reader["detail_json"]?.ToString(),
+                    EventAt = DateTime.TryParse(reader["event_at"]?.ToString(), null, System.Globalization.DateTimeStyles.RoundtripKind, out var at)
+                        ? at.ToUniversalTime()
+                        : DateTime.UtcNow,
+                    IsSynced = Convert.ToInt32(reader["is_synced"]) == 1,
+                });
+            }
+            return results;
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    public async Task MarkDlpAlertsSentAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        await MarkSentCoreAsync("dlp_alerts", "id", ids, ct);
+    }
+
+    // ────────────────────────────────────────
     // Location samples (Phase 3 GPS — synced; never deleted client-side)
     // ────────────────────────────────────────
 

@@ -34,6 +34,7 @@ func Setup(
 	dashboardHandler *handlers.DashboardHandler,
 	logInsightsHandler *handlers.LogInsightsHandler,
 	logGraphicalHandler *handlers.LogGraphicalHandler,
+	dlpHandler *handlers.DlpHandler,
 ) {
 	// ─────────────────────────────
 	// Global Middleware
@@ -111,6 +112,12 @@ func Setup(
 	// client-facing endpoint never leaks admin-drafted (inactive) content.
 	syncGroup.GET("/terms-content/active", termsContentHandler.ListActiveTermsContent)
 	syncGroup.POST("/terms-consent/sync", termsConsentHandler.SyncTermsConsent)
+
+	// DLP agent (DeviceAuth) — rules pull + alert sync; admin CRUD is under JWTAuth.
+	if dlpHandler != nil {
+		syncGroup.GET("/dlp-rules/active", dlpHandler.ListActiveRules)
+		syncGroup.POST("/dlp-alerts/sync", dlpHandler.SyncAlerts)
+	}
 
 	// Live stream — client push socket (DeviceAuth). Web watch/employees live under JWTAuth.
 	if streamHandler != nil {
@@ -256,6 +263,16 @@ func Setup(
 	protected.GET("/terms-consent/check", termsConsentHandler.HasAccepted)
 	protected.GET("/terms-consent", termsConsentHandler.ListTermsConsent)
 	protected.GET("/terms-consent/check", termsConsentHandler.HasAccepted)
+
+	// DLP — web-admin surface (JWT). Client agent uses DeviceAuth routes above.
+	if dlpHandler != nil {
+		protected.GET("/dlp-rules", dlpHandler.ListRules)
+		protected.POST("/dlp-rules", dlpHandler.CreateRule)
+		protected.PUT("/dlp-rules/:id", dlpHandler.UpdateRule)
+		protected.DELETE("/dlp-rules/:id", dlpHandler.DeleteRule)
+		protected.GET("/dlp-alerts", dlpHandler.ListAlerts)
+		protected.PATCH("/dlp-alerts/:id", dlpHandler.PatchAlert)
+	}
 
 	// Terms & Conditions content management (editable by admin)
 	protected.GET("/terms-content", termsContentHandler.ListTermsContent)

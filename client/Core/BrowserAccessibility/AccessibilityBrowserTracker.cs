@@ -30,6 +30,7 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
     private readonly ILogStore _store;
     private readonly ILogger<AccessibilityBrowserTracker> _logger;
     private readonly IBrowserRegistry? _browserRegistry;
+    private readonly client.Services.Dlp.DlpEventPublisher? _dlp;
 
     private sealed class TrackedWindow
     {
@@ -100,7 +101,8 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
         ILogStore store,
         ILogger<AccessibilityBrowserTracker> logger,
         BrowserHistoryReader? history = null,
-        IBrowserRegistry? browserRegistry = null)
+        IBrowserRegistry? browserRegistry = null,
+        client.Services.Dlp.DlpEventPublisher? dlp = null)
     {
         _config = config;
         _reader = reader;
@@ -108,6 +110,7 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
         _store = store;
         _logger = logger;
         _browserRegistry = browserRegistry;
+        _dlp = dlp;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -534,6 +537,9 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
             LastSeen = now,
         };
 
+        if (!string.IsNullOrEmpty(url))
+            _dlp?.PublishBrowserUrl(url, rootItem.Domain);
+
         // Debug level: emitted once per window open (and on every re-open), so it would
         // flood the terminal during `dotnet run`. The DB is the source of truth for
         // journeys; set ALPHA_LOG_LEVEL=debug to watch them live.
@@ -694,6 +700,9 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
         tw.LastUrl = url;
         tw.LastTitle = snap.WindowTitle;
         tw.LastActivity = now;
+
+        if (urlChanged && !string.IsNullOrEmpty(url))
+            _dlp?.PublishBrowserUrl(url, BrowserAccessibilityHelpers.ExtractDomain(url));
     }
 
     private async Task CloseWindowAsync(string key, TrackedWindow tw, DateTime closedAt, CancellationToken ct)

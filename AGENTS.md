@@ -1,7 +1,26 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-10-05
+> **Last audited:** 2026-10-08
 > **Changelog:**
+>
+> - 2026-10-08: **DLP empty-alerts fix — IPC serialize + FS watch without file-journey.**
+>   Root causes: (1) concurrent `usb_plugged` publishes raced the single-instance named pipe
+>   (3 PnP rows per stick → silent Connect timeouts); (2) `ALPHA_FILE_JOURNEY_ENABLED=false`
+>   skipped `FileSystemEventWatcher`, so copy-to-USB never emitted; (3) `file_on_removable`
+>   only matched `file_transfer` while the live rule was `usb`. Fix: queued IPC publisher,
+>   `DlpFileWatchHost` when DLP on + file-journey off, dual-trigger match
+>   (`file_transfer`+`usb`), 2s file-path dedup. Live-proven: write to `F:\` → local
+>   `dlp_alerts` → `POST /dlp-alerts/sync` → Postgres. Server must be up for rule cache.
+>
+> - 2026-10-08: **DLP v1 — separate `--dlp` agent process + live rules/alerts.**
+>   Migration **044** (`dlp_rules`, `dlp_rule_departments`, `dlp_alerts`). DeviceAuth
+>   `GET /dlp-rules/active` + `POST /dlp-alerts/sync`; JWT CRUD `/dlp-rules` + list/PATCH
+>   `/dlp-alerts`. Client: same binary `client --dlp` (own mutex), `DlpSupervisor` spawn/
+>   restart from main tracker, IPC events from USB/file/browser collectors, agent matches
+>   admin patterns (no hardcoded cloud vendors), syncs alerts. Env `ALPHA_DLP_ENABLED` /
+>   `ALPHA_DLP_IPC_NAME` (re-bake `config.enc`). Web `/dlp-alerts` + `/dlp-rules` live
+>   (infinite scroll + URL filters). Verified: `go build`/`go vet`; `dotnet build` 0/0;
+>   `npx tsc --noEmit`. Installer ship-test deferred (local exe lock during build).
 >
 > - 2026-10-05: **Web dashboard redesign — summary-first home (server + web).**
 >   New JWT `GET /api/v1/dashboard/summary` (date range + optional `departmentId`) returns

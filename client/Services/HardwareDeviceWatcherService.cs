@@ -7,6 +7,7 @@ using Microsoft.Extensions.Logging;
 using client.Configuration;
 using client.Core.Abstractions;
 using client.Core.Models;
+using client.Services.Dlp;
 
 namespace client.Services;
 
@@ -28,15 +29,21 @@ public class HardwareDeviceWatcherService : BackgroundService
     private readonly AppConfig _config;
     private readonly ILogStore _store;
     private readonly ILogger<HardwareDeviceWatcherService> _logger;
+    private readonly DlpEventPublisher _dlp;
     private readonly SemaphoreSlim _reconcileGate = new(1, 1);
 
     private static readonly TimeSpan ReconcileInterval = TimeSpan.FromMinutes(5);
 
-    public HardwareDeviceWatcherService(AppConfig config, ILogStore store, ILogger<HardwareDeviceWatcherService> logger)
+    public HardwareDeviceWatcherService(
+        AppConfig config,
+        ILogStore store,
+        ILogger<HardwareDeviceWatcherService> logger,
+        DlpEventPublisher dlp)
     {
         _config = config;
         _store = store;
         _logger = logger;
+        _dlp = dlp;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -196,6 +203,7 @@ public class HardwareDeviceWatcherService : BackgroundService
                 {
                     _logger.LogInformation("Hardware device plugged in: {Class} {Product} ({BusPath})",
                         dev.DeviceClass, dev.Product, dev.BusPath);
+                    _dlp.PublishUsbPlugged(dev.Vendor, dev.Product, dev.DeviceClass);
                 }
             }
 
@@ -512,6 +520,7 @@ public class HardwareDeviceWatcherService : BackgroundService
 
             await _store.StoreHardwareDevicesAsync(new[] { device }, ct);
             _logger.LogInformation("Audio device plugged in: {Class} {Product} ({BusPath})", deviceClass, product, busPath);
+            _dlp.PublishUsbPlugged(vendor, product, deviceClass);
         }
         finally
         {
@@ -732,6 +741,8 @@ public class HardwareDeviceWatcherService : BackgroundService
 
             if (devices.Count > 0)
             {
+                // Store is idempotent (open bus_path unique). Do not DLP-publish the
+                // full present set — that would re-alert every reconcile tick.
                 await _store.StoreHardwareDevicesAsync(devices, ct);
                 _logger.LogDebug("Hardware device reconcile found {Count} present device(s)", devices.Count);
             }

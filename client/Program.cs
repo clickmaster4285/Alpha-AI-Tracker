@@ -65,6 +65,8 @@ if (args.Contains("--print-config"))
     Console.WriteLine($"TaMaxLocalRows={cfg.TaMaxLocalRows}");
     Console.WriteLine($"TermsEnabled={cfg.TermsEnabled}");
     Console.WriteLine($"TermsCheckHours={cfg.TermsCheckHours}");
+    Console.WriteLine($"DlpEnabled={cfg.DlpEnabled}");
+    Console.WriteLine($"DlpIpcName={cfg.DlpIpcName}");
     Console.WriteLine($"LocationEnabled={cfg.LocationEnabled}");
     Console.WriteLine($"LocationIpFallback={cfg.LocationIpFallback}");
     Console.WriteLine($"LocationPollSec={cfg.LocationPollSec}");
@@ -130,6 +132,15 @@ EnvLoader.Load();
 if (args.Contains("--terms"))
 {
     await RunTermsAgentAsync(args);
+    return;
+}
+
+// `client --dlp` runs a STANDALONE headless DLP agent: own process + mutex, rule
+// pull, IPC listener, alert sync. The main tracker supervises it (DlpSupervisor)
+// and publishes sensor events — it never evaluates DLP rules in-process.
+if (args.Contains("--dlp"))
+{
+    await RunDlpAgentAsync(args);
     return;
 }
 
@@ -274,6 +285,13 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.Sc
 builder.Services.AddSingleton<client.Services.TermsService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.TermsService>());
 
+// DLP: main-tracker publisher + supervisor (agent is a separate --dlp process).
+builder.Services.AddSingleton<client.Services.Dlp.DlpEventPublisher>();
+if (config.DlpEnabled)
+{
+    builder.Services.AddHostedService<client.Services.Dlp.DlpSupervisor>();
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Time & Attendance (Phase 1, A.8): AttendanceAggregator rolls up today's
 // session-idle activity into daily_attendance_cache every 5 min. Reads use the
@@ -392,6 +410,7 @@ if (config.BrowserTrackingEnabled)
 // Desktop Event Bus (File Explorer tracking via AT-SPI on Linux, Shell COM on Windows,
 // plus FileSystemWatcher + recent-files sources on every platform). Master switch:
 // ALPHA_FILE_JOURNEY_ENABLED — when false, no file-journey data is collected at all.
+// DLP still needs removable FS events when file-journey is off — register a lean watch host.
 if (config.FileJourneyEnabled)
 {
     builder.Services.AddSingleton<EventCoordinator>();
@@ -403,6 +422,11 @@ if (config.FileJourneyEnabled)
     builder.Services.AddSingleton<FileSystemEventWatcher>();
     builder.Services.AddSingleton<RecentFilesWatcher>();
     builder.Services.AddHostedService<DesktopEventService>();
+}
+else if (config.DlpEnabled)
+{
+    builder.Services.AddSingleton<FileSystemEventWatcher>();
+    builder.Services.AddHostedService<client.Services.Dlp.DlpFileWatchHost>();
 }
 
 // USB / peripheral hotplug tracker (local SQLite only; no server sync yet)
@@ -593,6 +617,42 @@ static async Task RunTermsAgentAsync(string[] args)
     catch { /* stop failures are irrelevant for the agent */ }
     host.Dispose();
     Environment.Exit(0);
+}
+
+// Headless DLP agent — no Avalonia. Runs until killed by DlpSupervisor / OS.
+static async Task RunDlpAgentAsync(string[] args)
+{
+    using var agentMutex = new Mutex(true, client.Core.AppInfo.AppMutex + "-dlp-agent", out var agentCreated);
+    if (!agentCreated)
+    {
+        return; // another DLP agent is already running
+    }
+
+    var config = client.Configuration.AppConfig.FromEnv();
+    if (!config.DlpEnabled)
+    {
+        Console.Error.WriteLine("ALPHA_DLP_ENABLED=false — DLP agent exiting.");
+        return;
+    }
+
+    var builder = Host.CreateApplicationBuilder(args);
+    builder.Logging.ClearProviders();
+    builder.Logging.AddConsole();
+    builder.Logging.AddFile(ResolveLogPath());
+    builder.Logging.SetMinimumLevel(LogLevel.Information);
+
+    builder.Services.AddSingleton(config);
+    builder.Services.AddSingleton<ILogStore>(sp =>
+        new SqliteLogStore(ResolveDbPath(config.DbPath), config.DbEncryptionKey));
+    builder.Services.AddSingleton<HttpClient>(sp => new HttpClient { Timeout = TimeSpan.FromSeconds(30) });
+    builder.Services.AddHostedService<client.Services.Dlp.DlpEngine>();
+    builder.Services.AddHostedService<client.Services.Dlp.DlpAlertSync>();
+
+    var host = builder.Build();
+    await host.Services.GetRequiredService<ILogStore>()
+        .InitializeAsync(CancellationToken.None);
+
+    await host.RunAsync();
 }
 
 // A systemd user service keeps the environment captured by its manager, while

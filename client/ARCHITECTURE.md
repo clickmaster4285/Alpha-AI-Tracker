@@ -1,7 +1,12 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-10-03 (Win11 capture + Client Version headers, 1.2.34)
+> **Last audited:** 2026-10-08 (DLP agent process)
 > **Changelog:**
+> - 2026-10-08: **DLP agent — separate `client --dlp` process.** Main tracker hosts
+>   `DlpSupervisor` + `DlpEventPublisher` (USB / removable-file / browser URL → local IPC).
+>   Agent process: own mutex `AppMutex-dlp-agent`, `DlpEngine` (rule pull + match) +
+>   `DlpAlertSync`. SQLite `dlp_alerts`. Env: `ALPHA_DLP_ENABLED` (default true),
+>   `ALPHA_DLP_IPC_NAME`. Re-bake `config.enc` for installers. Verified: `dotnet build` 0/0.
 > - 2026-10-03: **Win11 blank live preview (FA-27) + Client Version on DeviceAuth.**
 >   FA-27 showed admin `LIVE` / `--- FPS` while SFU logged `withTrack=false`: Win11 GDI
 >   `CopyFromScreen` / CAPTUREBLT-only BitBlt produced no frames → no RTP. **`ScreenCaptureService`**
