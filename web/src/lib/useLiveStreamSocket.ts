@@ -32,6 +32,18 @@ export interface LiveStreamSocketState {
   selectMonitor: (index: number) => void;
 }
 
+/**
+ * Per-PeerConnection signaling state. Remote ICE candidates that arrive before
+ * the answer is applied MUST be queued — calling addIceCandidate with a null
+ * remoteDescription throws InvalidStateError and silently drops the candidate,
+ * breaking the whole ICE handshake (LIVE but no frames).
+ */
+interface PcEntry {
+  pc: RTCPeerConnection;
+  remoteReady: boolean;
+  queue: RTCIceCandidateInit[];
+}
+
 function resolveWsBase(): string {
   const fromEnv = process.env.NEXT_PUBLIC_WS_URL?.trim();
   if (fromEnv) return fromEnv.replace(/\/$/, '');
@@ -84,6 +96,7 @@ export function useLiveStreamSocket(
 
   const wsRef = useRef<WebSocket | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
+  const pcStateRef = useRef<PcEntry | null>(null);
   const videoHolder = useRef(videoRef);
   videoHolder.current = videoRef;
   const iceServersRef = useRef<RTCIceServer[]>([
@@ -134,6 +147,7 @@ export function useLiveStreamSocket(
     const cleanupPc = () => {
       const pc = pcRef.current;
       pcRef.current = null;
+      pcStateRef.current = null;
       if (pc) {
         try {
           pc.close();
@@ -217,6 +231,7 @@ export function useLiveStreamSocket(
         if (!pc) {
           pc = new RTCPeerConnection({ iceServers: iceServersRef.current });
           pcRef.current = pc;
+          pcStateRef.current = { pc, remoteReady: false, queue: [] };
           attachPcHandlers(pc, ws);
         }
         const offer = await pc.createOffer();
@@ -295,7 +310,7 @@ export function useLiveStreamSocket(
         }
       };
 
-      ws.onmessage = (ev) => {
+      ws.onmessage = async (ev) => {
         if (cancelled || typeof ev.data !== 'string') return;
         try {
           const msg = JSON.parse(ev.data) as {
@@ -353,24 +368,38 @@ export function useLiveStreamSocket(
           }
 
           if (msg.type === 'answer' && msg.sdp) {
-            const pc = pcRef.current;
-            if (pc && pc.signalingState === 'have-local-offer') {
-              void pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp }).catch((err) => {
-                console.warn('[live-stream] setRemoteDescription failed', err);
-              });
+            const entry = pcStateRef.current;
+            if (!entry || entry.remoteReady) return;
+            if (entry.pc.signalingState !== 'have-local-offer') return;
+            try {
+              await entry.pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+            } catch (err) {
+              console.warn('[live-stream] setRemoteDescription failed', err);
+              return;
+            }
+            entry.remoteReady = true;
+            // Flush every candidate that trickled in before the answer landed.
+            const queued = entry.queue;
+            entry.queue = [];
+            for (const c of queued) {
+              void entry.pc.addIceCandidate(c).catch(() => undefined);
             }
             return;
           }
 
           if (msg.type === 'ice' && msg.candidate) {
-            const pc = pcRef.current;
-            if (pc) {
-              void pc.addIceCandidate({
-                candidate: msg.candidate,
-                sdpMid: msg.sdpMid ?? undefined,
-                sdpMLineIndex: msg.sdpMLineIndex,
-              });
+            const entry = pcStateRef.current;
+            if (!entry) return;
+            const init: RTCIceCandidateInit = {
+              candidate: msg.candidate,
+              sdpMid: msg.sdpMid ?? undefined,
+              sdpMLineIndex: msg.sdpMLineIndex,
+            };
+            if (!entry.remoteReady) {
+              entry.queue.push(init);
+              return;
             }
+            void entry.pc.addIceCandidate(init).catch(() => undefined);
             return;
           }
 

@@ -127,6 +127,11 @@ public sealed class LiveStreamClient : BackgroundService
         ScreenVp8Encoder? encoder = null;
         CancellationTokenSource? mediaCts = null;
         Task? mediaPump = null;
+        // ICE candidates that arrive before the answer is applied cannot be
+        // added to the peer connection (remote description not set yet) — they
+        // are buffered here and flushed right after setRemoteDescription.
+        var pendingIce = new List<RTCIceCandidateInit>();
+        var remoteIceReady = false;
         var buffer = new byte[64 * 1024];
         var messageBuf = new MemoryStream(8 * 1024);
         // Max socket lifetime (Phase 1.8) — force reconnect so tokens/ICE stay fresh.
@@ -187,6 +192,8 @@ public sealed class LiveStreamClient : BackgroundService
                             {
                                 await StopMediaAsync(pc, encoder, mediaCts, mediaPump);
                                 (pc, encoder, mediaCts, mediaPump) = await StartPublisherAsync(ws, iceServers, ct);
+                                pendingIce.Clear();
+                                remoteIceReady = false;
                             }
                             catch (Exception ex)
                             {
@@ -213,6 +220,8 @@ public sealed class LiveStreamClient : BackgroundService
                             encoder = null;
                             mediaCts = null;
                             mediaPump = null;
+                            pendingIce.Clear();
+                            remoteIceReady = false;
                             _capture.SetStreamActive(false);
                             break;
 
@@ -244,15 +253,31 @@ public sealed class LiveStreamClient : BackgroundService
                                         sdp = sdp,
                                     };
                                     var setResult = pc.setRemoteDescription(answer);
-                                    if (setResult != SetDescriptionResultEnum.OK)
+                                    remoteIceReady = setResult == SetDescriptionResultEnum.OK;
+                                    if (!remoteIceReady)
                                         _logger.LogWarning("LiveStreamClient setRemoteDescription: {Result}", setResult);
+                                    if (remoteIceReady && pendingIce.Count > 0)
+                                    {
+                                        foreach (var cand in pendingIce)
+                                            pc.addIceCandidate(cand);
+                                    }
+                                    pendingIce.Clear();
                                 }
                             }
                             break;
 
                         case "ice":
                             if (pc is not null)
-                                ApplyRemoteIce(pc, doc.RootElement);
+                            {
+                                var cand = BuildRemoteIce(doc.RootElement);
+                                if (cand is not null)
+                                {
+                                    if (remoteIceReady)
+                                        pc.addIceCandidate(cand);
+                                    else
+                                        pendingIce.Add(cand);
+                                }
+                            }
                             break;
 
                         case "error":
@@ -746,13 +771,13 @@ public sealed class LiveStreamClient : BackgroundService
         return list;
     }
 
-    private static void ApplyRemoteIce(RTCPeerConnection pc, JsonElement root)
+    private static RTCIceCandidateInit? BuildRemoteIce(JsonElement root)
     {
         if (!root.TryGetProperty("candidate", out var candProp))
-            return;
+            return null;
         var candidate = candProp.GetString();
         if (string.IsNullOrWhiteSpace(candidate))
-            return;
+            return null;
 
         var init = new RTCIceCandidateInit { candidate = candidate };
         if (root.TryGetProperty("sdpMid", out var mid) && mid.ValueKind == JsonValueKind.String)
@@ -760,7 +785,7 @@ public sealed class LiveStreamClient : BackgroundService
         if (root.TryGetProperty("sdpMLineIndex", out var mline) && mline.ValueKind == JsonValueKind.Number)
             init.sdpMLineIndex = (ushort)mline.GetInt32();
 
-        pc.addIceCandidate(init);
+        return init;
     }
 
     private static string? BuildWsUrl(string? serverUrl)
