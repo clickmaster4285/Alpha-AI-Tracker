@@ -77,4 +77,42 @@ public static class BrowserAccessibilityHelpers
         var hash = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(value));
         return System.BitConverter.ToInt32(hash, 0) & 0x7FFFFFFF;
     }
+
+    // Last labels that are public suffixes, not file types — keeps "claude.ai" / "deepseek.com"
+    // from looking like an attached file. Not a product-name list.
+    private static readonly HashSet<string> DomainSuffixes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "com", "net", "org", "io", "ai", "app", "dev", "co", "uk", "de", "fr",
+        "edu", "gov", "mil", "info", "biz", "me", "tv", "cc", "xyz", "online", "site", "cloud",
+    };
+
+    /// <summary>
+    /// True when an accessibility name looks like an attached file chip ("keys.txt"),
+    /// not a URL or a bare hostname.
+    /// </summary>
+    public static bool LooksLikeAttachmentName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return false;
+        var n = name.Trim();
+        if (n.Length < 3 || n.Length > 180) return false;
+        if (n.Contains('\n') || n.Contains('\r') || n.Contains('/') || n.Contains('\\'))
+            return false;
+        if (n.Contains("://", StringComparison.Ordinal)) return false;
+        if (n.StartsWith("http", StringComparison.OrdinalIgnoreCase)) return false;
+
+        var dot = n.LastIndexOf('.');
+        if (dot <= 0 || dot >= n.Length - 1) return false;
+        var ext = n[(dot + 1)..];
+        if (ext.Length is < 1 or > 8) return false;
+        foreach (var c in ext)
+        {
+            if (!char.IsLetterOrDigit(c)) return false;
+        }
+        if (DomainSuffixes.Contains(ext) && !n.Contains(' '))
+            return false;
+
+        var baseName = n[..dot];
+        if (string.IsNullOrWhiteSpace(baseName)) return false;
+        return true;
+    }
 }

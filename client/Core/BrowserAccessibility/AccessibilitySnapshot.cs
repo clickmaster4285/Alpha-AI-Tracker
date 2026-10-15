@@ -49,5 +49,12 @@ public sealed class AccessibilitySnapshot
     /// </summary>
     public bool IsWebview { get; init; }
 
+    /// <summary>
+    /// File-like accessibility names visible in this window (attachment chips).
+    /// The tracker diffs these across polls; only newly appeared names on the
+    /// focused window become cloud-upload events.
+    /// </summary>
+    public IReadOnlyList<string> AttachmentNames { get; init; } = Array.Empty<string>();
+
     public DateTime CapturedAt { get; init; } = DateTime.UtcNow;
 }

@@ -12,17 +12,22 @@ using client.Services.Dlp;
 namespace client.Services;
 
 /// <summary>
-/// Local-only USB / peripheral / storage hotplug tracker (SQLite, no server sync yet).
+/// Main-tracker USB / peripheral / storage hotplug tracker.
 ///
 /// Tracks when physical devices are plugged in / unplugged:
 ///   - udev monitor (subsystem=usb) gives real-time add/remove events,
 ///   - a periodic /sys enumeration backfills anything the monitor missed (devices that
 ///     were present at boot before this service started) and self-heals gaps,
-///   - amixer polling detects analog audio jack plug/unplug for headsets/headphones.
+///   - amixer polling detects analog audio jack plug/unplug for headsets/headphones,
+///   - Windows PnP poll via Get-PnpDevice.
 ///
 /// Each plug-in writes a <c>hardware_devices</c> row (device_class/vendor/product/serial/
 /// bus_path/device_node/plugged_at); the matching plug-out sets <c>unplugged_at</c>.
 /// The open-row unique index (bus_path) keeps exactly one open row per physical slot.
+///
+/// DLP: this service (main process only) publishes <c>usb_plugged</c>/<c>usb_unplugged</c>
+/// over IPC to the separate <c>--dlp</c> agent. Do NOT register a second hardware watcher
+/// inside the agent — shared SQLite writes + dual publish would race and double-alert.
 /// </summary>
 public class HardwareDeviceWatcherService : BackgroundService
 {
@@ -214,6 +219,7 @@ public class HardwareDeviceWatcherService : BackgroundService
                 await _store.CloseHardwareDeviceAsync(dev.Id, now, ct);
                 _logger.LogInformation("Hardware device unplugged: {Class} {Product} ({BusPath})",
                     dev.DeviceClass, string.IsNullOrEmpty(dev.Product) ? "(unnamed)" : dev.Product, dev.BusPath);
+                _dlp.PublishUsbUnplugged(dev.Vendor, dev.Product, dev.DeviceClass);
             }
         }
         finally
@@ -659,6 +665,7 @@ public class HardwareDeviceWatcherService : BackgroundService
                 matched++;
                 _logger.LogInformation("Hardware device unplugged: {Class} {Product} ({BusPath})",
                     dev.DeviceClass, string.IsNullOrEmpty(dev.Product) ? "(unnamed)" : dev.Product, dev.BusPath);
+                _dlp.PublishUsbUnplugged(dev.Vendor, dev.Product, dev.DeviceClass);
             }
         }
         if (matched > 0)

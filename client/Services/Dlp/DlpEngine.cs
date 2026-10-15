@@ -10,6 +10,9 @@ namespace client.Services.Dlp;
 
 /// <summary>
 /// Runs only inside <c>client --dlp</c>: pulls active rules, listens on IPC, writes alerts.
+/// Rule cache is also updated instantly via <see cref="DlpRulesWsClient"/> when connected.
+/// USB/file/upload sensors stay in the main tracker and publish over IPC — this agent never
+/// watches <c>hardware_devices</c> itself.
 /// </summary>
 public sealed class DlpEngine : BackgroundService
 {
@@ -33,6 +36,14 @@ public sealed class DlpEngine : BackgroundService
         _store = store;
         _http = http;
         _logger = logger;
+    }
+
+    /// <summary>Replace the in-memory rule cache (HTTP pull or WebSocket push).</summary>
+    public void ApplyRules(IReadOnlyList<DlpRule>? rules, string source)
+    {
+        var list = rules?.ToList() ?? new List<DlpRule>();
+        lock (_rulesLock) _rules = list;
+        _logger.LogInformation("DlpEngine: cached {Count} active rule(s) via {Source}", list.Count, source);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -102,6 +113,12 @@ public sealed class DlpEngine : BackgroundService
                      r.Enabled &&
                      triggers.Any(t => string.Equals(r.Trigger, t, StringComparison.OrdinalIgnoreCase))))
         {
+            // cloud_upload requires an explicit domain pattern — empty never matches
+            // (prevents "match every site" flood from visit-era / misconfigured rules).
+            if (string.Equals(rule.Trigger, "cloud_upload", StringComparison.OrdinalIgnoreCase)
+                && string.IsNullOrWhiteSpace(rule.Pattern))
+                continue;
+
             if (!DlpPatternMatcher.Matches(rule.Pattern, evt.Subject)
                 && !DlpPatternMatcher.Matches(rule.Pattern, evt.Detail))
                 continue;
@@ -136,14 +153,14 @@ public sealed class DlpEngine : BackgroundService
     }
 
     /// <summary>
-    /// Sensor → admin trigger(s). Removable file ops match both file_transfer and usb
-    /// so a "usb not allowed" rule also catches copies onto a stick.
+    /// Sensor → admin trigger(s). Visits never map to cloud_upload — only real
+    /// <c>cloud_file_upload</c> (file-open dialog) does.
     /// </summary>
     private static string[] MapTriggers(string? type) => type?.ToLowerInvariant() switch
     {
-        "usb_plugged" => new[] { "usb" },
-        "file_on_removable" => new[] { "file_transfer", "usb" },
-        "browser_url" => new[] { "cloud_upload" },
+        "usb_plugged" or "usb_unplugged" => new[] { "usb" },
+        "file_on_removable" => new[] { "file_transfer" },
+        "cloud_file_upload" => new[] { "cloud_upload" },
         _ => Array.Empty<string>(),
     };
 
@@ -168,9 +185,7 @@ public sealed class DlpEngine : BackgroundService
 
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
         var payload = await JsonSerializer.DeserializeAsync<ActiveRulesPayload>(stream, JsonOpts, ct);
-        var rules = payload?.Rules ?? new List<DlpRule>();
-        lock (_rulesLock) _rules = rules;
-        _logger.LogInformation("DlpEngine: cached {Count} active rule(s)", rules.Count);
+        ApplyRules(payload?.Rules, "http");
     }
 
     private static void ApplyAuth(HttpRequestMessage request, EmployeeInfo employee)

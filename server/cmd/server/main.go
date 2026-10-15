@@ -11,6 +11,7 @@ import (
 
 	"github.com/alpha-ai-tracker/server/internal/config"
 	"github.com/alpha-ai-tracker/server/internal/database"
+	"github.com/alpha-ai-tracker/server/internal/dlpws"
 	"github.com/alpha-ai-tracker/server/internal/handlers"
 	"github.com/alpha-ai-tracker/server/internal/jobs"
 	goredis "github.com/alpha-ai-tracker/server/internal/redis"
@@ -119,7 +120,8 @@ func main() {
 	termsContentHandler := handlers.NewTermsContentHandler(termsContentRepo)
 	dlpRepo := repository.NewDlpRepo(pool)
 	dlpService := services.NewDlpService(dlpRepo)
-	dlpHandler := handlers.NewDlpHandler(dlpService)
+	dlpRulesHub := dlpws.NewHub()
+	dlpHandler := handlers.NewDlpHandler(dlpService, dlpRulesHub, cfg.CORS.AllowedOrigins)
 
 	iceServers := make([]stream.ICEServerConfig, 0, 2)
 	if len(cfg.LiveStream.STUNURLs) > 0 {

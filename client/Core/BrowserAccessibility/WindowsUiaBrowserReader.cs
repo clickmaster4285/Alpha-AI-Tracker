@@ -87,6 +87,7 @@ public sealed class WindowsUiaBrowserReader : IAccessibilityBrowserReader
                     }
 
                     var isBrowser = _browserRegistry.IsBrowser(processName);
+                    var isActive = fgHwnd != IntPtr.Zero && element.CurrentNativeWindowHandle == fgHwnd;
                     string url;
                     if (isBrowser)
                     {
@@ -115,8 +116,10 @@ public sealed class WindowsUiaBrowserReader : IAccessibilityBrowserReader
                         IsIncognito = BrowserAccessibilityHelpers.TitleSuggestsIncognito(title)
                                      || DetectIncognito(element, uia),
                         // Foreground window: matches the HWND returned by GetForegroundWindow.
-                        IsActive = fgHwnd != IntPtr.Zero && element.CurrentNativeWindowHandle == fgHwnd,
+                        IsActive = isActive,
                         IsWebview = !isBrowser,
+                        // Attachment chips only on the focused window — bounded walk.
+                        AttachmentNames = isActive && isBrowser ? ReadAttachmentNames(element, uia) : Array.Empty<string>(),
                     });
                 }
                 catch { }
@@ -290,5 +293,54 @@ private static bool DetectIncognito(IUIAutomationElement window, IUIAutomation u
         {
             return string.Empty;
         }
+    }
+
+    /// <summary>
+    /// Bounded control-view walk of the focused window. Collects names that look like
+    /// attached files (composer chips after a picker or a drop).
+    /// </summary>
+    private static IReadOnlyList<string> ReadAttachmentNames(IUIAutomationElement window, IUIAutomation uia)
+    {
+        var found = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var walker = uia.ControlViewWalker;
+            var stack = new Stack<IUIAutomationElement>();
+            var first = walker.GetFirstChildElement(window);
+            var sibs = 0;
+            while (first != null && sibs++ < 40)
+            {
+                stack.Push(first);
+                first = walker.GetNextSiblingElement(first);
+            }
+
+            var budget = 500;
+            while (stack.Count > 0 && budget-- > 0 && found.Count < 24)
+            {
+                var node = stack.Pop();
+                string name;
+                try { name = node.CurrentName ?? ""; }
+                catch { continue; }
+
+                if (BrowserAccessibilityHelpers.LooksLikeAttachmentName(name) && seen.Add(name.Trim()))
+                    found.Add(name.Trim());
+
+                try
+                {
+                    var child = walker.GetFirstChildElement(node);
+                    var kids = 0;
+                    while (child != null && kids++ < 40)
+                    {
+                        stack.Push(child);
+                        child = walker.GetNextSiblingElement(child);
+                    }
+                }
+                catch { /* node gone */ }
+            }
+        }
+        catch { /* UIA walk is best-effort */ }
+
+        return found;
     }
 }

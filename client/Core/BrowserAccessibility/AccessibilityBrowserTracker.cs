@@ -30,6 +30,7 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
     private readonly ILogStore _store;
     private readonly ILogger<AccessibilityBrowserTracker> _logger;
     private readonly IBrowserRegistry? _browserRegistry;
+    private readonly client.Core.Dlp.IBrowserForegroundUrl? _fgUrl;
     private readonly client.Services.Dlp.DlpEventPublisher? _dlp;
 
     private sealed class TrackedWindow
@@ -78,6 +79,11 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
     private static readonly TimeSpan HydrateGracePeriod = TimeSpan.FromSeconds(60);
 
     private readonly Dictionary<string, TrackedWindow> _tracked = new();
+    // File-like accessibility names already seen on each window. The first poll seeds
+    // the set (chat history, an open file listing) and does not alert. Later polls
+    // publish only names that newly appeared — the attachment chip after a picker or drop.
+    private readonly Dictionary<string, HashSet<string>> _attachmentBaseline = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DateTime> _attachmentDedup = new(StringComparer.OrdinalIgnoreCase);
     // Per-session foreground/background focus totals, accumulated once per poll from the
     // OS ACTIVE/FOCUSED window and flushed every 10 polls + on close (mirrors the main
     // collector loop). Keyed by app_session id.
@@ -102,6 +108,7 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
         ILogger<AccessibilityBrowserTracker> logger,
         BrowserHistoryReader? history = null,
         IBrowserRegistry? browserRegistry = null,
+        client.Core.Dlp.IBrowserForegroundUrl? fgUrl = null,
         client.Services.Dlp.DlpEventPublisher? dlp = null)
     {
         _config = config;
@@ -110,6 +117,7 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
         _store = store;
         _logger = logger;
         _browserRegistry = browserRegistry;
+        _fgUrl = fgUrl;
         _dlp = dlp;
     }
 
@@ -302,6 +310,11 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
                 if (_tracked.TryGetValue(activeKey, out var activeTw))
                 {
                     activeSessionId = activeTw.SessionId;
+                    // Feed DLP upload detector with the active tab URL (not an alert).
+                    var activeUrl = ResolveStoredUrl(snap);
+                    if (string.IsNullOrEmpty(activeUrl)) activeUrl = activeTw.LastUrl;
+                    _fgUrl?.Report(activeUrl, BrowserAccessibilityHelpers.ExtractDomain(activeUrl));
+                    PublishNewAttachments(activeKey, snap, activeUrl);
                     break;
                 }
             }
@@ -350,6 +363,7 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
 
             await _store.SetStatusAsync("browser_tracking_method", "accessibility", ct);
 
+            PruneAttachmentState();
             _lastPollPidCounts = pidCounts;
         }
         finally
@@ -460,6 +474,11 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
         var tw = kv.Value;
         _tracked.Remove(kv.Key);
         _tracked[newKey] = tw;
+        if (_attachmentBaseline.TryGetValue(kv.Key, out var names))
+        {
+            _attachmentBaseline.Remove(kv.Key);
+            _attachmentBaseline[newKey] = names;
+        }
         _logger.LogTrace("Re-keyed window {Old} → {New} (pid {Pid})", kv.Key, newKey, pid);
         return newKey;
     }
@@ -536,9 +555,6 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
             LastActivity = now,
             LastSeen = now,
         };
-
-        if (!string.IsNullOrEmpty(url))
-            _dlp?.PublishBrowserUrl(url, rootItem.Domain);
 
         // Debug level: emitted once per window open (and on every re-open), so it would
         // flood the terminal during `dotnet run`. The DB is the source of truth for
@@ -700,9 +716,6 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
         tw.LastUrl = url;
         tw.LastTitle = snap.WindowTitle;
         tw.LastActivity = now;
-
-        if (urlChanged && !string.IsNullOrEmpty(url))
-            _dlp?.PublishBrowserUrl(url, BrowserAccessibilityHelpers.ExtractDomain(url));
     }
 
     private async Task CloseWindowAsync(string key, TrackedWindow tw, DateTime closedAt, CancellationToken ct)
@@ -714,6 +727,57 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
             new[] { new AppSession { Id = tw.SessionId, ProcessName = string.Empty, EndedAt = closedAt } },
             closedAt, ct);
         _tracked.Remove(key);
+        _attachmentBaseline.Remove(key);
+    }
+
+    /// <summary>
+    /// Diff file-like names on the focused window. The first sighting of a window
+    /// only records what is already on the page. A name that appears on a later poll
+    /// is an attachment (picker or drop) and is published as a cloud upload.
+    /// </summary>
+    private void PublishNewAttachments(string windowKey, AccessibilitySnapshot snap, string? url)
+    {
+        var current = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var raw in snap.AttachmentNames)
+        {
+            if (!BrowserAccessibilityHelpers.LooksLikeAttachmentName(raw)) continue;
+            current.Add(raw.Trim());
+        }
+
+        if (!_attachmentBaseline.TryGetValue(windowKey, out var previous))
+        {
+            _attachmentBaseline[windowKey] = current;
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(url))
+        {
+            var domain = BrowserAccessibilityHelpers.ExtractDomain(url);
+            var now = DateTime.UtcNow;
+            foreach (var name in current)
+            {
+                if (previous.Contains(name)) continue;
+                var dedupKey = $"{domain}|{name}";
+                if (_attachmentDedup.TryGetValue(dedupKey, out var last) && (now - last).TotalSeconds < 3)
+                    continue;
+                _attachmentDedup[dedupKey] = now;
+                _logger.LogInformation("DLP attachment upload {Domain} {File}", domain, name);
+                _dlp?.PublishCloudFileUpload(url, domain, name);
+            }
+        }
+
+        _attachmentBaseline[windowKey] = current;
+    }
+
+    private void PruneAttachmentState()
+    {
+        foreach (var key in _attachmentBaseline.Keys.Where(k => !_tracked.ContainsKey(k)).ToList())
+            _attachmentBaseline.Remove(key);
+
+        if (_attachmentDedup.Count < 64) return;
+        var cutoff = DateTime.UtcNow.AddMinutes(-2);
+        foreach (var key in _attachmentDedup.Where(kv => kv.Value < cutoff).Select(kv => kv.Key).ToList())
+            _attachmentDedup.Remove(key);
     }
 
     /// <summary>
@@ -815,6 +879,8 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
                     UrlSource = "history",
                     IsIncognito = snap.IsIncognito,
                     IsActive = snap.IsActive,
+                    IsWebview = snap.IsWebview,
+                    AttachmentNames = snap.AttachmentNames,
                     CapturedAt = snap.CapturedAt,
                 });
             }

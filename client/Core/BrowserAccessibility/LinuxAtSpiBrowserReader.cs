@@ -118,6 +118,7 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                 IsIncognito = w.Incognito,
                 IsActive = w.Active,
                 IsWebview = w.Webview,
+                AttachmentNames = w.Files,
                 CapturedAt = now,
             });
 
@@ -211,6 +212,9 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                         Url = BrowserAccessibilityHelpers.NormalizeUrl(w.Url),
                         UrlSource = "sessionstore",
                         IsIncognito = existing.IsIncognito,
+                        IsActive = existing.IsActive,
+                        IsWebview = existing.IsWebview,
+                        AttachmentNames = existing.AttachmentNames,
                         CapturedAt = now,
                     };
                 }
@@ -335,7 +339,7 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
     // Combined python3 probe (Sources A + B)
     // ─────────────────────────────────────────────────────────────────────────────
 
-    private sealed record ProbeWindow(string Source, string Key, int Pid, string ProcessName, string Title, string Url, bool Incognito, bool Active, bool Webview);
+    private sealed record ProbeWindow(string Source, string Key, int Pid, string ProcessName, string Title, string Url, bool Incognito, bool Active, bool Webview, IReadOnlyList<string> Files);
 
     private async Task<List<ProbeWindow>> RunCombinedProbeAsync(CancellationToken ct)
     {
@@ -396,6 +400,17 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
             ct.ThrowIfCancellationRequested();
             try
             {
+                var files = new List<string>();
+                if (el.TryGetProperty("files", out var filesEl) && filesEl.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var f in filesEl.EnumerateArray())
+                    {
+                        var name = f.GetString();
+                        if (!string.IsNullOrWhiteSpace(name))
+                            files.Add(name);
+                    }
+                }
+
                 result.Add(new ProbeWindow(
                     el.GetProperty("src").GetString() ?? string.Empty,
                     el.GetProperty("key").GetString() ?? string.Empty,
@@ -405,7 +420,8 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                     el.GetProperty("url").GetString() ?? string.Empty,
                     el.TryGetProperty("incognito", out var inc) && inc.GetBoolean(),
                     el.TryGetProperty("active", out var act) && act.GetBoolean(),
-                    el.TryGetProperty("webview", out var wv) && wv.GetBoolean()));
+                    el.TryGetProperty("webview", out var wv) && wv.GetBoolean(),
+                    files));
             }
             catch (Exception ex)
             {
@@ -723,6 +739,58 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                             stack.append((k, depth + 1))
                     return best
 
+                def looks_like_file(name):
+                    n = (name or '').strip()
+                    if len(n) < 3 or len(n) > 180:
+                        return False
+                    if '\n' in n or '\r' in n or '/' in n or '\\' in n:
+                        return False
+                    low = n.lower()
+                    if '://' in low or low.startswith('http'):
+                        return False
+                    if '.' not in n:
+                        return False
+                    base, ext = n.rsplit('.', 1)
+                    if not base or not (1 <= len(ext) <= 8) or not ext.isalnum():
+                        return False
+                    if ' ' not in n and ext.lower() in (
+                        'com','net','org','io','ai','app','dev','co','uk','de','fr',
+                        'edu','gov','mil','info','biz','me','tv','cc','xyz','online','site','cloud'):
+                        return False
+                    return True
+
+                def collect_files(win, budget=400):
+                    found = []
+                    seen = set()
+                    stack = [(win, 0)]
+                    visited = set()
+                    while stack and budget > 0 and len(found) < 24:
+                        obj, depth = stack.pop()
+                        budget -= 1
+                        if depth > 14:
+                            continue
+                        try:
+                            kids = obj.GetChildren(dbus_interface=A11Y)
+                        except Exception:
+                            continue
+                        for kb, kp in kids:
+                            pk = str(kb) + str(kp)
+                            if pk in visited:
+                                continue
+                            visited.add(pk)
+                            try:
+                                k = bus.get_object(str(kb), str(kp))
+                                kname = str(getp(k, 'Name') or '')
+                            except Exception:
+                                continue
+                            if looks_like_file(kname):
+                                keyn = kname.strip().lower()
+                                if keyn not in seen:
+                                    seen.add(keyn)
+                                    found.append(kname.strip())
+                            stack.append((k, depth + 1))
+                    return found
+
                 registry = bus.get_object('org.a11y.atspi.Registry', '/org/a11y/atspi/accessible/root')
                 children = registry.GetChildren(dbus_interface=A11Y)
                 dbus_obj = bus.get_object('org.freedesktop.DBus', '/org/freedesktop/DBus')
@@ -805,6 +873,7 @@ public sealed class LinuxAtSpiBrowserReader : IAccessibilityBrowserReader
                             'incognito': win_incognito,
                             'active': win_active,
                             'webview': (not is_browser),
+                            'files': collect_files(w) if win_active else [],
                         })
         except Exception:
             pass

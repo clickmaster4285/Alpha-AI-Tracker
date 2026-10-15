@@ -113,10 +113,11 @@ func Setup(
 	syncGroup.GET("/terms-content/active", termsContentHandler.ListActiveTermsContent)
 	syncGroup.POST("/terms-consent/sync", termsConsentHandler.SyncTermsConsent)
 
-	// DLP agent (DeviceAuth) — rules pull + alert sync; admin CRUD is under JWTAuth.
+	// DLP agent (DeviceAuth) — rules pull + alert sync + live rule push WS; admin CRUD is under JWTAuth.
 	if dlpHandler != nil {
 		syncGroup.GET("/dlp-rules/active", dlpHandler.ListActiveRules)
 		syncGroup.POST("/dlp-alerts/sync", dlpHandler.SyncAlerts)
+		syncGroup.GET("/dlp/ws", dlpHandler.ConnectRulesWS)
 	}
 
 	// Live stream — client push socket (DeviceAuth). Web watch/employees live under JWTAuth.

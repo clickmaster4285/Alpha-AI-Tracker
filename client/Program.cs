@@ -286,10 +286,13 @@ builder.Services.AddSingleton<client.Services.TermsService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.TermsService>());
 
 // DLP: main-tracker publisher + supervisor (agent is a separate --dlp process).
+builder.Services.AddSingleton<client.Core.Dlp.IBrowserForegroundUrl, client.Core.Dlp.BrowserForegroundUrlCache>();
 builder.Services.AddSingleton<client.Services.Dlp.DlpEventPublisher>();
 if (config.DlpEnabled)
 {
     builder.Services.AddHostedService<client.Services.Dlp.DlpSupervisor>();
+    // Real cloud-upload intent (file-open dialog) — not visit-based browsing.
+    builder.Services.AddHostedService<client.Services.Dlp.DlpBrowserUploadWatcher>();
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -645,7 +648,10 @@ static async Task RunDlpAgentAsync(string[] args)
     builder.Services.AddSingleton<ILogStore>(sp =>
         new SqliteLogStore(ResolveDbPath(config.DbPath), config.DbEncryptionKey));
     builder.Services.AddSingleton<HttpClient>(sp => new HttpClient { Timeout = TimeSpan.FromSeconds(30) });
-    builder.Services.AddHostedService<client.Services.Dlp.DlpEngine>();
+    // Singleton so DlpRulesWsClient can push into the same rule cache DlpEngine matches against.
+    builder.Services.AddSingleton<client.Services.Dlp.DlpEngine>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.Dlp.DlpEngine>());
+    builder.Services.AddHostedService<client.Services.Dlp.DlpRulesWsClient>();
     builder.Services.AddHostedService<client.Services.Dlp.DlpAlertSync>();
 
     var host = builder.Build();

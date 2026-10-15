@@ -3,6 +3,40 @@
 > **Last audited:** 2026-10-08
 > **Changelog:**
 >
+> - 2026-10-08: **DLP upload sensor is the accessibility tree — extension path removed.**
+>   Deleted `client/extensions/dlp-upload/` and `DlpExtensionBridgeService` (never registered).
+>   Focused-window file chips (`keys.txt`) are read from Windows UIA and the Linux AT-SPI
+>   probe onto `AccessibilitySnapshot.AttachmentNames`. `AccessibilityBrowserTracker` seeds
+>   the set on the first poll of a window and publishes `cloud_file_upload` only for names
+>   that appear later (3s `domain|fileName` dedupe; empty URL skipped; public-suffix names
+>   such as `claude.ai` are not files). macOS returns an empty set. `DlpBrowserUploadWatcher`
+>   stays as the Windows dialog fallback. USB, `--dlp` matching, and `GET /api/v1/dlp/ws`
+>   are unchanged. Verified: `dotnet build` 0/0. A UIA walk of the focused Chrome
+>   "Store" window surfaced only `store@example.com`, which the suffix filter rejects,
+>   so a visit does not publish. The rebuilt tracker is running. Opening Claude showed
+>   the composer control "Add files, connectors, and more" inside the same walk budget;
+>   the file picker did not open from UIA Invoke, so no new chip and no new `dlp_alerts`
+>   row yet — attach a file on the focused Claude/DeepSeek tab and the main log should
+>   show `DLP attachment upload` followed by one `cloud_upload` row.
+>
+> - 2026-10-08: **DLP rule push WS + Claude upload fix.** DeviceAuth `GET /api/v1/dlp/ws`
+>   hub (`dlpws`) fans active-rule snapshots to the `--dlp` agent on connect and after
+>   JWT rule CRUD; `DlpRulesWsClient` applies them instantly (5‑min HTTP pull remains
+>   fallback). Presence `/ws` + live-stream stay on main. USB stays main-only
+>   (`hardware_devices` + IPC — no second watcher in agent). Upload watcher uses
+>   `IBrowserRegistry` (no product-name list). Verified: admin create `claude.ai` rule →
+>   agent `cached 4 … via websocket`; `cloud_file_upload`→claude alerts, visit/google
+>   ignored; presence Online still works; `dotnet build` 0/0; `go build`/`go vet` clean.
+>
+> - 2026-10-08: **DLP real data-loss only — no visit-based cloud alerts.**
+>   Removed `PublishBrowserUrl` on tab navigation; cloud alerts only from
+>   `cloud_file_upload` (Windows file-open dialog via `DlpBrowserUploadWatcher` +
+>   `IBrowserForegroundUrl`). Engine: empty `cloud_upload` pattern never matches;
+>   `file_on_removable` → `file_transfer` only (not `usb`); `usb_plugged`/`usb_unplugged`
+>   with PnP burst dedupe. Web rules hint: upload ≠ browse. Verified IPC matrix:
+>   browse/google-upload ignored; chatgpt upload + `.png` on removable + USB → alerts;
+>   `dotnet build` 0/0. True HTTP upload block deferred (alert_only).
+>
 > - 2026-10-08: **DLP empty-alerts fix — IPC serialize + FS watch without file-journey.**
 >   Root causes: (1) concurrent `usb_plugged` publishes raced the single-instance named pipe
 >   (3 PnP rows per stick → silent Connect timeouts); (2) `ALPHA_FILE_JOURNEY_ENABLED=false`
@@ -11,6 +45,8 @@
 >   `DlpFileWatchHost` when DLP on + file-journey off, dual-trigger match
 >   (`file_transfer`+`usb`), 2s file-path dedup. Live-proven: write to `F:\` → local
 >   `dlp_alerts` → `POST /dlp-alerts/sync` → Postgres. Server must be up for rule cache.
+>   *(Superseded for trigger mapping by “real data-loss only” above — file copy no longer
+>   dual-matches `usb`.)*
 >
 > - 2026-10-08: **DLP v1 — separate `--dlp` agent process + live rules/alerts.**
 >   Migration **044** (`dlp_rules`, `dlp_rule_departments`, `dlp_alerts`). DeviceAuth

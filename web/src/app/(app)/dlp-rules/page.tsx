@@ -38,7 +38,7 @@ const severityStyles: Record<string, string> = {
 const triggerMeta: Record<string, { label: string; icon: typeof Usb; hint: string }> = {
   usb: { label: 'USB device', icon: Usb, hint: 'Alert on any USB / removable device plug-in (no file filter)' },
   file_transfer: { label: 'File transfer', icon: FolderOpen, hint: 'Alert when matching file extensions are written to removable media' },
-  cloud_upload: { label: 'Cloud upload', icon: CloudUpload, hint: 'Alert when the browser visits matching domains' },
+  cloud_upload: { label: 'Cloud upload', icon: CloudUpload, hint: 'Alert when a file is chosen to upload on a matching domain (not mere visits)' },
 };
 
 /** Common extension presets (structural types — not product names). */
@@ -144,7 +144,7 @@ function PatternValuePicker({
   const addLabel = kind === 'extension' ? 'Add extension…' : 'Add domain…';
   const placeholder = kind === 'extension' ? 'e.g. pdf or .docx' : 'e.g. drive.google.com';
   const requiredHint = kind === 'domain'
-    ? 'At least one domain is required.'
+    ? 'At least one domain is required. Alerts fire only when a file is selected for upload on that domain — browsing alone is ignored.'
     : 'Optional — leave empty to match every file on removable media.';
 
   const commitDraft = () => {

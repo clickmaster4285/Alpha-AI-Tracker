@@ -7,20 +7,53 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alpha-ai-tracker/server/internal/dlpws"
 	"github.com/alpha-ai-tracker/server/internal/dto"
 	"github.com/alpha-ai-tracker/server/internal/models"
 	"github.com/alpha-ai-tracker/server/internal/repository"
 	"github.com/alpha-ai-tracker/server/internal/services"
+	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
 )
 
 type DlpHandler struct {
-	svc *services.DlpService
+	svc            *services.DlpService
+	hub            *dlpws.Hub
+	upgrader       websocket.Upgrader
+	allowedOrigins map[string]bool
 }
 
-func NewDlpHandler(svc *services.DlpService) *DlpHandler {
-	return &DlpHandler{svc: svc}
+func NewDlpHandler(svc *services.DlpService, hub *dlpws.Hub, allowedOrigins []string) *DlpHandler {
+	originSet := make(map[string]bool, len(allowedOrigins))
+	for _, o := range allowedOrigins {
+		originSet[strings.TrimSpace(o)] = true
+	}
+	h := &DlpHandler{
+		svc:            svc,
+		hub:            hub,
+		allowedOrigins: originSet,
+	}
+	h.upgrader = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 16 * 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				return true // desktop --dlp agent
+			}
+			if len(h.allowedOrigins) == 0 {
+				log.Printf("[dlp-ws] CheckOrigin rejected origin=%q (no CORS_ALLOWED_ORIGINS)", origin)
+				return false
+			}
+			if h.allowedOrigins[origin] {
+				return true
+			}
+			log.Printf("[dlp-ws] CheckOrigin rejected origin=%q", origin)
+			return false
+		},
+	}
+	return h
 }
 
 // ListActiveRules — DeviceAuth GET /dlp-rules/active
@@ -85,6 +118,7 @@ func (h *DlpHandler) CreateRule(c echo.Context) error {
 	if err != nil {
 		return errorResponse(c, http.StatusBadRequest, "Failed to create rule", err)
 	}
+	h.notifyRulesChanged(c.Request().Context())
 	return c.JSON(http.StatusCreated, created)
 }
 
@@ -105,6 +139,7 @@ func (h *DlpHandler) UpdateRule(c echo.Context) error {
 		}
 		return errorResponse(c, http.StatusBadRequest, "Failed to update rule", err)
 	}
+	h.notifyRulesChanged(c.Request().Context())
 	return c.JSON(http.StatusOK, updated)
 }
 
@@ -117,6 +152,7 @@ func (h *DlpHandler) DeleteRule(c echo.Context) error {
 		}
 		return errorResponse(c, http.StatusInternalServerError, "Failed to delete rule", err)
 	}
+	h.notifyRulesChanged(c.Request().Context())
 	return c.JSON(http.StatusOK, map[string]string{"message": "rule deleted"})
 }
 
