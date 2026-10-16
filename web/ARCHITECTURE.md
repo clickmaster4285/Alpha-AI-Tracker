@@ -1,7 +1,17 @@
 # Web Architecture — Alpha AI Tracker Dashboard
 
-> **Last audited:** 2026-10-15 (live-stream ICE queue)
+> **Last audited:** 2026-10-16 (RBAC sidebar gating)
 > **Changelog:**
+> - 2026-10-16: **Sidebar/route gating fixed for Terms & Conditions — the nav entry had no `module` key.**
+>   `AppSidebar.tsx` rendered **Settings → Terms & Conditions** for every authenticated user (a
+>   module-less child short-circuits both `isItemVisible` and `visibleChildrenOf` to `true`), and
+>   `findModuleForPath` fell through its exact-match pass to the `/settings` prefix, so the page was
+>   actually gated by the unrelated **General Settings** permission: a role without it (HR-only) saw
+>   the item and was bounced to `/unauthorized` on click, while a role holding plain `settings` got
+>   T&C create/edit/delete. The entry now carries `module: "settings/terms-and-conditions"`, matching
+>   the new server submodule key, so nav visibility and the route guard agree. `/settings/profile` is
+>   the only remaining module-less entry and is intentionally ungated (`RouteGuard.ALWAYS_ALLOWED`).
+>   Verified: `npx tsc --noEmit` clean; `GET /modules` returns the key (Settings 8/8 for `company_admin`).
 > - 2026-10-15: **Live stream — remote ICE is queued until the answer is applied (fixes LIVE tiles with zero frames).**
 >   `useLiveStreamSocket` held a single `pcRef` and applied every `ice` message immediately; because the
 >   SFU trickles candidates from a separate goroutine (they can precede the `answer`), a candidate could

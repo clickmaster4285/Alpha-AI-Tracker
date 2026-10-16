@@ -118,6 +118,7 @@ var rbacCatalog = []moduleSeed{
 			{Key: "settings/billing", Name: "Billing & Subscription", Route: "/settings/billing"},
 			{Key: "settings/compliance", Name: "GDPR & Compliance", Route: "/settings/compliance"},
 			{Key: "settings/security", Name: "Security Settings", Route: "/settings/security"},
+			{Key: "settings/terms-and-conditions", Name: "Terms & Conditions", Route: "/settings/terms-and-conditions"},
 		},
 	},
 }

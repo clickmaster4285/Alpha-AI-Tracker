@@ -1,7 +1,16 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-10-15 (live-stream ICE trickle race)
+> **Last audited:** 2026-10-16 (RBAC terms submodule)
 > **Changelog:**
+> - 2026-10-16: **RBAC catalog — new `settings/terms-and-conditions` submodule (fixes a nav/permission leak).**
+>   `internal/services/rbac_service.go` now seeds `settings/terms-and-conditions`
+>   ("Terms & Conditions", route `/settings/terms-and-conditions`, sort 8) under `settings-module`.
+>   Before this the catalog had no terms key, so the web sidebar rendered `/settings/terms-and-conditions`
+>   for every role and the client-side route guard fell back to the `/settings` prefix — meaning T&C
+>   management was gated by the unrelated **General Settings** permission. The boot seeder is idempotent
+>   (no migration); `GrantAllPermissions` gives `company_admin` the new key automatically (39 → 40
+>   grants) and existing roles keep their grants (default deny). Verified: `go build`/`go vet ./...` clean;
+>   boot against the dev DB seeded the row (Settings 7 → 8) and `GET /modules` returns the new key.
 > - 2026-10-15: **Live stream signaling — ICE trickle buffered until the answer is written (fixes LIVE with zero frames).**
 >   Root cause: the Pion SFU starts ICE gathering inside `SetLocalDescription` during
 >   `AcceptPublisherOffer` / `AcceptSubscriberOffer` and Pion invokes the candidate callback on a

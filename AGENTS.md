@@ -1,7 +1,27 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-10-15
+> **Last audited:** 2026-10-16
 > **Changelog:**
+>
+> - 2026-10-16: **RBAC leak — Terms & Conditions was visible to every role and guarded by an unrelated permission (server + web).**
+>   Reported: a user whose role grants only the HR module saw **Settings → Terms & Conditions**,
+>   and clicking it landed on `/unauthorized`. Root cause was one missing key in the nav config:
+>   `web/src/components/layout/AppSidebar.tsx` added the entry with **no `module` key** (a copy of the
+>   `/settings/profile` pattern, which is intentionally ungated), so `isItemVisible`/`visibleChildrenOf`
+>   short-circuit to `true` and the item rendered for every authenticated user — while
+>   `findModuleForPath` skipped the module-less entry in its exact-match pass and fell back to the
+>   `/settings` prefix, returning `settings`. Net effect: always visible, the page was really gated by
+>   the unrelated **General Settings** permission (so any role with plain `settings` also got T&C
+>   create/edit/delete), and a role without `settings` got a dead nav link. The server catalog had no
+>   terms key at all. Fix: `internal/services/rbac_service.go` seeds
+>   `settings/terms-and-conditions` ("Terms & Conditions", route `/settings/terms-and-conditions`)
+>   under `settings-module`, and the sidebar entry now carries
+>   `module: "settings/terms-and-conditions"` — nav visibility and the route guard resolve to the
+>   same key. `company_admin` keeps access via `GrantAllPermissions` (39 → 40 grants); no existing
+>   role is auto-granted, so the item disappears until an admin ticks it on `/roles`. No migration —
+>   the boot seeder upserts the catalog. Verified: `go build`/`go vet` clean, `npx tsc --noEmit`
+>   clean, boot seeder against the live dev DB (Settings 7 → 8 submodules, `hr` grants unchanged at
+>   6), and `GET /modules` + `GET /auth/profile` (Settings 8/8 for `company_admin`).
 >
 > - 2026-10-15: **Live stream — WebRTC signaling race dropped ICE → tiles read LIVE with zero frames (server + web + client).**
 >   Root cause was signaling ORDER, not per-PC hardware: the Pion SFU starts ICE gathering inside
