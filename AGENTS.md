@@ -1,7 +1,32 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-10-05
+> **Last audited:** 2026-10-15
 > **Changelog:**
+>
+> - 2026-10-15: **Live stream — WebRTC signaling race dropped ICE → tiles read LIVE with zero frames (server + web + client).**
+>   Root cause was signaling ORDER, not per-PC hardware: the Pion SFU starts ICE gathering inside
+>   `SetLocalDescription` during `AcceptPublisherOffer` / `AcceptSubscriberOffer`, and Pion fires the
+>   candidate callback on its own goroutine — so `{"type":"ice"}` could be written to the socket BEFORE
+>   `{"type":"answer"}`. A peer that calls `addIceCandidate` while its `remoteDescription` is still null
+>   throws `InvalidStateError`; that candidate was silently dropped, the ICE/DTLS handshake never
+>   completed, yet `ontrack` had already fired (the answer carried the media section) — so the UI showed
+>   LIVE / `--- FPS` and the 5s renegotiation loop spun forever. Which employees broke was pure timing
+>   luck (the connections where the answer landed before the first trickled candidate worked).
+>   Fix — buffer trickled candidates on all three peer roles until the remote description exists:
+>   (1) **server** `internal/handlers/stream_handler.go`: new `iceTrickle` (`sync.Mutex` + `answered`
+>   flag + `pending`) shared by the Push (publisher) and Watch (subscriber) paths; empty candidates are
+>   skipped, pre-answer candidates are held, and `answerMarked()` flushes them in order only AFTER the
+>   answer message is written. (2) **web** `lib/useLiveStreamSocket.ts`: per-PC
+>   `PcEntry { pc, remoteReady, queue }` held in `pcStateRef`; the `answer` branch awaits
+>   `setRemoteDescription`, then sets `remoteReady` and flushes the queue; the `ice` branch queues while
+>   `!remoteReady`; `cleanupPc` nulls the entry so a renegotiated PC gets fresh state (stale candidates
+>   can never hit a dead connection); `ws.onmessage` is now `async`. (3) **client**
+>   `Services/LiveStreamClient.cs`: `pendingIce` + `remoteIceReady`, flushed after `setRemoteDescription`
+>   returns `OK`, reset when the PC is recreated on `start`/`stop`; `ApplyRemoteIce` → `BuildRemoteIce`
+>   (returns the candidate). No route, contract, env, or migration change; the client half ships only in
+>   the next installer build.
+>   Verified: `go build ./...` clean; `go vet ./internal/handlers/...` clean; `npx tsc --noEmit` clean;
+>   `dotnet build` 0 warnings / 0 errors.
 >
 > - 2026-10-05: **Web dashboard redesign — summary-first home (server + web).**
 >   New JWT `GET /api/v1/dashboard/summary` (date range + optional `departmentId`) returns

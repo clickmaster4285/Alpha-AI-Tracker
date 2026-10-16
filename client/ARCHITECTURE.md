@@ -1,7 +1,17 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-10-03 (Win11 capture + Client Version headers, 1.2.34)
+> **Last audited:** 2026-10-15 (live-stream ICE buffering)
 > **Changelog:**
+> - 2026-10-15: **Live stream publisher — ICE buffered until the answer is applied (`LiveStreamClient`).**
+>   The publisher applied each server `ice` message immediately, but the SFU trickles candidates from a
+>   separate goroutine, so a candidate could arrive before the `answer`. `addIceCandidate` with a null
+>   remote description throws and that candidate is dropped — ICE/DTLS then never completes even though
+>   the publisher accepted the offer (watchers see LIVE with no frames). `LiveStreamClient` now keeps
+>   `pendingIce` + `remoteIceReady`: the `answer` handler sets `remoteIceReady` when
+>   `setRemoteDescription` returns `OK` and then flushes the buffered candidates; the `ice` handler
+>   queues while `!remoteIceReady`; both are reset whenever the PC is recreated on `start`/`stop`.
+>   `ApplyRemoteIce` was replaced by `BuildRemoteIce` (returns the candidate instead of applying it).
+>   Ships in the next installer build. Verified: `dotnet build` 0 warnings / 0 errors.
 > - 2026-10-03: **Win11 blank live preview (FA-27) + Client Version on DeviceAuth.**
 >   FA-27 showed admin `LIVE` / `--- FPS` while SFU logged `withTrack=false`: Win11 GDI
 >   `CopyFromScreen` / CAPTUREBLT-only BitBlt produced no frames → no RTP. **`ScreenCaptureService`**

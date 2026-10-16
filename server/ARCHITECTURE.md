@@ -1,7 +1,19 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-10-06 (logs insights + graphical)
+> **Last audited:** 2026-10-15 (live-stream ICE trickle race)
 > **Changelog:**
+> - 2026-10-15: **Live stream signaling — ICE trickle buffered until the answer is written (fixes LIVE with zero frames).**
+>   Root cause: the Pion SFU starts ICE gathering inside `SetLocalDescription` during
+>   `AcceptPublisherOffer` / `AcceptSubscriberOffer` and Pion invokes the candidate callback on a
+>   separate goroutine, so an `ice` message could reach the peer BEFORE the `answer`. The peer's
+>   `addIceCandidate` then throws `InvalidStateError` (null `remoteDescription`) and the candidate is
+>   dropped — ICE/DTLS never completes while `ontrack` has already fired, so watchers stay LIVE /
+>   `--- FPS` and the 5s renegotiation loop never converges. Fix: new `iceTrickle` type
+>   (`sync.Mutex`, `answered`, `pending`) in `internal/handlers/stream_handler.go`, wired into BOTH the
+>   Push (`AcceptPublisherOffer`) and Watch (`AcceptSubscriberOffer`) paths — empty candidates are
+>   dropped, candidates generated before the answer are buffered, and `answerMarked()` flushes them in
+>   order immediately after the answer message is written. No route, schema, or env change.
+>   Verified: `go build ./...` clean; `go vet ./internal/handlers/...` clean.
 > - 2026-10-06: **Log Insights + Graphical Logs aggregates.** JWT `GET /api/v1/logs/insights`
 >   and `GET /api/v1/logs/graphical` (`from`/`to` + optional `departmentId`/`employeeId`).
 >   Insights = digest (metrics, productivity mix, top apps/domains, outliers, highlights).
