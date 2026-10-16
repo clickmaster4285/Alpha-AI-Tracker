@@ -22,6 +22,9 @@
 >   the boot seeder upserts the catalog. Verified: `go build`/`go vet` clean, `npx tsc --noEmit`
 >   clean, boot seeder against the live dev DB (Settings 7 → 8 submodules, `hr` grants unchanged at
 >   6), and `GET /modules` + `GET /auth/profile` (Settings 8/8 for `company_admin`).
+>   Rule codified: **RBAC Nav → Catalog Parity Rule** (§6) — a permission-gated page must
+>   add the submodule to `rbacCatalog` AND the matching `module` key to the sidebar entry, in the
+>   same change.
 >
 > - 2026-10-15: **Live stream — WebRTC signaling race dropped ICE → tiles read LIVE with zero frames (server + web + client).**
 >   Root cause was signaling ORDER, not per-PC hardware: the Pion SFU starts ICE gathering inside
@@ -1244,6 +1247,7 @@ flowchart LR
 | **Cross-table boolean flags** | Booleans that depend on a cross-table relationship (e.g. "does this employee have a login account?") MUST be projected by the server in the same query that returns the row — never built client-side from a separate fetch (see *Server-Projected Flags Rule* below) |
 | **Branding & version**  | Product name and version are written in exactly two files — `client/APP_IDENTIFIERS` and `client/VERSION`. No literal product name or version string anywhere else in C#, XAML, or the build scripts (see below) |
 | **Cross-platform OS guards** | Guard platform-specific method bodies with `OperatingSystem.IsWindows/Linux/MacOS()`; do not propagate `[SupportedOSPlatform]` through cross-platform partial/background-service call graphs (see below) |
+| **RBAC nav → catalog parity** | Every permission-gated nav entry carries a `module` key that matches a submodule seeded in the server `rbacCatalog`; both halves change together and `module` is NEVER omitted (see *RBAC Nav → Catalog Parity Rule* below) |
 
 ### Web Infinite-Scroll Rule (mandatory)
 
@@ -1356,6 +1360,42 @@ client handler depend on context values only the other middleware sets.**
   `JWTAuth` (e.g. `GET /terms-consent`).
 - When adding any new endpoint, name its consumer FIRST (client machine vs admin browser) and
   mount it in the matching group — do not copy the group of whatever route happens to be nearby.
+
+### RBAC Nav → Catalog Parity Rule (mandatory)
+
+**A permission-gated page has TWO matching halves, and they ship together: a submodule key in the
+server catalog and that same key on the sidebar entry.** A nav item without them is not *"just
+ungated"* — it leaks the page to every role and hands its actions to whoever holds an unrelated
+permission.
+
+1. **Server — add the submodule to `rbacCatalog`** (`server/internal/services/rbac_service.go`):
+   `{Key: "<module>/<page>", Name: "<Label>", Route: "<path>"}` inside the owning module's
+   `Submodules` slice. The key is the permission identity (`settings/user-management`,
+   `settings/terms-and-conditions`, …); `Route` is the web path. **No migration** — the boot
+   seeder (`RBACService.SeedCatalog`) upserts the catalog idempotently on every start, so a new key
+   exists after the next server boot.
+2. **Web — put the same key on the nav entry** (`web/src/components/layout/AppSidebar.tsx`):
+   `{ label, path, module: "<same key>" }`. `module` is the ONLY thing that gates the item.
+3. **Never omit `module`.** `visibleChildrenOf` / `isItemVisible` evaluate
+   `c.module ? canAccess(...) : true`, so a missing key renders the item for **every** authenticated
+   user (and keeps its parent group visible). `findModuleForPath` then skips the module-less entry in
+   its exact-match pass and falls back to the nearest guarded parent
+   (`/settings/terms-and-conditions` → `settings`), so the page is gated by an unrelated
+   permission: a role without it sees a dead link that redirects to `/unauthorized`, and a role
+   holding that parent key silently gains the page's full CRUD. The **only** permitted module-less
+   entry is `/settings/profile` — intentionally open to all roles and listed in
+   `RouteGuard.ALWAYS_ALLOWED`. Adding another path to that list is a permission regression, not a fix.
+4. **Grants after adding a key:** `company_admin` is auto-granted everything via
+   `RBACRepo.GrantAllPermissions`; **no other role is auto-granted** (default deny), so tick the new
+   submodule per role on `/roles`. A role's grant set is re-read from the DB on each auth response, so
+   an existing session picks it up on its next page load / re-login.
+5. **Verify before claiming done:** confirm the key appears in `GET /api/v1/modules` and that the
+   target role's grants actually changed (`role_submodule_permissions`) — hiding the sidebar item
+   alone is not proof.
+
+**Reference (why this rule exists):** the 2026-10-16 Terms & Conditions bug — the nav entry carried
+no `module` key and the catalog had no `settings/terms-and-conditions` submodule, so a role granting
+only the HR module saw **Settings → Terms & Conditions** and clicking it landed on `/unauthorized`.
 
 ### Cross-Platform Analyzer Safety Rule (mandatory)
 
