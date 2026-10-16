@@ -27,6 +27,7 @@ type UpdateUserRequest struct {
 	TrackingEnabled *bool   `json:"trackingEnabled"`
 	TrackingStatus  *string `json:"trackingStatus,omitempty"`
 	IsOnline        *bool   `json:"isOnline,omitempty"`
+	Status          *string `json:"status,omitempty"` // ACCOUNT status: active | suspended
 }
 
 // LoginRequest is the payload for user authentication.
@@ -50,6 +51,7 @@ type UserResponse struct {
 	Shift           string      `json:"shift"`
 	TrackingEnabled bool        `json:"trackingEnabled"`
 	TrackingStatus  string      `json:"trackingStatus"`
+	Status          string      `json:"status"` // account status: active | suspended
 	IsOnline        bool        `json:"isOnline"`
 	Avatar          string      `json:"avatar"`
 	AvatarColor     string      `json:"avatarColor"`

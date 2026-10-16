@@ -2,7 +2,7 @@
 
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { Loader2, Search, ShieldCheck, Eye, EyeOff, Pencil } from 'lucide-react';
+import { Loader2, Search, ShieldCheck, Eye, EyeOff, Pencil, Ban, CircleCheck } from 'lucide-react';
 import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { usersApi, rolesApi, employeesApi, type Role, type User, type UpdateUserPayload } from '@/lib/api';
@@ -21,6 +21,32 @@ function UsersTable({
   onEdit: (user: User) => void;
 }) {
   const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const queryClient = useQueryClient();
+  // Id of the row whose status change is in flight (spins just that button).
+  const [pendingStatusId, setPendingStatusId] = useState<string | null>(null);
+
+  // Suspend / reactivate an account. Reuses PUT /users/:id — the server rejects
+  // `status` values other than active|suspended and refuses to suspend the
+  // system company_admin (403), which this surface already hides.
+  const statusMutation = useMutation({
+    mutationFn: ({ id, status }: { id: string; status: 'active' | 'suspended' }) =>
+      usersApi.update(id, { status }),
+    onSuccess: updated => {
+      const suspended = updated.status === 'suspended';
+      toast.success(suspended ? 'User suspended' : 'User activated', {
+        description: suspended
+          ? `${updated.name} can no longer sign in.`
+          : `${updated.name} can sign in again.`,
+      });
+      queryClient.invalidateQueries({ queryKey: ['users'] });
+    },
+    onError: (err: unknown) => {
+      toast.error('Could not change status', {
+        description: err instanceof Error ? err.message : 'Please try again.',
+      });
+    },
+    onSettled: () => setPendingStatusId(null),
+  });
 
   const query = useInfiniteQuery({
     queryKey: ['users', { search }],
@@ -100,25 +126,64 @@ function UsersTable({
                     </span>
                   </td>
                   <td className="px-4 py-3">
-                    <span
-                      className={`inline-flex items-center gap-1.5 text-xs font-medium ${u.isOnline ? 'text-success' : 'text-muted-foreground'}`}
-                    >
-                      <span className={`w-1.5 h-1.5 rounded-full ${u.isOnline ? 'bg-success' : 'bg-muted-foreground/40'}`} />
-                      {u.isOnline ? 'Online' : 'Offline'}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
+                          u.status === 'suspended'
+                            ? 'bg-destructive/15 text-destructive'
+                            : 'bg-success/10 text-success'
+                        }`}
+                      >
+                        {u.status === 'suspended' ? 'Suspended' : 'Active'}
+                      </span>
+                      <span
+                        className={`inline-flex items-center gap-1.5 text-xs font-medium ${u.isOnline ? 'text-success' : 'text-muted-foreground'}`}
+                      >
+                        <span className={`w-1.5 h-1.5 rounded-full ${u.isOnline ? 'bg-success' : 'bg-muted-foreground/40'}`} />
+                        {u.isOnline ? 'Online' : 'Offline'}
+                      </span>
+                    </div>
                   </td>
                   <td className="px-4 py-3 text-xs text-muted-foreground">{formatDate(u.createdAt)}</td>
                   <td className="px-4 py-3 text-right">
-                    {/* The system `company_admin` is a bootstrap-only account and
-                        must not be editable from this surface. Locked. */}
+                    {/* The system `company_admin` is a bootstrap-only account: it is
+                        neither editable nor suspendable from this surface (the
+                        server refuses both with 403). Locked. */}
                     {u.role !== 'company_admin' && (
-                      <button
-                        onClick={() => onEdit(u)}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium text-foreground hover:bg-muted transition-colors"
-                        aria-label={`Edit ${u.name}`}
-                      >
-                        <Pencil className="w-3.5 h-3.5" /> Edit
-                      </button>
+                      <div className="inline-flex items-center gap-1">
+                        <button
+                          onClick={() => onEdit(u)}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium text-foreground hover:bg-muted transition-colors"
+                          aria-label={`Edit ${u.name}`}
+                        >
+                          <Pencil className="w-3.5 h-3.5" /> Edit
+                        </button>
+                        <button
+                          onClick={() => {
+                            setPendingStatusId(u.id);
+                            statusMutation.mutate({
+                              id: u.id,
+                              status: u.status === 'suspended' ? 'active' : 'suspended',
+                            });
+                          }}
+                          disabled={pendingStatusId === u.id}
+                          className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50 ${
+                            u.status === 'suspended'
+                              ? 'text-success hover:bg-success/10'
+                              : 'text-destructive hover:bg-destructive/10'
+                          }`}
+                          aria-label={u.status === 'suspended' ? `Activate ${u.name}` : `Suspend ${u.name}`}
+                        >
+                          {pendingStatusId === u.id ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : u.status === 'suspended' ? (
+                            <CircleCheck className="w-3.5 h-3.5" />
+                          ) : (
+                            <Ban className="w-3.5 h-3.5" />
+                          )}
+                          {u.status === 'suspended' ? 'Activate' : 'Suspend'}
+                        </button>
+                      </div>
                     )}
                   </td>
                 </tr>

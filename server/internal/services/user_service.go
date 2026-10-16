@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/alpha-ai-tracker/server/internal/dto"
 	"github.com/alpha-ai-tracker/server/internal/models"
@@ -165,6 +166,24 @@ func (s *UserService) Update(ctx context.Context, id string, req *dto.UpdateUser
 	if req.IsOnline != nil {
 		updates["is_online"] = *req.IsOnline
 	}
+	if req.Status != nil {
+		status := strings.TrimSpace(*req.Status)
+		if status != "active" && status != "suspended" {
+			return nil, fmt.Errorf("invalid status")
+		}
+		// Suspending the system company_admin would lock every admin out of the
+		// dashboard — the same guard Delete applies. Reactivating always works.
+		if status == "suspended" {
+			isSystem, err := s.repo.IsUserRoleSystem(ctx, id)
+			if err != nil {
+				return nil, err
+			}
+			if isSystem {
+				return nil, fmt.Errorf("cannot suspend company admin")
+			}
+		}
+		updates["status"] = status
+	}
 
 	updated, err := s.repo.Update(ctx, id, updates)
 	if err != nil {
@@ -286,6 +305,7 @@ func userToResponse(u *models.User) dto.UserResponse {
 		Shift:           u.Shift,
 		TrackingEnabled: u.TrackingEnabled,
 		TrackingStatus:  u.TrackingStatus,
+		Status:          u.Status,
 		IsOnline:        u.IsOnline,
 		Avatar:          u.Avatar,
 		AvatarColor:     u.AvatarColor,

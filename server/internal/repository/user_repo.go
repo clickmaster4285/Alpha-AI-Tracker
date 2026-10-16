@@ -24,11 +24,15 @@ func NewUserRepo(pool *pgxpool.Pool) *UserRepo {
 
 // ListParams defines query parameters for listing users.
 type ListParams struct {
-	Search  string
-	RoleID  int
-	Status  string // "tracked" or "untracked"
-	Page    int
-	PerPage int
+	Search string
+	RoleID int
+	// Status filters tracking_status: "tracked" or "untracked".
+	Status string
+	// AccountStatus filters the ACCOUNT status: "active" or "suspended".
+	// Deliberately separate from Status — a suspended user keeps tracking_status.
+	AccountStatus string
+	Page          int
+	PerPage       int
 }
 
 // ListResult holds paginated results.
@@ -72,6 +76,11 @@ func (r *UserRepo) List(ctx context.Context, params ListParams) (*ListResult, er
 	} else if params.Status == "untracked" {
 		conditions = append(conditions, "u.tracking_status = 'untracked'")
 	}
+	if params.AccountStatus == "active" || params.AccountStatus == "suspended" {
+		conditions = append(conditions, fmt.Sprintf("u.status = $%d", argIdx))
+		args = append(args, params.AccountStatus)
+		argIdx++
+	}
 
 	whereClause := ""
 	if len(conditions) > 0 {
@@ -94,7 +103,7 @@ func (r *UserRepo) List(ctx context.Context, params ListParams) (*ListResult, er
 	query := fmt.Sprintf(`
 		SELECT u.id, u.employee_id, u.name, u.email, u.password_hash,
 		       u.role_id, COALESCE(r.name, ''), u.shift,
-		       u.tracking_enabled, u.tracking_status, u.is_online,
+		       u.tracking_enabled, u.tracking_status, u.status, u.is_online,
 		       COALESCE(u.avatar, ''), COALESCE(u.avatar_color, ''),
 		       u.created_at, u.updated_at, u.deleted_at
 		FROM users u LEFT JOIN roles r ON r.id = u.role_id
@@ -116,7 +125,7 @@ func (r *UserRepo) List(ctx context.Context, params ListParams) (*ListResult, er
 		if err := rows.Scan(
 			&u.ID, &u.EmployeeID, &u.Name, &u.Email, &u.PasswordHash,
 			&u.RoleID, &u.RoleName, &u.Shift,
-			&u.TrackingEnabled, &u.TrackingStatus, &u.IsOnline,
+			&u.TrackingEnabled, &u.TrackingStatus, &u.Status, &u.IsOnline,
 			&u.Avatar, &u.AvatarColor,
 			&u.CreatedAt, &u.UpdatedAt, &u.DeletedAt,
 		); err != nil {
@@ -144,7 +153,7 @@ func scanUserRow(rows pgx.Rows) (*models.User, error) {
 		err := row.Scan(
 			&u.ID, &u.EmployeeID, &u.Name, &u.Email, &u.PasswordHash,
 			&u.RoleID, &u.RoleName, &u.Shift,
-			&u.TrackingEnabled, &u.TrackingStatus, &u.IsOnline,
+			&u.TrackingEnabled, &u.TrackingStatus, &u.Status, &u.IsOnline,
 			&u.Avatar, &u.AvatarColor,
 			&u.CreatedAt, &u.UpdatedAt, &u.DeletedAt,
 		)
@@ -179,7 +188,7 @@ func (r *UserRepo) getByID(ctx context.Context, query string, args ...interface{
 const userSelectColumns = `
 		SELECT u.id, u.employee_id, u.name, u.email, u.password_hash,
 		       u.role_id, COALESCE(r.name, ''), u.shift,
-		       u.tracking_enabled, u.tracking_status, u.is_online,
+		       u.tracking_enabled, u.tracking_status, u.status, u.is_online,
 		       COALESCE(u.avatar, ''), COALESCE(u.avatar_color, ''),
 		       u.created_at, u.updated_at, u.deleted_at
 		FROM users u LEFT JOIN roles r ON r.id = u.role_id`
@@ -206,13 +215,17 @@ func (r *UserRepo) Create(ctx context.Context, u *models.User) (*models.User, er
 	}
 	defer tx.Rollback(ctx)
 
+	// `status` is deliberately NOT in the INSERT: migration 044 gives it
+	// NOT NULL DEFAULT 'active', so every insert path (service create, admin
+	// bootstrap) starts active without callers having to remember it. It IS in
+	// the RETURNING so the response carries the value.
 	query := `
 		INSERT INTO users (name, email, password_hash, employee_id, role_id, shift,
 		                   tracking_enabled, tracking_status, is_online)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING id, employee_id, name, email, password_hash,
 		          role_id, (SELECT name FROM roles WHERE id = role_id), shift,
-		          tracking_enabled, tracking_status, is_online,
+		          tracking_enabled, tracking_status, status, is_online,
 		          COALESCE(avatar, ''), COALESCE(avatar_color, ''),
 		          created_at, updated_at, deleted_at
 	`
@@ -255,6 +268,7 @@ func (r *UserRepo) Update(ctx context.Context, id string, updates map[string]int
 		"password_hash": "password_hash", "shift": "shift",
 		"tracking_enabled": "tracking_enabled",
 		"tracking_status":  "tracking_status", "is_online": "is_online",
+		"status": "status",
 	}
 
 	for field, dbCol := range allowedFields {
@@ -276,7 +290,7 @@ func (r *UserRepo) Update(ctx context.Context, id string, updates map[string]int
 		WHERE u.id = $1 AND u.deleted_at IS NULL
 		RETURNING u.id, u.employee_id, u.name, u.email, u.password_hash,
 		          u.role_id, (SELECT name FROM roles WHERE id = u.role_id), u.shift,
-		          u.tracking_enabled, u.tracking_status, u.is_online,
+		          u.tracking_enabled, u.tracking_status, u.status, u.is_online,
 		          COALESCE(u.avatar, ''), COALESCE(u.avatar_color, ''),
 		          u.created_at, u.updated_at, u.deleted_at
 	`, strings.Join(setClauses, ", "))

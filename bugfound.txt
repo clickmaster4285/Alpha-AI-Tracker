@@ -13,11 +13,10 @@ TABLE OF CONTENTS
   4. Bug #4 — Cinnamon Autostart Reliability Gap
   5. Bug #5 — Shift Management: Soft-Deleted Shift Names Block Re-Creation
   6. Bug #6 — installed_applications: version and publisher always empty on Linux
-   7. Bug #7 — Peripherals Page: Duplicate Devices Shown (Connected + Disconnected)
-   8. Bug #8 — device_hardware_info: Windows 11 shows as "Windows 10"
-   9. Bug #9 — Orphan app-items silently lost: client marks all sent IDs as synced
-  10. How Each Fix Should Be Applied (No Code Changes Yet)
-  11. Diagnostic Commands for Linux Mint 22.2
+   7. Bug #7 — device_hardware_info: Windows 11 shows as "Windows 10"
+   8. Bug #8 — Orphan app-items silently lost: client marks all sent IDs as synced
+  9. How Each Fix Should Be Applied (No Code Changes Yet)
+  10. Diagnostic Commands for Linux Mint 22.2
 
 
 ================================================================================
@@ -543,119 +542,15 @@ DIAGNOSTIC COMMANDS:
   # Expected: dpkg/flatpak return version+publisher, but the DB shows empty
 
 
-================================================================================
-  BUG #7 — Peripherals Page: Duplicate Devices Shown (Connected + Disconnected)
-  Date Found: 2026-09-02
-  Environment: Web Dashboard — Device Specs > Peripherals page
-  Affects: All platforms
-================================================================================
+=================================================================================
+  BUG #7 — device_hardware_info: Windows 11 shows as "Windows 10"
+  Date Found: 2026-09-05
+  Environment: Client — device_hardware_info table, os_name column
+  Affects: All Windows 11 machines
+=================================================================================
 
-SEVERITY: MEDIUM
-AFFECTS: Web dashboard peripherals page — every device with a connect/disconnect
-         history shows TWO cards instead of one
+SEVERITY: LOW-MEDIUM
 
-DESCRIPTION:
-  The peripherals page renders one card per hardware_devices row, including
-  both the current (connected) row AND old disconnected rows. For example,
-  a USB microphone with 2 history entries (plugged → unplugged → plugged)
-  shows TWO cards:
-
-    Card 1: "Microphone (3- USB Audio Device)" — Connected
-    Card 2: "Microphone (3- USB Audio Device)" — Disconnected
-
-  Same for "USB Composite Device", "Headset", etc. — every device that
-  was ever unplugged and reconnected shows a duplicate card. The page
-  currently renders ALL rows from hardwareDevices without grouping.
-
-STEPS TO REPRODUCE:
-  1. Plug in a USB device (e.g. microphone) — a Connected card appears
-  2. Unplug it — the card shows Disconnected
-  3. Plug it back in — a NEW Connected card appears
-  4. Now the page shows TWO cards for the same device
-
-ROOT CAUSE:
-  web/src/app/(app)/device-specs/peripherals/page.tsx:29
-  iterates over hardwareDevices.map() directly — every row in the
-  hardware_devices table gets its own card. When a device is
-  unplugged and replugged, the server creates a new row (new id,
-  new plugged_at, unplugged_at set on the old row). The page
-  displays BOTH rows independently.
-
-  The data is correct (the table stores the full history), but the
-  UI should group by device identity and show only ONE card per
-  device, with the history accessible via an expand/collapse arrow.
-
-EXPECTED BEHAVIOR:
-  By default, show a SINGLE card per device (the most recent state).
-  If the device has history (multiple connect/disconnect rows), show
-  a chevron/arrow button that expands to reveal previous connect and
-  disconnect events. The default view should always show the current
-  state (Connected or Disconnected) as the top-level card.
-
-AFFECTED FILES:
-  - web/src/app/(app)/device-specs/peripherals/page.tsx (renders raw rows)
-
-
-================================================================================
-  RESOLUTION PLAN FOR BUG #7
-================================================================================
-
-NOTE: No code changes made yet. This is the plan only.
-
-FIX #7 — Group hardware devices by identity, show history in expandable rows
----------------------------------------------------------------------------
-
-  WHERE: web/src/app/(app)/device-specs/peripherals/page.tsx
-
-  WHAT:
-
-  1. GROUP rows by device identity:
-     - Primary key: device.product + device.deviceClass + device.vendor
-       (same product name, same class, same vendor = same physical device)
-     - Fallback: if product is empty, use device.serial as identity
-     - Grouping logic: reduce hardwareDevices into a Map<string, HardwareDevice[]>
-       where the key is the identity and the value is the history sorted by
-       pluggedAt descending (newest first)
-
-  2. DEFAULT CARD — show only the most recent row per group:
-     - Each group renders ONE card
-     - The card shows: product name, vendor, device class, serial, pluggedAt
-     - Status badge: Connected if unpluggedAt is null, Disconnected otherwise
-     - If the group has only 1 row (no history), render as-is (no arrow)
-
-  3. EXPANDABLE HISTORY — arrow button when history exists:
-     - If the group has >1 row, show a small chevron (▼/▶) button in the
-       top-right corner of the card
-     - Clicking the arrow expands a sub-list below the card showing all
-       historical rows (sorted by pluggedAt DESC)
-     - Each history row shows: status (Connected/Disconnected), pluggedAt,
-       unpluggedAt (if present), formatted with formatDateShort
-     - The arrow button indicates "view history" — collapsed by default
-
-  4. UI details:
-     - Arrow button: lucide ChevronDown/ChevronRight, 16px, muted color,
-       positioned next to the status badge
-     - Expanded history: subtle left-border accent (e.g. border-l-2
-       border-muted), slightly smaller text, indented under the card
-     - Animation: smooth height transition when expanding/collapsing
-       (framer-motion or CSS transition)
-     - Empty history (single row): no arrow rendered, card is static
-
-  WHY: The current UI shows raw table rows as cards, which is confusing
-  when a device has history. The fix groups by device identity and makes
-  history optional — the default view is clean (one card per device) and
-  the history is available on demand. This matches the pattern already
-  used on the App Usage page (expandable per-app session groups).
-
-
- ================================================================================
-   BUG #8 — device_hardware_info: Windows 11 shows as "Windows 10"
-   Date Found: 2026-09-05
-   Environment: Client — device_hardware_info table, os_name column
-   Affects: All Windows 11 machines
- ================================================================================
-
- SEVERITY: LOW-MEDIUM
  AFFECTS: The os_name column in the device_hardware_info SQLite table always
           reports "Microsoft Windows 10.0.xxxxx" even on Windows 11 machines.
 
@@ -698,9 +593,10 @@ FIX #7 — Group hardware devices by identity, show history in expandable rows
    - client/Services/LogCollectorService.cs:1292 (RuntimeInformation.OSDescription)
 
 
- ================================================================================
-   RESOLUTION PLAN FOR BUG #8
- ================================================================================
+ =================================================================================
+RESOLUTION PLAN FOR BUG #7
+=================================================================================
+
 
  NOTE: No code changes made yet. This is the plan only.
 
@@ -757,17 +653,15 @@ FIX #7 — Group hardware devices by identity, show history in expandable rows
    # Expected: os_name says "Windows 10" but os_version build is >= 22000
 
    # Check the actual build number:
-   # Environment.OSVersion.Version.Build should be >= 22000 on Windows 11
+   # Environment.OSVersion.Version.Build should be >= 22000 on Windows 11================================================================================
+  BUG #8 — Orphan app-items silently lost: client marks all sent IDs as synced
+  Date Found: 2026-09-08
+  Environment: Server + Client sync pipeline
+  Affects: All platforms
+=================================================================================
 
+SEVERITY: LOW-MEDIUM
 
- ================================================================================
-   BUG #9 — Orphan app-items silently lost: client marks all sent IDs as synced
-   Date Found: 2026-09-08
-   Environment: Server + Client sync pipeline
-   Affects: All platforms
- ================================================================================
-
- SEVERITY: LOW-MEDIUM
  AFFECTS: The app-items sync pipeline — when a race condition causes orphan
           rows, the client marks them as synced even though the server dropped
           them, so they are never re-sent.
@@ -819,12 +713,10 @@ FIX #7 — Group hardware devices by identity, show history in expandable rows
    - server/internal/repository/new_schema_repo.go:416-630 (BulkInsertAppItems + filterOrphanAppItems)
    - server/internal/repository/new_schema_repo.go:436-438 (incorrect comment claiming re-sync)
    - client/Services/SyncService.cs:608-613 (marks all IDs as synced without checking response)
-   - client/Services/SyncService.cs:682-688 (SendAsync only checks 2xx, ignores body)
+   - client/Services/SyncService.cs:682-688 (SendAsync only checks 2xx, ignores body)================================================================================
+RESOLUTION PLAN FOR BUG #8
+=================================================================================
 
-
- ================================================================================
-   RESOLUTION PLAN FOR BUG #9
- ================================================================================
 
  NOTE: No code changes made yet. This is the plan only.
 

@@ -15,6 +15,7 @@ type User struct {
 	Shift           string      `json:"shift" db:"shift"`
 	TrackingEnabled bool        `json:"trackingEnabled" db:"tracking_enabled"`
 	TrackingStatus  string      `json:"trackingStatus" db:"tracking_status"`
+	Status          string      `json:"status" db:"status"` // ACCOUNT status: active | suspended
 	IsOnline        bool        `json:"isOnline" db:"is_online"`
 	Avatar          string      `json:"avatar" db:"avatar"`
 	AvatarColor     string      `json:"avatarColor" db:"avatar_color"`
@@ -34,6 +35,7 @@ type UserPublic struct {
 	Shift           string    `json:"shift"`
 	TrackingEnabled bool      `json:"trackingEnabled"`
 	TrackingStatus  string    `json:"trackingStatus"`
+	Status          string    `json:"status"`
 	IsOnline        bool      `json:"isOnline"`
 	Avatar          string    `json:"avatar"`
 	AvatarColor     string    `json:"avatarColor"`
@@ -54,6 +56,7 @@ func (u *User) ToPublic() UserPublic {
 		Shift:           u.Shift,
 		TrackingEnabled: u.TrackingEnabled,
 		TrackingStatus:  u.TrackingStatus,
+		Status:          u.Status,
 		IsOnline:        u.IsOnline,
 		Avatar:          u.Avatar,
 		AvatarColor:     u.AvatarColor,

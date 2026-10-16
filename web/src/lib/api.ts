@@ -926,6 +926,8 @@ export interface User {
   shift: string;
   trackingEnabled: boolean;
   trackingStatus: string;
+  /** Account status: 'active' | 'suspended'. Suspended users cannot sign in. */
+  status: string;
   isOnline: boolean;
   avatar: string;
   avatarColor: string;
@@ -956,10 +958,20 @@ export interface UpdateUserPayload {
   password?: string;
   roleId?: number;
   shift?: string;
+  status?: 'active' | 'suspended';
 }
 
 export const usersApi = {
-  list: (params?: { page?: number; perPage?: number; search?: string; roleId?: number; status?: string }) =>
+  list: (params?: {
+    page?: number;
+    perPage?: number;
+    search?: string;
+    roleId?: number;
+    /** Filters users.tracking_status ("tracked" | "untracked"). */
+    status?: string;
+    /** Filters the ACCOUNT status ("active" | "suspended"). */
+    accountStatus?: 'active' | 'suspended';
+  }) =>
     request<UserListResponse>('/users', { params: params as Record<string, string | number | undefined> }),
 
   get: (id: string) => request<User>('/users/' + id),

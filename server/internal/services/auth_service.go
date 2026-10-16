@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -156,6 +157,11 @@ func (s *AuthService) EnsureCompanyAdmin(ctx context.Context) error {
 	return nil
 }
 
+// ErrAccountSuspended is returned by Login and RefreshSession when the account
+// status is not 'active'. Handlers map it to HTTP 403 so the web can explain
+// the refusal (as opposed to a 401 for bad credentials).
+var ErrAccountSuspended = errors.New("Account suspended. Contact your administrator.")
+
 // Login authenticates a user and returns JWT token + user info.
 func (s *AuthService) Login(ctx context.Context, req *dto.LoginRequest) (*dto.LoginResponse, error) {
 	user, err := s.repo.GetByEmail(ctx, req.Email)
@@ -168,6 +174,12 @@ func (s *AuthService) Login(ctx context.Context, req *dto.LoginRequest) (*dto.Lo
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
 		return nil, fmt.Errorf("invalid email or password")
+	}
+
+	// Account status is checked AFTER the password so the API never reveals to
+	// an unauthenticated caller whether an account exists / is suspended.
+	if user.Status == "suspended" {
+		return nil, ErrAccountSuspended
 	}
 
 	token, err := s.generateToken(user)
@@ -239,6 +251,11 @@ func (s *AuthService) RefreshSession(ctx context.Context, rawRefreshToken string
 	}
 	if user == nil || user.DeletedAt != nil {
 		return nil, fmt.Errorf("user no longer exists")
+	}
+	// A suspended account must not keep minting access tokens from a 30-day
+	// refresh cookie.
+	if user.Status == "suspended" {
+		return nil, ErrAccountSuspended
 	}
 
 	access, err := s.generateToken(user)

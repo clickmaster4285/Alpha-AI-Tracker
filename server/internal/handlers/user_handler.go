@@ -27,11 +27,12 @@ func (h *UserHandler) ListUsers(c echo.Context) error {
 	roleID, _ := strconv.Atoi(c.QueryParam("roleId"))
 
 	params := repository.ListParams{
-		Search:  c.QueryParam("search"),
-		RoleID:  roleID,
-		Status:  c.QueryParam("status"),
-		Page:    page,
-		PerPage: perPage,
+		Search:        c.QueryParam("search"),
+		RoleID:        roleID,
+		Status:        c.QueryParam("status"),
+		AccountStatus: c.QueryParam("accountStatus"),
+		Page:          page,
+		PerPage:       perPage,
 	}
 
 	result, err := h.userService.List(c.Request().Context(), params)
@@ -115,10 +116,16 @@ func (h *UserHandler) UpdateUser(c echo.Context) error {
 	user, err := h.userService.Update(c.Request().Context(), id, &req)
 	if err != nil {
 		code := http.StatusInternalServerError
-		if err.Error() == "user not found" {
+		switch err.Error() {
+		case "user not found":
 			code = http.StatusNotFound
-		} else if err.Error() == "email already exists" {
+		case "email already exists":
 			code = http.StatusConflict
+		case "a valid role is required", "invalid status":
+			code = http.StatusBadRequest
+		case "cannot suspend company admin":
+			// Mirrors Delete's "cannot delete company admin" refusal.
+			code = http.StatusForbidden
 		}
 		return c.JSON(code, dto.APIError{
 			Code:    code,
