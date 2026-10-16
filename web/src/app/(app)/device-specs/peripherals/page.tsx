@@ -21,11 +21,12 @@ type HardwareDevice = {
 function groupDevices(devices: HardwareDevice[]): Map<string, HardwareDevice[]> {
   const groups = new Map<string, HardwareDevice[]>();
   for (const device of devices) {
-    const key = [
-      device.product?.trim() || '',
-      device.deviceClass?.trim() || '',
-      device.vendor?.trim() || '',
-    ].join('|') || `serial:${device.serial}`;
+    const hasProduct = device.product && device.product.trim() !== '';
+    // Use serial as identity when the product name is generic/empty —
+    // two "USB Composite Device" entries with different serials are different hardware.
+    const key = hasProduct
+      ? [device.product.trim(), device.deviceClass?.trim() || '', device.vendor?.trim() || ''].join('|')
+      : `serial:${device.serial}`;
     const existing = groups.get(key) || [];
     existing.push(device);
     groups.set(key, existing);
@@ -44,6 +45,16 @@ function groupDevices(devices: HardwareDevice[]): Map<string, HardwareDevice[]> 
 function DeviceCard({ device, history }: { device: HardwareDevice; history: HardwareDevice[] }) {
   const [expanded, setExpanded] = useState(false);
   const hasHistory = history.length > 1;
+
+  // A history row is effectively disconnected if a newer row exists in the group
+  // (the device was replugged). The newest row's own unpluggedAt determines the card status.
+  const isNewestInGroup = (h: HardwareDevice) => h.id === device.id;
+  const effectiveDisconnected = (h: HardwareDevice) => {
+    if (h.unpluggedAt) return true;
+    // No unpluggedAt on this row — but if a newer row exists, the device was replugged,
+    // so this older session effectively ended when the next one began.
+    return !isNewestInGroup(h);
+  };
 
   return (
     <motion.div
@@ -108,10 +119,10 @@ function DeviceCard({ device, history }: { device: HardwareDevice; history: Hard
               {history.map((h) => (
                 <div key={h.id} className="flex items-start gap-2 text-xs">
                   <span className={`flex items-center gap-1.5 font-medium whitespace-nowrap mt-0.5 ${
-                    h.unpluggedAt ? 'text-muted-foreground' : 'text-success'
+                    effectiveDisconnected(h) ? 'text-muted-foreground' : 'text-success'
                   }`}>
-                    <span className={`w-1.5 h-1.5 rounded-full ${h.unpluggedAt ? 'bg-muted-foreground' : 'bg-success'}`} />
-                    {h.unpluggedAt ? 'Disconnected' : 'Connected'}
+                    <span className={`w-1.5 h-1.5 rounded-full ${effectiveDisconnected(h) ? 'bg-muted-foreground' : 'bg-success'}`} />
+                    {effectiveDisconnected(h) ? 'Disconnected' : 'Connected'}
                   </span>
                   <span className="text-muted-foreground">Plugged {formatDateShort(h.pluggedAt)}</span>
                   {h.unpluggedAt && (
