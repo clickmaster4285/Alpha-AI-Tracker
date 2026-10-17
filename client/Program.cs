@@ -468,33 +468,89 @@ try
     await host.Services.GetRequiredService<ILogStore>()
         .InitializeAsync(CancellationToken.None);
 
-    // ─── Cold-start account removal (client --remove-account, no tracker running) ───
-    // No other process holds the database, so the wipe runs here — before the host
-    // starts, so no hosted service can write a row back into the emptied tables. The
-    // app then boots normally and, with no credentials left, opens on the sign-in
-    // page. (When a tracker IS already running the removal is handled by that
-    // instance instead — see the mutex branch above.)
-    if (isRemoveAccount)
+    // ✅ Cold-start account removal (no tracker running): wipe local data before host starts.
+    //    ✅ Running instance handles removal via mutex branch (see above).
+    //    ✅ Background mode (--background) does sync-then-wipe (see below).
+    if (isRemoveAccount && !isBackground)
     {
-        Console.WriteLine("Removing this machine's local account…");
-
-        // Wipe the local account data first.
-        await host.Services.GetRequiredService<ILogStore>()
-            .WipeLocalAccountDataAsync(CancellationToken.None);
-
-        // Kill the client process and any sibling alpha-ai-tracker processes.
-        // This ensures the process fully terminates after the account is removed,
-        // so the machine lands on the sign-in page with no lingering tracker.
+        // Cold-start: no other process holds the DB, so wipe before host starts.
+        // This matches the original behavior: remove account, then app boots to sign-in page.
         try
         {
-            // Kill the current process (client.exe) — this will terminate the process.
-            System.Diagnostics.Process.GetCurrentProcess()?.Kill(entireProcessTree: true);
+            Console.WriteLine("Removing this machine's local account (cold-start)...");
+            await host.Services.GetRequiredService<ILogStore>()
+                .WipeLocalAccountDataAsync(CancellationToken.None);
+            Console.WriteLine("Local account data wiped.");
+
+            // Kill the client process and any sibling alpha-ai-tracker processes.
+            // This ensures the process fully terminates after the account is removed,
+            // so the machine lands on the sign-in page with no lingering tracker.
+            try
+            {
+                System.Diagnostics.Process.GetCurrentProcess()?.Kill(entireProcessTree: true);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[remove-account] Failed to kill process: {ex.Message}");
+            }
+
+            // Also scan for and kill any other alpha-ai-tracker processes that might be running.
+            try
+            {
+                foreach (var proc in System.Diagnostics.Process.GetProcessesByName("client"))
+                {
+                    proc.Kill(entireProcessTree: true);
+                }
+                foreach (var proc in System.Diagnostics.Process.GetProcessesByName("AlphaAI"))
+                {
+                    proc.Kill(entireProcessTree: true);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[remove-account] Failed to kill sibling processes: {ex.Message}");
+            }
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[remove-account] Failed to kill process: {ex.Message}");
+            Console.Error.WriteLine($"[remove-account] Failed during cold-start removal: {ex.Message}");
+        }
+    }
+    
+    // ✅ Background mode with --remove-account: sync-then-wipe flow.
+    if (isRemoveAccount && isBackground)
+    {
+        // In background mode with --remove-account, drain unsynced data to server first,
+        // then wipe local account data. If the server is unreachable (401, 404, or other
+        // error), we still immediately remove all data from client as requested.
+        try
+        {
+            var syncService = host.Services.GetRequiredService<SyncService>();
+            
+            // Fire an immediate sync drain. This will send all unsent rows (device hardware,
+            // installed apps/packages, network info, session events, app sessions/items, etc.)
+            // to the server. The sync engine runs on its own loop, so the drain may take a moment.
+            // Even if it doesn't fully complete, we proceed to local removal as requested.
+            syncService.RequestImmediateSync();
+            Console.WriteLine("Sync drain initiated — proceeding with local account removal.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error initiating sync drain before account removal: {ex.Message}");
         }
 
+        // Now wipe the local account data — this always runs, even if sync failed or server was unreachable.
+        try
+        {
+            await host.Services.GetRequiredService<ILogStore>()
+                .WipeLocalAccountDataAsync(CancellationToken.None);
+            Console.WriteLine("Local account data wiped.");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[remove-account] Failed to wipe local account data: {ex.Message}");
+        }
+        
         // Also scan for and kill any other alpha-ai-tracker processes that might be running.
         try
         {
