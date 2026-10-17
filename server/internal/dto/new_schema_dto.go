@@ -52,7 +52,10 @@ type DeviceHardwareInfoEntry struct {
 type SyncDeviceHardwareRequest struct {
 	EmployeeID string                    `json:"employeeId"`
 	Token      string                    `json:"token"`
-	Entries    []DeviceHardwareInfoEntry `json:"entries"`
+	// MachineID is filled by the handler from the DeviceAuth context (never trusted
+	// from the body) so every row can be scoped to the reporting device.
+	MachineID string                    `json:"-"`
+	Entries   []DeviceHardwareInfoEntry `json:"entries"`
 }
 
 type DeviceHardwareInfoResponse struct {
@@ -95,6 +98,7 @@ type InstalledApplicationEntry struct {
 type SyncInstalledAppsRequest struct {
 	EmployeeID string                      `json:"employeeId"`
 	Token      string                      `json:"token"`
+	MachineID  string                      `json:"-"`
 	Entries    []InstalledApplicationEntry `json:"entries"`
 }
 
@@ -140,6 +144,7 @@ type InstalledPackageEntry struct {
 type SyncInstalledPackagesRequest struct {
 	EmployeeID string                  `json:"employeeId"`
 	Token      string                  `json:"token"`
+	MachineID  string                  `json:"-"`
 	Entries    []InstalledPackageEntry `json:"entries"`
 }
 
@@ -160,6 +165,7 @@ type InstalledPackageResponse struct {
 type SyncNetworkInfoRequest struct {
 	EmployeeID string             `json:"employeeId"`
 	Token      string             `json:"token"`
+	MachineID  string             `json:"-"`
 	Entries    []NetworkInfoEntry `json:"entries"`
 }
 
@@ -385,6 +391,7 @@ type AppStatusEntry struct {
 type SyncAppStatusRequest struct {
 	EmployeeID string           `json:"employeeId"`
 	Token      string           `json:"token"`
+	MachineID  string           `json:"-"`
 	Entries    []AppStatusEntry `json:"entries"`
 }
 
@@ -403,6 +410,7 @@ type HardwareDeviceEntry struct {
 type SyncHardwareDevicesRequest struct {
 	EmployeeID string                `json:"employeeId"`
 	Token      string                `json:"token"`
+	MachineID  string                `json:"-"`
 	Entries    []HardwareDeviceEntry `json:"entries"`
 }
 
@@ -420,6 +428,7 @@ type PermissionStatusEntry struct {
 type SyncPermissionStatusRequest struct {
 	EmployeeID string                  `json:"employeeId"`
 	Token      string                  `json:"token"`
+	MachineID  string                  `json:"-"`
 	Entries    []PermissionStatusEntry `json:"entries"`
 }
 
@@ -434,6 +443,7 @@ type StorageDeviceEntry struct {
 type SyncStorageDevicesRequest struct {
 	EmployeeID string               `json:"employeeId"`
 	Token      string               `json:"token"`
+	MachineID  string               `json:"-"`
 	Entries    []StorageDeviceEntry `json:"entries"`
 }
 

@@ -1,0 +1,7 @@
+i want to add the btn on the setting->user-management and also active/suspended status 
+and on login first check the status and authorized
+
+pick the bug #7 from bugfound.txt and resolve that and remove from the bugfound.txt
+
+on dashboard tell me why shown tracked:5 and Active devices:9 why???
+is this any bug or something other??

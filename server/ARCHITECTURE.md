@@ -1,7 +1,30 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-10-16 (RBAC terms submodule)
+> **Last audited:** 2026-10-17 (device-scoped legacy backfill)
 > **Changelog:**
+> - 2026-10-17: **Device Specs — legacy machine rows are now attributed to their device (migration 047); a removed device shows its last-known software.**
+>   Migration **046** added `machine_id` to the device-scoped sync tables with `DEFAULT ''` and then
+>   tried to attribute the pre-existing rows from `app_sessions` with `HAVING COUNT(DISTINCT machine_id) = 1`.
+>   That heuristic fails in the exact device-swap scenario it targets: the retired machine's
+>   `app_sessions` are purged by the retention worker (30 days) before the migration runs, so the
+>   employee looks single-machine (or machine-less) and nothing is backfilled — the old machine's
+>   `device_hardware_info` / `network_info` / `storage_devices` / `hardware_devices` /
+>   `permission_status` / `app_status` / link rows stay `machine_id = ''`. The Device Specs dropdown
+>   still listed that machine (by its `default-EMP-XXXXX` machine id — the fallback bound when a login
+>   arrives without a machine id), so selecting it filtered `machine_id = 'default-EMP-XXXXX'`, matched
+>   nothing, and the Hardware Overview rendered "No hardware snapshot synced yet".
+>   Migration **047** re-attributes each leftover `''` row from the **device registry's own activity
+>   window** `[created_at, last_seen_at]` — only when exactly ONE device window contains the row's
+>   (server-stamped) sync time; ambiguous/no-window rows stay `''` (the "unknown machine" bucket shown
+>   under All devices). Idempotent, `machine_id`-set rows untouched, natural-key collisions skipped.
+>   `ListEmployeeApplications` / `ListEmployeePackages` now also include `is_active = false` links when
+>   the requested machine has **no live registration** (all its `employee_devices` rows revoked), so a
+>   removed device shows the last-known inventory the staleness sweep had deactivated; the
+>   employee-wide view still filters `is_active`. No route/contract change.
+>   Verified: `go build ./...` / `go vet ./...` clean; migration dry-run + applied against the dev DB
+>   (10, 3, 6, 21, 8, 37 link/row groups attributed for the affected employees, 0 unattributed left);
+>   per-device reads for `default-EMP-10003` now return hw/storage/network/peripherals/status/packages;
+>   installed-software scoping measured live — retired device 99 apps, current device 73, aggregate 73.
 > - 2026-10-16: **RBAC catalog — new `settings/terms-and-conditions` submodule (fixes a nav/permission leak).**
 >   `internal/services/rbac_service.go` now seeds `settings/terms-and-conditions`
 >   ("Terms & Conditions", route `/settings/terms-and-conditions`, sort 8) under `settings-module`.
@@ -651,16 +674,21 @@ app_fingerprint TEXT UNIQUE                (015)  = desktop_id|binary_name
 ```
 Per-install metadata (version/path/date/publisher) now lives on `employee_installed_applications`, so the catalog row is shared across employees. The legacy `employee_id` column is retained for backward compat but is no longer the dedup key.
 
-**`employee_installed_applications`** — employee↔app junction (migration 015)
+**`employee_installed_applications`** — employee↔app junction (migrations 015, 046)
 ```
 id                      BIGSERIAL PK
 employee_id             VARCHAR(20) NOT NULL → FK → employees(employee_id)
+machine_id              TEXT NOT NULL DEFAULT ''   (046 — device scope)
 installed_application_id TEXT NOT NULL → FK → installed_applications(id)
 app_version / publisher / install_path / install_date
 first_seen_at / last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now()
 is_active               BOOLEAN NOT NULL DEFAULT true
-UNIQUE (employee_id, installed_application_id)
+UNIQUE (employee_id, machine_id, installed_application_id)
 ```
+`is_active` means "the machine is still reporting this app" (only the hourly staleness sweep clears it).
+`ListEmployeeApplications` still filters `is_active` for the employee-wide view, but for a **device that
+has no live registration** (every `employee_devices` row revoked) it includes inactive links so a removed
+device shows its last-known inventory instead of an empty page.
 
 **`network_info`** — Network snapshots per employee (migration 006)
 ```
@@ -724,13 +752,14 @@ detected_at / synced_at / created_at / deleted_at TIMESTAMPTZ
 package_fingerprint TEXT UNIQUE (016)  = package_name|source_manager
 ```
 
-**`employee_installed_packages`** — employee↔package junction (migration 016)
+**`employee_installed_packages`** — employee↔package junction (migrations 016, 046)
 ```
-id BIGSERIAL PK · employee_id FK · installed_package_id FK
-version / publisher / install_path
+id BIGSERIAL PK · employee_id FK · machine_id TEXT DEFAULT '' (046)
+installed_package_id FK · version / publisher / install_path
 first_seen_at / last_seen_at · is_active BOOLEAN
-UNIQUE (employee_id, installed_package_id)
+UNIQUE (employee_id, machine_id, installed_package_id)
 ```
+Same removed-device read rule as the app junction (`ListEmployeePackages`).
 
 **`schema_migrations`** — Migration tracking
 ```

@@ -8,6 +8,7 @@ import "time"
 type EmployeeInstalledApplication struct {
 	ID                     int64      `json:"id" db:"id"`
 	EmployeeID             string     `json:"employeeId" db:"employee_id"`
+	MachineID              string     `json:"machineId" db:"machine_id"`
 	InstalledApplicationID string     `json:"installedApplicationId" db:"installed_application_id"`
 	AppVersion             string     `json:"appVersion" db:"app_version"`
 	Publisher              string     `json:"publisher" db:"publisher"`
@@ -22,6 +23,7 @@ type EmployeeInstalledApplication struct {
 type EmployeeInstalledPackage struct {
 	ID                 int64     `json:"id" db:"id"`
 	EmployeeID         string    `json:"employeeId" db:"employee_id"`
+	MachineID          string    `json:"machineId" db:"machine_id"`
 	InstalledPackageID string    `json:"installedPackageId" db:"installed_package_id"`
 	Version            string    `json:"version" db:"version"`
 	Publisher          string    `json:"publisher" db:"publisher"`

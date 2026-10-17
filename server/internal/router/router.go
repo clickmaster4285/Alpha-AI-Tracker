@@ -155,6 +155,7 @@ func Setup(
 	employees.GET("", employeeHandler.ListEmployees)
 	employees.GET("/:id/detail", newSchemaHandler.GetEmployeeDetail)
 	employees.GET("/:id/devices", authHandler.ListEmployeeDevices)
+	employees.POST("/:id/devices/remove", newSchemaHandler.RemoveEmployeeDevice)
 	employees.POST("/import", employeeHandler.ImportEmployees)
 	employees.GET("/export", employeeHandler.ExportEmployees)
 	employees.GET("/:id", employeeHandler.GetEmployee)

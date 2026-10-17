@@ -226,6 +226,32 @@ type EmployeeActivityStats struct {
 	LastActivityAt *time.Time `json:"lastActivityAt,omitempty"`
 }
 
+// EmployeeDeviceDto is a registered device for the employee detail response.
+// Hostname is the most recent hostname the machine itself reported; the web labels the
+// device "{employee name} ({hostname})" so a device is never shown as "Unknown device".
+type EmployeeDeviceDto struct {
+	ID            string     `json:"id"`
+	EmployeeID    string     `json:"employeeId"`
+	MachineID     string     `json:"machineId"`
+	Platform      string     `json:"platform"`
+	ClientVersion string     `json:"clientVersion"`
+	DeviceName    string     `json:"deviceName"`
+	Hostname      string     `json:"hostname"`
+	LastSeenAt    time.Time  `json:"lastSeenAt"`
+	RevokedAt     *time.Time `json:"revokedAt,omitempty"`
+	IsActive      bool       `json:"isActive"`
+}
+
+// RemoveEmployeeDeviceResponse reports what "Remove current device" changed.
+// Nothing is deleted: the counts describe revoked registrations and the
+// sessions/items that were frozen because the machine can no longer report.
+type RemoveEmployeeDeviceResponse struct {
+	RevokedDevices int    `json:"revokedDevices"`
+	ClosedSessions int    `json:"closedSessions"`
+	ClosedItems    int    `json:"closedItems"`
+	TrackingStatus string `json:"trackingStatus"`
+}
+
 // EmployeeDetailResponse is the full machine picture for one employee.
 type EmployeeDetailResponse struct {
 	Employee        EmployeeResponse             `json:"employee"`
@@ -238,4 +264,5 @@ type EmployeeDetailResponse struct {
 	AppStatus       map[string]string            `json:"appStatus"`
 	Permissions     []PermissionStatusDetail     `json:"permissions"`
 	Stats           EmployeeActivityStats        `json:"stats"`
+	Devices         []EmployeeDeviceDto          `json:"devices"`
 }

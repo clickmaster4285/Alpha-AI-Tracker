@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check, Eye, Monitor, Upload, Download, Pencil, Trash2, AlertTriangle, UserPlus } from 'lucide-react';
+import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check, Eye, Monitor, MonitorOff, Upload, Download, Pencil, Trash2, AlertTriangle, UserPlus } from 'lucide-react';
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import * as XLSX from 'xlsx';
@@ -78,6 +78,7 @@ function UsersListInner() {
   const [showAdd, setShowAdd] = useState(false);
   const [showEdit, setShowEdit] = useState<string | null>(null);
   const [showSecret, setShowSecret] = useState<Employee | null>(null);
+  const [showRemove, setShowRemove] = useState<Employee | null>(null);
   const [secretValue, setSecretValue] = useState('');
   const [copied, setCopied] = useState(false);
   const [importResult, setImportResult] = useState<ImportEmployeesResponse | null>(null);
@@ -220,6 +221,26 @@ function UsersListInner() {
     },
     onError: (err: Error) => {
       toast.error('Failed to delete employee', { description: err.message });
+    },
+  });
+
+  // "Remove current device": revoke the employee's devices, freeze every open
+  // session/item and flip the employee to untracked. Nothing is deleted — the old
+  // machine stays visible as history under Device Specs — and the row switches back
+  // to "Generate Login Secret" so a new machine can be onboarded.
+  const removeDeviceMutation = useMutation({
+    mutationFn: (id: string) => employeesApi.removeDevice(id),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['employees'] });
+      queryClient.invalidateQueries({ queryKey: ['employee-detail'] });
+      setShowRemove(null);
+      toast.success('Device removed', {
+        description: `${data.revokedDevices} device${data.revokedDevices === 1 ? '' : 's'} revoked · ${data.closedSessions} session${data.closedSessions === 1 ? '' : 's'} closed. The employee is now untracked — generate a new login secret for the replacement machine.`,
+        duration: 9000,
+      });
+    },
+    onError: (err: Error) => {
+      toast.error('Failed to remove device', { description: err.message });
     },
   });
 
@@ -600,10 +621,17 @@ function UsersListInner() {
                             </Link>
                           </DropdownMenuItem>
                         )}
-                        <DropdownMenuItem onSelect={() => handleGenerateSecret(emp)} className="cursor-pointer gap-2.5 px-2.5 py-2">
-                          <Key className="w-4 h-4 text-muted-foreground" />
-                          Generate Login Secret
-                        </DropdownMenuItem>
+                        {emp.trackingStatus === 'tracked' ? (
+                          <DropdownMenuItem onSelect={() => setShowRemove(emp)} className="cursor-pointer gap-2.5 px-2.5 py-2 text-warning focus:text-warning focus:bg-warning/10">
+                            <MonitorOff className="w-4 h-4" />
+                            Remove Current Device
+                          </DropdownMenuItem>
+                        ) : (
+                          <DropdownMenuItem onSelect={() => handleGenerateSecret(emp)} className="cursor-pointer gap-2.5 px-2.5 py-2">
+                            <Key className="w-4 h-4 text-muted-foreground" />
+                            Generate Login Secret
+                          </DropdownMenuItem>
+                        )}
                         <DropdownMenuSeparator className="my-1.5" />
                         <DropdownMenuItem
                           onSelect={() => handleDelete(emp.id)}
@@ -738,6 +766,69 @@ function UsersListInner() {
             >
               {updateMutation.isPending ? 'Saving...' : 'Save Changes'}
             </button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Remove Current Device — confirmation */}
+      <Dialog open={showRemove !== null} onOpenChange={(open) => { if (!open) setShowRemove(null); }}>
+        <DialogContent className="bg-card sm:max-w-[460px]">
+          <DialogHeader>
+            <DialogTitle className="font-display">Remove Current Device</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 mt-2">
+            {showRemove && (
+              <div className="flex items-center gap-3 bg-background border border-border rounded-xl p-3.5">
+                <div
+                  className="w-11 h-11 rounded-full flex items-center justify-center text-sm font-bold text-primary-foreground shrink-0"
+                  style={{ backgroundColor: showRemove.avatarColor || '#7C3AED' }}
+                >
+                  {showRemove.avatar || showRemove.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-foreground truncate">{showRemove.name}</p>
+                  <p className="text-xs text-muted-foreground truncate">{showRemove.email}</p>
+                </div>
+                <div className="text-right shrink-0">
+                  <p className="text-[11px] uppercase tracking-wide text-muted-foreground font-medium">Employee ID</p>
+                  <p className="text-sm font-mono font-medium text-foreground">{showRemove.employeeId}</p>
+                </div>
+              </div>
+            )}
+
+            <div className="flex items-start gap-2.5 bg-warning/10 border border-warning/30 rounded-xl p-3">
+              <AlertTriangle className="w-4 h-4 text-warning mt-0.5 shrink-0" />
+              <div className="text-xs text-foreground space-y-1.5">
+                <p>This detaches the machine the employee is currently tracked on:</p>
+                <ul className="list-disc pl-4 space-y-1 text-muted-foreground">
+                  <li>The device registration is revoked — that machine can no longer sync.</li>
+                  <li>Every running session and activity item is closed and the employee becomes <span className="font-semibold text-foreground">Untracked</span>.</li>
+                  <li>Nothing is deleted. Device Specs and all history stay available.</li>
+                </ul>
+                <p className="pt-1">Afterwards, <span className="font-semibold">Generate Login Secret</span> lets them sign in on the replacement machine and tracking resumes.</p>
+              </div>
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowRemove(null)}
+                disabled={removeDeviceMutation.isPending}
+                className="flex-1 border border-border text-foreground py-2.5 rounded-lg text-sm font-medium hover:bg-muted transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => showRemove && removeDeviceMutation.mutate(showRemove.id)}
+                disabled={removeDeviceMutation.isPending}
+                className="flex-1 bg-destructive text-destructive-foreground py-2.5 rounded-lg text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {removeDeviceMutation.isPending ? (
+                  <><Loader2 className="w-4 h-4 animate-spin" /> Removing…</>
+                ) : (
+                  <><MonitorOff className="w-4 h-4" /> Remove Device</>
+                )}
+              </button>
+            </div>
           </div>
         </DialogContent>
       </Dialog>

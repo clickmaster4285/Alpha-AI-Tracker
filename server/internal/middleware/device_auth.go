@@ -63,6 +63,7 @@ func DeviceAuth(deviceRepo *repository.DeviceRepo, userRepo *repository.UserRepo
 
 				c.Set("employee_id", device.EmployeeID)
 				c.Set("device_id", device.ID)
+				c.Set("device_machine_id", device.MachineID)
 				return next(c)
 			}
 

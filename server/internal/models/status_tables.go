@@ -8,6 +8,7 @@ import "time"
 // kept for API symmetry but must never be scanned (db:"-" prevents RowToStructByName traps).
 type AppStatus struct {
 	EmployeeID string     `json:"employeeId" db:"employee_id"`
+	MachineID  string     `json:"machineId" db:"machine_id"`
 	Key        string     `json:"key" db:"key"`
 	Value      string     `json:"value" db:"value"`
 	UpdatedAt  time.Time  `json:"updatedAt" db:"updated_at"`
@@ -19,6 +20,7 @@ type AppStatus struct {
 type HardwareDevice struct {
 	ID           string     `json:"id" db:"id"`
 	EmployeeID   string     `json:"employeeId" db:"employee_id"`
+	MachineID    string     `json:"machineId" db:"machine_id"`
 	DeviceClass  string     `json:"deviceClass" db:"device_class"`
 	Vendor       string     `json:"vendor" db:"vendor"`
 	Product      string     `json:"product" db:"product"`
@@ -35,6 +37,7 @@ type HardwareDevice struct {
 type PermissionStatus struct {
 	CheckID      string     `json:"checkId" db:"check_id"`
 	EmployeeID   string     `json:"employeeId" db:"employee_id"`
+	MachineID    string     `json:"machineId" db:"machine_id"`
 	SessionID    string     `json:"sessionId" db:"session_id"`
 	SessionType  string     `json:"sessionType" db:"session_type"`
 	Platform     string     `json:"platform" db:"platform"`
@@ -50,6 +53,7 @@ type PermissionStatus struct {
 type StorageDevice struct {
 	ID               string     `json:"id" db:"id"`
 	EmployeeID       string     `json:"employeeId" db:"employee_id"`
+	MachineID        string     `json:"machineId" db:"machine_id"`
 	DeviceHardwareID string     `json:"deviceHardwareId" db:"device_hardware_id"`
 	DeviceType       string     `json:"deviceType" db:"device_type"`
 	Model            string     `json:"model" db:"model"`

@@ -1,7 +1,66 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-10-16
+> **Last audited:** 2026-10-17
 > **Changelog:**
+>
+> - 2026-10-17: **Device Specs — legacy machine rows attributed to their device (migration 047) + a removed device shows its last-known software (server + web).**
+>   Reported: after **Remove current device** + a new login, `/device-specs?deviceId=<old>` showed the
+>   current device fine but the removed device rendered **"No hardware snapshot synced yet — the desktop
+>   client will upload one after login"**, with every other device surface empty. Root cause was a gap in
+>   migration **046**: it added `machine_id` with `DEFAULT ''` and then attributed the pre-existing rows
+>   from `app_sessions` with `HAVING COUNT(DISTINCT machine_id) = 1` — but `app_sessions` is purged by the
+>   retention worker after 30 days, so a swapped PC's retired-machine sessions are usually already gone
+>   when the migration runs and **nothing** is backfilled. The old machine's `device_hardware_info` /
+>   `network_info` / `storage_devices` / `hardware_devices` / `permission_status` / `app_status` / link
+>   rows stayed `machine_id = ''` while the Device Specs dropdown still listed that machine by its
+>   `default-EMP-XXXXX` machine id (the fallback the login handler binds when a request omits a machine
+>   id) — so the machine-scoped read `machine_id = 'default-EMP-XXXXX'` matched nothing. **Server:**
+>   migration **047** re-attributes each leftover `''` row from the **device registry's own activity
+>   window** `[created_at, last_seen_at]`, only when exactly ONE device window contains the row's
+>   server-stamped sync time (ambiguous/no-window rows stay `''` = the "unknown machine" bucket shown
+>   under All devices; rows that already carry a machine id are untouched, natural-key collisions are
+>   skipped — idempotent). `ListEmployeeApplications` / `ListEmployeePackages` also include
+>   `is_active = false` links when the requested machine has **no live registration** (all its
+>   `employee_devices` rows revoked), so a removed device shows the last-known inventory the hourly
+>   staleness sweep had deactivated; the aggregate view still filters `is_active`. **Web:** the Hardware
+>   Overview empty state now says *"No hardware snapshot was recorded for this device before it was
+>   removed"* for a removed device instead of the false "will upload one after login". Verified:
+>   `go build`/`go vet ./...` clean, `npx tsc --noEmit` clean, `next build` passes; migration 047 dry-run
+>   (rolled back) then applied to the dev DB — rows attributed per table **10/3/6/21/8/37/242/4354**, 0
+>   left unattributed; per-device reads for `default-EMP-10003` return hw/storage/network/peripherals/
+>   status/packages and installed-software scoping measures **retired 99 / current 73 / aggregate 73**.
+>   Rule codified: **Retired-Device History Rule** (§6).
+>
+> - 2026-10-17: **Device swap handling — "Remove current device" + per-device Device Specs (server + web + client).**
+>   An employee who moved to a new PC stayed tracked on the old machine and every synced surface was
+>   collapsed into one employee-wide bucket, so Device Specs could not tell the two machines apart.
+>   **Server:** migration **046** adds `machine_id` to `device_hardware_info`, `network_info`,
+>   `storage_devices`, `hardware_devices`, `permission_status`, `app_status` and both employee↔catalog
+>   junctions; the natural keys become device-wide (`permission_status` PK `(employee_id, machine_id,
+>   check_id)`, `app_status` PK `(employee_id, machine_id, key)`, links UNIQUE
+>   `(employee_id, machine_id, <catalog id>)`) and a single-machine backfill attributes legacy rows.
+>   **No client sync change was needed:** `DeviceAuth` now also sets `device_machine_id`, every sync
+>   DTO carries a `json:"-"` `MachineID` filled by the handler, and the repos stamp it on insert.
+>   `SyncDeviceHardware` also copies the reported hostname into `employee_devices.device_name`.
+>   **New endpoint** `POST /api/v1/employees/:id/devices/remove` (JWTAuth): revokes every active device,
+>   closes all open `app_sessions` (`status='CLOSED'`) and `app_items` (`closed_at`), sets
+>   `tracking_status='untracked'` + `is_online=false`, and returns the counts — nothing is deleted, so
+>   Device Specs and history stay intact. **Web:** the employees row menu shows **Remove Current Device**
+>   while `trackingStatus === 'tracked'` (confirmation dialog) and falls back to **Generate Login Secret**
+>   once untracked; `EmployeePage` gained a URL-synced `?deviceId=` machine selector (shown when the
+>   employee has 2+ devices) wired into `GET /employees/:id/detail?deviceId=`, which scopes hardware,
+>   storage, network, apps, packages, peripherals, permissions and app status to that machine. Device
+>   labels are always **"{employee name} ({hostname})"** — hostname falls back to the device name, then
+>   the machine id, never "Unknown device". **Client:** login now sends `deviceName = Environment.MachineName`
+>   (installer ships it in the next build; the server-side hostname copy already covers older clients).
+>   Verified: `go build`/`go vet` clean, `npx tsc --noEmit` clean, `next build` passes, `dotnet build` 0/0;
+>   migration 046 applied to the dev DB; live API tests — detail with/without `?deviceId=` (aggregate
+>   deduped, per-machine scoped), a real device-token sync stamped `machine_id` + back-filled
+>   `employee_devices.device_name` from the hostname, the same `app_status` key held two device rows, the
+>   remove endpoint returned `{revokedDevices:2, closedSessions:1, closedItems:1, trackingStatus:"untracked"}`
+>   with device rows kept (`revoked_at`), sessions/items closed, history still readable, and a revoked
+>   device token then synced → 401.
+>   Rule codified: **Machine-Scoped Data Rule** (§6).
 >
 > - 2026-10-16: **RBAC leak — Terms & Conditions was visible to every role and guarded by an unrelated permission (server + web).**
 >   Reported: a user whose role grants only the HR module saw **Settings → Terms & Conditions**,
@@ -1248,6 +1307,8 @@ flowchart LR
 | **Branding & version**  | Product name and version are written in exactly two files — `client/APP_IDENTIFIERS` and `client/VERSION`. No literal product name or version string anywhere else in C#, XAML, or the build scripts (see below) |
 | **Cross-platform OS guards** | Guard platform-specific method bodies with `OperatingSystem.IsWindows/Linux/MacOS()`; do not propagate `[SupportedOSPlatform]` through cross-platform partial/background-service call graphs (see below) |
 | **RBAC nav → catalog parity** | Every permission-gated nav entry carries a `module` key that matches a submodule seeded in the server `rbacCatalog`; both halves change together and `module` is NEVER omitted (see *RBAC Nav → Catalog Parity Rule* below) |
+| **Machine-scoped data** | Every synced row that describes a specific machine carries `machine_id`, stamped server-side from `DeviceAuth` (never from the request body); device-level reads take `machineID` where `""` = all devices (see *Machine-Scoped Data Rule* below) |
+| **Retired-device history** | A removed device keeps showing its last-known data: legacy rows are attributed to it from the device registry's activity window (migration 047), and device-scoped software reads include the staleness-swept `is_active = false` links while the aggregate keeps the filter (see *Retired-Device History Rule* below) |
 
 ### Web Infinite-Scroll Rule (mandatory)
 
@@ -1396,6 +1457,60 @@ permission.
 **Reference (why this rule exists):** the 2026-10-16 Terms & Conditions bug — the nav entry carried
 no `module` key and the catalog had no `settings/terms-and-conditions` submodule, so a role granting
 only the HR module saw **Settings → Terms & Conditions** and clicking it landed on `/unauthorized`.
+
+### Machine-Scoped Data Rule (mandatory since 2026-10-17)
+
+**Any synced row that describes a specific machine carries `machine_id`, and the server stamps it
+from the authenticated device — never from the request body.** An employee can swap PCs; without this
+dimension, two machines silently overwrite each other's hardware, network, software and permission
+rows and the Device Specs module cannot show one machine at a time.
+
+1. **Schema:** the machine-data tables (`device_hardware_info`, `network_info`, `storage_devices`,
+   `hardware_devices`, `permission_status`, `app_status`) and the employee↔catalog junctions store
+   `machine_id TEXT NOT NULL DEFAULT ''` plus an `(employee_id, machine_id, …)` index. Natural keys
+   that used to be employee-wide include `machine_id` (see migration 046): `permission_status` PK
+   `(employee_id, machine_id, check_id)`, `app_status` PK `(employee_id, machine_id, key)`, link
+   UNIQUE `(employee_id, machine_id, <catalog id>)`. `app_sessions` has carried it since 006.
+2. **Write path:** `DeviceAuth` sets `device_machine_id`; each sync handler copies it into the DTO's
+   `MachineID` (`json:"-"`), the service maps it onto the model and the repo inserts it. The token is
+   the identity — a client cannot spoof another machine by sending a body field.
+3. **Read path:** repo reads take `(employeeID, machineID)`; `machineID == ""` means the employee-wide
+   aggregate (`GET /employees/:id/detail` with no `?deviceId=`). Rows still carrying `machine_id = ''`
+   are the genuinely unattributable bucket and appear only in the aggregate — migration **047**
+   re-attributes every legacy row that can be resolved to a device (see *Retired-Device History Rule*).
+4. **Labeling:** a device is always rendered **"{employee name} ({hostname})"** — hostname from the
+   latest hardware snapshot (or `employee_devices.device_name`, filled from that hostname on sync) with
+   the machine id as the last resort. Never render "Unknown device".
+5. **Removal is non-destructive:** "Remove current device" revokes `employee_devices` rows, closes
+   open sessions/items and flips the employee to untracked. Rows are never deleted; history stays
+   queryable and the next login on a new machine registers a fresh device and resumes tracking.
+
+### Retired-Device History Rule (mandatory since 2026-10-17)
+
+**A removed device must keep showing its last-known data on every Device Specs surface — its rows are
+attributed to it, and "currently installed" software is not emptied out just because the machine stopped
+syncing.** Two failure modes have to be handled together or the `/device-specs?deviceId=<old>` view goes
+blank after a device swap.
+
+1. **Attribute legacy rows from the device registry, never from `app_sessions`.** Migration 046's
+   `HAVING COUNT(DISTINCT machine_id) = 1` over `app_sessions` is wrong: `app_sessions` is purged by the
+   retention worker (30 days) and the replacement machine may have no sessions yet, so a swapped PC's
+   leftover rows silently stay `machine_id = ''`. Attribute from `employee_devices`'
+   `[created_at, last_seen_at]` activity window and only when exactly ONE window contains the row's
+   server-stamped sync time (`created_at` for `app_status` — `updated_at` is client time; `synced_at`
+   elsewhere; `last_seen_at` for junctions). Ambiguous rows stay `''`; never guess. See migration **047**.
+2. **A removed device's inventory is frozen, not uninstalled.** The hourly `jobs/staleness_sweep.go`
+   flips `employee_installed_*` links to `is_active = false` when the machine stops re-syncing — for a
+   retired device that empties the whole Installed Software page. Device-scoped reads
+   (`ListEmployeeApplications` / `ListEmployeePackages`) therefore include inactive links when the
+   requested machine has **no live `employee_devices` row** (all revoked), while the employee-wide view
+   keeps the `is_active` filter so a *live* machine's uninstalled apps stay hidden.
+3. **Empty states must be truthful.** A removed device will never log in again, so never tell the user
+   "the desktop client will upload one after login" for it — say the snapshot was never recorded for
+   that device.
+4. **Verify with the device registry, not just the API.** Check that the device id the dropdown sends
+   (`employee_devices.machine_id`, e.g. the `default-EMP-XXXXX` login fallback) is the id the rows now
+   carry, and measure per-device vs aggregate counts (a correct fix leaves the aggregate unchanged).
 
 ### Cross-Platform Analyzer Safety Rule (mandatory)
 

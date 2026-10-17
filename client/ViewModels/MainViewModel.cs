@@ -847,6 +847,9 @@ public partial class MainViewModel : ViewModelBase
                 machineId = _config.ClientId,
                 platform = RuntimeInformation.OSDescription,
                 clientVersion = AppInfo.Version,
+                // Hostname is the human label the web Device Specs dropdown shows as
+                // "{employee name} ({hostname})" — without it a fresh device reads as unnamed.
+                deviceName = System.Environment.MachineName,
             };
             var json = JsonSerializer.Serialize(payload);
             var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");

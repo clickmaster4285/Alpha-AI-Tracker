@@ -1,11 +1,25 @@
 'use client';
 
-import { Loader2, UserX } from 'lucide-react';
+import { Loader2, UserX, Laptop } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import EmployeeSelector from '@/components/EmployeeSelector';
 import { useEmployeeDetail } from '@/hooks/use-employee-detail';
 import { useUrlActivityFilter } from '@/hooks/use-url-activity-filter';
-import { employeesApi, type Employee, type EmployeeDetail } from '@/lib/api';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { employeesApi, type Employee, type EmployeeDevice, type EmployeeDetail } from '@/lib/api';
+
+/** "All devices" sentinel — Radix Select cannot use an empty string as an item value. */
+const ALL_DEVICES = '__all__';
+
+/**
+ * Device label used everywhere in Device Specs: "{employee name} ({hostname})".
+ * A device whose login never sent a name still has the hostname the machine
+ * reported with its hardware snapshot, so it is never rendered as "Unknown device".
+ */
+export function deviceLabel(device: EmployeeDevice, employee: Employee): string {
+  const host = (device.hostname || device.deviceName || device.machineId || '').trim();
+  return host ? `${employee.name} (${host})` : employee.name;
+}
 
 export interface EmployeePageContext {
   /** Full employee record (UUID id + EMP-XXXXX code). */
@@ -45,6 +59,10 @@ export interface EmployeePageContext {
    */
   body: Record<string, string>;
   setBody: (patch: Record<string, string> | ((prev: Record<string, string>) => Record<string, string>)) => void;
+  /** Selected machine id from the device dropdown ('' = all devices / aggregate). */
+  deviceId: string;
+  /** Every registered device for this employee, newest activity first (may be empty). */
+  devices: EmployeeDevice[];
 }
 
 interface EmployeePageProps {
@@ -113,10 +131,11 @@ export default function EmployeePage({
   // picker" bug — there is now exactly one `useUrlQueryState` on the
   // page and no race window between two instances.
   const { filter, setFilter, extra: urlExtra, setExtra } = useUrlActivityFilter(
-    { employeeId: {}, ...(bodySchema ?? {}) },
-    { employeeId: '', ...(bodyInitial ?? {}) },
+    { employeeId: {}, deviceId: {}, ...(bodySchema ?? {}) },
+    { employeeId: '', deviceId: '', ...(bodyInitial ?? {}) },
   );
   const employeeId = urlExtra.employeeId;
+  const deviceId = urlExtra.deviceId;
   // Body's own URL state — everything in `extra` except `employeeId` (the
   // shell's picker key). The body destructures this and calls `setBody`
   // instead of maintaining its own `useUrlQueryState`.
@@ -133,10 +152,16 @@ export default function EmployeePage({
 
   const employee = employeesData?.data.find(e => e.id === employeeId) ?? null;
 
-  const detailQuery = useEmployeeDetail(fetchDetail ? employeeId : '');
+  const detailQuery = useEmployeeDetail(fetchDetail ? employeeId : '', deviceId);
 
   const handleChange = (emp: Employee | null) => {
-    setExtra({ employeeId: emp?.id ?? '' });
+    // A different employee means different devices — drop the stale selection.
+    setExtra({ employeeId: emp?.id ?? '', deviceId: '' });
+  };
+
+  const devices = detailQuery.data?.devices ?? [];
+  const handleDeviceChange = (value: string) => {
+    setExtra({ deviceId: value === ALL_DEVICES ? '' : value });
   };
 
   return (
@@ -152,7 +177,28 @@ export default function EmployeePage({
             <p className="text-sm text-muted-foreground mt-0.5">{subtitle}</p>
           </div>
         </div>
-        <EmployeeSelector value={employeeId} onChange={handleChange} />
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+          <EmployeeSelector value={employeeId} onChange={handleChange} />
+          {/* Device dropdown — only when the employee has more than one registered
+              machine. The value is the machine id (stable across re-logins). */}
+          {employee && devices.length > 1 && (
+            <Select value={deviceId || ALL_DEVICES} onValueChange={handleDeviceChange}>
+              <SelectTrigger className="h-9 w-full sm:w-[280px] bg-card border border-border">
+                <Laptop className="w-4 h-4 text-muted-foreground shrink-0" />
+                <SelectValue placeholder="All devices" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={ALL_DEVICES}>All devices</SelectItem>
+                {devices.map(device => (
+                  <SelectItem key={device.id} value={device.machineId}>
+                    {deviceLabel(device, employee)}
+                    {device.isActive ? ' · current' : ' · removed'}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+        </div>
       </div>
 
       {/* Body */}
@@ -187,6 +233,8 @@ export default function EmployeePage({
           setEmployeeId: (id: string) => setExtra({ employeeId: id }),
           filter,
           setFilter,
+          deviceId,
+          devices,
           body,
           // `setBody` only writes the body keys (never the picker's
           // `employeeId` or the activity-filter `q/preset/from/to`), so
