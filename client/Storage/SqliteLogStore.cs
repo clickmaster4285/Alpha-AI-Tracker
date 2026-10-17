@@ -3,6 +3,7 @@ using Microsoft.Data.Sqlite;
 using client.Core;
 using client.Core.Abstractions;
 using client.Core.Models;
+using client.Configuration;
 
 namespace client.Storage;
 
@@ -3323,6 +3324,9 @@ public class SqliteLogStore : ILogStore, IDisposable
         {
             _connectionGate.Release();
         }
+
+        // Remove .machine-id and device_id files from disk
+        AppConfig.RemoveMachineAndDeviceIdentifiers();
     }
 
     /// <summary>

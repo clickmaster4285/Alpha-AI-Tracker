@@ -160,6 +160,9 @@ if (!mutexCreated)
     // instance that races us for the mutex. Signal and exit.
     if (isRemoveAccount)
     {
+        AppConfig.RemoveMachineAndDeviceIdentifiers();
+        EncryptedConfigService.ResetCache();
+
         var delivered = SingleInstanceService.SignalExistingInstance(
             SingleInstanceService.CommandRemoveAccount);
         Console.WriteLine(delivered
@@ -480,40 +483,43 @@ try
             Console.WriteLine("Removing this machine's local account (cold-start)...");
             await host.Services.GetRequiredService<ILogStore>()
                 .WipeLocalAccountDataAsync(CancellationToken.None);
+            AppConfig.RemoveMachineAndDeviceIdentifiers();
+            config.ResetMachineId();
+            EncryptedConfigService.ResetCache();
             Console.WriteLine("Local account data wiped.");
 
-            // Kill the client process and any sibling alpha-ai-tracker processes.
-            // This ensures the process fully terminates after the account is removed,
-            // so the machine lands on the sign-in page with no lingering tracker.
+            // Kill any sibling alpha-ai-tracker processes.
             try
             {
-                System.Diagnostics.Process.GetCurrentProcess()?.Kill(entireProcessTree: true);
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"[remove-account] Failed to kill process: {ex.Message}");
-            }
-
-            // Also scan for and kill any other alpha-ai-tracker processes that might be running.
-            try
-            {
+                var currentId = Environment.ProcessId;
                 foreach (var proc in System.Diagnostics.Process.GetProcessesByName("client"))
                 {
-                    proc.Kill(entireProcessTree: true);
+                    if (proc.Id != currentId)
+                    {
+                        try { proc.Kill(entireProcessTree: true); } catch { }
+                    }
                 }
                 foreach (var proc in System.Diagnostics.Process.GetProcessesByName("AlphaAI"))
                 {
-                    proc.Kill(entireProcessTree: true);
+                    if (proc.Id != currentId)
+                    {
+                        try { proc.Kill(entireProcessTree: true); } catch { }
+                    }
                 }
             }
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"[remove-account] Failed to kill sibling processes: {ex.Message}");
             }
+
+            Environment.Exit(0);
+            return;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[remove-account] Failed during cold-start removal: {ex.Message}");
+            Environment.Exit(1);
+            return;
         }
     }
     
@@ -544,6 +550,9 @@ try
         {
             await host.Services.GetRequiredService<ILogStore>()
                 .WipeLocalAccountDataAsync(CancellationToken.None);
+            AppConfig.RemoveMachineAndDeviceIdentifiers();
+            config.ResetMachineId();
+            EncryptedConfigService.ResetCache();
             Console.WriteLine("Local account data wiped.");
         }
         catch (Exception ex)
@@ -554,19 +563,29 @@ try
         // Also scan for and kill any other alpha-ai-tracker processes that might be running.
         try
         {
+            var currentId = Environment.ProcessId;
             foreach (var proc in System.Diagnostics.Process.GetProcessesByName("client"))
             {
-                proc.Kill(entireProcessTree: true);
+                if (proc.Id != currentId)
+                {
+                    try { proc.Kill(entireProcessTree: true); } catch { }
+                }
             }
             foreach (var proc in System.Diagnostics.Process.GetProcessesByName("AlphaAI"))
             {
-                proc.Kill(entireProcessTree: true);
+                if (proc.Id != currentId)
+                {
+                    try { proc.Kill(entireProcessTree: true); } catch { }
+                }
             }
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[remove-account] Failed to kill sibling processes: {ex.Message}");
         }
+
+        Environment.Exit(0);
+        return;
     }
 
     await host.StartAsync(CancellationToken.None);
@@ -642,6 +661,9 @@ try
                 host.Services.GetRequiredService<LogCollectorService>().StopTracking();
                 host.Services.GetRequiredService<ILogStore>()
                     .WipeLocalAccountDataAsync(CancellationToken.None).GetAwaiter().GetResult();
+                AppConfig.RemoveMachineAndDeviceIdentifiers();
+                config.ResetMachineId();
+                EncryptedConfigService.ResetCache();
                 Console.WriteLine("Local account removed — opening the sign-in page.");
             }
             catch (Exception ex)

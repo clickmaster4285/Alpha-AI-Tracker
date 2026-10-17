@@ -40,18 +40,19 @@ func (r *DeviceRepo) UpsertDevice(
 
 	query := `
 		INSERT INTO employee_devices (
-			employee_id, machine_id, platform, client_version, device_name, token_hash, expires_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7)
+			employee_id, machine_id, platform, client_version, device_name, token_hash, expires_at, is_active_device, remove_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING id, employee_id, machine_id, platform, client_version, device_name,
-		          token_hash, created_at, last_seen_at, expires_at, revoked_at
+		          token_hash, created_at, last_seen_at, expires_at, revoked_at, is_active_device, remove_at
 	`
 
 	var d models.EmployeeDevice
 	err = tx.QueryRow(ctx, query,
-		employeeID, machineID, platform, clientVersion, deviceName, tokenHash, expiresAt,
+		employeeID, machineID, platform, clientVersion, deviceName, tokenHash, expiresAt, true, nil,
 	).Scan(
 		&d.ID, &d.EmployeeID, &d.MachineID, &d.Platform, &d.ClientVersion, &d.DeviceName,
 		&d.TokenHash, &d.CreatedAt, &d.LastSeenAt, &d.ExpiresAt, &d.RevokedAt,
+		&d.IsActiveDevice, &d.RemoveAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert employee_device: %w", err)
@@ -68,7 +69,7 @@ func (r *DeviceRepo) UpsertDevice(
 func (r *DeviceRepo) GetByTokenHash(ctx context.Context, tokenHash string) (*models.EmployeeDevice, error) {
 	query := `
 		SELECT id, employee_id, machine_id, platform, client_version, device_name,
-		       token_hash, created_at, last_seen_at, expires_at, revoked_at
+		       token_hash, created_at, last_seen_at, expires_at, revoked_at, is_active_device, remove_at
 		FROM employee_devices
 		WHERE token_hash = $1 AND revoked_at IS NULL
 	`
@@ -77,6 +78,7 @@ func (r *DeviceRepo) GetByTokenHash(ctx context.Context, tokenHash string) (*mod
 	err := r.pool.QueryRow(ctx, query, tokenHash).Scan(
 		&d.ID, &d.EmployeeID, &d.MachineID, &d.Platform, &d.ClientVersion, &d.DeviceName,
 		&d.TokenHash, &d.CreatedAt, &d.LastSeenAt, &d.ExpiresAt, &d.RevokedAt,
+		&d.IsActiveDevice, &d.RemoveAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -135,7 +137,7 @@ func (r *DeviceRepo) IsActive(ctx context.Context, deviceID string) (bool, error
 func (r *DeviceRepo) ListByEmployeeID(ctx context.Context, employeeID string) ([]models.EmployeeDevice, error) {
 	query := `
 		SELECT id, employee_id, machine_id, platform, client_version, device_name,
-		       token_hash, created_at, last_seen_at, expires_at, revoked_at
+		       token_hash, created_at, last_seen_at, expires_at, revoked_at, is_active_device, remove_at
 		FROM employee_devices
 		WHERE employee_id = $1
 		ORDER BY last_seen_at DESC
@@ -153,6 +155,7 @@ func (r *DeviceRepo) ListByEmployeeID(ctx context.Context, employeeID string) ([
 		if err := rows.Scan(
 			&d.ID, &d.EmployeeID, &d.MachineID, &d.Platform, &d.ClientVersion, &d.DeviceName,
 			&d.TokenHash, &d.CreatedAt, &d.LastSeenAt, &d.ExpiresAt, &d.RevokedAt,
+			&d.IsActiveDevice, &d.RemoveAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan employee device: %w", err)
 		}

@@ -1391,7 +1391,9 @@ func ListEmployeeDevices(ctx context.Context, pool *pgxpool.Pool, employeeID str
 func (r *NewSchemaRepo) RevokeEmployeeDevices(ctx context.Context, employeeID string) (int, error) {
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE employee_devices
-		SET revoked_at = NOW()
+		SET revoked_at = NOW(),
+		    is_active_device = false,
+		    remove_at = NOW()
 		WHERE employee_id = $1 AND revoked_at IS NULL
 	`, employeeID)
 	if err != nil {

@@ -486,6 +486,8 @@ export interface EmployeeDevice {
   revokedAt: string | null;
   /** True while the registration is unrevoked and unexpired. */
   isActive: boolean;
+  /** When the device was revoked (null when still active). */
+  removeAt: string | null;
 }
 
 /** Result of POST /employees/:id/devices/remove ("Remove current device"). */

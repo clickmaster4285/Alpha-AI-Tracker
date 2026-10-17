@@ -250,10 +250,9 @@ public interface ILogStore
     ///
     /// Used by the <c>--remove-account</c> client command (surfaced in the web
     /// "Remove Current Device" modal): the machine must end up with no trace of the
-    /// removed employee and land back on the sign-in page. The physical machine
-    /// identity (.machine-id) and the encrypted fleet config are NOT account data
-    /// and are deliberately left alone, so a replacement employee signing in on the
-    /// same hardware keeps its device history.
+    /// removed employee and land back on the sign-in page. The machine identity (.machine-id)
+    /// and device_id files are removed so the device cleanly regenerates identifiers on
+    /// subsequent login, while the encrypted fleet config (config.enc) is preserved.
     /// </summary>
     Task WipeLocalAccountDataAsync(CancellationToken ct);
 

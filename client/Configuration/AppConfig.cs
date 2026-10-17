@@ -4,7 +4,12 @@ namespace client.Configuration;
 
 public class AppConfig
 {
-    public string ClientId { get; init; } = GenerateMachineId();
+    private string _clientId = string.Empty;
+    public string ClientId
+    {
+        get => string.IsNullOrWhiteSpace(_clientId) ? (_clientId = GenerateMachineId()) : _clientId;
+        set => _clientId = value;
+    }
     public string DbPath { get; init; } = "data/alpha_tracker.db";
     public string? DbEncryptionKey { get; init; }
     public int CollectIntervalSec { get; init; } = 30;
@@ -245,5 +250,94 @@ public class AppConfig
         }
         catch { }
         return newId;
+    }
+
+    /// <summary>
+    /// Resets the in-memory ClientId so that subsequent accesses generate a fresh identifier
+    /// after account removal.
+    /// </summary>
+    public void ResetMachineId()
+    {
+        _clientId = string.Empty;
+    }
+
+    /// <summary>
+    /// Removes the .machine-id and device_id files from all known runtime directories
+    /// (data directory, user config directory, and application directory).
+    /// Used by --remove-account to cleanly disassociate the machine from its prior registration
+    /// without breaking fleet configuration (config.enc), database files, or logging.
+    /// </summary>
+    public static void RemoveMachineAndDeviceIdentifiers()
+    {
+        var candidateDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // 1. User-writable data directory (%LOCALAPPDATA%\AlphaAITracker or ~/.local/share/alpha-ai-tracker)
+        try
+        {
+            var dataDir = OperatingSystem.IsWindows()
+                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AlphaAITracker")
+                : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share", "alpha-ai-tracker");
+            if (Directory.Exists(dataDir))
+            {
+                candidateDirs.Add(dataDir);
+                var subData = Path.Combine(dataDir, "data");
+                if (Directory.Exists(subData)) candidateDirs.Add(subData);
+            }
+        }
+        catch { }
+
+        // 2. User config directory (%APPDATA%\AlphaAITracker or ~/.config/alpha-ai-tracker)
+        try
+        {
+            var configDir = EnvLoader.UserConfigDir;
+            if (!string.IsNullOrEmpty(configDir) && Directory.Exists(configDir))
+            {
+                candidateDirs.Add(configDir);
+            }
+        }
+        catch { }
+
+        // 3. Application base directory (next to executable)
+        try
+        {
+            var appDir = AppDomain.CurrentDomain.BaseDirectory;
+            if (!string.IsNullOrEmpty(appDir) && Directory.Exists(appDir))
+            {
+                candidateDirs.Add(appDir);
+            }
+        }
+        catch { }
+
+        var targetFileNames = new[]
+        {
+            ".machine-id",
+            "machine-id",
+            "device_id",
+            ".device_id",
+            "device-id",
+            ".device-id",
+            "deviceId",
+            ".deviceId"
+        };
+
+        foreach (var dir in candidateDirs)
+        {
+            foreach (var name in targetFileNames)
+            {
+                try
+                {
+                    var filePath = Path.Combine(dir, name);
+                    if (File.Exists(filePath))
+                    {
+                        File.Delete(filePath);
+                        Console.WriteLine($"[remove-account] Removed identifier file: {filePath}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[remove-account] Could not delete {name} in {dir}: {ex.Message}");
+                }
+            }
+        }
     }
 }

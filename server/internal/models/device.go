@@ -15,4 +15,6 @@ type EmployeeDevice struct {
 	LastSeenAt    time.Time  `json:"lastSeenAt" db:"last_seen_at"`
 	ExpiresAt     *time.Time `json:"expiresAt,omitempty" db:"expires_at"`
 	RevokedAt     *time.Time `json:"revokedAt,omitempty" db:"revoked_at"`
+	IsActiveDevice bool       `json:"isActiveDevice" db:"is_active_device"`
+	RemoveAt      *time.Time `json:"removeAt" db:"remove_at"`
 }

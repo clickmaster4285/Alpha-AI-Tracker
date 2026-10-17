@@ -536,6 +536,9 @@ public partial class MainViewModel : ViewModelBase
         // 2. Drop every locally stored row — credentials + device token, collected
         //    activity, inventory/hardware/network caches, mirrored schedules and terms.
         await _store.WipeLocalAccountDataAsync(ct);
+        AppConfig.RemoveMachineAndDeviceIdentifiers();
+        _config.ResetMachineId();
+        EncryptedConfigService.ResetCache();
 
         // 3. Land on the sign-in page. IsLoggedIn=false flips MainWindow from the
         //    shell / permission wizard to LoginPage and disarms the terms gate;

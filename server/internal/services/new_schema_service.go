@@ -1141,7 +1141,6 @@ func (s *NewSchemaService) GetEmployeeDetail(ctx context.Context, id, machineID 
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now()
 	for _, d := range deviceList {
 		hostname := strings.TrimSpace(hostnames[d.MachineID])
 		deviceName := strings.TrimSpace(d.DeviceName)
@@ -1156,6 +1155,7 @@ func (s *NewSchemaService) GetEmployeeDetail(ctx context.Context, id, machineID 
 		if hostname == "" {
 			hostname = deviceName
 		}
+		_isActive := d.IsActiveDevice && (d.RemoveAt == nil)
 		resp.Devices = append(resp.Devices, dto.EmployeeDeviceDto{
 			ID:            d.ID,
 			EmployeeID:    d.EmployeeID,
@@ -1166,7 +1166,8 @@ func (s *NewSchemaService) GetEmployeeDetail(ctx context.Context, id, machineID 
 			Hostname:      hostname,
 			LastSeenAt:    d.LastSeenAt,
 			RevokedAt:     d.RevokedAt,
-			IsActive:      d.RevokedAt == nil && (d.ExpiresAt == nil || d.ExpiresAt.After(now)),
+			IsActiveDevice: _isActive,
+			RemoveAt:      d.RemoveAt,
 		})
 	}
 	return resp, nil

@@ -229,6 +229,8 @@ type EmployeeActivityStats struct {
 // EmployeeDeviceDto is a registered device for the employee detail response.
 // Hostname is the most recent hostname the machine itself reported; the web labels the
 // device "{employee name} ({hostname})" so a device is never shown as "Unknown device".
+// is_active_device tracks whether the device is still actively reporting.
+// remove_at records when the device was marked inactive (for audit trail).
 type EmployeeDeviceDto struct {
 	ID            string     `json:"id"`
 	EmployeeID    string     `json:"employeeId"`
@@ -239,7 +241,8 @@ type EmployeeDeviceDto struct {
 	Hostname      string     `json:"hostname"`
 	LastSeenAt    time.Time  `json:"lastSeenAt"`
 	RevokedAt     *time.Time `json:"revokedAt,omitempty"`
-	IsActive      bool       `json:"isActive"`
+	IsActiveDevice bool       `json:"isActiveDevice"`
+	RemoveAt      *time.Time `json:"removeAt,omitempty"`
 }
 
 // RemoveEmployeeDeviceResponse reports what "Remove current device" changed.
