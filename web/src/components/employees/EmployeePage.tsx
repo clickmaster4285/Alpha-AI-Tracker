@@ -172,18 +172,27 @@ export default function EmployeePage({
           <div className="w-11 h-11 rounded-xl gradient-primary flex items-center justify-center flex-shrink-0">
             <Icon className="w-5 h-5 text-primary-foreground" />
           </div>
-          <div>
+          <div className="min-w-0">
             <h1 className="text-xl font-bold text-foreground font-display">{title}</h1>
             <p className="text-sm text-muted-foreground mt-0.5">{subtitle}</p>
           </div>
         </div>
-        <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-          <EmployeeSelector value={employeeId} onChange={handleChange} />
+        {/* Controls — wrap onto their own line instead of overflowing the
+            content edge. The picker is capped so the device dropdown always
+            keeps room (Root cause of the "device dropdown clipped by the
+            screen width" bug: the picker was `shrink-0` up to 384px next to a
+            fixed 280px trigger, so the pair outran the content area). */}
+        <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2 w-full min-w-0 lg:w-auto">
+          <EmployeeSelector
+            value={employeeId}
+            onChange={handleChange}
+            className="sm:w-[240px] sm:max-w-full"
+          />
           {/* Device dropdown — only when the employee has more than one registered
               machine. The value is the machine id (stable across re-logins). */}
           {employee && devices.length > 1 && (
             <Select value={deviceId || ALL_DEVICES} onValueChange={handleDeviceChange}>
-              <SelectTrigger className="h-9 w-full sm:w-[280px] bg-card border border-border">
+              <SelectTrigger className="h-9 w-full sm:w-[240px] bg-card border border-border overflow-hidden">
                 <Laptop className="w-4 h-4 text-muted-foreground shrink-0" />
                 <SelectValue placeholder="All devices" />
               </SelectTrigger>
