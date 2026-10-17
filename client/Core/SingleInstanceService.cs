@@ -51,6 +51,32 @@ public static class SingleInstanceService
     /// </summary>
     public static Action? OnShowRequested;
 
+    /// <summary>Bring the existing window to the front.</summary>
+    public const string CommandShow = "SHOW";
+
+    /// <summary>
+    /// Remove the login account from this machine: wipe every locally stored row,
+    /// stop collecting and drop the UI back to the sign-in page.
+    ///
+    /// The RUNNING instance performs the removal — it owns the SQLite connection and
+    /// the GUI, so it can empty the tables and re-render the sign-in page in place
+    /// without a restart (a restart would have to race auto-start / systemd
+    /// <c>Restart=always</c> for the mutex). The process that SENDS this command
+    /// (<c>client --remove-account</c>) must exit afterwards and must NOT start a
+    /// second tracker.
+    /// </summary>
+    public const string CommandRemoveAccount = "REMOVE_ACCOUNT";
+
+    /// <summary>
+    /// Invoked on the pipe-listener thread when a second launch asks to remove the
+    /// local account. Two owners, mirroring the two GUI states: while the GUI is
+    /// still headless this is handled in <c>Program.cs</c> (create the GUI, then let
+    /// its boot consume the pending request) and once the GUI exists
+    /// <c>App.axaml.cs</c> takes it over (show the window, then reset it to the
+    /// sign-in page). Implementations must marshal onto the UI thread.
+    /// </summary>
+    public static Action? OnRemoveAccountRequested;
+
     /// <summary>
     /// Start the named-pipe server on the primary (mutex-owning) instance.
     /// Loops forever, accepting one connection at a time, until
@@ -82,9 +108,14 @@ public static class SingleInstanceService
 
                 using var reader = new StreamReader(server);
                 var line = await reader.ReadLineAsync(ct);
-                if (string.Equals(line, "SHOW", StringComparison.Ordinal))
+                if (string.Equals(line, CommandShow, StringComparison.Ordinal))
                 {
                     try { OnShowRequested?.Invoke(); }
+                    catch { /* never let a UI callback error kill the listener */ }
+                }
+                else if (string.Equals(line, CommandRemoveAccount, StringComparison.Ordinal))
+                {
+                    try { OnRemoveAccountRequested?.Invoke(); }
                     catch { /* never let a UI callback error kill the listener */ }
                 }
             }
@@ -116,11 +147,13 @@ public static class SingleInstanceService
     }
 
     /// <summary>
-    /// Attempt to signal an already-running instance to show its window.
+    /// Attempt to signal an already-running instance to show its window
+    /// (<paramref name="command"/> = <see cref="CommandShow"/>) or to remove the
+    /// local account (<see cref="CommandRemoveAccount"/>).
     /// Called by a second launch that failed to acquire the global mutex.
     /// Returns true if the signal was delivered.
     /// </summary>
-    public static bool SignalExistingInstance()
+    public static bool SignalExistingInstance(string command = CommandShow)
     {
         try
         {
@@ -134,7 +167,7 @@ public static class SingleInstanceService
             client.Connect(2000);
 
             using var writer = new StreamWriter(client);
-            writer.WriteLine("SHOW");
+            writer.WriteLine(command);
             writer.Flush();
             return true;
         }

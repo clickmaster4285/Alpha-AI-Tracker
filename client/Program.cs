@@ -142,9 +142,38 @@ var isMinimized = args.Contains("--minimized");
 // Restart=always racing) must exit quietly so they never disturb the user.
 var isUserLaunch = !isBackground && !isMinimized;
 
+// ─── Account removal (--remove-account) ───
+// `client --remove-account` completely removes this machine's login account and
+// puts the tool back on the sign-in page. It is the command the web "Remove
+// Current Device" modal shows for Linux and Windows.
+var isRemoveAccount = args.Contains("--remove-account");
+
 var appMutex = new Mutex(true, SingleInstanceService.MutexName, out var mutexCreated);
 if (!mutexCreated)
 {
+    // ── --remove-account while a tracker is already running ──
+    // The RUNNING instance owns the SQLite connection and the GUI, so it performs
+    // the removal in place (empty the tables, stop collecting, re-render the
+    // sign-in page — see App.axaml.cs). This process must NOT do the wipe itself:
+    // the database file is in use, and stopping the tracker here would have
+    // auto-start / systemd Restart=always immediately start a second, still-logged-in
+    // instance that races us for the mutex. Signal and exit.
+    if (isRemoveAccount)
+    {
+        var delivered = SingleInstanceService.SignalExistingInstance(
+            SingleInstanceService.CommandRemoveAccount);
+        Console.WriteLine(delivered
+            ? "Account removal requested — the running app is wiping this machine's local account and will show the sign-in page."
+            : "Could not reach the running app — showing it instead. Verify the account was removed on that machine.");
+        if (!delivered)
+        {
+            // Pipe dead (the instance is starting up or wedged) — at least surface it
+            // so the operator can see what state the machine is in.
+            SingleInstanceService.SignalExistingInstance();
+        }
+        return;
+    }
+
     // ── --restart (post-update relaunch) ──
     // The updater launches us with --restart and then shuts the OLD process down
     // so the newly-installed binary can take over. The old process may still own
@@ -439,6 +468,51 @@ try
     await host.Services.GetRequiredService<ILogStore>()
         .InitializeAsync(CancellationToken.None);
 
+    // ─── Cold-start account removal (client --remove-account, no tracker running) ───
+    // No other process holds the database, so the wipe runs here — before the host
+    // starts, so no hosted service can write a row back into the emptied tables. The
+    // app then boots normally and, with no credentials left, opens on the sign-in
+    // page. (When a tracker IS already running the removal is handled by that
+    // instance instead — see the mutex branch above.)
+    if (isRemoveAccount)
+    {
+        Console.WriteLine("Removing this machine's local account…");
+
+        // Wipe the local account data first.
+        await host.Services.GetRequiredService<ILogStore>()
+            .WipeLocalAccountDataAsync(CancellationToken.None);
+
+        // Kill the client process and any sibling alpha-ai-tracker processes.
+        // This ensures the process fully terminates after the account is removed,
+        // so the machine lands on the sign-in page with no lingering tracker.
+        try
+        {
+            // Kill the current process (client.exe) — this will terminate the process.
+            System.Diagnostics.Process.GetCurrentProcess()?.Kill(entireProcessTree: true);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[remove-account] Failed to kill process: {ex.Message}");
+        }
+
+        // Also scan for and kill any other alpha-ai-tracker processes that might be running.
+        try
+        {
+            foreach (var proc in System.Diagnostics.Process.GetProcessesByName("client"))
+            {
+                proc.Kill(entireProcessTree: true);
+            }
+            foreach (var proc in System.Diagnostics.Process.GetProcessesByName("AlphaAI"))
+            {
+                proc.Kill(entireProcessTree: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[remove-account] Failed to kill sibling processes: {ex.Message}");
+        }
+    }
+
     await host.StartAsync(CancellationToken.None);
 
     // The lifetime is now available - wire the ApplicationStopping hook.
@@ -465,7 +539,7 @@ try
         // no data gap. After the UI initializes, App.axaml.cs takes over
         // OnShowRequested to bring the existing window forward for further launches.
         var uiStarted = 0;
-        SingleInstanceService.OnShowRequested = () =>
+        void StartLazyGui()
         {
             if (Interlocked.Exchange(ref uiStarted, 1) == 1) return;
             try
@@ -496,6 +570,31 @@ try
             {
                 Console.Error.WriteLine($"[client] Failed to start GUI thread: {ex.Message}");
             }
+        }
+
+        SingleInstanceService.OnShowRequested = StartLazyGui;
+
+        // ─── Account removal while running HEADLESS (client --remove-account) ───
+        // This process owns the SQLite connection, so the wipe happens HERE, in place.
+        // App.PendingRemoveAccount additionally tells a GUI that is still booting to
+        // reconcile the state it may have read before the wipe (App.axaml.cs); once the
+        // GUI is live it replaces this handler with its own, which resets the shell.
+        SingleInstanceService.OnRemoveAccountRequested = () =>
+        {
+            try
+            {
+                host.Services.GetRequiredService<LogCollectorService>().StopTracking();
+                host.Services.GetRequiredService<ILogStore>()
+                    .WipeLocalAccountDataAsync(CancellationToken.None).GetAwaiter().GetResult();
+                Console.WriteLine("Local account removed — opening the sign-in page.");
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[client] Account removal failed: {ex.Message}");
+            }
+
+            App.PendingRemoveAccount = true;
+            StartLazyGui();
         };
         // WaitForShutdownAsync is tied to IHostApplicationLifetime. The previous
         // uncancellable Task.Delay kept the process alive after SIGTERM even though

@@ -515,6 +515,49 @@ public partial class MainViewModel : ViewModelBase
     }
 
     /// <summary>
+    /// Completely remove the login account from this machine and return the tool to
+    /// the sign-in page.
+    ///
+    /// Invoked by the <c>client --remove-account</c> CLI command (Linux + Windows) —
+    /// either directly on a cold start, or via the REMOVE_ACCOUNT single-instance
+    /// signal when the tracker is already running (the web "Remove Current Device"
+    /// modal shows the exact command for both platforms). The web already revoked the
+    /// machine's device registration server-side; this half removes the LOCAL account
+    /// so the machine is handed over with no trace of the previous employee.
+    ///
+    /// Order matters: collecting stops BEFORE the wipe, otherwise the collector's next
+    /// cycle would write a session straight back into the freshly emptied tables.
+    /// </summary>
+    public async Task RemoveAccountAsync(CancellationToken ct = default)
+    {
+        // 1. Stop the one producer that keeps writing without re-reading credentials.
+        _logCollector.StopTracking();
+
+        // 2. Drop every locally stored row — credentials + device token, collected
+        //    activity, inventory/hardware/network caches, mirrored schedules and terms.
+        await _store.WipeLocalAccountDataAsync(ct);
+
+        // 3. Land on the sign-in page. IsLoggedIn=false flips MainWindow from the
+        //    shell / permission wizard to LoginPage and disarms the terms gate;
+        //    MainWindow.axaml binds these flags directly.
+        IsLoggedIn = false;
+        CurrentPermissionStep = PermissionStep.None;
+        IsSplashVisible = false;
+        RequiresTermsAcceptance = false;
+        EmployeeName = string.Empty;
+        EmployeeDepartment = string.Empty;
+        EmployeeAvatar = string.Empty;
+        EmployeeAvatarColor = string.Empty;
+        EmployeeId = string.Empty;
+        SecretKey = string.Empty;
+        StatusMessage = string.Empty;
+        IsLoading = false;
+        IsStepWorking = false;
+        StepStatusText = string.Empty;
+        MissingDependenciesList = string.Empty;
+    }
+
+    /// <summary>
     /// Check each permission condition and return the first incomplete step.
     /// Always re-validates the ACTUAL condition — never trusts stored status alone.
     /// If a permission was previously granted but is now revoked (e.g. user removed

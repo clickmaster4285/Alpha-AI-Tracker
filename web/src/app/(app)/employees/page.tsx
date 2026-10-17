@@ -3,11 +3,12 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check, Eye, Monitor, MonitorOff, Upload, Download, Pencil, Trash2, AlertTriangle, UserPlus } from 'lucide-react';
+import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check, Eye, Monitor, MonitorOff, Upload, Download, Pencil, Trash2, AlertTriangle, UserPlus, Terminal } from 'lucide-react';
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import * as XLSX from 'xlsx';
-import { employeesApi, departmentsApi, usersApi, shiftsApi, type Employee, type CreateEmployeePayload, type UpdateEmployeePayload, type ImportEmployeeRow, type ImportEmployeesResponse, type Shift } from '@/lib/api';
+import { employeesApi, departmentsApi, usersApi, shiftsApi, type Employee, type CreateEmployeePayload, type UpdateEmployeePayload, type ImportEmployeeRow, type ImportEmployeesResponse, type Shift, type RemoveEmployeeDeviceResponse } from '@/lib/api';
+import { REMOVE_ACCOUNT_COMMANDS } from '@/lib/client-commands';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { useUrlQueryState } from '@/hooks/use-url-query-state';
 import {
@@ -81,6 +82,13 @@ function UsersListInner() {
   const [showRemove, setShowRemove] = useState<Employee | null>(null);
   const [secretValue, setSecretValue] = useState('');
   const [copied, setCopied] = useState(false);
+  // Which OS command row was last copied (see REMOVE_ACCOUNT_COMMANDS) — the modal
+  // shows the Linux and Windows variants side by side.
+  const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
+  // Result of the last "Remove Current Device" in the open modal. While set, the
+  // modal switches to its post-removal state, which is where the operator gets the
+  // `--remove-account` command to finish the handover on that machine.
+  const [removeResult, setRemoveResult] = useState<RemoveEmployeeDeviceResponse | null>(null);
   const [importResult, setImportResult] = useState<ImportEmployeesResponse | null>(null);
 
   // Form state
@@ -228,14 +236,20 @@ function UsersListInner() {
   // session/item and flip the employee to untracked. Nothing is deleted — the old
   // machine stays visible as history under Device Specs — and the row switches back
   // to "Generate Login Secret" so a new machine can be onboarded.
+  //
+  // The dialog deliberately STAYS OPEN on success: revoking the device is only the
+  // server half of a handover, and the post-removal state is where the admin gets the
+  // `--remove-account` client command for that machine. (The menu item that opens this
+  // modal disappears once the employee is untracked, so the command would otherwise
+  // become unreachable.)
   const removeDeviceMutation = useMutation({
     mutationFn: (id: string) => employeesApi.removeDevice(id),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['employees'] });
       queryClient.invalidateQueries({ queryKey: ['employee-detail'] });
-      setShowRemove(null);
+      setRemoveResult(data);
       toast.success('Device removed', {
-        description: `${data.revokedDevices} device${data.revokedDevices === 1 ? '' : 's'} revoked · ${data.closedSessions} session${data.closedSessions === 1 ? '' : 's'} closed. The employee is now untracked — generate a new login secret for the replacement machine.`,
+        description: `${data.revokedDevices} device${data.revokedDevices === 1 ? '' : 's'} revoked · ${data.closedSessions} session${data.closedSessions === 1 ? '' : 's'} closed. The employee is now untracked.`,
         duration: 9000,
       });
     },
@@ -416,6 +430,64 @@ function UsersListInner() {
       toast.error('Copy failed', { description: 'Your browser blocked clipboard access. Copy the secret manually.' });
     }
   };
+
+  // Copies one of the `--remove-account` client commands shown in the Remove Device
+  // modal (Linux + Windows variants, see lib/client-commands.ts).
+  const handleCopyCommand = async (os: string, command: string) => {
+    const ok = await copyToClipboard(command);
+    if (ok) {
+      setCopiedCommand(os);
+      setTimeout(() => setCopiedCommand(null), 2000);
+    } else {
+      toast.error('Copy failed', { description: 'Your browser blocked clipboard access. Copy the command manually.' });
+    }
+  };
+
+  /**
+   * The `--remove-account` client commands, rendered in both states of the Remove
+   * Device modal. Revoking the device (server) and removing the local account
+   * (command) are two halves of the same handover — the modal is the only place the
+   * admin can read/copy the command, because the menu item that opens it disappears
+   * as soon as the employee becomes untracked.
+   */
+  const renderRemoveAccountCommands = () => (
+    <div className="border border-border rounded-xl overflow-hidden">
+      <div className="px-3 py-2 bg-muted/40 border-b border-border flex items-center gap-2">
+        <Terminal className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+        <p className="text-xs font-semibold text-foreground">Remove the account on that machine</p>
+      </div>
+      <div className="p-3 space-y-2.5">
+        {REMOVE_ACCOUNT_COMMANDS.map(({ os, shell, command }) => (
+          <div key={os} className="space-y-1">
+            <div className="flex items-baseline gap-2">
+              <p className="text-[11px] uppercase tracking-wide text-muted-foreground font-semibold">{os}</p>
+              <p className="text-[10px] text-muted-foreground/70">{shell}</p>
+            </div>
+            <div className="bg-background border border-border rounded-lg p-1.5 flex items-center gap-1.5">
+              <code className="flex-1 text-[11px] font-mono text-foreground select-all px-2 py-1.5 break-all">{command}</code>
+              <button
+                onClick={() => handleCopyCommand(os, command)}
+                className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold flex items-center gap-1.5 transition-colors shrink-0 ${
+                  copiedCommand === os
+                    ? 'bg-success/15 text-success'
+                    : 'bg-primary text-primary-foreground hover:opacity-90'
+                }`}
+              >
+                {copiedCommand === os ? (
+                  <><Check className="w-3 h-3" /> Copied</>
+                ) : (
+                  <><Copy className="w-3 h-3" /> Copy</>
+                )}
+              </button>
+            </div>
+          </div>
+        ))}
+        <p className="text-[11px] text-muted-foreground">
+          The tool wipes its local account and opens on its sign-in page. Server-side history is not affected.
+        </p>
+      </div>
+    </div>
+  );
 
   // ── Loading state ──
   if (employeesLoading && !employeesData) {
@@ -622,7 +694,7 @@ function UsersListInner() {
                           </DropdownMenuItem>
                         )}
                         {emp.trackingStatus === 'tracked' ? (
-                          <DropdownMenuItem onSelect={() => setShowRemove(emp)} className="cursor-pointer gap-2.5 px-2.5 py-2 text-warning focus:text-warning focus:bg-warning/10">
+                          <DropdownMenuItem onSelect={() => { setRemoveResult(null); setCopiedCommand(null); setShowRemove(emp); }} className="cursor-pointer gap-2.5 px-2.5 py-2 text-warning focus:text-warning focus:bg-warning/10">
                             <MonitorOff className="w-4 h-4" />
                             Remove Current Device
                           </DropdownMenuItem>
@@ -770,11 +842,16 @@ function UsersListInner() {
         </DialogContent>
       </Dialog>
 
-      {/* Remove Current Device — confirmation */}
-      <Dialog open={showRemove !== null} onOpenChange={(open) => { if (!open) setShowRemove(null); }}>
-        <DialogContent className="bg-card sm:max-w-[460px]">
+      {/* Remove Current Device — confirmation, then the post-removal handover steps */}
+      <Dialog
+        open={showRemove !== null}
+        onOpenChange={(open) => { if (!open) { setShowRemove(null); setRemoveResult(null); setCopiedCommand(null); } }}
+      >
+        <DialogContent className="bg-card sm:max-w-[520px]">
           <DialogHeader>
-            <DialogTitle className="font-display">Remove Current Device</DialogTitle>
+            <DialogTitle className="font-display">
+              {removeResult ? 'Device Removed' : 'Remove Current Device'}
+            </DialogTitle>
           </DialogHeader>
           <div className="space-y-4 mt-2">
             {showRemove && (
@@ -796,39 +873,89 @@ function UsersListInner() {
               </div>
             )}
 
-            <div className="flex items-start gap-2.5 bg-warning/10 border border-warning/30 rounded-xl p-3">
-              <AlertTriangle className="w-4 h-4 text-warning mt-0.5 shrink-0" />
-              <div className="text-xs text-foreground space-y-1.5">
-                <p>This detaches the machine the employee is currently tracked on:</p>
-                <ul className="list-disc pl-4 space-y-1 text-muted-foreground">
-                  <li>The device registration is revoked — that machine can no longer sync.</li>
-                  <li>Every running session and activity item is closed and the employee becomes <span className="font-semibold text-foreground">Untracked</span>.</li>
-                  <li>Nothing is deleted. Device Specs and all history stay available.</li>
-                </ul>
-                <p className="pt-1">Afterwards, <span className="font-semibold">Generate Login Secret</span> lets them sign in on the replacement machine and tracking resumes.</p>
-              </div>
-            </div>
+            {removeResult ? (
+              <>
+                <div className="flex items-start gap-2.5 bg-success/10 border border-success/30 rounded-xl p-3">
+                  <Check className="w-4 h-4 text-success mt-0.5 shrink-0" />
+                  <div className="text-xs text-foreground space-y-1.5">
+                    <p>
+                      <span className="font-semibold">{removeResult.revokedDevices}</span> device
+                      {removeResult.revokedDevices === 1 ? '' : 's'} revoked ·{' '}
+                      <span className="font-semibold">{removeResult.closedSessions}</span> session
+                      {removeResult.closedSessions === 1 ? '' : 's'} closed ·{' '}
+                      <span className="font-semibold">{removeResult.closedItems}</span> activity item
+                      {removeResult.closedItems === 1 ? '' : 's'} closed.
+                    </p>
+                    <p className="text-muted-foreground">
+                      The employee is now <span className="font-semibold text-foreground">Untracked</span>. Device Specs
+                      and all history stay available.
+                    </p>
+                  </div>
+                </div>
 
-            <div className="flex gap-2">
+                <p className="text-xs text-muted-foreground">
+                  This revokes the device on the server. To finish the handover, remove the local account on that
+                  machine — the tool returns to its sign-in page with no trace of the employee:
+                </p>
+                {renderRemoveAccountCommands()}
+
+                <p className="text-xs text-muted-foreground">
+                  On the replacement machine, <span className="font-semibold text-foreground">Generate Login Secret</span>{' '}
+                  (row menu) lets the employee sign in and tracking resumes.
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="flex items-start gap-2.5 bg-warning/10 border border-warning/30 rounded-xl p-3">
+                  <AlertTriangle className="w-4 h-4 text-warning mt-0.5 shrink-0" />
+                  <div className="text-xs text-foreground space-y-1.5">
+                    <p>This detaches the machine the employee is currently tracked on:</p>
+                    <ul className="list-disc pl-4 space-y-1 text-muted-foreground">
+                      <li>The device registration is revoked — that machine can no longer sync.</li>
+                      <li>Every running session and activity item is closed and the employee becomes <span className="font-semibold text-foreground">Untracked</span>.</li>
+                      <li>Nothing is deleted. Device Specs and all history stay available.</li>
+                    </ul>
+                    <p className="pt-1">Afterwards, <span className="font-semibold">Generate Login Secret</span> lets them sign in on the replacement machine and tracking resumes.</p>
+                  </div>
+                </div>
+
+                <p className="text-xs text-muted-foreground">
+                  You will also get a command to run on that machine, which removes its local account so the tool sits
+                  on its sign-in page:
+                </p>
+                {renderRemoveAccountCommands()}
+              </>
+            )}
+
+            {removeResult ? (
               <button
-                onClick={() => setShowRemove(null)}
-                disabled={removeDeviceMutation.isPending}
-                className="flex-1 border border-border text-foreground py-2.5 rounded-lg text-sm font-medium hover:bg-muted transition-colors disabled:opacity-50"
+                onClick={() => { setShowRemove(null); setRemoveResult(null); setCopiedCommand(null); }}
+                className="w-full border border-border text-foreground py-2.5 rounded-lg text-sm font-medium hover:bg-muted transition-colors"
               >
-                Cancel
+                Close
               </button>
-              <button
-                onClick={() => showRemove && removeDeviceMutation.mutate(showRemove.id)}
-                disabled={removeDeviceMutation.isPending}
-                className="flex-1 bg-destructive text-destructive-foreground py-2.5 rounded-lg text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50 flex items-center justify-center gap-2"
-              >
-                {removeDeviceMutation.isPending ? (
-                  <><Loader2 className="w-4 h-4 animate-spin" /> Removing…</>
-                ) : (
-                  <><MonitorOff className="w-4 h-4" /> Remove Device</>
-                )}
-              </button>
-            </div>
+            ) : (
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setShowRemove(null)}
+                  disabled={removeDeviceMutation.isPending}
+                  className="flex-1 border border-border text-foreground py-2.5 rounded-lg text-sm font-medium hover:bg-muted transition-colors disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => showRemove && removeDeviceMutation.mutate(showRemove.id)}
+                  disabled={removeDeviceMutation.isPending}
+                  className="flex-1 bg-destructive text-destructive-foreground py-2.5 rounded-lg text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {removeDeviceMutation.isPending ? (
+                    <><Loader2 className="w-4 h-4 animate-spin" /> Removing…</>
+                  ) : (
+                    <><MonitorOff className="w-4 h-4" /> Remove Device</>
+                  )}
+                </button>
+              </div>
+            )}
           </div>
         </DialogContent>
       </Dialog>

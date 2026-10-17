@@ -195,9 +195,7 @@ func (s *AuthService) Login(ctx context.Context, req *dto.LoginRequest) (*dto.Lo
 
 	refreshRaw, refreshExpiresAt, err := s.issueRefreshToken(ctx, user.ID)
 	if err != nil {
-		// Access token is already valid — log and continue without a refresh cookie
-		// rather than failing the login.
-		log.Printf("[auth] WARNING: could not issue refresh token for %s: %v", user.ID, err)
+		return nil, fmt.Errorf("issue refresh token: %w", err)
 	} else {
 		resp.RefreshToken = refreshRaw
 		resp.RefreshExpiresAt = refreshExpiresAt

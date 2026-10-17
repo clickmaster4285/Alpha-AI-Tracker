@@ -3249,6 +3249,108 @@ public class SqliteLogStore : ILogStore, IDisposable
         }
     }
 
+    public async Task WipeLocalAccountDataAsync(CancellationToken ct)
+    {
+        if (_connection == null) return;
+
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            // The table list is read from the database itself (sqlite_master) instead of a
+            // hardcoded array, so a table added in a later release is wiped automatically —
+            // a hardcoded list would silently leak the new table's rows past the removal.
+            var tables = new List<string>();
+            var listCmd = _connection.CreateCommand();
+            listCmd.CommandText =
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'";
+            await using (var reader = await listCmd.ExecuteReaderAsync(ct))
+            {
+                while (await reader.ReadAsync(ct))
+                {
+                    tables.Add(reader.GetString(0));
+                }
+            }
+
+            // Foreign-key enforcement is turned OFF for the sweep. sqlite_master returns
+            // tables in CREATION order, not dependency order, so deleting a parent
+            // (app_sessions) before its children (app_items) aborts the whole transaction
+            // with SQLITE_CONSTRAINT_FOREIGNKEY — which left the account on disk. Every
+            // table is emptied in ONE transaction, so the database still lands consistent:
+            // a fully empty database has no row left that could dangle. The pragma is a
+            // no-op inside a transaction, so it must be set before BEGIN and restored
+            // after COMMIT.
+            var foreignKeysWereEnforced = await ReadForeignKeysPragmaAsync(ct);
+            await WriteForeignKeysPragmaAsync(false, ct);
+            try
+            {
+                await using (var tx = await _connection.BeginTransactionAsync(ct))
+                {
+                    foreach (var table in tables)
+                    {
+                        var cmd = _connection.CreateCommand();
+                        cmd.Transaction = (SqliteTransaction)tx;
+                        // Table names come from sqlite_master (never caller input); quoted so a
+                        // name that collides with a keyword can never break the statement.
+                        cmd.CommandText = $"DELETE FROM \"{table}\"";
+                        await cmd.ExecuteNonQueryAsync(ct);
+                    }
+
+                    await tx.CommitAsync(ct);
+                }
+            }
+            finally
+            {
+                if (foreignKeysWereEnforced)
+                    await WriteForeignKeysPragmaAsync(true, ct);
+            }
+
+            // Physically reclaim the freed pages so nothing from the removed account is
+            // left readable in the file. Deliberately best-effort: VACUUM needs exclusive
+            // access, and the read-only connection used by the attendance rollup may be
+            // mid-query — the DELETEs above ARE the removal, this only compacts the file.
+            try
+            {
+                var vacuum = _connection.CreateCommand();
+                vacuum.CommandText = "VACUUM";
+                await vacuum.ExecuteNonQueryAsync(ct);
+            }
+            catch (SqliteException)
+            {
+                // Data is already gone; a failed compaction must not fail the removal.
+            }
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Reads <c>PRAGMA foreign_keys</c> for the current connection (true = enforced).
+    /// Used to restore the connection's setting after the wipe disables it.
+    /// </summary>
+    private async Task<bool> ReadForeignKeysPragmaAsync(CancellationToken ct)
+    {
+        if (_connection == null) return false;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "PRAGMA foreign_keys";
+        var value = await cmd.ExecuteScalarAsync(ct);
+        return value != null && Convert.ToInt64(value) != 0;
+    }
+
+    /// <summary>
+    /// Toggles <c>PRAGMA foreign_keys</c> on the shared connection. SQLite silently
+    /// ignores the pragma inside a transaction, so callers must invoke it outside one
+    /// (see <see cref="WipeLocalAccountDataAsync"/>).
+    /// </summary>
+    private async Task WriteForeignKeysPragmaAsync(bool enforced, CancellationToken ct)
+    {
+        if (_connection == null) return;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = enforced ? "PRAGMA foreign_keys = ON" : "PRAGMA foreign_keys = OFF";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     public void Dispose()
     {
         _connectionGate.Dispose();

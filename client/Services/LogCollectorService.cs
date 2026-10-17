@@ -229,6 +229,34 @@ public class LogCollectorService : BackgroundService
     }
 
     /// <summary>
+    /// Stop collecting and forget the signed-in employee.
+    ///
+    /// Used ONLY by the account-removal flow (<c>--remove-account</c> / the
+    /// REMOVE_ACCOUNT single-instance signal): the collector is the one producer the
+    /// main loop owns, and without this it would keep writing app_sessions for an
+    /// account that no longer exists — including straight back into the tables that
+    /// were just emptied. The main loop parks on the 5s "waiting for login" branch
+    /// (identical to a fresh install), the browser/desktop-event producers gate on
+    /// their own employee lookup, and SyncService already no-ops without credentials.
+    ///
+    /// Tracking resumes normally on the next successful login (StartTracking) or
+    /// session restore — nothing here is persisted, so the flag dies with the process.
+    /// </summary>
+    public void StopTracking()
+    {
+        lock (_trackingLock)
+        {
+            _trackingEnabled = false;
+            // Clear the in-memory identity too — a stale employee id/name/token would
+            // otherwise be stamped onto anything that slipped through before the wipe.
+            _currentEmployeeId = null;
+            _currentEmployeeName = null;
+            _currentToken = null;
+        }
+        _logger.LogInformation("Tracking stopped (account removed)");
+    }
+
+    /// <summary>
     /// After reinstall/upgrade the employee stays logged in (SQLite credentials), so
     /// employee-login never re-runs and <c>employee_devices.client_version</c> used to
     /// stay stale. Writing app_status.client_version with is_synced=0 queues a sync, and
