@@ -9,6 +9,7 @@ type DashboardSummaryResponse struct {
 	Activity        DashboardActivity        `json:"activity"`
 	Monitoring      DashboardMonitoring      `json:"monitoring"`
 	Devices         DashboardDevices         `json:"devices"`
+	Attendance      DashboardAttendance      `json:"attendance"`
 	Live            DashboardLive            `json:"live"`
 	TopApps         []DashboardTopApp        `json:"topApps"`
 	TopDomains      []DashboardTopDomain     `json:"topDomains"`
@@ -49,6 +50,21 @@ type DashboardDevices struct {
 type DashboardVersionRow struct {
 	Version string `json:"version"`
 	Count   int    `json:"count"`
+}
+
+// DashboardAttendance is today's attendance status breakdown across the
+// department-filtered employee set. The day is resolved per employee from their
+// shift timezone (same rule as GET /attendance/today), so Date is the server's
+// reference date only.
+type DashboardAttendance struct {
+	Date     string `json:"date"`
+	Total    int    `json:"total"`
+	Present  int    `json:"present"`
+	Late     int    `json:"late"`
+	Absent   int    `json:"absent"`
+	HalfDay  int    `json:"halfDay"`
+	OffShift int    `json:"offShift"`
+	Unknown  int    `json:"unknown"`
 }
 
 type DashboardLive struct {

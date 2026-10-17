@@ -101,6 +101,54 @@ func (s *TimeAttendanceService) AttendanceToday(ctx context.Context, employeeID 
 	return s.attendanceForDay(ctx, employeeID, time.Now().In(location), location, schedule)
 }
 
+// AttendanceDayCounts buckets TODAY's attendance status across employeeIDs.
+// "Today" is resolved per employee from their shift timezone — the same rule as
+// AttendanceToday / GET /attendance/today — so the numbers line up with the
+// /attendance page. An employee with no schedule falls back to UTC and lands in
+// "unknown". Intended for the bounded, department-filtered dashboard summary; it
+// runs one attendance computation per employee (the same work the /attendance
+// page currently fans out over HTTP, done here in a single request).
+func (s *TimeAttendanceService) AttendanceDayCounts(
+	ctx context.Context, employeeIDs []string,
+) (dto.DashboardAttendance, error) {
+	out := dto.DashboardAttendance{
+		Date:  time.Now().UTC().Format("2006-01-02"),
+		Total: len(employeeIDs),
+	}
+	now := time.Now()
+	for _, employeeID := range employeeIDs {
+		schedule, err := s.repo.GetScheduleForEmployee(ctx, employeeID)
+		if err != nil {
+			return out, err
+		}
+		location := time.UTC
+		if schedule != nil {
+			if loaded, err := time.LoadLocation(schedule.Timezone); err == nil {
+				location = loaded
+			}
+		}
+		record, err := s.attendanceForDay(ctx, employeeID, now.In(location), location, schedule)
+		if err != nil {
+			return out, err
+		}
+		switch record.Status {
+		case "present":
+			out.Present++
+		case "late":
+			out.Late++
+		case "absent":
+			out.Absent++
+		case "half_day":
+			out.HalfDay++
+		case "off_shift":
+			out.OffShift++
+		default:
+			out.Unknown++
+		}
+	}
+	return out, nil
+}
+
 func (s *TimeAttendanceService) AttendanceRange(
 	ctx context.Context,
 	employeeID, fromValue, toValue string,

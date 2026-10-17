@@ -3,6 +3,23 @@
 > **Last audited:** 2026-10-17
 > **Changelog:**
 >
+> - 2026-10-17: **Dashboard — the "Fleet health" card is replaced by an "Attendance" card (server + web).**
+>   The home page's fleet panel is gone; its slot now shows **today's attendance breakdown**
+>   (Present / Late / Absent / Off shift, plus **Half day** and **Not recorded** rows only when non-zero)
+>   for the department-filtered employee set, with a "View attendance →" link to `/attendance`.
+>   **Server:** `DashboardSummaryResponse` gains
+>   an `attendance` block (`date` / `total` / `present` / `late` / `absent` / `halfDay` / `offShift` /
+>   `unknown`); new `TimeAttendanceService.AttendanceDayCounts(employeeIDs)` buckets each employee's
+>   current-day status by resolving "today" per shift timezone and reusing `attendanceForDay`, so the
+>   card agrees with `GET /attendance/today`; `DashboardService` computes it inside the existing
+>   errgroup over the department-filtered `employeeRepo.ListAll` set (its constructor gained a
+>   `*TimeAttendanceService`; `main.go` wiring updated). The dashboard remains a **single** summary
+>   request — no list-API fan-out. **Web:** `FleetHealthCard` was removed from
+>   `DashboardStatGrid.tsx` and replaced by `AttendanceCard`; `DashboardSummaryResponse` gained the
+>   `attendance` type. The `devices` stats stay in the payload (the attention strip still uses
+>   `devices.stale7d`). Verified: `go build`/`go vet ./...` clean, `npx tsc --noEmit` clean,
+>   `next build` passes.
+>
 > - 2026-10-17: **Device Specs — legacy machine rows attributed to their device (migration 047) + a removed device shows its last-known software (server + web).**
 >   Reported: after **Remove current device** + a new login, `/device-specs?deviceId=<old>` showed the
 >   current device fine but the removed device rendered **"No hardware snapshot synced yet — the desktop

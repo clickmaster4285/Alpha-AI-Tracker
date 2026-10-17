@@ -1,7 +1,16 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-10-17 (device-scoped legacy backfill)
+> **Last audited:** 2026-10-17 (dashboard attendance aggregate)
 > **Changelog:**
+> - 2026-10-17: **Dashboard summary now carries today's attendance (`attendance` block).**
+>   `DashboardSummaryResponse` gains `attendance` (`date`, `total`, `present`, `late`, `absent`,
+>   `halfDay`, `offShift`, `unknown`). New `TimeAttendanceService.AttendanceDayCounts(ctx, employeeIDs)`
+>   resolves "today" per employee from their shift timezone and reuses the private `attendanceForDay`, so
+>   the counts match `GET /attendance/today`; an employee without a schedule falls back to UTC and lands
+>   in `unknown`. `DashboardService` runs it in the existing errgroup over the department-filtered
+>   `EmployeeRepo.ListAll` set and gained a `*TimeAttendanceService` dependency (wired in `main.go`).
+>   Replaces the web "Fleet health" card; the `devices` block is unchanged (still consumed by the
+>   attention strip). Verified: `go build ./...` / `go vet ./...` clean.
 > - 2026-10-17: **Device Specs — legacy machine rows are now attributed to their device (migration 047); a removed device shows its last-known software.**
 >   Migration **046** added `machine_id` to the device-scoped sync tables with `DEFAULT ''` and then
 >   tried to attribute the pre-existing rows from `app_sessions` with `HAVING COUNT(DISTINCT machine_id) = 1`.

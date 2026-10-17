@@ -1485,6 +1485,16 @@ export interface DashboardSummaryResponse {
     stale7d: number;
     versions: DashboardVersionRow[];
   };
+  attendance: {
+    date: string;
+    total: number;
+    present: number;
+    late: number;
+    absent: number;
+    halfDay: number;
+    offShift: number;
+    unknown: number;
+  };
   live: {
     online: number;
     streaming: number;

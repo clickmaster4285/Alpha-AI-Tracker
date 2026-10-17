@@ -184,7 +184,7 @@ func main() {
 
 	dashboardRepo := repository.NewDashboardRepo(pool)
 	dashboardService := services.NewDashboardService(
-		dashboardRepo, employeeRepo, termsConsentRepo, timeAttendanceRepo, streamHub, presenceHub,
+		dashboardRepo, employeeRepo, termsConsentRepo, timeAttendanceRepo, timeAttendanceService, streamHub, presenceHub,
 	)
 	dashboardHandler := handlers.NewDashboardHandler(dashboardService)
 
