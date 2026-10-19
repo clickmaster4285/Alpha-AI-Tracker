@@ -168,6 +168,12 @@ export default function EmployeePage({
   };
 
   const devices = detailQuery.data?.devices ?? [];
+  // `keepPreviousData` (use-employee-detail) holds the previous payload across
+  // query re-keys (deviceId is part of the key), so `data` can briefly belong
+  // to a DIFFERENT employee or a different machine scope. Only a settled,
+  // non-placeholder payload for the CURRENT key is authoritative enough to
+  // drive the URL mirror or the render branches below.
+  const detailSettled = detailQuery.isSuccess && !detailQuery.isPlaceholderData;
 
   // "All devices" was removed from the dropdown (2026-10-19, user request): whenever
   // the employee has more than one machine the shell ALWAYS scopes to exactly one —
@@ -184,11 +190,16 @@ export default function EmployeePage({
   // The URL stays the single source of truth (URL-Synced Filters Rule): mirror the
   // resolved scope back into `?deviceId=` so back/forward, a shared link and the
   // rendered scope always agree. Empty is stripped from the URL by the hook.
+  //
+  // Gated on `detailSettled`: while the re-keyed query is in flight the kept
+  // placeholder payload resolves `effectiveDeviceId` from stale data, and
+  // writing that back would ping-pong `?deviceId=` forever ("Maximum update
+  // depth exceeded"). Only the settled payload for the current key writes.
   useEffect(() => {
-    if (employee && effectiveDeviceId !== deviceId) {
+    if (employee && detailSettled && effectiveDeviceId !== deviceId) {
       setExtra({ deviceId: effectiveDeviceId });
     }
-  }, [employee, deviceId, effectiveDeviceId, setExtra]);
+  }, [employee, detailSettled, deviceId, effectiveDeviceId, setExtra]);
 
   const handleDeviceChange = (value: string) => {
     setExtra({ deviceId: value });
@@ -221,7 +232,7 @@ export default function EmployeePage({
           {/* Device dropdown — when the employee has more than one registered
               machine (R8). The value is the machine id (stable across re-logins);
               each entry carries the machine lifecycle status from employee_machines. */}
-          {employee && devices.length > 1 && (
+          {employee && detailSettled && devices.length > 1 && (
             <Select value={effectiveDeviceId} onValueChange={handleDeviceChange}>
               <SelectTrigger className="h-9 w-full sm:w-[240px] bg-card border border-border overflow-hidden">
                 <Laptop className="w-4 h-4 text-muted-foreground shrink-0" />
@@ -253,7 +264,7 @@ export default function EmployeePage({
             Select an employee to view their {fetchDetail ? 'device information' : 'activity'}.
           </p>
         </div>
-      ) : fetchDetail && detailQuery.isLoading ? (
+      ) : fetchDetail && !detailSettled && !detailQuery.error ? (
         <div className="flex items-center justify-center min-h-[320px]">
           <div className="flex flex-col items-center gap-3">
             <Loader2 className="w-8 h-8 animate-spin text-primary" />
@@ -271,7 +282,9 @@ export default function EmployeePage({
         children({
           employee,
           detail: detailQuery.data,
-          detailLoading: detailQuery.isLoading,
+          // `keepPreviousData` keeps `isLoading` false across query re-keys,
+          // so derive "loading" from the settled-payload check instead.
+          detailLoading: fetchDetail && !detailSettled && !detailQuery.error,
           setEmployeeId: (id: string) => setExtra({ employeeId: id }),
           filter,
           setFilter,
