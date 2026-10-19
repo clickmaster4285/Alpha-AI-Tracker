@@ -1,7 +1,13 @@
-i want to add the btn on the setting->user-management and also active/suspended status 
-and on login first check the status and authorized
+now i want to manage the device over employee, if one employee change there device|system then what happend. 
 
-pick the bug #7 from bugfound.txt and resolve that and remove from the bugfound.txt
+now i wnat to link every table with machine_id on client local db and server db also 
+and also on server side make new table where store employee_id with machine_id with there status:active|old with first_track_at and last_track_at
 
-on dashboard tell me why shown tracked:5 and Active devices:9 why???
-is this any bug or something other??
+and when on client side when i run the command `& "C:\Program Files (x86)\Alpha AI Tracker\client.exe" --remove-account` then first synce all the unsynced data to server with "remove the accound" and then wipe the local db and machine id.
+and when on server side request recive "remove the accound" then update teh status:untracked and machine status:old with last_track_at also update
+
+and when on the server when i "remove current device" of any employee and on client side same employee when any data syncing to server then from server first update that data to server db and responed back wipe the local db and machine id and the client side wiping the db.
+
+and when i relogin again then first create a new machine id and save on both db
+
+and on web side "/device-specs", "/device-specs/software", "/device-specs/peripherals", "/device-specs/permissions" module when any employee have multi machine then shown dropdown machine list with status 
