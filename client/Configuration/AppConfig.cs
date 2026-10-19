@@ -4,7 +4,12 @@ namespace client.Configuration;
 
 public class AppConfig
 {
-    public string ClientId { get; init; } = GenerateMachineId();
+    private string _clientId = string.Empty;
+    public string ClientId
+    {
+        get => string.IsNullOrWhiteSpace(_clientId) ? (_clientId = GenerateMachineId()) : _clientId;
+        set => _clientId = value;
+    }
     public string DbPath { get; init; } = "data/alpha_tracker.db";
     public string? DbEncryptionKey { get; init; }
     public int CollectIntervalSec { get; init; } = 30;
@@ -53,6 +58,11 @@ public class AppConfig
     public int SyncBackoffMaxSec { get; init; } = 300;       // exponential-backoff ceiling on failure (5 min)
     public bool SyncCompression { get; init; } = true;       // gzip request bodies (server: middleware.Decompress)
     public int SyncRetentionHours { get; init; } = 24;       // retention: synced app_items/app_sessions older than this are deleted client-side
+    // Account removal (R4, 2026-10-19): how long `client --remove-account` waits for the
+    // final drain before wiping anyway. Bounded so a huge backlog / offline machine can
+    // never block removal forever (Removal always proceeds; the unsent rows are the
+    // operator's explicit trade-off and are reported).
+    public int RemoveAccountSyncTimeoutSec { get; init; } = 120;
 
     // ─── Time & Attendance (Phase 1, finalplan §3) ───
     // Idle thresholds (A.4): when does "idle" start, and how often to poll the OS
@@ -161,6 +171,7 @@ public class AppConfig
             SyncBackoffMaxSec = Math.Max(5, int.TryParse(GetEnv("ALPHA_SYNC_BACKOFF_MAX_SEC"), out var syncBack) ? syncBack : 300),
             SyncCompression = GetEnv("ALPHA_SYNC_COMPRESSION") is not ("0" or "false" or "False"),
             SyncRetentionHours = Math.Max(1, int.TryParse(GetEnv("ALPHA_SYNC_RETENTION_HOURS"), out var syncRet) ? syncRet : 24),
+            RemoveAccountSyncTimeoutSec = Math.Max(5, int.TryParse(GetEnv("ALPHA_REMOVE_ACCOUNT_SYNC_TIMEOUT_SEC"), out var remTmo) ? remTmo : 120),
             UpdateRepo = FirstNonEmpty(GetEnv("ALPHA_UPDATE_REPO"), GetEnv("REPO")) ?? string.Empty,
             UpdateEnabled = GetEnv("ALPHA_UPDATE_ENABLED") is not ("0" or "false" or "False"),
             UpdateAutoCheckHours = Math.Max(1, int.TryParse(GetEnv("ALPHA_UPDATE_AUTO_CHECK_HOURS"), out var updHours) ? updHours : 24),
@@ -245,5 +256,94 @@ public class AppConfig
         }
         catch { }
         return newId;
+    }
+
+    /// <summary>
+    /// Resets the in-memory ClientId so that subsequent accesses generate a fresh identifier
+    /// after account removal.
+    /// </summary>
+    public void ResetMachineId()
+    {
+        _clientId = string.Empty;
+    }
+
+    /// <summary>
+    /// Removes the .machine-id and device_id files from all known runtime directories
+    /// (data directory, user config directory, and application directory).
+    /// Used by --remove-account to cleanly disassociate the machine from its prior registration
+    /// without breaking fleet configuration (config.enc), database files, or logging.
+    /// </summary>
+    public static void RemoveMachineAndDeviceIdentifiers()
+    {
+        var candidateDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // 1. User-writable data directory (%LOCALAPPDATA%\AlphaAITracker or ~/.local/share/alpha-ai-tracker)
+        try
+        {
+            var dataDir = OperatingSystem.IsWindows()
+                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AlphaAITracker")
+                : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share", "alpha-ai-tracker");
+            if (Directory.Exists(dataDir))
+            {
+                candidateDirs.Add(dataDir);
+                var subData = Path.Combine(dataDir, "data");
+                if (Directory.Exists(subData)) candidateDirs.Add(subData);
+            }
+        }
+        catch { }
+
+        // 2. User config directory (%APPDATA%\AlphaAITracker or ~/.config/alpha-ai-tracker)
+        try
+        {
+            var configDir = EnvLoader.UserConfigDir;
+            if (!string.IsNullOrEmpty(configDir) && Directory.Exists(configDir))
+            {
+                candidateDirs.Add(configDir);
+            }
+        }
+        catch { }
+
+        // 3. Application base directory (next to executable)
+        try
+        {
+            var appDir = AppDomain.CurrentDomain.BaseDirectory;
+            if (!string.IsNullOrEmpty(appDir) && Directory.Exists(appDir))
+            {
+                candidateDirs.Add(appDir);
+            }
+        }
+        catch { }
+
+        var targetFileNames = new[]
+        {
+            ".machine-id",
+            "machine-id",
+            "device_id",
+            ".device_id",
+            "device-id",
+            ".device-id",
+            "deviceId",
+            ".deviceId"
+        };
+
+        foreach (var dir in candidateDirs)
+        {
+            foreach (var name in targetFileNames)
+            {
+                try
+                {
+                    var filePath = Path.Combine(dir, name);
+                    if (File.Exists(filePath))
+                    {
+                        File.Delete(filePath);
+                        Console.WriteLine($"[remove-account] Removed identifier file: {filePath}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[remove-account] Could not delete {name} in {dir}: {ex.Message}");
+                }
+            }
+        }
     }
 }

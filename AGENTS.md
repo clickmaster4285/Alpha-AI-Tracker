@@ -1,7 +1,178 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-10-05
+> **Last audited:** 2026-10-19
 > **Changelog:**
+>
+> - 2026-10-19 (late): **Three fixes — post-wipe re-login re-collects hardware/network/software (client), the setup wizard can pass step 2 on Linux (client), "All devices" removed from the Device Specs dropdown (web).**
+>   **1. "No hardware snapshot synced yet / No installed applications synced yet" on a device that re-logged in after a removal** — root-caused on the live dev DB (employee `MU-90`: the relogged-in machine had `app_items` / `app_sessions` / `app_status` rows but **zero** `device_hardware_info` / `network_info` / `employee_installed_applications`). The removal wipe runs inside the already-`running process: it deletes every SQLite row, but the collector's IN-MEMORY dedup fingerprints (`_lastHardwareFingerprint`, `_lastNetworkPublicIp`/`_lastNetworkPrivateIp`) survive it, and the installed-software scan only runs at STARTUP (inventory is event-driven — there is deliberately no periodic scan). The machine therefore still "looks unchanged": every periodic collect takes the same-process fast path and the startup scan never runs again, so the machine id minted for the re-login never receives a snapshot, a network row or an inventory. Fix: new `LogCollectorService.RecollectAfterLoginAsync()` drops those fingerprints (dedup then falls back to the wiped, i.e. empty, DB) and re-runs hardware + network + `RescanInventoryAsync`; `MainViewModel.LoginAsync` fires it after `StartTracking()` and wakes `SyncService` again once it finishes. Login also now wipes a leftover local DB that belongs to a DIFFERENT employee **before** the login request (with `ResetMachineId()` + `EncryptedConfigService.ResetCache()`), so the rotated machine id and the server-side device registration always agree. Restarting the client alone also heals an already-stuck machine — the startup collects run regardless of login.
+>   **2. Setup wizard stuck on "SETUP STEP 2 OF 4" (Linux):** step 2's gate `IsBackgroundGuardConfigured()` requires the systemd USER unit `~/.config/systemd/user/alpha-ai-tracker.service`, but `GrantBackgroundRunningAsync` only called `EnableAutoStartForced()` — which writes the `.desktop` autostart entry and runs `systemctl --user enable` against a unit file that does not exist yet. The step printed "Background guard enabled successfully." and then re-evaluated to ITSELF forever (no forward navigation). New `AutoStartService.EnsureBackgroundGuardAsync()` writes the unit, daemon-reloads and enables it — deliberately without starting it (the wizard runs inside the live process; starting the unit would spawn a mutex-fighting `Restart=always` twin) — and the step now throws honestly if that fails. The macOS gate checks the launchd plist instead of unconditionally returning `false` (same stuck-step class).
+>   **3. "All devices" removed from the Device Specs dropdown (web):** `EmployeePage` no longer renders the `__all__` sentinel — with 2+ machines it always scopes to exactly one (the URL's machine while it is still registered, else the first entry; the server orders machines active-first, then most recently tracked) and mirrors that back into `?deviceId=` (URL-Synced Filters Rule). Single-machine employees keep the employee-wide view they already got (no dropdown is rendered for them). Verified: `dotnet build` 0/0, `npx tsc --noEmit` clean, `next build` passes.
+> - 2026-10-19: **Device lifecycle — `employee_machines` registry, full `machine_id` coverage, and the remove-account / remove-device wipe handshake (server + client + web).**
+>   **Server:** migration **049** adds `employee_machines` — the canonical one-row-per-physical-machine
+>   lifecycle record (`status` `active|old`, `first_track_at`, `last_track_at`, `wipe_requested_at`),
+>   backfilled from `employee_devices`. It exists because `employee_devices` is the AUTH-TOKEN registry
+>   and `UpsertDevice` revokes + re-inserts a row on every login, so one physical PC appeared as many
+>   rows and the Device Specs dropdown could not tell machines apart. Every employee login upserts the
+>   machine as `active` (preserving `first_track_at`); `DeviceAuth` advances `last_track_at`. Migration
+>   **050** completes `machine_id` coverage on `session_events`, `app_items` and `location_samples`
+>   (per-table indexes + 047-style attribution from the device activity window; `app_items` attributes
+>   exactly from its parent session). `terms_consent` deliberately stays employee-scoped — a consent is
+>   the person accepting terms, not the machine. **R6 handshake:** `DeviceAuth` now also resolves
+>   REVOKED device tokens (`GetByTokenHashIncludingRevoked`), sets `device_removed` and skips
+>   `TouchLastSeen`; every sync handler persists the incoming batch FIRST and only then adds
+>   `{"action":"wipe_local"}` to the response (`applyDeviceAction`). `POST /employees/:id/devices/remove`
+>   additionally marks the employee's machines `old` and stamps `wipe_requested_at`. **R4/R5:** new
+>   DeviceAuth endpoint `POST /api/v1/devices/self-remove` marks the CALLING machine `old`, advances
+>   `last_track_at`, revokes its device rows, closes open activity and flips the employee to
+>   `untracked` (non-destructive — nothing is deleted). `GET /employees/:id/detail` now sources
+>   `devices[]` from `employee_machines` (deduped to one row per machine) with `status`, `firstTrackAt`,
+>   `lastTrackAt`, `wipeRequestedAt` and a corrected `isActiveDevice`.
+>   **Client:** every telemetry INSERT stamps `machine_id` from a new single-row `machine_identity`
+>   table, written from a lazy `AppConfig.ClientId` provider so a wipe + re-login in the same process
+>   stores the NEW id (the `employee_info.machine_id` column is written on login too); `JourneyEngine`
+>   no longer uses the hostname as the machine id. New `Services/AccountRemovalService.cs` owns the one
+>   removal routine — stop collecting → bounded `SyncService.WaitForDrainAsync` →
+>   `POST /devices/self-remove` → wipe local DB + `.machine-id` + `ResetMachineId()` — and serves the
+>   `--remove-account` CLI (cold-start and background), the running-instance signal AND the
+>   server-initiated wipe; `SyncService` parses the response `action` and raises
+>   `OnServerRequestedWipe` (once per process). The cold-start path now starts the host first (the old
+>   code fired `RequestImmediateSync()` at a host that had not started, so the drain never ran and the
+>   server was never told).
+>   **Web:** `EmployeeDevice` drops `isActive` for the lifecycle `status` / `firstTrackAt` /
+>   `lastTrackAt` / `wipeRequestedAt`; the Device Specs dropdown shows each machine with its status
+>   (`active` / `old · removed` + last tracked); the Hardware Overview empty state keys off
+>   `status === 'old'`.
+>   Verified live against the dev DB: 049/050 applied (24 backfilled machine rows); employee login →
+>   machine `active`; hardware / session-event / location syncs stamped the device's `machine_id`;
+>   admin remove → machine `old` + `wipe_requested_at` and the revoked token's next batch was
+>   **persisted and** answered `{"action":"wipe_local"}`; second machine login + `self-remove` →
+>   `{removed:true, machineId, status:"old", trackingStatus:"untracked"}`; detail `devices[]` returned
+>   one row per machine with status. `go build`/`go vet`/`go test ./internal/...` clean, `dotnet build`
+>   0/0, `npx tsc --noEmit` clean. Rule codified: **Device Lifecycle Rule** (§6).
+>
+> - 2026-10-17: **Dashboard — the "Fleet health" card is replaced by an "Attendance" card (server + web).**
+>   The home page's fleet panel is gone; its slot now shows **today's attendance breakdown**
+>   (Present / Late / Absent / Off shift, plus **Half day** and **Not recorded** rows only when non-zero)
+>   for the department-filtered employee set, with a "View attendance →" link to `/attendance`.
+>   **Server:** `DashboardSummaryResponse` gains
+>   an `attendance` block (`date` / `total` / `present` / `late` / `absent` / `halfDay` / `offShift` /
+>   `unknown`); new `TimeAttendanceService.AttendanceDayCounts(employeeIDs)` buckets each employee's
+>   current-day status by resolving "today" per shift timezone and reusing `attendanceForDay`, so the
+>   card agrees with `GET /attendance/today`; `DashboardService` computes it inside the existing
+>   errgroup over the department-filtered `employeeRepo.ListAll` set (its constructor gained a
+>   `*TimeAttendanceService`; `main.go` wiring updated). The dashboard remains a **single** summary
+>   request — no list-API fan-out. **Web:** `FleetHealthCard` was removed from
+>   `DashboardStatGrid.tsx` and replaced by `AttendanceCard`; `DashboardSummaryResponse` gained the
+>   `attendance` type. The `devices` stats stay in the payload (the attention strip still uses
+>   `devices.stale7d`). Verified: `go build`/`go vet ./...` clean, `npx tsc --noEmit` clean,
+>   `next build` passes.
+>
+> - 2026-10-17: **Device Specs — legacy machine rows attributed to their device (migration 047) + a removed device shows its last-known software (server + web).**
+>   Reported: after **Remove current device** + a new login, `/device-specs?deviceId=<old>` showed the
+>   current device fine but the removed device rendered **"No hardware snapshot synced yet — the desktop
+>   client will upload one after login"**, with every other device surface empty. Root cause was a gap in
+>   migration **046**: it added `machine_id` with `DEFAULT ''` and then attributed the pre-existing rows
+>   from `app_sessions` with `HAVING COUNT(DISTINCT machine_id) = 1` — but `app_sessions` is purged by the
+>   retention worker after 30 days, so a swapped PC's retired-machine sessions are usually already gone
+>   when the migration runs and **nothing** is backfilled. The old machine's `device_hardware_info` /
+>   `network_info` / `storage_devices` / `hardware_devices` / `permission_status` / `app_status` / link
+>   rows stayed `machine_id = ''` while the Device Specs dropdown still listed that machine by its
+>   `default-EMP-XXXXX` machine id (the fallback the login handler binds when a request omits a machine
+>   id) — so the machine-scoped read `machine_id = 'default-EMP-XXXXX'` matched nothing. **Server:**
+>   migration **047** re-attributes each leftover `''` row from the **device registry's own activity
+>   window** `[created_at, last_seen_at]`, only when exactly ONE device window contains the row's
+>   server-stamped sync time (ambiguous/no-window rows stay `''` = the "unknown machine" bucket shown
+>   under All devices; rows that already carry a machine id are untouched, natural-key collisions are
+>   skipped — idempotent). `ListEmployeeApplications` / `ListEmployeePackages` also include
+>   `is_active = false` links when the requested machine has **no live registration** (all its
+>   `employee_devices` rows revoked), so a removed device shows the last-known inventory the hourly
+>   staleness sweep had deactivated; the aggregate view still filters `is_active`. **Web:** the Hardware
+>   Overview empty state now says *"No hardware snapshot was recorded for this device before it was
+>   removed"* for a removed device instead of the false "will upload one after login". Verified:
+>   `go build`/`go vet ./...` clean, `npx tsc --noEmit` clean, `next build` passes; migration 047 dry-run
+>   (rolled back) then applied to the dev DB — rows attributed per table **10/3/6/21/8/37/242/4354**, 0
+>   left unattributed; per-device reads for `default-EMP-10003` return hw/storage/network/peripherals/
+>   status/packages and installed-software scoping measures **retired 99 / current 73 / aggregate 73**.
+>   Rule codified: **Retired-Device History Rule** (§6).
+>
+> - 2026-10-17: **Device swap handling — "Remove current device" + per-device Device Specs (server + web + client).**
+>   An employee who moved to a new PC stayed tracked on the old machine and every synced surface was
+>   collapsed into one employee-wide bucket, so Device Specs could not tell the two machines apart.
+>   **Server:** migration **046** adds `machine_id` to `device_hardware_info`, `network_info`,
+>   `storage_devices`, `hardware_devices`, `permission_status`, `app_status` and both employee↔catalog
+>   junctions; the natural keys become device-wide (`permission_status` PK `(employee_id, machine_id,
+>   check_id)`, `app_status` PK `(employee_id, machine_id, key)`, links UNIQUE
+>   `(employee_id, machine_id, <catalog id>)`) and a single-machine backfill attributes legacy rows.
+>   **No client sync change was needed:** `DeviceAuth` now also sets `device_machine_id`, every sync
+>   DTO carries a `json:"-"` `MachineID` filled by the handler, and the repos stamp it on insert.
+>   `SyncDeviceHardware` also copies the reported hostname into `employee_devices.device_name`.
+>   **New endpoint** `POST /api/v1/employees/:id/devices/remove` (JWTAuth): revokes every active device,
+>   closes all open `app_sessions` (`status='CLOSED'`) and `app_items` (`closed_at`), sets
+>   `tracking_status='untracked'` + `is_online=false`, and returns the counts — nothing is deleted, so
+>   Device Specs and history stay intact. **Web:** the employees row menu shows **Remove Current Device**
+>   while `trackingStatus === 'tracked'` (confirmation dialog) and falls back to **Generate Login Secret**
+>   once untracked; `EmployeePage` gained a URL-synced `?deviceId=` machine selector (shown when the
+>   employee has 2+ devices) wired into `GET /employees/:id/detail?deviceId=`, which scopes hardware,
+>   storage, network, apps, packages, peripherals, permissions and app status to that machine. Device
+>   labels are always **"{employee name} ({hostname})"** — hostname falls back to the device name, then
+>   the machine id, never "Unknown device". **Client:** login now sends `deviceName = Environment.MachineName`
+>   (installer ships it in the next build; the server-side hostname copy already covers older clients).
+>   Verified: `go build`/`go vet` clean, `npx tsc --noEmit` clean, `next build` passes, `dotnet build` 0/0;
+>   migration 046 applied to the dev DB; live API tests — detail with/without `?deviceId=` (aggregate
+>   deduped, per-machine scoped), a real device-token sync stamped `machine_id` + back-filled
+>   `employee_devices.device_name` from the hostname, the same `app_status` key held two device rows, the
+>   remove endpoint returned `{revokedDevices:2, closedSessions:1, closedItems:1, trackingStatus:"untracked"}`
+>   with device rows kept (`revoked_at`), sessions/items closed, history still readable, and a revoked
+>   device token then synced → 401.
+>   Rule codified: **Machine-Scoped Data Rule** (§6).
+>
+> - 2026-10-16: **RBAC leak — Terms & Conditions was visible to every role and guarded by an unrelated permission (server + web).**
+>   Reported: a user whose role grants only the HR module saw **Settings → Terms & Conditions**,
+>   and clicking it landed on `/unauthorized`. Root cause was one missing key in the nav config:
+>   `web/src/components/layout/AppSidebar.tsx` added the entry with **no `module` key** (a copy of the
+>   `/settings/profile` pattern, which is intentionally ungated), so `isItemVisible`/`visibleChildrenOf`
+>   short-circuit to `true` and the item rendered for every authenticated user — while
+>   `findModuleForPath` skipped the module-less entry in its exact-match pass and fell back to the
+>   `/settings` prefix, returning `settings`. Net effect: always visible, the page was really gated by
+>   the unrelated **General Settings** permission (so any role with plain `settings` also got T&C
+>   create/edit/delete), and a role without `settings` got a dead nav link. The server catalog had no
+>   terms key at all. Fix: `internal/services/rbac_service.go` seeds
+>   `settings/terms-and-conditions` ("Terms & Conditions", route `/settings/terms-and-conditions`)
+>   under `settings-module`, and the sidebar entry now carries
+>   `module: "settings/terms-and-conditions"` — nav visibility and the route guard resolve to the
+>   same key. `company_admin` keeps access via `GrantAllPermissions` (39 → 40 grants); no existing
+>   role is auto-granted, so the item disappears until an admin ticks it on `/roles`. No migration —
+>   the boot seeder upserts the catalog. Verified: `go build`/`go vet` clean, `npx tsc --noEmit`
+>   clean, boot seeder against the live dev DB (Settings 7 → 8 submodules, `hr` grants unchanged at
+>   6), and `GET /modules` + `GET /auth/profile` (Settings 8/8 for `company_admin`).
+>   Rule codified: **RBAC Nav → Catalog Parity Rule** (§6) — a permission-gated page must
+>   add the submodule to `rbacCatalog` AND the matching `module` key to the sidebar entry, in the
+>   same change.
+>
+> - 2026-10-15: **Live stream — WebRTC signaling race dropped ICE → tiles read LIVE with zero frames (server + web + client).**
+>   Root cause was signaling ORDER, not per-PC hardware: the Pion SFU starts ICE gathering inside
+>   `SetLocalDescription` during `AcceptPublisherOffer` / `AcceptSubscriberOffer`, and Pion fires the
+>   candidate callback on its own goroutine — so `{"type":"ice"}` could be written to the socket BEFORE
+>   `{"type":"answer"}`. A peer that calls `addIceCandidate` while its `remoteDescription` is still null
+>   throws `InvalidStateError`; that candidate was silently dropped, the ICE/DTLS handshake never
+>   completed, yet `ontrack` had already fired (the answer carried the media section) — so the UI showed
+>   LIVE / `--- FPS` and the 5s renegotiation loop spun forever. Which employees broke was pure timing
+>   luck (the connections where the answer landed before the first trickled candidate worked).
+>   Fix — buffer trickled candidates on all three peer roles until the remote description exists:
+>   (1) **server** `internal/handlers/stream_handler.go`: new `iceTrickle` (`sync.Mutex` + `answered`
+>   flag + `pending`) shared by the Push (publisher) and Watch (subscriber) paths; empty candidates are
+>   skipped, pre-answer candidates are held, and `answerMarked()` flushes them in order only AFTER the
+>   answer message is written. (2) **web** `lib/useLiveStreamSocket.ts`: per-PC
+>   `PcEntry { pc, remoteReady, queue }` held in `pcStateRef`; the `answer` branch awaits
+>   `setRemoteDescription`, then sets `remoteReady` and flushes the queue; the `ice` branch queues while
+>   `!remoteReady`; `cleanupPc` nulls the entry so a renegotiated PC gets fresh state (stale candidates
+>   can never hit a dead connection); `ws.onmessage` is now `async`. (3) **client**
+>   `Services/LiveStreamClient.cs`: `pendingIce` + `remoteIceReady`, flushed after `setRemoteDescription`
+>   returns `OK`, reset when the PC is recreated on `start`/`stop`; `ApplyRemoteIce` → `BuildRemoteIce`
+>   (returns the candidate). No route, contract, env, or migration change; the client half ships only in
+>   the next installer build.
+>   Verified: `go build ./...` clean; `go vet ./internal/handlers/...` clean; `npx tsc --noEmit` clean;
+>   `dotnet build` 0 warnings / 0 errors.
 >
 > - 2026-10-05: **Web dashboard redesign — summary-first home (server + web).**
 >   New JWT `GET /api/v1/dashboard/summary` (date range + optional `departmentId`) returns
@@ -1033,6 +1204,8 @@ flowchart LR
 | Live stream push (client → SFU)            | WS `GET /api/v1/live-stream/push` + WebRTC VP8 | `Authorization: Device <token>`    | Signaling JSON (`hello`/`offer`/`ice`/`start`/`stop`/`select_monitor`/`force_keyframe`); media via WebRTC |
 | Live stream uplink probe (client → server) | REST POST `/api/v1/live-stream/uplink-probe` | `Authorization: Device <token>`     | Timed body (discarded); client measures RTT → bitrate ladder |
 | Presence keep-alive (client → server)      | WS `GET /api/v1/ws`                         | `Authorization: Device <token>`       | Ping/pong; Online/`wsConnected` (Redis-mirrored when available) |
+| Remove the account (client → server)       | REST POST `/api/v1/devices/self-remove`     | `Authorization: Device <token>`       | Empty JSON body → `{removed, machineId, status, lastTrackAt, trackingStatus}`; called AFTER the final drain |
+| Server-requested wipe (server → client)    | inline in every `*/sync` response            | —                                     | `{"action":"wipe_local"}` appended only when the reporting device was removed; the batch in that response is already persisted |
 
 ### Server ↔ Web
 
@@ -1199,6 +1372,10 @@ flowchart LR
 | **Cross-table boolean flags** | Booleans that depend on a cross-table relationship (e.g. "does this employee have a login account?") MUST be projected by the server in the same query that returns the row — never built client-side from a separate fetch (see *Server-Projected Flags Rule* below) |
 | **Branding & version**  | Product name and version are written in exactly two files — `client/APP_IDENTIFIERS` and `client/VERSION`. No literal product name or version string anywhere else in C#, XAML, or the build scripts (see below) |
 | **Cross-platform OS guards** | Guard platform-specific method bodies with `OperatingSystem.IsWindows/Linux/MacOS()`; do not propagate `[SupportedOSPlatform]` through cross-platform partial/background-service call graphs (see below) |
+| **RBAC nav → catalog parity** | Every permission-gated nav entry carries a `module` key that matches a submodule seeded in the server `rbacCatalog`; both halves change together and `module` is NEVER omitted (see *RBAC Nav → Catalog Parity Rule* below) |
+| **Machine-scoped data** | Every synced row that describes a specific machine carries `machine_id`, stamped server-side from `DeviceAuth` (never from the request body); device-level reads take `machineID` where `""` = all devices (see *Machine-Scoped Data Rule* below) |
+| **Retired-device history** | A removed device keeps showing its last-known data: legacy rows are attributed to it from the device registry's activity window (migration 047), and device-scoped software reads include the staleness-swept `is_active = false` links while the aggregate keeps the filter (see *Retired-Device History Rule* below) |
+| **Device lifecycle** | `employee_machines` is the canonical one-row-per-machine registry (`status` `active|old`, `first_track_at`, `last_track_at`, `wipe_requested_at`); `employee_devices` stays the rotating auth-token registry. Removal is a handshake: persist first, then instruct the client to wipe (see *Device Lifecycle Rule* below) |
 
 ### Web Infinite-Scroll Rule (mandatory)
 
@@ -1311,6 +1488,133 @@ client handler depend on context values only the other middleware sets.**
   `JWTAuth` (e.g. `GET /terms-consent`).
 - When adding any new endpoint, name its consumer FIRST (client machine vs admin browser) and
   mount it in the matching group — do not copy the group of whatever route happens to be nearby.
+
+### RBAC Nav → Catalog Parity Rule (mandatory)
+
+**A permission-gated page has TWO matching halves, and they ship together: a submodule key in the
+server catalog and that same key on the sidebar entry.** A nav item without them is not *"just
+ungated"* — it leaks the page to every role and hands its actions to whoever holds an unrelated
+permission.
+
+1. **Server — add the submodule to `rbacCatalog`** (`server/internal/services/rbac_service.go`):
+   `{Key: "<module>/<page>", Name: "<Label>", Route: "<path>"}` inside the owning module's
+   `Submodules` slice. The key is the permission identity (`settings/user-management`,
+   `settings/terms-and-conditions`, …); `Route` is the web path. **No migration** — the boot
+   seeder (`RBACService.SeedCatalog`) upserts the catalog idempotently on every start, so a new key
+   exists after the next server boot.
+2. **Web — put the same key on the nav entry** (`web/src/components/layout/AppSidebar.tsx`):
+   `{ label, path, module: "<same key>" }`. `module` is the ONLY thing that gates the item.
+3. **Never omit `module`.** `visibleChildrenOf` / `isItemVisible` evaluate
+   `c.module ? canAccess(...) : true`, so a missing key renders the item for **every** authenticated
+   user (and keeps its parent group visible). `findModuleForPath` then skips the module-less entry in
+   its exact-match pass and falls back to the nearest guarded parent
+   (`/settings/terms-and-conditions` → `settings`), so the page is gated by an unrelated
+   permission: a role without it sees a dead link that redirects to `/unauthorized`, and a role
+   holding that parent key silently gains the page's full CRUD. The **only** permitted module-less
+   entry is `/settings/profile` — intentionally open to all roles and listed in
+   `RouteGuard.ALWAYS_ALLOWED`. Adding another path to that list is a permission regression, not a fix.
+4. **Grants after adding a key:** `company_admin` is auto-granted everything via
+   `RBACRepo.GrantAllPermissions`; **no other role is auto-granted** (default deny), so tick the new
+   submodule per role on `/roles`. A role's grant set is re-read from the DB on each auth response, so
+   an existing session picks it up on its next page load / re-login.
+5. **Verify before claiming done:** confirm the key appears in `GET /api/v1/modules` and that the
+   target role's grants actually changed (`role_submodule_permissions`) — hiding the sidebar item
+   alone is not proof.
+
+**Reference (why this rule exists):** the 2026-10-16 Terms & Conditions bug — the nav entry carried
+no `module` key and the catalog had no `settings/terms-and-conditions` submodule, so a role granting
+only the HR module saw **Settings → Terms & Conditions** and clicking it landed on `/unauthorized`.
+
+### Machine-Scoped Data Rule (mandatory since 2026-10-17)
+
+**Any synced row that describes a specific machine carries `machine_id`, and the server stamps it
+from the authenticated device — never from the request body.** An employee can swap PCs; without this
+dimension, two machines silently overwrite each other's hardware, network, software and permission
+rows and the Device Specs module cannot show one machine at a time.
+
+1. **Schema:** the machine-data tables (`device_hardware_info`, `network_info`, `storage_devices`,
+   `hardware_devices`, `permission_status`, `app_status`) and the employee↔catalog junctions store
+   `machine_id TEXT NOT NULL DEFAULT ''` plus an `(employee_id, machine_id, …)` index. Natural keys
+   that used to be employee-wide include `machine_id` (see migration 046): `permission_status` PK
+   `(employee_id, machine_id, check_id)`, `app_status` PK `(employee_id, machine_id, key)`, link
+   UNIQUE `(employee_id, machine_id, <catalog id>)`. `app_sessions` has carried it since 006.
+2. **Write path:** `DeviceAuth` sets `device_machine_id`; each sync handler copies it into the DTO's
+   `MachineID` (`json:"-"`), the service maps it onto the model and the repo inserts it. The token is
+   the identity — a client cannot spoof another machine by sending a body field.
+3. **Read path:** repo reads take `(employeeID, machineID)`; `machineID == ""` means the employee-wide
+   aggregate (`GET /employees/:id/detail` with no `?deviceId=`). Rows still carrying `machine_id = ''`
+   are the genuinely unattributable bucket and appear only in the aggregate — migration **047**
+   re-attributes every legacy row that can be resolved to a device (see *Retired-Device History Rule*).
+4. **Labeling:** a device is always rendered **"{employee name} ({hostname})"** — hostname from the
+   latest hardware snapshot (or `employee_devices.device_name`, filled from that hostname on sync) with
+   the machine id as the last resort. Never render "Unknown device".
+5. **Removal is non-destructive:** "Remove current device" revokes `employee_devices` rows, closes
+   open sessions/items and flips the employee to untracked. Rows are never deleted; history stays
+   queryable and the next login on a new machine registers a fresh device and resumes tracking.
+
+### Retired-Device History Rule (mandatory since 2026-10-17)
+
+**A removed device must keep showing its last-known data on every Device Specs surface — its rows are
+attributed to it, and "currently installed" software is not emptied out just because the machine stopped
+syncing.** Two failure modes have to be handled together or the `/device-specs?deviceId=<old>` view goes
+blank after a device swap.
+
+1. **Attribute legacy rows from the device registry, never from `app_sessions`.** Migration 046's
+   `HAVING COUNT(DISTINCT machine_id) = 1` over `app_sessions` is wrong: `app_sessions` is purged by the
+   retention worker (30 days) and the replacement machine may have no sessions yet, so a swapped PC's
+   leftover rows silently stay `machine_id = ''`. Attribute from `employee_devices`'
+   `[created_at, last_seen_at]` activity window and only when exactly ONE window contains the row's
+   server-stamped sync time (`created_at` for `app_status` — `updated_at` is client time; `synced_at`
+   elsewhere; `last_seen_at` for junctions). Ambiguous rows stay `''`; never guess. See migration **047**.
+2. **A removed device's inventory is frozen, not uninstalled.** The hourly `jobs/staleness_sweep.go`
+   flips `employee_installed_*` links to `is_active = false` when the machine stops re-syncing — for a
+   retired device that empties the whole Installed Software page. Device-scoped reads
+   (`ListEmployeeApplications` / `ListEmployeePackages`) therefore include inactive links when the
+   requested machine has **no live `employee_devices` row** (all revoked), while the employee-wide view
+   keeps the `is_active` filter so a *live* machine's uninstalled apps stay hidden.
+3. **Empty states must be truthful.** A removed device will never log in again, so never tell the user
+   "the desktop client will upload one after login" for it — say the snapshot was never recorded for
+   that device.
+4. **Verify with the device registry, not just the API.** Check that the device id the dropdown sends
+   (`employee_devices.machine_id`, e.g. the `default-EMP-XXXXX` login fallback) is the id the rows now
+   carry, and measure per-device vs aggregate counts (a correct fix leaves the aggregate unchanged).
+
+### Device Lifecycle Rule (mandatory since 2026-10-19)
+
+**A machine's lifecycle has ONE source of truth (`employee_machines`), and every removal is a
+"persist first, then instruct" handshake — the server never tells a client to wipe before it has
+stored the data that client just sent.**
+
+1. **Registry split.** `employee_machines` (one row per `(employee_id, machine_id)`, `status`
+   `active|old`, `first_track_at`, `last_track_at`, `wipe_requested_at`) is the canonical lifecycle
+   record. `employee_devices` keeps owning the auth-token state and **rotates a row on every login**
+   — never drive a machine list or a status badge off it. A machine that logs in again becomes
+   `active` with `first_track_at` preserved; `DeviceAuth` keeps `last_track_at` current on every
+   request.
+2. **`machine_id` is everywhere.** Server (migrations 046/050): every device-scoped sync table plus
+   `session_events`, `app_items`, `location_samples` carry it, stamped from the authenticated device
+   (`json:"-"` `MachineID` on the DTO), never from the request body. Client: every local table has
+   the column and stamps it from the single-row `machine_identity` table, whose value comes from a
+   **lazy** `AppConfig.ClientId` provider (a wipe resets the id, so a re-login in the same process
+   must persist the new one — a value captured at construction would stamp the retired machine).
+   `terms_consent` is intentionally employee-scoped.
+3. **Devices with `machine_id = ''`** are the honest "unknown machine" bucket: they appear only in
+   the employee-wide aggregate, never under a specific device.
+4. **Remove current device (admin) = persist-then-wipe.** `POST /employees/:id/devices/remove`
+   revokes the devices, closes open activity, sets `tracking_status='untracked'` **and** marks the
+   machines `old` + `wipe_requested_at=NOW()`. `DeviceAuth` deliberately still accepts the now
+   **revoked** token (`GetByTokenHashIncludingRevoked`), flags `device_removed`, and the sync handler
+   persists the batch FIRST and only then answers `{"action":"wipe_local"}`. The client wipes its
+   local DB + machine id and lands on the sign-in page; its next login mints a **new** machine id and
+   a new `employee_machines` row, while the old row stays `old` with its history.
+5. **Remove the account (employee) = drain then notify.** `client.exe --remove-account` starts the
+   host, drains every unsynced row (bounded by `ALPHA_REMOVE_ACCOUNT_SYNC_TIMEOUT_SEC`), then calls
+   `POST /api/v1/devices/self-remove` (DeviceAuth) — which marks the calling machine `old`, advances
+   `last_track_at`, revokes its devices and flips the employee to `untracked` — and only then wipes
+   locally. One routine (`AccountRemovalService`) serves the CLI burst, the running-instance signal
+   and the server-initiated wipe; a failed drain/server call never blocks the local wipe.
+6. **Never delete to remove.** Every removal path only changes statuses; history and last-known data
+   stay readable (see *Retired-Device History Rule*).
 
 ### Cross-Platform Analyzer Safety Rule (mandatory)
 

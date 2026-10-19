@@ -1,0 +1,31 @@
+currnetly i face many issue
+
+1. (
+i login the tool on current windows macheine and then remove account , 
+and then login on the linux machine of same employee 
+on that step every thing is good on the web side drop down 2 device shown on "device-specs/.." modules and shown good the info about hardware,installed etc..
+but then remove account again
+then i relogin on the old same window machine
+
+on the web side now 3 device shown but on the third active device info updated cann't synced|shown why???
+"No hardware snapshot synced yet — the desktop client will upload one after login"
+"No installed applications synced yet"
+
+i want when i remove the accound through direct command or from web "remove current device" and the client responed wipedb then remove full local db with machine id 
+
+and when i login the accound then first remove existing db and create a new local db and start tracker 
+
+)
+
+2. i want to remove the option "all Devices" from dropdown on the "device-specs/.." modules
+
+3. on the linux machine & 'c:\Users\DEV-05\Downloads\Screenshot From 2026-10-19 11-58-41.png' why i cann't redirect the next step why???
+
+email: Clickmasters@gmail.com  (Noe: on the emial the first character is capital)
+password: Clickmasters@1234
+
+DB_HOST=localhost
+DB_PORT=5432
+DB_USER=alpha_monitoring
+DB_PASSWORD=123456
+DB_NAME=alpha_ai_tracker

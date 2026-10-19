@@ -229,6 +229,34 @@ public class LogCollectorService : BackgroundService
     }
 
     /// <summary>
+    /// Stop collecting and forget the signed-in employee.
+    ///
+    /// Used ONLY by the account-removal flow (<c>--remove-account</c> / the
+    /// REMOVE_ACCOUNT single-instance signal): the collector is the one producer the
+    /// main loop owns, and without this it would keep writing app_sessions for an
+    /// account that no longer exists — including straight back into the tables that
+    /// were just emptied. The main loop parks on the 5s "waiting for login" branch
+    /// (identical to a fresh install), the browser/desktop-event producers gate on
+    /// their own employee lookup, and SyncService already no-ops without credentials.
+    ///
+    /// Tracking resumes normally on the next successful login (StartTracking) or
+    /// session restore — nothing here is persisted, so the flag dies with the process.
+    /// </summary>
+    public void StopTracking()
+    {
+        lock (_trackingLock)
+        {
+            _trackingEnabled = false;
+            // Clear the in-memory identity too — a stale employee id/name/token would
+            // otherwise be stamped onto anything that slipped through before the wipe.
+            _currentEmployeeId = null;
+            _currentEmployeeName = null;
+            _currentToken = null;
+        }
+        _logger.LogInformation("Tracking stopped (account removed)");
+    }
+
+    /// <summary>
     /// After reinstall/upgrade the employee stays logged in (SQLite credentials), so
     /// employee-login never re-runs and <c>employee_devices.client_version</c> used to
     /// stay stale. Writing app_status.client_version with is_synced=0 queues a sync, and
@@ -1812,6 +1840,44 @@ public class LogCollectorService : BackgroundService
     // Fixes Issue 2: scans actual installed apps from OS registry/db,
     // NOT from running processes. Collects metadata (version, publisher, etc.)
     // ────────────────────────────────────────────
+
+    /// <summary>
+    /// Re-runs the startup collects right after an EXPLICIT login, because a local
+    /// account wipe may have run in this very process (remove-account CLI, GUI removal,
+    /// or the server's {"action":"wipe_local"} response — 2026-10-19).
+    ///
+    /// Why a plain login is not enough: hardware and network collection dedup against
+    /// BOTH the last row persisted in SQLite and the in-memory fingerprints captured
+    /// earlier in this process, and the installed-software scan only runs at startup
+    /// (inventory detection is event-driven — there is deliberately no periodic scan).
+    /// A wipe deletes the rows but leaves those in-memory fingerprints intact, so the
+    /// machine still "looks unchanged": every later collect takes the fast path, and
+    /// the machine id minted for the re-login never receives a hardware snapshot, a
+    /// network row or a software inventory — the web Device Specs page then shows
+    /// "No hardware snapshot synced yet" / "No installed applications synced yet"
+    /// forever for that device. Dropping the fingerprints here makes the dedup fall
+    /// back to the (wiped, therefore empty) DB, which stores fresh rows stamped with
+    /// the new machine identity.
+    ///
+    /// Safe on an ordinary login: the same DB-compare dedup prevents duplicate rows.
+    /// </summary>
+    public async Task RecollectAfterLoginAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            _lastHardwareFingerprint = null;
+            _lastNetworkPublicIp = null;
+            _lastNetworkPrivateIp = null;
+
+            await CollectDeviceHardwareAsync(ct);
+            await CollectNetworkInfoAsync(ct);
+            await RescanInventoryAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Post-login recollection (hardware / network / software) failed");
+        }
+    }
 
     /// <summary>
     /// On-demand OS inventory rescan — used by the Installed Applications page's

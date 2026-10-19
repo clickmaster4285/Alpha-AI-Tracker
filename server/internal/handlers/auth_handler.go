@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"time"
 
@@ -46,7 +47,7 @@ func setAuthCookies(c echo.Context, accessValue string, accessExpiry time.Time, 
 	}
 }
 
-func clearAuthCookies(c echo.Context) {
+func ClearAuthCookie(c echo.Context) {
 	for _, name := range []string{authCookieName, refreshCookieName} {
 		c.SetCookie(&http.Cookie{
 			Name:     name,
@@ -117,6 +118,14 @@ func (h *AuthHandler) Login(c echo.Context) error {
 
 	resp, err := h.authService.Login(c.Request().Context(), &req)
 	if err != nil {
+		// 403 (not 401) for a suspended account: the credentials were valid, the
+		// account is simply not authorized, and the web shows the message as-is.
+		if errors.Is(err, services.ErrAccountSuspended) {
+			return c.JSON(http.StatusForbidden, dto.APIError{
+				Code:    http.StatusForbidden,
+				Message: err.Error(),
+			})
+		}
 		return c.JSON(http.StatusUnauthorized, dto.APIError{
 			Code:    http.StatusUnauthorized,
 			Message: err.Error(),
@@ -144,7 +153,14 @@ func (h *AuthHandler) Refresh(c echo.Context) error {
 
 	resp, err := h.authService.RefreshSession(c.Request().Context(), rawRefresh)
 	if err != nil {
-		clearAuthCookies(c)
+		if errors.Is(err, services.ErrAccountSuspended) {
+			ClearAuthCookie(c)
+			return c.JSON(http.StatusForbidden, dto.APIError{
+				Code:    http.StatusForbidden,
+				Message: err.Error(),
+			})
+		}
+		ClearAuthCookie(c)
 		return c.JSON(http.StatusUnauthorized, dto.APIError{
 			Code:    http.StatusUnauthorized,
 			Message: "Invalid or expired refresh token",
@@ -165,7 +181,7 @@ func (h *AuthHandler) Logout(c echo.Context) error {
 		c.Logger().Errorf("failed to revoke refresh token: %v", err)
 	}
 
-	clearAuthCookies(c)
+	ClearAuthCookie(c)
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "logged out successfully",
@@ -240,6 +256,17 @@ func (h *AuthHandler) CheckAuth(c echo.Context) error {
 
 	user, err := h.authService.GetUserResponseByID(c.Request().Context(), userID)
 	if err != nil || user == nil {
+		return c.JSON(http.StatusOK, dto.AuthCheckResponse{
+			Authenticated: false,
+		})
+	}
+
+	// A suspended account is not authorized. Report unauthenticated AND drop the
+	// cookies, so the web routes the user to /login immediately (where the next
+	// sign-in attempt surfaces the 403 "Account suspended" message) instead of
+	// letting an already-issued 15-minute access token keep the session alive.
+	if user.Status == "suspended" {
+		ClearAuthCookie(c)
 		return c.JSON(http.StatusOK, dto.AuthCheckResponse{
 			Authenticated: false,
 		})
@@ -387,6 +414,14 @@ func (h *AuthHandler) EmployeeLogin(c echo.Context) error {
 			if err == nil && device != nil {
 				resp.DeviceToken = rawDeviceToken
 				resp.DeviceID = device.ID
+			}
+
+			// R3/R7: record the machine in the canonical lifecycle registry. A machine
+			// that was marked 'old' and logs in again — or a brand-new machine id after
+			// a local wipe — becomes 'active'; first_track_at is preserved for a machine
+			// we have already seen, so re-login never restarts its history.
+			if _, merr := h.deviceRepo.UpsertEmployeeMachineActive(c.Request().Context(), emp.EmployeeID, machineID); merr != nil {
+				c.Logger().Errorf("failed to upsert employee machine: %v", merr)
 			}
 		}
 	}

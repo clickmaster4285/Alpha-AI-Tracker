@@ -352,7 +352,17 @@ export const employeesApi = {
 
   // Aggregate machine picture: latest hardware, storage, network, installed apps/packages,
   // peripherals, permission checks, app status and activity stats.
-  detail: (id: string) => request<EmployeeDetail>('/employees/' + id + '/detail'),
+  // `deviceId` is the device's machine id — it scopes every device-level surface to that
+  // machine; omitted means the employee-wide aggregate ("all machines").
+  detail: (id: string, deviceId?: string) =>
+    request<EmployeeDetail>('/employees/' + id + '/detail', {
+      params: deviceId ? { deviceId } : undefined,
+    }),
+
+  // "Remove current device": revoke every active device, close open sessions/items and
+  // flip the employee to untracked. History is kept; the next login starts tracking again.
+  removeDevice: (id: string) =>
+    request<RemoveEmployeeDeviceResponse>('/employees/' + id + '/devices/remove', { method: 'POST' }),
 
   create: (data: CreateEmployeePayload) =>
     request<Employee>('/employees', { method: 'POST', body: data }),
@@ -459,6 +469,50 @@ export interface DeviceHardwareDetail {
   syncedAt?: string;
 }
 
+/** One of an employee's registered desktop devices (employee_machines).
+ *  Used by the device-specs page dropdown when an employee has multiple machines.
+ *
+ *  `status` / `firstTrackAt` / `lastTrackAt` come from the canonical
+ *  `employee_machines` lifecycle registry (server migration 049): one row per
+ *  physical machine, deduplicated even though the auth-token registry
+ *  (`employee_devices`) may hold several revoked rows for the same machine.
+ *  `isActiveDevice` mirrors `status === 'active'` (the lifecycle row is
+ *  authoritative for "is this machine current"). */
+export interface EmployeeDevice {
+  id: string;
+  employeeId: string;
+  machineId: string;
+  platform: string;
+  clientVersion: string;
+  deviceName: string;
+  /** Most recent hostname the machine itself reported (may be empty for legacy rows). */
+  hostname: string;
+  /** ISO timestamp — when the device last checked in. */
+  lastSeenAt: string;
+  /** Whether this device registration has been revoked by an admin. */
+  revokedAt: string | null;
+  /** True while the machine's lifecycle status is 'active'. */
+  isActiveDevice: boolean;
+  /** When the device was revoked (null when still active). */
+  removeAt: string | null;
+  /** Machine lifecycle status from `employee_machines`: 'active' | 'old'. */
+  status: 'active' | 'old';
+  /** ISO timestamp — when this machine was first tracked. */
+  firstTrackAt: string;
+  /** ISO timestamp — when this machine last reported (advances on every sync). */
+  lastTrackAt: string;
+  /** Set when an admin removed this device and the client still owes a local wipe. */
+  wipeRequestedAt?: string | null;
+}
+
+/** Result of POST /employees/:id/devices/remove ("Remove current device"). */
+export interface RemoveEmployeeDeviceResponse {
+  revokedDevices: number;
+  closedSessions: number;
+  closedItems: number;
+  trackingStatus: string;
+}
+
 export interface StorageDeviceDetail {
   id: string;
   deviceType: string;
@@ -546,6 +600,9 @@ export interface EmployeeDetail {
   appStatus: Record<string, string>;
   permissions: PermissionStatusDetail[];
   stats: EmployeeActivityStats;
+  /** All registered devices for this employee (employee_devices).
+   *  Used by the device-specs page to offer a dropdown when multiple exist. */
+  devices: EmployeeDevice[];
 }
 
 // ──────────────────────────
@@ -926,6 +983,8 @@ export interface User {
   shift: string;
   trackingEnabled: boolean;
   trackingStatus: string;
+  /** Account status: 'active' | 'suspended'. Suspended users cannot sign in. */
+  status: string;
   isOnline: boolean;
   avatar: string;
   avatarColor: string;
@@ -956,10 +1015,20 @@ export interface UpdateUserPayload {
   password?: string;
   roleId?: number;
   shift?: string;
+  status?: 'active' | 'suspended';
 }
 
 export const usersApi = {
-  list: (params?: { page?: number; perPage?: number; search?: string; roleId?: number; status?: string }) =>
+  list: (params?: {
+    page?: number;
+    perPage?: number;
+    search?: string;
+    roleId?: number;
+    /** Filters users.tracking_status ("tracked" | "untracked"). */
+    status?: string;
+    /** Filters the ACCOUNT status ("active" | "suspended"). */
+    accountStatus?: 'active' | 'suspended';
+  }) =>
     request<UserListResponse>('/users', { params: params as Record<string, string | number | undefined> }),
 
   get: (id: string) => request<User>('/users/' + id),
@@ -1432,6 +1501,16 @@ export interface DashboardSummaryResponse {
     seen24h: number;
     stale7d: number;
     versions: DashboardVersionRow[];
+  };
+  attendance: {
+    date: string;
+    total: number;
+    present: number;
+    late: number;
+    absent: number;
+    halfDay: number;
+    offShift: number;
+    unknown: number;
   };
   live: {
     online: number;

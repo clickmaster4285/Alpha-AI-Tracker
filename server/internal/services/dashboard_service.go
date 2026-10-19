@@ -26,6 +26,7 @@ type DashboardService struct {
 	employeeRepo     *repository.EmployeeRepo
 	termsConsentRepo *repository.TermsConsentRepo
 	taRepo           *repository.TimeAttendanceRepo
+	taService        *TimeAttendanceService
 	streamHub        *stream.Hub
 	presence         *ws.Hub // optional
 }
@@ -36,6 +37,7 @@ func NewDashboardService(
 	employeeRepo *repository.EmployeeRepo,
 	termsConsentRepo *repository.TermsConsentRepo,
 	taRepo *repository.TimeAttendanceRepo,
+	taService *TimeAttendanceService,
 	streamHub *stream.Hub,
 	presence *ws.Hub,
 ) *DashboardService {
@@ -44,6 +46,7 @@ func NewDashboardService(
 		employeeRepo:     employeeRepo,
 		termsConsentRepo: termsConsentRepo,
 		taRepo:           taRepo,
+		taService:        taService,
 		streamHub:        streamHub,
 		presence:         presence,
 	}
@@ -92,6 +95,7 @@ func (s *DashboardService) GetSummary(ctx context.Context, p SummaryParams) (*dt
 		activity   repository.DashboardActivityCounts
 		monitoring repository.DashboardMonitoringCounts
 		devices    repository.DashboardDeviceStats
+		attendance dto.DashboardAttendance
 		topApps    []repository.DashboardTopAppRow
 		topDomains []repository.DashboardTopDomainRow
 		recent     []repository.DashboardRecentSessionRow
@@ -118,6 +122,23 @@ func (s *DashboardService) GetSummary(ctx context.Context, p SummaryParams) (*dt
 	g.Go(func() error {
 		var err error
 		devices, err = s.repo.DeviceStats(gctx, p.DepartmentID)
+		return err
+	})
+	g.Go(func() error {
+		// Today's attendance for the department-filtered employee set. Reuses the
+		// time-attendance computation so the card matches GET /attendance/today.
+		emps, err := s.employeeRepo.ListAll(gctx)
+		if err != nil {
+			return err
+		}
+		ids := make([]string, 0, len(emps))
+		for _, e := range emps {
+			if p.DepartmentID != nil && e.DepartmentID != *p.DepartmentID {
+				continue
+			}
+			ids = append(ids, e.EmployeeID)
+		}
+		attendance, err = s.taService.AttendanceDayCounts(gctx, ids)
 		return err
 	})
 	g.Go(func() error {
@@ -205,6 +226,7 @@ func (s *DashboardService) GetSummary(ctx context.Context, p SummaryParams) (*dt
 			Active: devices.Active, Seen15m: devices.Seen15m, Seen24h: devices.Seen24h,
 			Stale7d: devices.Stale7d, Versions: versionRows,
 		},
+		Attendance:     attendance,
 		Live:           live,
 		TopApps:        appRows,
 		TopDomains:     domainRows,

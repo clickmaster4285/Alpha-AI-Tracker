@@ -41,6 +41,7 @@ type AppSession struct {
 type AppItem struct {
 	ID           string     `json:"id" db:"id"`
 	EmployeeID   string     `json:"employeeId" db:"employee_id"`
+	MachineID    string     `json:"machineId" db:"machine_id"`
 	AppSessionID string     `json:"appSessionId" db:"app_session_id"`
 	ParentItemID *string    `json:"parentItemId,omitempty" db:"parent_item_id"`
 	ItemType     string     `json:"itemType" db:"item_type"`

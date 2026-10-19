@@ -484,19 +484,8 @@ func (h *StreamHandler) Push(c echo.Context) error {
 			log.Printf("[live-stream] hello employee=%s platform=%s available=%v monitors=%d version=%s",
 				empID, msg.Platform, msg.StreamAvailable, len(msg.Monitors), msg.Version)
 		case "offer":
-			answer, err := h.hub.SFU().AcceptPublisherOffer(empID, msg.SDP, func(c webrtc.ICECandidateInit) {
-				payload := map[string]interface{}{
-					"type":      "ice",
-					"candidate": c.Candidate,
-				}
-				if c.SDPMLineIndex != nil {
-					payload["sdpMLineIndex"] = *c.SDPMLineIndex
-				}
-				if c.SDPMid != nil {
-					payload["sdpMid"] = *c.SDPMid
-				}
-				_ = write(payload)
-			})
+			trickle := newIceTrickle(write)
+			answer, err := h.hub.SFU().AcceptPublisherOffer(empID, msg.SDP, trickle.on)
 			if err != nil {
 				log.Printf("[live-stream] publisher offer employee=%s: %v", empID, err)
 				_ = write(map[string]string{"type": "error", "code": "offer_failed"})
@@ -504,6 +493,7 @@ func (h *StreamHandler) Push(c echo.Context) error {
 			}
 			log.Printf("[live-stream] publisher offer accepted employee=%s", empID)
 			_ = write(map[string]string{"type": "answer", "sdp": answer})
+			trickle.answerMarked()
 		case "ice":
 			cand := webrtc.ICECandidateInit{Candidate: msg.Candidate}
 			if msg.SDPMLineIndex != nil {
@@ -516,6 +506,60 @@ func (h *StreamHandler) Push(c echo.Context) error {
 				log.Printf("[live-stream] publisher ice employee=%s: %v", empID, err)
 			}
 		}
+	}
+}
+
+// iceTrickle buffers SFU ICE candidates until the answer has been written to
+// the socket. Pion starts ICE gathering during SetLocalDescription, so the
+// candidate callback can fire BEFORE the answer message is sent. A peer that
+// receives ICE before its remote description exists throws InvalidStateError on
+// addIceCandidate and drops that candidate, which strands the connection
+// (status LIVE, but no frames ever arrive).
+type iceTrickle struct {
+	mu       sync.Mutex
+	answered bool
+	pending  []map[string]interface{}
+	write    func(interface{}) error
+}
+
+func newIceTrickle(write func(interface{}) error) *iceTrickle {
+	return &iceTrickle{write: write}
+}
+
+func (t *iceTrickle) on(c webrtc.ICECandidateInit) {
+	if c.Candidate == "" {
+		return
+	}
+	payload := map[string]interface{}{
+		"type":      "ice",
+		"candidate": c.Candidate,
+	}
+	if c.SDPMLineIndex != nil {
+		payload["sdpMLineIndex"] = *c.SDPMLineIndex
+	}
+	if c.SDPMid != nil {
+		payload["sdpMid"] = *c.SDPMid
+	}
+	t.mu.Lock()
+	if !t.answered {
+		t.pending = append(t.pending, payload)
+		t.mu.Unlock()
+		return
+	}
+	t.mu.Unlock()
+	_ = t.write(payload)
+}
+
+// answerMarked flushes buffered candidates. Must be called AFTER the answer
+// message has been written to the socket.
+func (t *iceTrickle) answerMarked() {
+	t.mu.Lock()
+	t.answered = true
+	pending := t.pending
+	t.pending = nil
+	t.mu.Unlock()
+	for _, payload := range pending {
+		_ = t.write(payload)
 	}
 }
 
@@ -696,29 +740,19 @@ func (h *StreamHandler) Watch(c echo.Context) error {
 			go func() {
 				defer func() { <-h.offerSem }()
 				h.hub.SFU().UnwatchTrackReady(empID, watcherID)
-				answer, withTrack, err := h.hub.SFU().AcceptSubscriberOffer(empID, watcherID, sdp, func(c webrtc.ICECandidateInit) {
-					payload := map[string]interface{}{
-						"type":      "ice",
-						"candidate": c.Candidate,
-					}
-					if c.SDPMLineIndex != nil {
-						payload["sdpMLineIndex"] = *c.SDPMLineIndex
-					}
-					if c.SDPMid != nil {
-						payload["sdpMid"] = *c.SDPMid
-					}
-					_ = write(payload)
-				})
-				if err != nil {
-					if errors.Is(err, stream.ErrSuperseded) {
-						log.Printf("[live-stream] subscriber offer superseded employee=%s watcher=%d", empID, watcherID)
-						return
-					}
-					log.Printf("[live-stream] subscriber offer employee=%s: %v", empID, err)
-					_ = write(map[string]string{"type": "error", "code": "offer_failed"})
+			trickle := newIceTrickle(write)
+			answer, withTrack, err := h.hub.SFU().AcceptSubscriberOffer(empID, watcherID, sdp, trickle.on)
+			if err != nil {
+				if errors.Is(err, stream.ErrSuperseded) {
+					log.Printf("[live-stream] subscriber offer superseded employee=%s watcher=%d", empID, watcherID)
 					return
 				}
-				_ = write(map[string]string{"type": "answer", "sdp": answer})
+				log.Printf("[live-stream] subscriber offer employee=%s: %v", empID, err)
+				_ = write(map[string]string{"type": "error", "code": "offer_failed"})
+				return
+			}
+			_ = write(map[string]string{"type": "answer", "sdp": answer})
+			trickle.answerMarked()
 				if withTrack {
 					// Late joiner: VP8 decoder needs an IDR or the tile stays LIVE/black.
 					h.hub.NudgePublisherKeyframe(empID)

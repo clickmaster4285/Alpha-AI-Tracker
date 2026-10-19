@@ -1,7 +1,78 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-10-03 (Win11 capture + Client Version headers, 1.2.34)
+> **Last audited:** 2026-10-19 (machine id coverage + account/device removal)
 > **Changelog:**
+> - 2026-10-19 (late): **Post-wipe re-login re-collects hardware / network / software; the Linux setup wizard can pass step 2.**
+>   *Defect 1 ("No hardware snapshot synced yet" on a device that re-logged in after a removal):* a
+>   removal wipe runs inside the ALREADY-RUNNING process — it deletes every SQLite row, but the
+>   collector's in-memory dedup fingerprints (`_lastHardwareFingerprint`,
+>   `_lastNetworkPublicIp`/`_lastNetworkPrivateIp`) survive it and the installed-software scan only
+>   runs at STARTUP (inventory is event-driven, no periodic scan — user rule 2026-08-10). The machine
+>   still "looks unchanged", so every periodic collect took the same-process fast path and the startup
+>   scan never ran again: the machine id minted for the re-login received zero `device_hardware_info`,
+>   `network_info`, `storage_devices` and `employee_installed_applications` rows (live evidence:
+>   employee MU-90's third machine had sessions/items/status but no snapshot at all). New
+>   `LogCollectorService.RecollectAfterLoginAsync()` drops the fingerprints (dedup then falls back to
+>   the wiped, empty DB) and re-runs hardware → network → `RescanInventoryAsync`; `MainViewModel.LoginAsync`
+>   fires it after `StartTracking()` and wakes `SyncService` again when it completes. Login also wipes
+>   a leftover local DB belonging to a DIFFERENT employee BEFORE the login request (with
+>   `ResetMachineId()` + `EncryptedConfigService.ResetCache()`), so the rotated machine id and the
+>   server-side device registration always agree (R7). *Defect 2 (wizard stuck on SETUP STEP 2 OF 4 on
+>   Linux):* step 2's gate `IsBackgroundGuardConfigured()` requires the systemd USER unit, but
+>   `GrantBackgroundRunningAsync` only called `EnableAutoStartForced()` — which writes the `.desktop`
+>   entry and runs `systemctl --user enable` against a unit file that does not exist yet — so the step
+>   reported success and re-evaluated to itself forever. New `AutoStartService.EnsureBackgroundGuardAsync()`
+>   writes the unit, daemon-reloads and enables it (deliberately NOT started: the wizard runs inside
+>   the live process; starting it would spawn a mutex-fighting `Restart=always` twin); the step throws
+>   honestly if that fails, and the macOS gate checks the launchd plist instead of always returning
+>   false. Verified: `dotnet build` 0/0 **and** the full `AlphaAITracker-Setup-1.2.36.exe` installed
+>   build — remove-account (machine `old`, employee `untracked`) → same-process GUI re-login minted a
+>   new machine id and, WITHIN 12 SECONDS and without any restart, synced `device_hardware_info`,
+>   `network_info`, `storage_devices` and 74 installed-app links for it (the exact sequence of
+>   `RecollectAfterLoginAsync`), employee back to `tracked`.
+> - 2026-10-19: **`machine_id` on every local table + one account-removal routine + server-initiated wipe.**
+>   **Identity:** a new single-row `machine_identity` table (id=1, `machine_id`) holds THIS machine's
+>   id, and every telemetry INSERT reads it in SQL —
+>   `COALESCE((SELECT machine_id FROM machine_identity WHERE id = 1), '')` — so no store method needed
+>   a new parameter. `machine_id TEXT NOT NULL DEFAULT ''` was added to `device_hardware_info`,
+>   `storage_devices`, `installed_applications`, `installed_packages`, `network_info`,
+>   `hardware_devices`, `session_events`, `app_items`, `app_status`, `permission_status`,
+>   `employee_info`, `location_samples` and `daily_attendance_cache` (both in `CreateTableSql` for new
+>   installs and in `MigrateSql` for existing DBs, plus an `app_items` backfill from its parent
+>   session). `SqliteLogStore` takes a **lazy** `Func<string>` provider (`() => config.ClientId`) and
+>   refreshes `machine_identity` at initialization AND on every login — the id is reset by a wipe, so a
+>   value captured at construction would stamp the retired machine onto the fresh account.
+>   `employee_info.machine_id` is written on login (R7 "save on both DBs").
+>   `Core/DesktopEventBus/JourneyEngine` no longer stamps `Environment.MachineName` on journey
+>   sessions — it uses `AppConfig.ClientId`, the same id every other surface uses.
+>   **Removal:** new `Services/AccountRemovalService.cs` is the ONE removal routine — stop collecting
+>   (`LogCollectorService.StopTracking`) → bounded `SyncService.WaitForDrainAsync`
+>   (`ALPHA_REMOVE_ACCOUNT_SYNC_TIMEOUT_SEC`, default 120s) → `SyncService.SelfRemoveAsync`
+>   (`POST /api/v1/devices/self-remove`, DeviceAuth) → wipe the SQLite DB + `.machine-id` /
+>   device-id files + `ResetMachineId()` + `EncryptedConfigService.ResetCache()`. `SyncService` gained
+>   `Action` parsing on `SyncBatchResponse` and `OnServerRequestedWipe`, raised **once** per process when
+>   a sync answer carries `{"action":"wipe_local"}` (the admin removed this device; that batch is
+>   already persisted server-side) — `Program.cs` wires it to the same service so a removed device
+>   wipes itself and lands on the sign-in page. `WaitForDrainAsync` waits on a real per-pass
+>   completion signal (`CompletePass(drainedAll)`); a pass is "drained" only when nothing failed and
+>   the per-pass budget was not exhausted, and the not-logged-in branch publishes a trivially complete
+>   pass so `--remove-account` can't sit out its whole timeout.
+>   **`--remove-account`:** all entry points converge on the service. The cold-start/background path
+>   now starts the host FIRST (the old code called `RequestImmediateSync()` before `host.StartAsync()`, so
+>   the drain never ran and the server was never told), then drains, notifies, wipes, kills siblings and
+>   stops the host; the running-instance branch still signals the live process, which runs the same
+>   routine in place; `MainViewModel.RemoveAccountAsync` delegates too. Verified: `dotnet build` 0
+>   warnings / 0 errors.
+> - 2026-10-15: **Live stream publisher — ICE buffered until the answer is applied (`LiveStreamClient`).**
+>   The publisher applied each server `ice` message immediately, but the SFU trickles candidates from a
+>   separate goroutine, so a candidate could arrive before the `answer`. `addIceCandidate` with a null
+>   remote description throws and that candidate is dropped — ICE/DTLS then never completes even though
+>   the publisher accepted the offer (watchers see LIVE with no frames). `LiveStreamClient` now keeps
+>   `pendingIce` + `remoteIceReady`: the `answer` handler sets `remoteIceReady` when
+>   `setRemoteDescription` returns `OK` and then flushes the buffered candidates; the `ice` handler
+>   queues while `!remoteIceReady`; both are reset whenever the PC is recreated on `start`/`stop`.
+>   `ApplyRemoteIce` was replaced by `BuildRemoteIce` (returns the candidate instead of applying it).
+>   Ships in the next installer build. Verified: `dotnet build` 0 warnings / 0 errors.
 > - 2026-10-03: **Win11 blank live preview (FA-27) + Client Version on DeviceAuth.**
 >   FA-27 showed admin `LIVE` / `--- FPS` while SFU logged `withTrack=false`: Win11 GDI
 >   `CopyFromScreen` / CAPTUREBLT-only BitBlt produced no frames → no RTP. **`ScreenCaptureService`**

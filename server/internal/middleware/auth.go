@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/alpha-ai-tracker/server/internal/dto"
+	"github.com/alpha-ai-tracker/server/internal/handlers"
 	"github.com/alpha-ai-tracker/server/internal/services"
 	"github.com/labstack/echo/v4"
 )
@@ -50,6 +51,20 @@ func JWTAuth(authService *services.AuthService) echo.MiddlewareFunc {
 
 			// Set user info in context
 			c.Set("user_id", claims.UserID)
+
+			// Check user status — if not active, clear the cookie and deny access
+			user, err := authService.GetUserByID(c.Request().Context(), claims.UserID)
+			if err != nil {
+				c.Logger().Errorf("failed to load user %s for status check: %v", claims.UserID, err)
+				return next(c)
+			}
+			if user != nil && user.Status != "active" {
+				handlers.ClearAuthCookie(c)
+				return c.JSON(http.StatusUnauthorized, dto.APIError{
+					Code:    http.StatusUnauthorized,
+					Message: "Account is not active",
+				})
+			}
 
 			return next(c)
 		}

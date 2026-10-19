@@ -242,6 +242,20 @@ public interface ILogStore
     Task<EmployeeInfo?> GetEmployeeInfoAsync(CancellationToken ct);
     Task ClearEmployeeInfoAsync(CancellationToken ct);
 
+    /// <summary>
+    /// Delete EVERY locally stored row for this account — the login credentials /
+    /// device token (employee_info), all collected activity (sessions, items,
+    /// events), the inventory + hardware/network caches and the mirrored
+    /// schedules/holidays/terms — leaving only the schema itself.
+    ///
+    /// Used by the <c>--remove-account</c> client command (surfaced in the web
+    /// "Remove Current Device" modal): the machine must end up with no trace of the
+    /// removed employee and land back on the sign-in page. The machine identity (.machine-id)
+    /// and device_id files are removed so the device cleanly regenerates identifiers on
+    /// subsequent login, while the encrypted fleet config (config.enc) is preserved.
+    /// </summary>
+    Task WipeLocalAccountDataAsync(CancellationToken ct);
+
     // ════════════════════════════════════════════════════════════════════════
     // Time and Attendance (Phase 1, finalplan section 2.2)
     // ════════════════════════════════════════════════════════════════════════

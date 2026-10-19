@@ -57,30 +57,30 @@ func (r *NewSchemaRepo) BulkInsertDeviceHardware(ctx context.Context, entries []
 		}
 		batch := entries[i:end]
 		valueStrings := make([]string, 0, len(batch))
-		args := make([]interface{}, 0, len(batch)*12)
+		args := make([]interface{}, 0, len(batch)*15)
 		argIdx := 1
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
 				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
-				argIdx+10, argIdx+11, argIdx+12, argIdx+13,
+				argIdx+10, argIdx+11, argIdx+12, argIdx+13, argIdx+14,
 			))
 			storageDevices := e.StorageDevices
 			if strings.TrimSpace(storageDevices) == "" {
 				storageDevices = "[]"
 			}
 			args = append(args,
-				e.ID, e.EmployeeID, e.MacAddress, e.Hostname, e.OsName, e.OsVersion,
+				e.ID, e.EmployeeID, e.MachineID, e.MacAddress, e.Hostname, e.OsName, e.OsVersion,
 				e.CpuModel, e.CpuCores, e.RamTotalMB, storageDevices, e.GpuModel, e.GpuVramMB, e.CollectedAt, time.Now(),
 			)
-			argIdx += 14
+			argIdx += 15
 		}
 
 		query := fmt.Sprintf(`
 			INSERT INTO device_hardware_info
-				(id, employee_id, mac_address, hostname, os_name, os_version,
+				(id, employee_id, machine_id, mac_address, hostname, os_name, os_version,
 				 cpu_model, cpu_cores, ram_total_mb, storage_devices, gpu_model, gpu_vram_mb, collected_at, synced_at)
 			VALUES %s
 			ON CONFLICT (id) DO NOTHING
@@ -215,23 +215,23 @@ func (r *NewSchemaRepo) BulkInsertNetworkInfo(ctx context.Context, entries []mod
 		}
 		batch := entries[i:end]
 		valueStrings := make([]string, 0, len(batch))
-		args := make([]interface{}, 0, len(batch)*7)
+		args := make([]interface{}, 0, len(batch)*8)
 		argIdx := 1
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
-				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4, argIdx+5, argIdx+6, argIdx+7,
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4, argIdx+5, argIdx+6, argIdx+7, argIdx+8,
 			))
 			args = append(args,
-				e.ID, e.EmployeeID, e.PublicIP, e.PrivateIP, e.MacAddress, e.NetworkInterfaceName, e.CollectedAt, time.Now(),
+				e.ID, e.EmployeeID, e.MachineID, e.PublicIP, e.PrivateIP, e.MacAddress, e.NetworkInterfaceName, e.CollectedAt, time.Now(),
 			)
-			argIdx += 8
+			argIdx += 9
 		}
 
 		query := fmt.Sprintf(`
 			INSERT INTO network_info
-				(id, employee_id, public_ip, private_ip, mac_address, network_interface_name, collected_at, synced_at)
+				(id, employee_id, machine_id, public_ip, private_ip, mac_address, network_interface_name, collected_at, synced_at)
 			VALUES %s
 			ON CONFLICT (id) DO NOTHING
 		`, strings.Join(valueStrings, ", "))
@@ -262,28 +262,29 @@ func (r *NewSchemaRepo) BulkInsertSessionEvents(ctx context.Context, entries []m
 		}
 		batch := entries[i:end]
 		valueStrings := make([]string, 0, len(batch))
-		args := make([]interface{}, 0, len(batch)*9)
+		args := make([]interface{}, 0, len(batch)*10)
 		argIdx := 1
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
-				argIdx+5, argIdx+6, argIdx+7, argIdx+8,
+				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
 			))
 			args = append(args,
-				e.ID, e.EmployeeID, e.EventType, e.OsUsername, e.EventAt,
+				e.ID, e.EmployeeID, e.MachineID, e.EventType, e.OsUsername, e.EventAt,
 				e.EventCount, e.FirstAt, e.LastAt, time.Now(),
 			)
-			argIdx += 9
+			argIdx += 10
 		}
 
 		query := fmt.Sprintf(`
 			INSERT INTO session_events
-				(id, employee_id, event_type, os_username, event_at,
+				(id, employee_id, machine_id, event_type, os_username, event_at,
 				 event_count, first_at, last_at, synced_at)
 			VALUES %s
 			ON CONFLICT (id) DO UPDATE SET
+				machine_id = EXCLUDED.machine_id,
 				event_type = EXCLUDED.event_type,
 				os_username = EXCLUDED.os_username,
 				event_at = EXCLUDED.event_at,
@@ -486,35 +487,36 @@ func (r *NewSchemaRepo) BulkInsertAppItems(ctx context.Context, entries []models
 		batch = survivorIdxOf(batch, survivorIdx)
 
 		valueStrings := make([]string, 0, len(batch))
-		args := make([]interface{}, 0, len(batch)*21)
+		args := make([]interface{}, 0, len(batch)*22)
 		argIdx := 1
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
 				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
 				argIdx+10, argIdx+11, argIdx+12, argIdx+13, argIdx+14,
 				argIdx+15, argIdx+16, argIdx+17, argIdx+18, argIdx+19,
-				argIdx+20,
+				argIdx+20, argIdx+21,
 			))
 			args = append(args,
-				e.ID, e.EmployeeID, e.AppSessionID, e.ParentItemID, e.ItemType,
+				e.ID, e.EmployeeID, e.MachineID, e.AppSessionID, e.ParentItemID, e.ItemType,
 				e.Title, e.Identifier, e.Url, e.Domain, e.OpenedAt, e.ClosedAt,
 				e.ProcessID, e.ObjectType, e.Action, e.JourneyID, e.Sequence,
 				e.PreviousPath, e.CurrentPath, e.WindowID, e.TabID, e.MetadataJSON,
 			)
-			argIdx += 21
+			argIdx += 22
 		}
 
 		query := fmt.Sprintf(`
 			INSERT INTO app_items
-				(id, employee_id, app_session_id, parent_item_id, item_type,
+				(id, employee_id, machine_id, app_session_id, parent_item_id, item_type,
 				 title, identifier, url, domain, opened_at, closed_at,
 				 process_id, object_type, action, journey_id, sequence,
 				 previous_path, current_path, window_id, tab_id, metadata_json, synced_at)
 			VALUES %s
 			ON CONFLICT (id) DO UPDATE SET
+				machine_id = COALESCE(NULLIF(EXCLUDED.machine_id, ''), app_items.machine_id),
 				title = EXCLUDED.title,
 				identifier = EXCLUDED.identifier,
 				url = COALESCE(NULLIF(EXCLUDED.url, ''), app_items.url),
@@ -1348,6 +1350,176 @@ func (r *NewSchemaRepo) ListAppItems(ctx context.Context, params AppItemListPara
 	}, nil
 }
 
+// ListEmployeeDevices returns all registered devices for an employee (employee_devices).
+func (r *NewSchemaRepo) ListEmployeeDevices(ctx context.Context, employeeID string) ([]models.EmployeeDevice, error) {
+	return ListEmployeeDevices(ctx, r.pool, employeeID)
+}
+
+// ListEmployeeMachines returns the canonical per-machine lifecycle rows for an
+// employee (employee_machines, migration 049) — one entry per physical machine.
+func (r *NewSchemaRepo) ListEmployeeMachines(ctx context.Context, employeeID string) ([]models.EmployeeMachine, error) {
+	return ListEmployeeMachines(ctx, r.pool, employeeID)
+}
+
+// UpsertEmployeeMachineActive marks (employee, machine) current, preserving first_track_at.
+func (r *NewSchemaRepo) UpsertEmployeeMachineActive(ctx context.Context, employeeID, machineID string) (*models.EmployeeMachine, error) {
+	return UpsertEmployeeMachineActive(ctx, r.pool, employeeID, machineID)
+}
+
+// TouchEmployeeMachineLastTrack advances last_track_at for one machine.
+func (r *NewSchemaRepo) TouchEmployeeMachineLastTrack(ctx context.Context, employeeID, machineID string) error {
+	return TouchEmployeeMachineLastTrack(ctx, r.pool, employeeID, machineID)
+}
+
+// MarkEmployeeMachineOld flips one machine to 'old'; requestWipe stamps wipe_requested_at (R6).
+func (r *NewSchemaRepo) MarkEmployeeMachineOld(ctx context.Context, employeeID, machineID string, requestWipe bool) error {
+	return MarkEmployeeMachineOld(ctx, r.pool, employeeID, machineID, requestWipe)
+}
+
+// MarkAllEmployeeMachinesOld flips every ACTIVE machine of an employee to 'old' (remove-account).
+func (r *NewSchemaRepo) MarkAllEmployeeMachinesOld(ctx context.Context, employeeID string) error {
+	return MarkAllEmployeeMachinesOld(ctx, r.pool, employeeID)
+}
+
+// MarkAllEmployeeMachinesOldWithWipe flips every ACTIVE machine to 'old' and stamps
+// wipe_requested_at (R6). Machines already 'old' are skipped.
+func (r *NewSchemaRepo) MarkAllEmployeeMachinesOldWithWipe(ctx context.Context, employeeID string) error {
+	return MarkAllEmployeeMachinesOldWithWipe(ctx, r.pool, employeeID)
+}
+
+// ListEmployeeDevices is a shared helper that queries employee_devices for an employee.
+func ListEmployeeDevices(ctx context.Context, pool *pgxpool.Pool, employeeID string) ([]models.EmployeeDevice, error) {
+	query := `
+		SELECT id, employee_id, machine_id, platform, client_version, device_name,
+		       token_hash, created_at, last_seen_at, expires_at, revoked_at
+		FROM employee_devices
+		WHERE employee_id = $1
+		ORDER BY last_seen_at DESC
+	`
+	rows, err := pool.Query(ctx, query, employeeID)
+	if err != nil {
+		return nil, fmt.Errorf("list employee devices: %w", err)
+	}
+	defer rows.Close()
+
+	var devices []models.EmployeeDevice
+	for rows.Next() {
+		var d models.EmployeeDevice
+		if err := rows.Scan(
+			&d.ID, &d.EmployeeID, &d.MachineID, &d.Platform, &d.ClientVersion, &d.DeviceName,
+			&d.TokenHash, &d.CreatedAt, &d.LastSeenAt, &d.ExpiresAt, &d.RevokedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan employee device: %w", err)
+		}
+		devices = append(devices, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate employee devices: %w", err)
+	}
+	return devices, nil
+}
+
+// RevokeEmployeeDevices revokes every live device registration for an employee and
+// returns how many rows changed. The rows are kept (revoked_at set) so the device
+// history and all data it produced stay queryable — nothing is deleted.
+func (r *NewSchemaRepo) RevokeEmployeeDevices(ctx context.Context, employeeID string) (int, error) {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE employee_devices
+		SET revoked_at = NOW(),
+		    is_active_device = false,
+		    remove_at = NOW()
+		WHERE employee_id = $1 AND revoked_at IS NULL
+	`, employeeID)
+	if err != nil {
+		return 0, fmt.Errorf("revoke employee devices: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// CloseOpenActivity freezes every still-open app session and app item for an employee.
+// Used when a device is removed from the employee: the machine can no longer report, so
+// nothing may keep rendering as Running. History is preserved — the rows stay CLOSED.
+func (r *NewSchemaRepo) CloseOpenActivity(ctx context.Context, employeeID string) (sessions int, items int, err error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("begin close activity tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx, `
+		UPDATE app_items
+		SET closed_at = NOW()
+		WHERE employee_id = $1 AND closed_at IS NULL AND deleted_at IS NULL
+	`, employeeID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("close open app_items: %w", err)
+	}
+	items = int(tag.RowsAffected())
+
+	tag, err = tx.Exec(ctx, `
+		UPDATE app_sessions
+		SET ended_at = COALESCE(ended_at, NOW()),
+		    last_activity_at = COALESCE(last_activity_at, NOW()),
+		    last_sync_at = NOW(),
+		    status = 'CLOSED'
+		WHERE employee_id = $1 AND ended_at IS NULL AND deleted_at IS NULL
+	`, employeeID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("close open app_sessions: %w", err)
+	}
+	sessions = int(tag.RowsAffected())
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, fmt.Errorf("commit close activity: %w", err)
+	}
+	return sessions, items, nil
+}
+
+// LatestHostnamesByMachine returns machine_id → most recently reported hostname, so the
+// web can label a device "{employee name} ({hostname})" even when the login never sent a
+// device name. Only non-empty hostnames are returned.
+func (r *NewSchemaRepo) LatestHostnamesByMachine(ctx context.Context, employeeID string) (map[string]string, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT DISTINCT ON (machine_id) machine_id, hostname
+		FROM device_hardware_info
+		WHERE employee_id = $1 AND deleted_at IS NULL AND machine_id <> '' AND hostname <> ''
+		ORDER BY machine_id, collected_at DESC
+	`, employeeID)
+	if err != nil {
+		return nil, fmt.Errorf("latest hostnames by machine: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[string]string)
+	for rows.Next() {
+		var machineID, hostname string
+		if err := rows.Scan(&machineID, &hostname); err != nil {
+			return nil, fmt.Errorf("scan hostname row: %w", err)
+		}
+		out[machineID] = hostname
+	}
+	return out, rows.Err()
+}
+
+// TouchDeviceName fills employee_devices.device_name from a freshly synced hostname. It
+// only writes when the stored name is empty or differs, so steady-state heartbeats do not
+// churn the row.
+func (r *NewSchemaRepo) TouchDeviceName(ctx context.Context, employeeID, machineID, deviceName string) error {
+	if strings.TrimSpace(deviceName) == "" || strings.TrimSpace(machineID) == "" {
+		return nil
+	}
+	_, err := r.pool.Exec(ctx, `
+		UPDATE employee_devices
+		SET device_name = $3
+		WHERE employee_id = $1 AND machine_id = $2 AND revoked_at IS NULL
+		  AND device_name IS DISTINCT FROM $3
+	`, employeeID, machineID, deviceName)
+	if err != nil {
+		return fmt.Errorf("touch device name: %w", err)
+	}
+	return nil
+}
+
 // ────────────────────────────────
 // CATALOG + EMPLOYEE LINK UPSERTS
 // (employee↔app / employee↔package catalog dedup)
@@ -1455,14 +1627,15 @@ func (r *NewSchemaRepo) UpsertPackageCatalog(ctx context.Context, tx pgx.Tx, e m
 	return id, nil
 }
 
-// UpsertEmployeeAppLink links an employee to a catalog app, refreshing per-install metadata.
+// UpsertEmployeeAppLink links an employee-machine to a catalog app, refreshing per-install metadata.
+// The link is device-scoped: the same app installed on two machines keeps two rows.
 func (r *NewSchemaRepo) UpsertEmployeeAppLink(ctx context.Context, tx pgx.Tx, link models.EmployeeInstalledApplication) error {
 	_, err := tx.Exec(ctx, `
 		INSERT INTO employee_installed_applications
-			(employee_id, installed_application_id, app_version, publisher, install_path, install_date,
+			(employee_id, machine_id, installed_application_id, app_version, publisher, install_path, install_date,
 			 first_seen_at, last_seen_at, is_active)
-		VALUES ($1, $2, $3, $4, $5, $6, now(), now(), true)
-		ON CONFLICT (employee_id, installed_application_id) DO UPDATE SET
+		VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now(), true)
+		ON CONFLICT (employee_id, machine_id, installed_application_id) DO UPDATE SET
 			app_version = EXCLUDED.app_version,
 			publisher = COALESCE(NULLIF(EXCLUDED.publisher, ''), employee_installed_applications.publisher),
 			install_path = COALESCE(NULLIF(EXCLUDED.install_path, ''), employee_installed_applications.install_path),
@@ -1470,7 +1643,7 @@ func (r *NewSchemaRepo) UpsertEmployeeAppLink(ctx context.Context, tx pgx.Tx, li
 			last_seen_at = now(),
 			is_active = true
 	`,
-		link.EmployeeID, link.InstalledApplicationID, link.AppVersion, link.Publisher, link.InstallPath, link.InstallDate,
+		link.EmployeeID, link.MachineID, link.InstalledApplicationID, link.AppVersion, link.Publisher, link.InstallPath, link.InstallDate,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert employee app link: %w", err)
@@ -1478,21 +1651,22 @@ func (r *NewSchemaRepo) UpsertEmployeeAppLink(ctx context.Context, tx pgx.Tx, li
 	return nil
 }
 
-// UpsertEmployeePackageLink links an employee to a catalog package, refreshing per-install metadata.
+// UpsertEmployeePackageLink links an employee-machine to a catalog package, refreshing
+// per-install metadata. The link is device-scoped like the app junction.
 func (r *NewSchemaRepo) UpsertEmployeePackageLink(ctx context.Context, tx pgx.Tx, link models.EmployeeInstalledPackage) error {
 	_, err := tx.Exec(ctx, `
 		INSERT INTO employee_installed_packages
-			(employee_id, installed_package_id, version, publisher, install_path,
+			(employee_id, machine_id, installed_package_id, version, publisher, install_path,
 			 first_seen_at, last_seen_at, is_active)
-		VALUES ($1, $2, $3, $4, $5, now(), now(), true)
-		ON CONFLICT (employee_id, installed_package_id) DO UPDATE SET
+		VALUES ($1, $2, $3, $4, $5, $6, now(), now(), true)
+		ON CONFLICT (employee_id, machine_id, installed_package_id) DO UPDATE SET
 			version = EXCLUDED.version,
 			publisher = COALESCE(NULLIF(EXCLUDED.publisher, ''), employee_installed_packages.publisher),
 			install_path = COALESCE(NULLIF(EXCLUDED.install_path, ''), employee_installed_packages.install_path),
 			last_seen_at = now(),
 			is_active = true
 	`,
-		link.EmployeeID, link.InstalledPackageID, link.Version, link.Publisher, link.InstallPath,
+		link.EmployeeID, link.MachineID, link.InstalledPackageID, link.Version, link.Publisher, link.InstallPath,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert employee package link: %w", err)
@@ -1506,12 +1680,12 @@ func (r *NewSchemaRepo) UpsertEmployeePackageLink(ctx context.Context, tx pgx.Tx
 
 func (r *NewSchemaRepo) UpsertAppStatus(ctx context.Context, tx pgx.Tx, e models.AppStatus) error {
 	_, err := tx.Exec(ctx, `
-		INSERT INTO app_status (employee_id, key, value, updated_at)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (employee_id, key) DO UPDATE SET
+		INSERT INTO app_status (employee_id, machine_id, key, value, updated_at)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (employee_id, machine_id, key) DO UPDATE SET
 			value = EXCLUDED.value,
 			updated_at = EXCLUDED.updated_at
-	`, e.EmployeeID, e.Key, e.Value, e.UpdatedAt)
+	`, e.EmployeeID, e.MachineID, e.Key, e.Value, e.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("upsert app_status: %w", err)
 	}
@@ -1535,25 +1709,25 @@ func (r *NewSchemaRepo) BulkUpsertHardwareDevices(ctx context.Context, entries [
 		}
 		batch := entries[i:end]
 		valueStrings := make([]string, 0, len(batch))
-		args := make([]interface{}, 0, len(batch)*10)
+		args := make([]interface{}, 0, len(batch)*11)
 		argIdx := 1
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
-				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
+				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9, argIdx+10,
 			))
 			args = append(args,
-				e.ID, e.EmployeeID, e.DeviceClass, e.Vendor, e.Product,
+				e.ID, e.EmployeeID, e.MachineID, e.DeviceClass, e.Vendor, e.Product,
 				e.Serial, e.BusPath, e.DeviceNode, e.PluggedAt, e.UnpluggedAt,
 			)
-			argIdx += 10
+			argIdx += 11
 		}
 
 		query := fmt.Sprintf(`
 			INSERT INTO hardware_devices
-				(id, employee_id, device_class, vendor, product, serial, bus_path, device_node, plugged_at, unplugged_at, synced_at)
+				(id, employee_id, machine_id, device_class, vendor, product, serial, bus_path, device_node, plugged_at, unplugged_at, synced_at)
 			VALUES %s
 			ON CONFLICT (id) DO UPDATE SET
 				unplugged_at = COALESCE(EXCLUDED.unplugged_at, hardware_devices.unplugged_at),
@@ -1586,28 +1760,27 @@ func (r *NewSchemaRepo) BulkUpsertPermissionStatus(ctx context.Context, entries 
 		}
 		batch := entries[i:end]
 		valueStrings := make([]string, 0, len(batch))
-		args := make([]interface{}, 0, len(batch)*9)
+		args := make([]interface{}, 0, len(batch)*10)
 		argIdx := 1
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
-				argIdx+5, argIdx+6, argIdx+7, argIdx+8,
+				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
 			))
 			args = append(args,
-				e.CheckID, e.EmployeeID, e.SessionID, e.SessionType, e.Platform,
+				e.CheckID, e.EmployeeID, e.MachineID, e.SessionID, e.SessionType, e.Platform,
 				e.CheckedAt, e.Method, e.Works, e.Details,
 			)
-			argIdx += 9
+			argIdx += 10
 		}
 
 		query := fmt.Sprintf(`
 			INSERT INTO permission_status
-				(check_id, employee_id, session_id, session_type, platform, checked_at, method, works, details, synced_at)
+				(check_id, employee_id, machine_id, session_id, session_type, platform, checked_at, method, works, details, synced_at)
 			VALUES %s
-			ON CONFLICT (check_id) DO UPDATE SET
-				employee_id = EXCLUDED.employee_id,
+			ON CONFLICT (employee_id, machine_id, check_id) DO UPDATE SET
 				session_id = EXCLUDED.session_id,
 				session_type = EXCLUDED.session_type,
 				platform = EXCLUDED.platform,
@@ -1643,23 +1816,23 @@ func (r *NewSchemaRepo) BulkUpsertStorageDevices(ctx context.Context, entries []
 		}
 		batch := entries[i:end]
 		valueStrings := make([]string, 0, len(batch))
-		args := make([]interface{}, 0, len(batch)*6)
+		args := make([]interface{}, 0, len(batch)*7)
 		argIdx := 1
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, NOW())",
-				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4, argIdx+5,
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
+				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4, argIdx+5, argIdx+6,
 			))
 			args = append(args,
-				e.ID, e.EmployeeID, e.DeviceHardwareID, e.DeviceType, e.Model, e.CapacityMB,
+				e.ID, e.EmployeeID, e.MachineID, e.DeviceHardwareID, e.DeviceType, e.Model, e.CapacityMB,
 			)
-			argIdx += 6
+			argIdx += 7
 		}
 
 		query := fmt.Sprintf(`
 			INSERT INTO storage_devices
-				(id, employee_id, device_hardware_id, device_type, model, capacity_mb, synced_at)
+				(id, employee_id, machine_id, device_hardware_id, device_type, model, capacity_mb, synced_at)
 			VALUES %s
 			ON CONFLICT (id) DO NOTHING
 		`, strings.Join(valueStrings, ", "))
@@ -1678,22 +1851,24 @@ func (r *NewSchemaRepo) BulkUpsertStorageDevices(ctx context.Context, entries []
 // (web dashboard — GET /employees/:id/detail)
 // ────────────────────────────────
 
-// GetLatestDeviceHardware returns the most recent device_hardware_info snapshot for an employee.
-func (r *NewSchemaRepo) GetLatestDeviceHardware(ctx context.Context, employeeID string) (*models.DeviceHardwareInfo, error) {
+// GetLatestDeviceHardware returns the most recent device_hardware_info snapshot for an
+// employee. machineID scopes the read to one device; "" keeps the employee-wide view.
+func (r *NewSchemaRepo) GetLatestDeviceHardware(ctx context.Context, employeeID, machineID string) (*models.DeviceHardwareInfo, error) {
 	query := `
-		SELECT id, employee_id, COALESCE(device_id, '') AS device_id, COALESCE(mac_address, '') AS mac_address,
+		SELECT id, employee_id, COALESCE(machine_id, '') AS machine_id, COALESCE(device_id, '') AS device_id,
+		       COALESCE(mac_address, '') AS mac_address,
 		       COALESCE(hostname, '') AS hostname, COALESCE(os_name, '') AS os_name, COALESCE(os_version, '') AS os_version,
 		       COALESCE(cpu_model, '') AS cpu_model, cpu_cores, ram_total_mb,
 		       COALESCE(storage_devices::TEXT, '[]') AS storage_devices,
 		       COALESCE(gpu_model, '') AS gpu_model, gpu_vram_mb, collected_at, synced_at, created_at
 		FROM device_hardware_info
-		WHERE employee_id = $1 AND deleted_at IS NULL
+		WHERE employee_id = $1 AND deleted_at IS NULL AND ($2 = '' OR machine_id = $2)
 		ORDER BY collected_at DESC
 		LIMIT 1
 	`
 	var hw models.DeviceHardwareInfo
-	err := r.pool.QueryRow(ctx, query, employeeID).Scan(
-		&hw.ID, &hw.EmployeeID, &hw.DeviceID, &hw.MacAddress, &hw.Hostname, &hw.OsName, &hw.OsVersion,
+	err := r.pool.QueryRow(ctx, query, employeeID, machineID).Scan(
+		&hw.ID, &hw.EmployeeID, &hw.MachineID, &hw.DeviceID, &hw.MacAddress, &hw.Hostname, &hw.OsName, &hw.OsVersion,
 		&hw.CpuModel, &hw.CpuCores, &hw.RamTotalMB, &hw.StorageDevices, &hw.GpuModel, &hw.GpuVramMB,
 		&hw.CollectedAt, &hw.SyncedAt, &hw.CreatedAt,
 	)
@@ -1706,15 +1881,16 @@ func (r *NewSchemaRepo) GetLatestDeviceHardware(ctx context.Context, employeeID 
 	return &hw, nil
 }
 
-// ListStorageDevices returns the storage_devices rows for an employee.
-func (r *NewSchemaRepo) ListStorageDevices(ctx context.Context, employeeID string) ([]models.StorageDevice, error) {
+// ListStorageDevices returns the storage_devices rows for an employee (optionally one machine).
+func (r *NewSchemaRepo) ListStorageDevices(ctx context.Context, employeeID, machineID string) ([]models.StorageDevice, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, employee_id, device_hardware_id, COALESCE(device_type, '') AS device_type,
+		SELECT id, employee_id, COALESCE(machine_id, '') AS machine_id, device_hardware_id,
+		       COALESCE(device_type, '') AS device_type,
 		       COALESCE(model, '') AS model, capacity_mb, synced_at, created_at
 		FROM storage_devices
-		WHERE employee_id = $1 AND deleted_at IS NULL
+		WHERE employee_id = $1 AND deleted_at IS NULL AND ($2 = '' OR machine_id = $2)
 		ORDER BY capacity_mb DESC
-	`, employeeID)
+	`, employeeID, machineID)
 	if err != nil {
 		return nil, fmt.Errorf("list storage_devices: %w", err)
 	}
@@ -1724,7 +1900,7 @@ func (r *NewSchemaRepo) ListStorageDevices(ctx context.Context, employeeID strin
 	for rows.Next() {
 		var d models.StorageDevice
 		if err := rows.Scan(
-			&d.ID, &d.EmployeeID, &d.DeviceHardwareID, &d.DeviceType, &d.Model, &d.CapacityMB,
+			&d.ID, &d.EmployeeID, &d.MachineID, &d.DeviceHardwareID, &d.DeviceType, &d.Model, &d.CapacityMB,
 			&d.SyncedAt, &d.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan storage_device row: %w", err)
@@ -1734,20 +1910,22 @@ func (r *NewSchemaRepo) ListStorageDevices(ctx context.Context, employeeID strin
 	return devices, rows.Err()
 }
 
-// GetLatestNetworkInfo returns the most recent network_info snapshot for an employee.
-func (r *NewSchemaRepo) GetLatestNetworkInfo(ctx context.Context, employeeID string) (*models.NetworkInfo, error) {
+// GetLatestNetworkInfo returns the most recent network_info snapshot for an employee
+// (optionally scoped to one machine).
+func (r *NewSchemaRepo) GetLatestNetworkInfo(ctx context.Context, employeeID, machineID string) (*models.NetworkInfo, error) {
 	query := `
-		SELECT id, employee_id, COALESCE(public_ip, '') AS public_ip, COALESCE(private_ip, '') AS private_ip,
+		SELECT id, employee_id, COALESCE(machine_id, '') AS machine_id,
+		       COALESCE(public_ip, '') AS public_ip, COALESCE(private_ip, '') AS private_ip,
 		       COALESCE(mac_address, '') AS mac_address, COALESCE(network_interface_name, '') AS network_interface_name,
 		       collected_at, synced_at, created_at
 		FROM network_info
-		WHERE employee_id = $1 AND deleted_at IS NULL
+		WHERE employee_id = $1 AND deleted_at IS NULL AND ($2 = '' OR machine_id = $2)
 		ORDER BY collected_at DESC
 		LIMIT 1
 	`
 	var n models.NetworkInfo
-	err := r.pool.QueryRow(ctx, query, employeeID).Scan(
-		&n.ID, &n.EmployeeID, &n.PublicIP, &n.PrivateIP, &n.MacAddress, &n.NetworkInterfaceName,
+	err := r.pool.QueryRow(ctx, query, employeeID, machineID).Scan(
+		&n.ID, &n.EmployeeID, &n.MachineID, &n.PublicIP, &n.PrivateIP, &n.MacAddress, &n.NetworkInterfaceName,
 		&n.CollectedAt, &n.SyncedAt, &n.CreatedAt,
 	)
 	if err != nil {
@@ -1761,19 +1939,48 @@ func (r *NewSchemaRepo) GetLatestNetworkInfo(ctx context.Context, employeeID str
 
 // ListEmployeeApplications returns the employee's currently-installed applications
 // (catalog row joined with the per-employee junction row, active links only).
-func (r *NewSchemaRepo) ListEmployeeApplications(ctx context.Context, employeeID string) ([]models.EmployeeApplicationDetail, error) {
+// machineID scopes the read to one device; "" keeps the employee-wide view. When a
+// machineID is given and that machine has no live device registration (it was removed),
+// inactive links are included so the removed device's last-known inventory is shown.
+func (r *NewSchemaRepo) ListEmployeeApplications(ctx context.Context, employeeID, machineID string) ([]models.EmployeeApplicationDetail, error) {
+	// DISTINCT ON collapses the per-machine link rows to ONE row per catalog app in the
+	// employee-wide view (a legacy '' link plus a per-machine link are the same app).
 	rows, err := r.pool.Query(ctx, `
-		SELECT ia.id, ia.app_name, COALESCE(ia.binary_name, '') AS binary_name,
-		       COALESCE(eia.app_version, '') AS app_version,
-		       COALESCE(eia.publisher, '') AS publisher,
-		       COALESCE(eia.install_path, '') AS install_path,
-		       eia.install_date, ia.is_browser, COALESCE(ia.categories, '') AS categories,
-		       COALESCE(ia.desktop_id, '') AS desktop_id, eia.first_seen_at, eia.last_seen_at
-		FROM employee_installed_applications eia
-		JOIN installed_applications ia ON ia.id = eia.installed_application_id
-		WHERE eia.employee_id = $1 AND eia.is_active = true AND ia.deleted_at IS NULL
-		ORDER BY ia.app_name ASC
-	`, employeeID)
+		SELECT t.id, t.app_name, t.binary_name, t.app_version, t.publisher, t.install_path,
+		       t.install_date, t.is_browser, t.categories, t.desktop_id, t.first_seen_at, t.last_seen_at
+		FROM (
+			SELECT DISTINCT ON (ia.id)
+			       ia.id, ia.app_name, COALESCE(ia.binary_name, '') AS binary_name,
+			       COALESCE(eia.app_version, '') AS app_version,
+			       COALESCE(eia.publisher, '') AS publisher,
+			       COALESCE(eia.install_path, '') AS install_path,
+			       eia.install_date, ia.is_browser, COALESCE(ia.categories, '') AS categories,
+			       COALESCE(ia.desktop_id, '') AS desktop_id, eia.first_seen_at, eia.last_seen_at
+			FROM employee_installed_applications eia
+			JOIN installed_applications ia ON ia.id = eia.installed_application_id
+			WHERE eia.employee_id = $1 AND ia.deleted_at IS NULL
+			  AND ($2 = '' OR eia.machine_id = $2)
+			  -- is_active means "the machine is still reporting this app". A retired device
+			  -- never syncs again, so once the staleness sweep flips its links to false the
+			  -- whole device-scoped Installed Software page would be empty. For a machine
+			  -- with NO live registration (all its employee_devices rows revoked) show the
+			  -- last-known inventory instead; the employee-wide view keeps is_active so a
+			  -- live machine's uninstalled apps stay hidden.
+			  AND (
+			    eia.is_active = true
+			    OR (
+			      $2 <> '' AND NOT EXISTS (
+			        SELECT 1 FROM employee_devices d
+			        WHERE d.employee_id = eia.employee_id
+			          AND d.machine_id = eia.machine_id
+			          AND d.revoked_at IS NULL
+			      )
+			    )
+			  )
+			ORDER BY ia.id, eia.last_seen_at DESC
+		) t
+		ORDER BY t.app_name ASC
+	`, employeeID, machineID)
 	if err != nil {
 		return nil, fmt.Errorf("list employee applications: %w", err)
 	}
@@ -1795,18 +2002,42 @@ func (r *NewSchemaRepo) ListEmployeeApplications(ctx context.Context, employeeID
 
 // ListEmployeePackages returns the employee's currently-installed packages
 // (catalog row joined with the per-employee junction row, active links only).
-func (r *NewSchemaRepo) ListEmployeePackages(ctx context.Context, employeeID string) ([]models.EmployeePackageDetail, error) {
+// machineID scopes the read to one device; "" keeps the employee-wide view. When a
+// machineID is given and that machine has no live device registration (it was removed),
+// inactive links are included so the removed device's last-known inventory is shown.
+func (r *NewSchemaRepo) ListEmployeePackages(ctx context.Context, employeeID, machineID string) ([]models.EmployeePackageDetail, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT ip.id, ip.package_name, COALESCE(eip.version, '') AS version,
-		       COALESCE(ip.category, '') AS category, COALESCE(ip.source_manager, '') AS source_manager,
-		       COALESCE(eip.install_path, '') AS install_path,
-		       COALESCE(eip.publisher, '') AS publisher, COALESCE(ip.description, '') AS description,
-		       eip.first_seen_at, eip.last_seen_at
-		FROM employee_installed_packages eip
-		JOIN installed_packages ip ON ip.id = eip.installed_package_id
-		WHERE eip.employee_id = $1 AND eip.is_active = true AND ip.deleted_at IS NULL
-		ORDER BY ip.package_name ASC
-	`, employeeID)
+		SELECT t.id, t.package_name, t.version, t.category, t.source_manager, t.install_path,
+		       t.publisher, t.description, t.first_seen_at, t.last_seen_at
+		FROM (
+			SELECT DISTINCT ON (ip.id)
+			       ip.id, ip.package_name, COALESCE(eip.version, '') AS version,
+			       COALESCE(ip.category, '') AS category, COALESCE(ip.source_manager, '') AS source_manager,
+			       COALESCE(eip.install_path, '') AS install_path,
+			       COALESCE(eip.publisher, '') AS publisher, COALESCE(ip.description, '') AS description,
+			       eip.first_seen_at, eip.last_seen_at
+			FROM employee_installed_packages eip
+			JOIN installed_packages ip ON ip.id = eip.installed_package_id
+			WHERE eip.employee_id = $1 AND ip.deleted_at IS NULL
+			  AND ($2 = '' OR eip.machine_id = $2)
+			  -- Same rule as ListEmployeeApplications: a device with no live registration
+			  -- (every employee_devices row revoked) shows its last-known inventory even
+			  -- though the staleness sweep marked its links inactive.
+			  AND (
+			    eip.is_active = true
+			    OR (
+			      $2 <> '' AND NOT EXISTS (
+			        SELECT 1 FROM employee_devices d
+			        WHERE d.employee_id = eip.employee_id
+			          AND d.machine_id = eip.machine_id
+			          AND d.revoked_at IS NULL
+			      )
+			    )
+			  )
+			ORDER BY ip.id, eip.last_seen_at DESC
+		) t
+		ORDER BY t.package_name ASC
+	`, employeeID, machineID)
 	if err != nil {
 		return nil, fmt.Errorf("list employee packages: %w", err)
 	}
@@ -1826,16 +2057,18 @@ func (r *NewSchemaRepo) ListEmployeePackages(ctx context.Context, employeeID str
 	return pkgs, rows.Err()
 }
 
-// ListHardwareDevices returns the peripheral (USB hotplug) history for an employee.
-func (r *NewSchemaRepo) ListHardwareDevices(ctx context.Context, employeeID string) ([]models.HardwareDevice, error) {
+// ListHardwareDevices returns the peripheral (USB hotplug) history for an employee
+// (optionally scoped to one machine).
+func (r *NewSchemaRepo) ListHardwareDevices(ctx context.Context, employeeID, machineID string) ([]models.HardwareDevice, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, employee_id, COALESCE(device_class, '') AS device_class, COALESCE(vendor, '') AS vendor,
+		SELECT id, employee_id, COALESCE(machine_id, '') AS machine_id,
+		       COALESCE(device_class, '') AS device_class, COALESCE(vendor, '') AS vendor,
 		       COALESCE(product, '') AS product, COALESCE(serial, '') AS serial, COALESCE(bus_path, '') AS bus_path,
 		       COALESCE(device_node, '') AS device_node, plugged_at, unplugged_at, synced_at, created_at
 		FROM hardware_devices
-		WHERE employee_id = $1 AND deleted_at IS NULL
+		WHERE employee_id = $1 AND deleted_at IS NULL AND ($2 = '' OR machine_id = $2)
 		ORDER BY plugged_at DESC
-	`, employeeID)
+	`, employeeID, machineID)
 	if err != nil {
 		return nil, fmt.Errorf("list hardware_devices: %w", err)
 	}
@@ -1845,7 +2078,7 @@ func (r *NewSchemaRepo) ListHardwareDevices(ctx context.Context, employeeID stri
 	for rows.Next() {
 		var d models.HardwareDevice
 		if err := rows.Scan(
-			&d.ID, &d.EmployeeID, &d.DeviceClass, &d.Vendor, &d.Product, &d.Serial, &d.BusPath,
+			&d.ID, &d.EmployeeID, &d.MachineID, &d.DeviceClass, &d.Vendor, &d.Product, &d.Serial, &d.BusPath,
 			&d.DeviceNode, &d.PluggedAt, &d.UnpluggedAt, &d.SyncedAt, &d.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan hardware_device row: %w", err)
@@ -1857,13 +2090,13 @@ func (r *NewSchemaRepo) ListHardwareDevices(ctx context.Context, employeeID stri
 
 // ListAppStatus returns the key/value status rows for an employee (heartbeat, etc.).
 // Note: app_status has no deleted_at column (ephemeral key/value store).
-func (r *NewSchemaRepo) ListAppStatus(ctx context.Context, employeeID string) ([]models.AppStatus, error) {
+func (r *NewSchemaRepo) ListAppStatus(ctx context.Context, employeeID, machineID string) ([]models.AppStatus, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT employee_id, key, value, updated_at, created_at
+		SELECT employee_id, COALESCE(machine_id, '') AS machine_id, key, value, updated_at, created_at
 		FROM app_status
-		WHERE employee_id = $1
+		WHERE employee_id = $1 AND ($2 = '' OR machine_id = $2)
 		ORDER BY key ASC
-	`, employeeID)
+	`, employeeID, machineID)
 	if err != nil {
 		return nil, fmt.Errorf("list app_status: %w", err)
 	}
@@ -1872,7 +2105,7 @@ func (r *NewSchemaRepo) ListAppStatus(ctx context.Context, employeeID string) ([
 	var statuses []models.AppStatus
 	for rows.Next() {
 		var s models.AppStatus
-		if err := rows.Scan(&s.EmployeeID, &s.Key, &s.Value, &s.UpdatedAt, &s.CreatedAt); err != nil {
+		if err := rows.Scan(&s.EmployeeID, &s.MachineID, &s.Key, &s.Value, &s.UpdatedAt, &s.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan app_status row: %w", err)
 		}
 		statuses = append(statuses, s)
@@ -1880,16 +2113,18 @@ func (r *NewSchemaRepo) ListAppStatus(ctx context.Context, employeeID string) ([
 	return statuses, rows.Err()
 }
 
-// ListPermissionStatus returns the permission-method check rows for an employee.
-func (r *NewSchemaRepo) ListPermissionStatus(ctx context.Context, employeeID string) ([]models.PermissionStatus, error) {
+// ListPermissionStatus returns the permission-method check rows for an employee
+// (optionally scoped to one machine).
+func (r *NewSchemaRepo) ListPermissionStatus(ctx context.Context, employeeID, machineID string) ([]models.PermissionStatus, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT check_id, employee_id, COALESCE(session_id, '') AS session_id, COALESCE(session_type, '') AS session_type,
+		SELECT check_id, employee_id, COALESCE(machine_id, '') AS machine_id,
+		       COALESCE(session_id, '') AS session_id, COALESCE(session_type, '') AS session_type,
 		       COALESCE(platform, '') AS platform, checked_at, COALESCE(method, '') AS method, works, COALESCE(details, '') AS details,
 		       synced_at, created_at
 		FROM permission_status
-		WHERE employee_id = $1 AND deleted_at IS NULL
+		WHERE employee_id = $1 AND deleted_at IS NULL AND ($2 = '' OR machine_id = $2)
 		ORDER BY checked_at DESC
-	`, employeeID)
+	`, employeeID, machineID)
 	if err != nil {
 		return nil, fmt.Errorf("list permission_status: %w", err)
 	}
@@ -1899,7 +2134,7 @@ func (r *NewSchemaRepo) ListPermissionStatus(ctx context.Context, employeeID str
 	for rows.Next() {
 		var p models.PermissionStatus
 		if err := rows.Scan(
-			&p.CheckID, &p.EmployeeID, &p.SessionID, &p.SessionType, &p.Platform,
+			&p.CheckID, &p.EmployeeID, &p.MachineID, &p.SessionID, &p.SessionType, &p.Platform,
 			&p.CheckedAt, &p.Method, &p.Works, &p.Details, &p.SyncedAt, &p.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan permission_status row: %w", err)
@@ -1967,26 +2202,27 @@ func (r *NewSchemaRepo) BulkUpsertLocationSamples(ctx context.Context, entries [
 		}
 		batch := entries[i:end]
 		valueStrings := make([]string, 0, len(batch))
-		args := make([]interface{}, 0, len(batch)*9)
+		args := make([]interface{}, 0, len(batch)*10)
 		argIdx := 1
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
-				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4, argIdx+5, argIdx+6, argIdx+7, argIdx+8,
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
+				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4, argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
 			))
 			args = append(args,
-				e.ID, e.EmployeeID, e.Latitude, e.Longitude, e.AccuracyM, e.AltitudeM,
+				e.ID, e.EmployeeID, e.MachineID, e.Latitude, e.Longitude, e.AccuracyM, e.AltitudeM,
 				e.Source, e.Address, e.CapturedAt,
 			)
-			argIdx += 9
+			argIdx += 10
 		}
 
 		query := fmt.Sprintf(`
 			INSERT INTO location_samples
-				(id, employee_id, latitude, longitude, accuracy_m, altitude_m, source, address, captured_at, synced_at)
+				(id, employee_id, machine_id, latitude, longitude, accuracy_m, altitude_m, source, address, captured_at, synced_at)
 			VALUES %s
 			ON CONFLICT (id) DO UPDATE SET
+				machine_id = COALESCE(NULLIF(EXCLUDED.machine_id, ''), location_samples.machine_id),
 				latitude = EXCLUDED.latitude,
 				longitude = EXCLUDED.longitude,
 				accuracy_m = EXCLUDED.accuracy_m,

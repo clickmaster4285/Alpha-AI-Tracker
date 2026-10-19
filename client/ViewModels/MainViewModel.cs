@@ -21,6 +21,7 @@ public partial class MainViewModel : ViewModelBase
     private readonly AutoStartService _autoStart;
     private readonly LogCollectorService _logCollector;
     private readonly SyncService _syncService;
+    private readonly AccountRemovalService _accountRemoval;
     private readonly TermsService _terms;
 
     /// <summary>Self-update state — bound by the top-bar buttons and the dashboard banner.</summary>
@@ -349,6 +350,7 @@ public partial class MainViewModel : ViewModelBase
         AutoStartService autoStart,
         LogCollectorService logCollector,
         SyncService syncService,
+        AccountRemovalService accountRemoval,
         AppUpdateService updateService,
         TermsService terms,
         DashboardViewModel dashboard,
@@ -362,6 +364,7 @@ public partial class MainViewModel : ViewModelBase
         _autoStart = autoStart;
         _logCollector = logCollector;
         _syncService = syncService;
+        _accountRemoval = accountRemoval;
         _terms = terms;
         Update = updateService;
         Dashboard = dashboard;
@@ -515,6 +518,50 @@ public partial class MainViewModel : ViewModelBase
     }
 
     /// <summary>
+    /// Completely remove the login account from this machine and return the tool to
+    /// the sign-in page.
+    ///
+    /// Invoked by the <c>client --remove-account</c> CLI command (Linux + Windows) —
+    /// either directly on a cold start, or via the REMOVE_ACCOUNT single-instance
+    /// signal when the tracker is already running (the web "Remove Current Device"
+    /// modal shows the exact command for both platforms). The web already revoked the
+    /// machine's device registration server-side; this half removes the LOCAL account
+    /// so the machine is handed over with no trace of the previous employee.
+    ///
+    /// Order matters: collecting stops BEFORE the wipe, otherwise the collector's next
+    /// cycle would write a session straight back into the freshly emptied tables.
+    ///
+    /// The actual sequence (stop → bounded drain → POST /devices/self-remove → wipe) is
+    /// owned by <see cref="AccountRemovalService"/> so every entry point behaves the same
+    /// (R4/R5, 2026-10-19). This method only resets the view-model state.
+    /// </summary>
+    public async Task RemoveAccountAsync(CancellationToken ct = default)
+    {
+        // 1-2. Stop collecting, drain pending rows to the server, notify the server this
+        //      machine is going away, then wipe the local DB + machine/device identifiers.
+        await _accountRemoval.RunAsync(ct);
+
+        // 3. Land on the sign-in page. IsLoggedIn=false flips MainWindow from the
+        //    shell / permission wizard to LoginPage and disarms the terms gate;
+        //    MainWindow.axaml binds these flags directly.
+        IsLoggedIn = false;
+        CurrentPermissionStep = PermissionStep.None;
+        IsSplashVisible = false;
+        RequiresTermsAcceptance = false;
+        EmployeeName = string.Empty;
+        EmployeeDepartment = string.Empty;
+        EmployeeAvatar = string.Empty;
+        EmployeeAvatarColor = string.Empty;
+        EmployeeId = string.Empty;
+        SecretKey = string.Empty;
+        StatusMessage = string.Empty;
+        IsLoading = false;
+        IsStepWorking = false;
+        StepStatusText = string.Empty;
+        MissingDependenciesList = string.Empty;
+    }
+
+    /// <summary>
     /// Check each permission condition and return the first incomplete step.
     /// Always re-validates the ACTUAL condition — never trusts stored status alone.
     /// If a permission was previously granted but is now revoked (e.g. user removed
@@ -575,6 +622,15 @@ public partial class MainViewModel : ViewModelBase
         {
             return Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
                 @"Software\Microsoft\Windows\CurrentVersion\Run")?.GetValue("AlphaAITracker") != null;
+        }
+        if (OperatingSystem.IsMacOS())
+        {
+            // launchd KeepAlive plist = the macOS background guard; EnableAutoStart writes
+            // it, so the gate mirrors that check instead of returning false unconditionally
+            // (which would strand macOS on step 2 exactly like the missing Linux unit).
+            return File.Exists(Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                "Library", "LaunchAgents", "com.alphaai.tracker.plist"));
         }
         return false;
     }
@@ -833,6 +889,24 @@ public partial class MainViewModel : ViewModelBase
 
         try
         {
+            // Fresh local database on login (2026-10-19): a login must never inherit
+            // another account's local history. A removal wipe normally leaves the DB
+            // empty already, but if rows belonging to a DIFFERENT employee are still on
+            // disk (a removal that never ran — machine handed over by hand, interrupted
+            // wipe — clear them BEFORE the login request). Order matters: the wipe
+            // rotates the machine id, so the server registers this login under the very
+            // identity the freshly created local rows will be stamped with — otherwise
+            // the device registry and the row stamping disagree and Device Specs shows
+            // an empty device.
+            var prior = await _store.GetEmployeeInfoAsync(CancellationToken.None);
+            if (prior != null && !string.IsNullOrWhiteSpace(prior.EmployeeId) &&
+                !string.Equals(prior.EmployeeId, EmployeeId.Trim(), StringComparison.OrdinalIgnoreCase))
+            {
+                await _store.WipeLocalAccountDataAsync(CancellationToken.None);
+                _config.ResetMachineId();
+                EncryptedConfigService.ResetCache();
+            }
+
             var serverUrl = _config.ServerUrl ?? "http://localhost:8080";
             // Include machineId/platform/clientVersion so the server binds the device
             // record to THIS specific machine (its persisted .machine-id), not the
@@ -847,6 +921,9 @@ public partial class MainViewModel : ViewModelBase
                 machineId = _config.ClientId,
                 platform = RuntimeInformation.OSDescription,
                 clientVersion = AppInfo.Version,
+                // Hostname is the human label the web Device Specs dropdown shows as
+                // "{employee name} ({hostname})" — without it a fresh device reads as unnamed.
+                deviceName = System.Environment.MachineName,
             };
             var json = JsonSerializer.Serialize(payload);
             var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
@@ -907,6 +984,20 @@ public partial class MainViewModel : ViewModelBase
             // on the server right now, not on the next 60s idle tick. The SyncService loop
             // picks up the signal and drains every unsent table in byte-bounded chunks.
             _syncService.RequestImmediateSync();
+
+            // Hardware / network / software were last collected at process start — possibly
+            // BEFORE this machine's local wipe — and their in-memory dedup fingerprints
+            // survived that wipe, so the periodic collects would skip forever and this
+            // login's machine id would never get a snapshot. Re-collect for the identity
+            // this login just established, then wake the sync engine again so those rows
+            // are pushed immediately. Fire-and-forget: the OS probes (GPU via PowerShell,
+            // package-manager walks) must not block the UI thread, and
+            // RecollectAfterLoginAsync logs its own failures.
+            _ = Task.Run(async () =>
+            {
+                await _logCollector.RecollectAfterLoginAsync(CancellationToken.None);
+                _syncService.RequestImmediateSync();
+            });
 
             IsLoggedIn = true;
             EmployeeName = emp.Name;
@@ -1001,11 +1092,21 @@ public partial class MainViewModel : ViewModelBase
         return Task.CompletedTask;
     }
 
-    private Task GrantBackgroundRunningAsync()
+    private async Task GrantBackgroundRunningAsync()
     {
         _autoStart.EnableAutoStartForced();
+
+        // Step 2's gate (IsBackgroundGuardConfigured) checks for the systemd USER unit
+        // on Linux, but nothing used to create it: EnableAutoStartForced only wrote the
+        // .desktop autostart entry and ran `systemctl --user enable` against a unit file
+        // that did not exist yet. The step therefore re-evaluated to ITSELF after showing
+        // its success message — "Background guard enabled successfully." and no way to
+        // reach step 3 (stuck on SETUP STEP 2 OF 4, 2026-10-19). Install the unit here.
+        if (!await _autoStart.EnsureBackgroundGuardAsync())
+            throw new InvalidOperationException(
+                "Failed to install the background guard service (systemd user unit). Check that systemd is available and try again.");
+
         StepStatusText = "Background guard enabled successfully.";
-        return Task.CompletedTask;
     }
 
     private async Task InstallDependenciesAsync()

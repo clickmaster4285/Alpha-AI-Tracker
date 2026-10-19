@@ -1,11 +1,33 @@
 'use client';
 
-import { Loader2, UserX } from 'lucide-react';
+import { useEffect } from 'react';
+import { Loader2, UserX, Laptop } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import EmployeeSelector from '@/components/EmployeeSelector';
 import { useEmployeeDetail } from '@/hooks/use-employee-detail';
 import { useUrlActivityFilter } from '@/hooks/use-url-activity-filter';
-import { employeesApi, type Employee, type EmployeeDetail } from '@/lib/api';
+import { formatRelative } from '@/lib/format';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { employeesApi, type Employee, type EmployeeDevice, type EmployeeDetail } from '@/lib/api';
+
+/**
+ * Device label used everywhere in Device Specs: "{employee name} ({hostname})".
+ * A device whose login never sent a name still has the hostname the machine
+ * reported with its hardware snapshot, so it is never rendered as "Unknown device".
+ */
+export function deviceLabel(device: EmployeeDevice, employee: Employee): string {
+  const host = (device.hostname || device.deviceName || device.machineId || '').trim();
+  return host ? `${employee.name} (${host})` : employee.name;
+}
+
+/**
+ * Machine lifecycle badge for the Device Specs dropdown (R8, 2026-10-19):
+ * "active" machines are currently tracked; "old" machines were removed (the admin
+ * revoked the device and the client wiped itself) but keep their history.
+ */
+export function deviceStatusLabel(device: EmployeeDevice): string {
+  return device.status === 'old' ? 'old · removed' : 'active';
+}
 
 export interface EmployeePageContext {
   /** Full employee record (UUID id + EMP-XXXXX code). */
@@ -45,6 +67,10 @@ export interface EmployeePageContext {
    */
   body: Record<string, string>;
   setBody: (patch: Record<string, string> | ((prev: Record<string, string>) => Record<string, string>)) => void;
+  /** Selected machine id from the device dropdown ('' = all devices / aggregate). */
+  deviceId: string;
+  /** Every registered device for this employee, newest activity first (may be empty). */
+  devices: EmployeeDevice[];
 }
 
 interface EmployeePageProps {
@@ -113,10 +139,11 @@ export default function EmployeePage({
   // picker" bug — there is now exactly one `useUrlQueryState` on the
   // page and no race window between two instances.
   const { filter, setFilter, extra: urlExtra, setExtra } = useUrlActivityFilter(
-    { employeeId: {}, ...(bodySchema ?? {}) },
-    { employeeId: '', ...(bodyInitial ?? {}) },
+    { employeeId: {}, deviceId: {}, ...(bodySchema ?? {}) },
+    { employeeId: '', deviceId: '', ...(bodyInitial ?? {}) },
   );
   const employeeId = urlExtra.employeeId;
+  const deviceId = urlExtra.deviceId;
   // Body's own URL state — everything in `extra` except `employeeId` (the
   // shell's picker key). The body destructures this and calls `setBody`
   // instead of maintaining its own `useUrlQueryState`.
@@ -133,10 +160,49 @@ export default function EmployeePage({
 
   const employee = employeesData?.data.find(e => e.id === employeeId) ?? null;
 
-  const detailQuery = useEmployeeDetail(fetchDetail ? employeeId : '');
+  const detailQuery = useEmployeeDetail(fetchDetail ? employeeId : '', deviceId);
 
   const handleChange = (emp: Employee | null) => {
-    setExtra({ employeeId: emp?.id ?? '' });
+    // A different employee means different devices — drop the stale selection.
+    setExtra({ employeeId: emp?.id ?? '', deviceId: '' });
+  };
+
+  const devices = detailQuery.data?.devices ?? [];
+  // `keepPreviousData` (use-employee-detail) holds the previous payload across
+  // query re-keys (deviceId is part of the key), so `data` can briefly belong
+  // to a DIFFERENT employee or a different machine scope. Only a settled,
+  // non-placeholder payload for the CURRENT key is authoritative enough to
+  // drive the URL mirror or the render branches below.
+  const detailSettled = detailQuery.isSuccess && !detailQuery.isPlaceholderData;
+
+  // "All devices" was removed from the dropdown (2026-10-19, user request): whenever
+  // the employee has more than one machine the shell ALWAYS scopes to exactly one —
+  // the machine in the URL while it is still registered, otherwise the first entry
+  // (the server orders machines active-first, then most-recently-tracked, so that
+  // default is the live machine). Single-machine employees keep the employee-wide
+  // view they already got (no dropdown was ever rendered for them), and a stale
+  // `?deviceId=` for a machine that no longer exists falls back the same way.
+  const urlDeviceValid = deviceId !== '' && devices.some(d => d.machineId === deviceId);
+  const effectiveDeviceId = urlDeviceValid
+    ? deviceId
+    : (devices.length > 1 ? (devices[0]?.machineId ?? '') : '');
+
+  // The URL stays the single source of truth (URL-Synced Filters Rule): mirror the
+  // resolved scope back into `?deviceId=` so back/forward, a shared link and the
+  // rendered scope always agree. Empty is stripped from the URL by the hook.
+  //
+  // Gated on `detailSettled`: while the re-keyed query is in flight the kept
+  // placeholder payload resolves `effectiveDeviceId` from stale data, and
+  // writing that back would ping-pong `?deviceId=` forever ("Maximum update
+  // depth exceeded"). Only the settled payload for the current key writes.
+  useEffect(() => {
+    if (employee && detailSettled && effectiveDeviceId !== deviceId) {
+      setExtra({ deviceId: effectiveDeviceId });
+    }
+  }, [employee, detailSettled, deviceId, effectiveDeviceId, setExtra]);
+
+  const handleDeviceChange = (value: string) => {
+    setExtra({ deviceId: value });
   };
 
   return (
@@ -147,12 +213,45 @@ export default function EmployeePage({
           <div className="w-11 h-11 rounded-xl gradient-primary flex items-center justify-center flex-shrink-0">
             <Icon className="w-5 h-5 text-primary-foreground" />
           </div>
-          <div>
+          <div className="min-w-0">
             <h1 className="text-xl font-bold text-foreground font-display">{title}</h1>
             <p className="text-sm text-muted-foreground mt-0.5">{subtitle}</p>
           </div>
         </div>
-        <EmployeeSelector value={employeeId} onChange={handleChange} />
+        {/* Controls — wrap onto their own line instead of overflowing the
+            content edge. The picker is capped so the device dropdown always
+            keeps room (Root cause of the "device dropdown clipped by the
+            screen width" bug: the picker was `shrink-0` up to 384px next to a
+            fixed 280px trigger, so the pair outran the content area). */}
+        <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2 w-full min-w-0 lg:w-auto">
+          <EmployeeSelector
+            value={employeeId}
+            onChange={handleChange}
+            className="sm:w-[240px] sm:max-w-full"
+          />
+          {/* Device dropdown — when the employee has more than one registered
+              machine (R8). The value is the machine id (stable across re-logins);
+              each entry carries the machine lifecycle status from employee_machines. */}
+          {employee && detailSettled && devices.length > 1 && (
+            <Select value={effectiveDeviceId} onValueChange={handleDeviceChange}>
+              <SelectTrigger className="h-9 w-full sm:w-[240px] bg-card border border-border overflow-hidden">
+                <Laptop className="w-4 h-4 text-muted-foreground shrink-0" />
+                <SelectValue placeholder="Select device" />
+              </SelectTrigger>
+              <SelectContent>
+                {devices.map(device => (
+                  <SelectItem key={device.machineId} value={device.machineId}>
+                    {deviceLabel(device, employee)}
+                    {` · ${deviceStatusLabel(device)}`}
+                    {device.status === 'old' && device.lastTrackAt
+                      ? ` (last tracked ${formatRelative(device.lastTrackAt)})`
+                      : ''}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+        </div>
       </div>
 
       {/* Body */}
@@ -165,7 +264,7 @@ export default function EmployeePage({
             Select an employee to view their {fetchDetail ? 'device information' : 'activity'}.
           </p>
         </div>
-      ) : fetchDetail && detailQuery.isLoading ? (
+      ) : fetchDetail && !detailSettled && !detailQuery.error ? (
         <div className="flex items-center justify-center min-h-[320px]">
           <div className="flex flex-col items-center gap-3">
             <Loader2 className="w-8 h-8 animate-spin text-primary" />
@@ -183,10 +282,14 @@ export default function EmployeePage({
         children({
           employee,
           detail: detailQuery.data,
-          detailLoading: detailQuery.isLoading,
+          // `keepPreviousData` keeps `isLoading` false across query re-keys,
+          // so derive "loading" from the settled-payload check instead.
+          detailLoading: fetchDetail && !detailSettled && !detailQuery.error,
           setEmployeeId: (id: string) => setExtra({ employeeId: id }),
           filter,
           setFilter,
+          deviceId: effectiveDeviceId,
+          devices,
           body,
           // `setBody` only writes the body keys (never the picker's
           // `employeeId` or the activity-filter `q/preset/from/to`), so

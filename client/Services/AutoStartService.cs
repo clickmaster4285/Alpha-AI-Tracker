@@ -112,6 +112,108 @@ public class AutoStartService
     }
 
     /// <summary>
+    /// Ensures the platform's "background guard" is actually configured — the thing the
+    /// permission wizard's step 2 re-evaluates (MainViewModel.IsBackgroundGuardConfigured).
+    ///
+    /// On Linux that gate checks for the systemd USER unit
+    /// <c>~/.config/systemd/user/alpha-ai-tracker.service</c>, but until now nothing in
+    /// the wizard created that file: <see cref="EnableAutoStartForced"/> only wrote the
+    /// <c>.desktop</c> autostart entry and ran <c>systemctl --user enable</c> against a
+    /// unit that did not exist yet — so the step reported "Background guard enabled
+    /// successfully." and then re-evaluated to ITSELF forever, with no way to reach step 3
+    /// (stuck on "SETUP STEP 2 OF 4" on Linux, 2026-10-19).
+    ///
+    /// The unit is written, daemon-reloaded and enabled, but deliberately NOT started:
+    /// the wizard runs inside the already-live process, and starting the unit here would
+    /// spawn a second instance that fights the single-instance mutex in a Restart=always
+    /// loop. Windows (Run key) and macOS (launchd plist) are configured by
+    /// <see cref="EnableAutoStart"/>, so this only verifies them.
+    ///
+    /// Returns true when the guard is configured afterwards; false only when Linux could
+    /// not write/enable the unit (the caller surfaces that as a failed step).
+    /// </summary>
+    public async Task<bool> EnsureBackgroundGuardAsync(CancellationToken ct = default)
+    {
+        if (OperatingSystem.IsLinux())
+        {
+            try
+            {
+                var exePath = Environment.ProcessPath ?? Environment.GetCommandLineArgs()[0];
+                var unitContent = $"""
+                    [Unit]
+                    Description=Alpha AI Tracker - Employee Monitoring Service
+
+                    [Service]
+                    Type=simple
+                    ExecStart={exePath} --background
+                    Restart=always
+                    RestartSec=10
+                    StartLimitBurst=0
+                    StartLimitIntervalSec=0
+
+                    [Install]
+                    WantedBy=default.target
+                    """;
+
+                var systemdDir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                    ".config", "systemd", "user");
+                Directory.CreateDirectory(systemdDir);
+                var servicePath = Path.Combine(systemdDir, "alpha-ai-tracker.service");
+                await File.WriteAllTextAsync(servicePath, unitContent, ct);
+
+                // daemon-reload so the user manager sees the freshly written unit;
+                // enable so it comes back at the next login. Both are best-effort — the
+                // wizard's gate (and this return) only needs the unit file to exist and
+                // to be enabled, and a headless session without a user bus still ends up
+                // with a working guard on the next boot with a session.
+                await RunSystemctlAsync("--user daemon-reload", ct);
+                var enabled = await RunSystemctlAsync("--user enable alpha-ai-tracker.service", ct);
+
+                _logger.LogInformation(
+                    "Linux background guard installed at {Path} (enable exit {Code})",
+                    servicePath, enabled);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to install the systemd background guard unit");
+                return false;
+            }
+        }
+
+        if (OperatingSystem.IsMacOS())
+        {
+            // The launchd KeepAlive plist IS the macOS background guard (EnableAutoStart writes it).
+            return File.Exists(Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                "Library", "LaunchAgents", "com.alphaai.tracker.plist"));
+        }
+
+        // Windows: the Run key is both what EnableAutoStartForced writes and what the
+        // wizard's gate reads.
+        return IsAutoStartEnabled();
+    }
+
+    /// <summary>Runs <c>systemctl</c> with the given arguments and returns its exit code (-1 if it never started).</summary>
+    private static async Task<int> RunSystemctlAsync(string arguments, CancellationToken ct)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "systemctl",
+            Arguments = arguments,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        using var proc = Process.Start(psi);
+        if (proc == null) return -1;
+        await proc.WaitForExitAsync(ct);
+        return proc.ExitCode;
+    }
+
+    /// <summary>
     /// Remove auto-start registration.
     /// </summary>
     public bool DisableAutoStart()

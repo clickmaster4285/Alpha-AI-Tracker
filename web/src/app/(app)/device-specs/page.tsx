@@ -15,8 +15,16 @@ export default function DeviceSpecsHardware() {
       icon={Monitor}
       fetchDetail
     >
-      {({ detail }) => {
+      {({ detail, devices, deviceId }) => {
         const { deviceHardware, storageDevices, networkInfo, appStatus } = detail!;
+
+        // A removed device can never log in again, so the generic "the desktop client
+        // will upload one after login" wording would be false for it — name the real
+        // reason instead.
+        const selectedDevice = deviceId ? devices.find(d => d.machineId === deviceId) : undefined;
+        // `status` comes from the employee_machines lifecycle registry (migration 049):
+        // 'old' means the admin removed this machine and the client wiped itself.
+        const deviceRemoved = !!selectedDevice && selectedDevice.status === 'old';
 
         const specs = [
           { icon: Cpu, label: 'Processor', value: deviceHardware?.cpuModel ? `${deviceHardware.cpuModel} · ${deviceHardware.cpuCores} cores` : '—' },
@@ -31,7 +39,14 @@ export default function DeviceSpecsHardware() {
         return (
           <div className="space-y-4">
             {!deviceHardware && (
-              <EmptyState icon={Monitor} text="No hardware snapshot synced yet — the desktop client will upload one after login" />
+              <EmptyState
+                icon={Monitor}
+                text={
+                  deviceRemoved
+                    ? 'No hardware snapshot was recorded for this device before it was removed'
+                    : 'No hardware snapshot synced yet — the desktop client will upload one after login'
+                }
+              />
             )}
 
             {deviceHardware && (

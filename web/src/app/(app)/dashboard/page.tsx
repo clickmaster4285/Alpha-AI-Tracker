@@ -21,7 +21,7 @@ import {
   AttentionStrip,
   ClassificationPulse,
   DashboardStatGrid,
-  FleetHealthCard,
+  AttendanceCard,
   QuickActions,
 } from '@/components/dashboard/DashboardStatGrid';
 import { OnlineNowPanel } from '@/components/dashboard/OnlineNowPanel';
@@ -152,7 +152,7 @@ function DashboardInner() {
             onRetry={() => presenceQuery.refetch()}
           />
         )}
-        <FleetHealthCard summary={summary} loading={summaryQuery.isLoading} />
+        <AttendanceCard summary={summary} loading={summaryQuery.isLoading} />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

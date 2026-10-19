@@ -27,6 +27,17 @@ public partial class App : Application
     /// </summary>
     public static bool LaunchedHidden { get; set; }
 
+    /// <summary>
+    /// True while an account removal is waiting for a GUI to exist.
+    ///
+    /// <c>client --remove-account</c> on a machine whose tracker runs headless
+    /// (--background under systemd / auto-start) asks the running instance to remove
+    /// the account. Program.cs sets this flag and starts the lazy GUI; the GUI's boot
+    /// consumes it before the window is created, so the tool opens directly on the
+    /// sign-in page instead of briefly rendering the removed employee's dashboard.
+    /// </summary>
+    public static bool PendingRemoveAccount { get; set; }
+
     public override void Initialize()
     {
         AvaloniaXamlLoader.Load(this);
@@ -100,6 +111,32 @@ public partial class App : Application
                 await viewModel.InitializeAsync(CancellationToken.None);
             }).GetAwaiter().GetResult();
 
+            // ─── Pending account removal (client --remove-account) ───
+            // Wipe this machine's local account and forget the employee (see
+            // MainViewModel.RemoveAccountAsync). Called from here — before the window
+            // exists, so a removal request that STARTED this GUI (headless tracker →
+            // lazy GUI) opens straight on the sign-in page with no flash of the removed
+            // employee's dashboard — and from the single-instance handler below, for a
+            // GUI that is already live. InitializeAsync has restored the session by this
+            // point; the removal undoes it.
+            async Task RemoveLocalAccountAsync()
+            {
+                try
+                {
+                    await viewModel.RemoveAccountAsync(CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[client] Account removal failed: {ex.Message}");
+                }
+            }
+
+            if (PendingRemoveAccount)
+            {
+                PendingRemoveAccount = false;
+                Task.Run(RemoveLocalAccountAsync).GetAwaiter().GetResult();
+            }
+
             var mainWindow = new MainWindow
             {
                 DataContext = viewModel,
@@ -172,25 +209,54 @@ public partial class App : Application
             // signal via the named pipe, bring this window to the front. This is
             // what makes "open the GUI any number of times" work without ever
             // stopping the background tracker.
-            SingleInstanceService.OnShowRequested = () =>
+            //
+            // Brings the window to the front. Shared by the SHOW signal and the
+            // account-removal signal below.
+            void ShowWindow()
             {
-                Dispatcher.UIThread.Post(() =>
+                try
                 {
-                    try
-                    {
-                        if (mainWindow.WindowState == Avalonia.Controls.WindowState.Minimized)
-                            mainWindow.WindowState = Avalonia.Controls.WindowState.Normal;
-                        mainWindow.Show();
-                        mainWindow.Activate();
-                        mainWindow.Topmost = true;
-                        mainWindow.Topmost = false; // bring to front without pinning
-                    }
-                    catch
-                    {
-                        // Window may be in an odd state during shutdown — ignore.
-                    }
+                    if (mainWindow.WindowState == Avalonia.Controls.WindowState.Minimized)
+                        mainWindow.WindowState = Avalonia.Controls.WindowState.Normal;
+                    mainWindow.Show();
+                    mainWindow.Activate();
+                    mainWindow.Topmost = true;
+                    mainWindow.Topmost = false; // bring to front without pinning
+                }
+                catch
+                {
+                    // Window may be in an odd state during shutdown — ignore.
+                }
+            }
+
+            SingleInstanceService.OnShowRequested = () => Dispatcher.UIThread.Post(ShowWindow);
+
+            // ─── Account removal (client --remove-account) ───
+            // This process owns both the SQLite connection and the window, so it
+            // performs the removal in place: wipe every local row, stop collecting, and
+            // land the UI on the sign-in page. The requesting CLI process then exits —
+            // it must NOT start a second tracker. Removing the account here (rather than
+            // in the CLI, after stopping the tracker) is also what keeps the Linux
+            // systemd unit's Restart=always from racing the mutex with a restarted,
+            // still-logged-in tracker.
+            SingleInstanceService.OnRemoveAccountRequested = () => Dispatcher.UIThread.Post(async () =>
+            {
+                await RemoveLocalAccountAsync();
+                ShowWindow();
+            });
+
+            // A removal request that arrived between the boot-time check above and the
+            // handler installation just now would otherwise be dropped (the flag had not
+            // been consumed yet and no handler existed) — re-check and run it.
+            if (PendingRemoveAccount)
+            {
+                PendingRemoveAccount = false;
+                Dispatcher.UIThread.Post(async () =>
+                {
+                    await RemoveLocalAccountAsync();
+                    ShowWindow();
                 });
-            };
+            }
 
             // Show the window only for a real user launch. Auto-start / systemd boot
             // instances (--background / --minimized) start hidden (or fully headless),

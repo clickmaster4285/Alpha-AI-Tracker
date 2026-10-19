@@ -173,7 +173,8 @@ func (r *DashboardRepo) MonitoringCounts(ctx context.Context) (DashboardMonitori
 
 func (r *DashboardRepo) DeviceStats(ctx context.Context, departmentID *int) (DashboardDeviceStats, error) {
 	var out DashboardDeviceStats
-	// When department is set, only devices whose employee is in that dept.
+	// Always exclude devices whose employee has been deleted (orphan devices).
+	// The department filter is applied inside the EXISTS when set.
 	bucketsQ := `
 		SELECT
 			COUNT(*),
@@ -182,10 +183,11 @@ func (r *DashboardRepo) DeviceStats(ctx context.Context, departmentID *int) (Das
 			COUNT(*) FILTER (WHERE d.last_seen_at IS NULL OR d.last_seen_at < NOW() - INTERVAL '7 days')
 		FROM employee_devices d
 		WHERE d.revoked_at IS NULL
-		  AND ($1::int IS NULL OR EXISTS (
+		  AND EXISTS (
 		      SELECT 1 FROM employees e
-		      WHERE e.employee_id = d.employee_id AND e.deleted_at IS NULL AND e.department_id = $1
-		  ))
+		      WHERE e.employee_id = d.employee_id AND e.deleted_at IS NULL
+		        AND ($1::int IS NULL OR e.department_id = $1)
+		  )
 	`
 	if err := r.pool.QueryRow(ctx, bucketsQ, departmentID).Scan(
 		&out.Active, &out.Seen15m, &out.Seen24h, &out.Stale7d,
@@ -197,10 +199,11 @@ func (r *DashboardRepo) DeviceStats(ctx context.Context, departmentID *int) (Das
 		SELECT COALESCE(NULLIF(TRIM(d.client_version), ''), '(empty)') AS version, COUNT(*) AS cnt
 		FROM employee_devices d
 		WHERE d.revoked_at IS NULL
-		  AND ($1::int IS NULL OR EXISTS (
+		  AND EXISTS (
 		      SELECT 1 FROM employees e
-		      WHERE e.employee_id = d.employee_id AND e.deleted_at IS NULL AND e.department_id = $1
-		  ))
+		      WHERE e.employee_id = d.employee_id AND e.deleted_at IS NULL
+		        AND ($1::int IS NULL OR e.department_id = $1)
+		  )
 		GROUP BY 1
 		ORDER BY cnt DESC, version ASC
 		LIMIT 10

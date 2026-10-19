@@ -47,6 +47,7 @@ func (s *NewSchemaService) SyncDeviceHardware(ctx context.Context, req *dto.Sync
 		entries = append(entries, models.DeviceHardwareInfo{
 			ID:             e.ID,
 			EmployeeID:     req.EmployeeID,
+			MachineID:      req.MachineID,
 			MacAddress:     e.MacAddress,
 			Hostname:       e.Hostname,
 			OsName:         e.OsName,
@@ -65,6 +66,16 @@ func (s *NewSchemaService) SyncDeviceHardware(ctx context.Context, req *dto.Sync
 	inserted, err := s.repo.BulkInsertDeviceHardware(ctx, entries)
 	if err != nil {
 		return nil, fmt.Errorf("bulk insert device_hardware: %w", err)
+	}
+	// The hardware snapshot carries the real hostname: use it to give the device record a
+	// human label (the client login may not send one) for the Device Specs dropdown.
+	if req.MachineID != "" {
+		for _, e := range req.Entries {
+			if strings.TrimSpace(e.Hostname) != "" {
+				_ = s.repo.TouchDeviceName(ctx, req.EmployeeID, req.MachineID, e.Hostname)
+				break
+			}
+		}
 	}
 	return &dto.SyncBatchResponse{Synced: inserted, Message: fmt.Sprintf("Synced %d of %d entries", inserted, len(req.Entries))}, nil
 }
@@ -135,6 +146,7 @@ func (s *NewSchemaService) SyncInstalledApps(ctx context.Context, req *dto.SyncI
 
 		err = s.repo.UpsertEmployeeAppLink(ctx, tx, models.EmployeeInstalledApplication{
 			EmployeeID:             req.EmployeeID,
+			MachineID:              req.MachineID,
 			InstalledApplicationID: catalogID,
 			AppVersion:             e.AppVersion,
 			Publisher:              e.Publisher,
@@ -220,6 +232,7 @@ func (s *NewSchemaService) SyncInstalledPackages(ctx context.Context, req *dto.S
 
 		err = s.repo.UpsertEmployeePackageLink(ctx, tx, models.EmployeeInstalledPackage{
 			EmployeeID:         req.EmployeeID,
+			MachineID:          req.MachineID,
 			InstalledPackageID: catalogID,
 			Version:            e.Version,
 			Publisher:          e.Publisher,
@@ -259,6 +272,7 @@ func (s *NewSchemaService) SyncNetworkInfo(ctx context.Context, req *dto.SyncNet
 		entries = append(entries, models.NetworkInfo{
 			ID:                   e.ID,
 			EmployeeID:           req.EmployeeID,
+			MachineID:            req.MachineID,
 			PublicIP:             e.PublicIP,
 			PrivateIP:            e.PrivateIP,
 			MacAddress:           e.MacAddress,
@@ -322,6 +336,7 @@ func (s *NewSchemaService) SyncSessionEvents(ctx context.Context, req *dto.SyncS
 		entries = append(entries, models.SessionEvent{
 			ID:         e.ID,
 			EmployeeID: req.EmployeeID,
+			MachineID:  req.MachineID,
 			EventType:  e.EventType,
 			OsUsername: e.OsUsername,
 			EventAt:    ts,
@@ -427,6 +442,7 @@ func (s *NewSchemaService) SyncAppItems(ctx context.Context, req *dto.SyncAppIte
 		entries = append(entries, models.AppItem{
 			ID:           e.ID,
 			EmployeeID:   req.EmployeeID,
+			MachineID:    req.MachineID,
 			AppSessionID: e.AppSessionID,
 			ParentItemID: e.ParentItemID,
 			ItemType:     e.ItemType,
@@ -704,6 +720,7 @@ func (s *NewSchemaService) SyncAppStatus(ctx context.Context, req *dto.SyncAppSt
 		}
 		if err := s.repo.UpsertAppStatus(ctx, tx, models.AppStatus{
 			EmployeeID: req.EmployeeID,
+			MachineID:  req.MachineID,
 			Key:        e.Key,
 			Value:      e.Value,
 			UpdatedAt:  updatedAt,
@@ -745,6 +762,7 @@ func (s *NewSchemaService) SyncHardwareDevices(ctx context.Context, req *dto.Syn
 		entries = append(entries, models.HardwareDevice{
 			ID:          e.ID,
 			EmployeeID:  req.EmployeeID,
+			MachineID:   req.MachineID,
 			DeviceClass: e.DeviceClass,
 			Vendor:      e.Vendor,
 			Product:     e.Product,
@@ -783,6 +801,7 @@ func (s *NewSchemaService) SyncPermissionStatus(ctx context.Context, req *dto.Sy
 		entries = append(entries, models.PermissionStatus{
 			CheckID:     e.CheckID,
 			EmployeeID:  req.EmployeeID,
+			MachineID:   req.MachineID,
 			SessionID:   e.SessionID,
 			SessionType: e.SessionType,
 			Platform:    e.Platform,
@@ -819,6 +838,7 @@ func (s *NewSchemaService) SyncStorageDevices(ctx context.Context, req *dto.Sync
 		entries = append(entries, models.StorageDevice{
 			ID:               e.ID,
 			EmployeeID:       req.EmployeeID,
+			MachineID:        req.MachineID,
 			DeviceHardwareID: e.DeviceHardwareID,
 			DeviceType:       e.DeviceType,
 			Model:            e.Model,
@@ -863,6 +883,7 @@ func (s *NewSchemaService) SyncLocationSamples(ctx context.Context, req *dto.Syn
 		entries = append(entries, models.LocationSample{
 			ID:         e.ID,
 			EmployeeID: req.EmployeeID,
+			MachineID:  req.MachineID,
 			Latitude:   e.Latitude,
 			Longitude:  e.Longitude,
 			AccuracyM:  e.AccuracyM,
@@ -937,7 +958,9 @@ func (s *NewSchemaService) ListLocationSamples(ctx context.Context, params repos
 // GetEmployeeDetail builds the full machine picture for an employee by UUID.
 // The sync tables are keyed by employee_id (EMP-XXXXX), so the UUID from the route is
 // resolved to the employee record first, then every read uses emp.EmployeeID.
-func (s *NewSchemaService) GetEmployeeDetail(ctx context.Context, id string) (*dto.EmployeeDetailResponse, error) {
+// machineID = "" returns the employee-wide aggregate; a machine id scopes every
+// device-level surface to that machine (Device Specs device dropdown).
+func (s *NewSchemaService) GetEmployeeDetail(ctx context.Context, id, machineID string) (*dto.EmployeeDetailResponse, error) {
 	emp, err := s.employeeRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("get employee: %w", err)
@@ -958,7 +981,7 @@ func (s *NewSchemaService) GetEmployeeDetail(ctx context.Context, id string) (*d
 	}
 
 	// Latest device hardware snapshot.
-	hw, err := s.repo.GetLatestDeviceHardware(ctx, employeeID)
+	hw, err := s.repo.GetLatestDeviceHardware(ctx, employeeID, machineID)
 	if err != nil {
 		return nil, err
 	}
@@ -981,7 +1004,7 @@ func (s *NewSchemaService) GetEmployeeDetail(ctx context.Context, id string) (*d
 	}
 
 	// Storage devices (children of device_hardware_info).
-	storage, err := s.repo.ListStorageDevices(ctx, employeeID)
+	storage, err := s.repo.ListStorageDevices(ctx, employeeID, machineID)
 	if err != nil {
 		return nil, err
 	}
@@ -996,7 +1019,7 @@ func (s *NewSchemaService) GetEmployeeDetail(ctx context.Context, id string) (*d
 	}
 
 	// Latest network snapshot.
-	net, err := s.repo.GetLatestNetworkInfo(ctx, employeeID)
+	net, err := s.repo.GetLatestNetworkInfo(ctx, employeeID, machineID)
 	if err != nil {
 		return nil, err
 	}
@@ -1014,7 +1037,7 @@ func (s *NewSchemaService) GetEmployeeDetail(ctx context.Context, id string) (*d
 	}
 
 	// Currently-installed applications (active junction links).
-	apps, err := s.repo.ListEmployeeApplications(ctx, employeeID)
+	apps, err := s.repo.ListEmployeeApplications(ctx, employeeID, machineID)
 	if err != nil {
 		return nil, err
 	}
@@ -1036,7 +1059,7 @@ func (s *NewSchemaService) GetEmployeeDetail(ctx context.Context, id string) (*d
 	}
 
 	// Currently-installed packages (active junction links).
-	pkgs, err := s.repo.ListEmployeePackages(ctx, employeeID)
+	pkgs, err := s.repo.ListEmployeePackages(ctx, employeeID, machineID)
 	if err != nil {
 		return nil, err
 	}
@@ -1056,7 +1079,7 @@ func (s *NewSchemaService) GetEmployeeDetail(ctx context.Context, id string) (*d
 	}
 
 	// Peripherals (USB hotplug history).
-	devices, err := s.repo.ListHardwareDevices(ctx, employeeID)
+	devices, err := s.repo.ListHardwareDevices(ctx, employeeID, machineID)
 	if err != nil {
 		return nil, err
 	}
@@ -1074,7 +1097,7 @@ func (s *NewSchemaService) GetEmployeeDetail(ctx context.Context, id string) (*d
 	}
 
 	// Key/value app status.
-	statuses, err := s.repo.ListAppStatus(ctx, employeeID)
+	statuses, err := s.repo.ListAppStatus(ctx, employeeID, machineID)
 	if err != nil {
 		return nil, err
 	}
@@ -1083,7 +1106,7 @@ func (s *NewSchemaService) GetEmployeeDetail(ctx context.Context, id string) (*d
 	}
 
 	// Permission-method checks.
-	perms, err := s.repo.ListPermissionStatus(ctx, employeeID)
+	perms, err := s.repo.ListPermissionStatus(ctx, employeeID, machineID)
 	if err != nil {
 		return nil, err
 	}
@@ -1112,7 +1135,187 @@ func (s *NewSchemaService) GetEmployeeDetail(ctx context.Context, id string) (*d
 		LastActivityAt: stats.LastActivityAt,
 	}
 
+	// Machine list — the CANONICAL source is employee_machines (one row per physical
+	// machine, migration 049). The auth-token registry (employee_devices) rotates a row
+	// on every re-login, so driving the dropdown off it duplicated machines (G8). The
+	// registry is still consulted for the newest platform/client version and the
+	// token-level active flag of each machine.
+	machineList, err := s.repo.ListEmployeeMachines(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	deviceList, err := s.repo.ListEmployeeDevices(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	hostnames, err := s.repo.LatestHostnamesByMachine(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Newest device registration per machine (registry rows come back last_seen DESC).
+	latestByMachine := make(map[string]models.EmployeeDevice, len(deviceList))
+	for _, d := range deviceList {
+		if _, ok := latestByMachine[d.MachineID]; !ok {
+			latestByMachine[d.MachineID] = d
+		}
+	}
+
+	for _, m := range machineList {
+		machineID := m.MachineID
+		hostname := strings.TrimSpace(hostnames[machineID])
+		var reg models.EmployeeDevice
+		var hasReg bool
+		if r, ok := latestByMachine[machineID]; ok {
+			reg, hasReg = r, true
+		}
+
+		deviceName := ""
+		if hasReg {
+			deviceName = strings.TrimSpace(reg.DeviceName)
+		}
+		// Never surface a nameless device: fall back to the hostname the machine
+		// reported, and finally to the machine id so the dropdown is always readable.
+		if deviceName == "" {
+			deviceName = hostname
+		}
+		if deviceName == "" {
+			deviceName = machineID
+		}
+		if hostname == "" {
+			hostname = deviceName
+		}
+
+		dtoDev := dto.EmployeeDeviceDto{
+			EmployeeID:      employeeID,
+			MachineID:       machineID,
+			DeviceName:      deviceName,
+			Hostname:        hostname,
+			Status:          m.Status,
+			FirstTrackAt:    m.FirstTrackAt,
+			LastTrackAt:     m.LastTrackAt,
+			WipeRequestedAt: m.WipeRequestedAt,
+			// The lifecycle row is authoritative for "is this machine current".
+			IsActiveDevice: m.Status == models.MachineStatusActive,
+		}
+		if hasReg {
+			dtoDev.ID = reg.ID
+			dtoDev.Platform = reg.Platform
+			dtoDev.ClientVersion = reg.ClientVersion
+			dtoDev.LastSeenAt = reg.LastSeenAt
+			dtoDev.RevokedAt = reg.RevokedAt
+			dtoDev.RemoveAt = reg.RemoveAt
+		}
+		resp.Devices = append(resp.Devices, dtoDev)
+	}
 	return resp, nil
+}
+
+// RemoveAccount handles the client's "remove the account" signal (R4/R5). The calling
+// machine has already drained its unsynced rows; this marks that machine 'old', advances
+// last_track_at, revokes its device registrations, closes its open activity and flips the
+// employee to untracked. Non-destructive: nothing is deleted.
+func (s *NewSchemaService) RemoveAccount(ctx context.Context, employeeID, machineID string) (*dto.SelfRemoveAccountResponse, error) {
+	emp, err := s.employeeRepo.GetByEmployeeID(ctx, employeeID)
+	if err != nil {
+		return nil, fmt.Errorf("get employee: %w", err)
+	}
+	if emp == nil {
+		return nil, fmt.Errorf("employee not found")
+	}
+
+	if machineID != "" {
+		if err := s.repo.MarkEmployeeMachineOld(ctx, employeeID, machineID, false); err != nil {
+			return nil, err
+		}
+	}
+
+	revoked, err := s.repo.RevokeEmployeeDevices(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	_ = revoked
+
+	sessions, items, err := s.repo.CloseOpenActivity(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	_ = sessions
+	_ = items
+
+	if _, err := s.employeeRepo.Update(ctx, emp.ID, map[string]interface{}{
+		"tracking_status": "untracked",
+		"is_online":       false,
+	}); err != nil {
+		return nil, fmt.Errorf("update employee tracking status: %w", err)
+	}
+
+	// Read back the machine row for an honest lastTrackAt/status in the response.
+	resp := &dto.SelfRemoveAccountResponse{
+		Removed:        true,
+		MachineID:      machineID,
+		Status:         models.MachineStatusOld,
+		LastTrackAt:    time.Now().UTC(),
+		TrackingStatus: "untracked",
+	}
+	if machines, lerr := s.repo.ListEmployeeMachines(ctx, employeeID); lerr == nil {
+		for _, m := range machines {
+			if m.MachineID == machineID {
+				resp.Status = m.Status
+				resp.LastTrackAt = m.LastTrackAt
+				break
+			}
+		}
+	}
+	return resp, nil
+}
+
+// RemoveEmployeeDevices detaches every machine from an employee ("Remove current device"
+// on the employees page). It is deliberately non-destructive: device registrations are
+// revoked (not deleted), open app sessions/items are closed (not removed) and the
+// employee is flipped to untracked. All history stays queryable — Device Specs keeps
+// showing the retired machine — and the next login on a new machine registers a fresh
+// device and starts tracking again.
+func (s *NewSchemaService) RemoveEmployeeDevices(ctx context.Context, id string) (*dto.RemoveEmployeeDeviceResponse, error) {
+	emp, err := s.employeeRepo.GetByID(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("get employee: %w", err)
+	}
+	if emp == nil {
+		return nil, fmt.Errorf("employee not found")
+	}
+
+	revoked, err := s.repo.RevokeEmployeeDevices(ctx, emp.EmployeeID)
+	if err != nil {
+		return nil, err
+	}
+
+	// R6 trigger: every ACTIVE machine of this employee is now 'old' and flagged for a
+	// wipe (machines already 'old' are untouched). The next sync from any of them
+	// persists its outstanding rows (DeviceAuth accepts the revoked token) and is
+	// answered with action=wipe_local.
+	if err := s.repo.MarkAllEmployeeMachinesOldWithWipe(ctx, emp.EmployeeID); err != nil {
+		return nil, err
+	}
+
+	sessions, items, err := s.repo.CloseOpenActivity(ctx, emp.EmployeeID)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := s.employeeRepo.Update(ctx, emp.ID, map[string]interface{}{
+		"tracking_status": "untracked",
+		"is_online":       false,
+	}); err != nil {
+		return nil, fmt.Errorf("update employee tracking status: %w", err)
+	}
+
+	return &dto.RemoveEmployeeDeviceResponse{
+		RevokedDevices: revoked,
+		ClosedSessions: sessions,
+		ClosedItems:    items,
+		TrackingStatus: "untracked",
+	}, nil
 }
 
 // ── Hours Insights ──

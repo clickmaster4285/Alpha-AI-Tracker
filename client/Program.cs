@@ -142,9 +142,44 @@ var isMinimized = args.Contains("--minimized");
 // Restart=always racing) must exit quietly so they never disturb the user.
 var isUserLaunch = !isBackground && !isMinimized;
 
+// ─── Account removal (--remove-account) ───
+// `client --remove-account` completely removes this machine's login account and
+// puts the tool back on the sign-in page. It is the command the web "Remove
+// Current Device" modal shows for Linux and Windows.
+var isRemoveAccount = args.Contains("--remove-account");
+
 var appMutex = new Mutex(true, SingleInstanceService.MutexName, out var mutexCreated);
 if (!mutexCreated)
 {
+    // ── --remove-account while a tracker is already running ──
+    // The RUNNING instance owns the SQLite connection and the GUI, so it performs
+    // the removal in place (empty the tables, stop collecting, re-render the
+    // sign-in page — see App.axaml.cs). This process must NOT do the wipe itself:
+    // the database file is in use, and stopping the tracker here would have
+    // auto-start / systemd Restart=always immediately start a second, still-logged-in
+    // instance that races us for the mutex. Signal and exit.
+    if (isRemoveAccount)
+    {
+        // The RUNNING instance owns both the SQLite connection and the server
+        // credentials, so IT performs the whole routine — stop collecting, bounded
+        // drain, POST /devices/self-remove, wipe, sign-in page — via
+        // AccountRemovalService (R4/R5, 2026-10-19). This process must not delete
+        // identifiers or touch the DB: if the signal is not delivered we would leave a
+        // half-removed machine, and a concurrent writer would race the wipe.
+        var delivered = SingleInstanceService.SignalExistingInstance(
+            SingleInstanceService.CommandRemoveAccount);
+        Console.WriteLine(delivered
+            ? "Account removal requested — the running app is draining pending data, notifying the server, and wiping this machine's local account."
+            : "Could not reach the running app — showing it instead. Verify the account was removed on that machine.");
+        if (!delivered)
+        {
+            // Pipe dead (the instance is starting up or wedged) — at least surface it
+            // so the operator can see what state the machine is in.
+            SingleInstanceService.SignalExistingInstance();
+        }
+        return;
+    }
+
     // ── --restart (post-update relaunch) ──
     // The updater launches us with --restart and then shuts the OLD process down
     // so the newly-installed binary can take over. The old process may still own
@@ -216,7 +251,9 @@ builder.Services.AddSingleton(config);
 // SQLite Log Store
 builder.Services.AddSingleton<ILogStore>(sp =>
 {
-    return new SqliteLogStore(ResolveDbPath(config.DbPath), config.DbEncryptionKey);
+    // Lazy provider: after `--remove-account` resets ClientId, a re-login in this same
+    // process must persist the NEW machine id, not the retired one (R2/R7).
+    return new SqliteLogStore(ResolveDbPath(config.DbPath), config.DbEncryptionKey, null, () => config.ClientId);
 });
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -348,6 +385,11 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<LogCollectorServic
 builder.Services.AddSingleton<SyncService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<SyncService>());
 
+// Account removal (R4/R5/R6, 2026-10-19): single routine shared by the `--remove-account`
+// CLI flow, the running-instance signal handler and the server-initiated wipe
+// ({"action":"wipe_local"}). It drains, calls /devices/self-remove, then wipes.
+builder.Services.AddSingleton<AccountRemovalService>();
+
 // Control WebSocket (presence / keep-alive). Parked when ALPHA_WS_ENABLED=false.
 // Connects only after SyncService proves a 2xx (idle timeout fallback + reconnect).
 // Registered after SyncService so the sync loop is running before we wait on it.
@@ -439,6 +481,47 @@ try
     await host.Services.GetRequiredService<ILogStore>()
         .InitializeAsync(CancellationToken.None);
 
+    // ─── Account removal wiring (R4/R5/R6, 2026-10-19) ───────────────────────
+    // Wire BEFORE the host starts so a server-initiated wipe can never be missed
+    // (SyncService raises OnServerRequestedWipe at most once per process).
+    var syncService = host.Services.GetRequiredService<SyncService>();
+    var accountRemoval = host.Services.GetRequiredService<AccountRemovalService>();
+
+    // R6: an admin removed this device; the server answered a sync with
+    // {"action":"wipe_local"} AFTER persisting that batch. Run the canonical removal
+    // routine in the background — it must not block the sync loop it was raised from.
+    syncService.OnServerRequestedWipe += () =>
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await accountRemoval.RunAsync(CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[client] Server-requested wipe failed: {ex.Message}");
+            }
+        });
+    };
+
+    // After ANY wipe (CLI or server-initiated) let the shell react: a live GUI resets to
+    // the sign-in page, a headless tracker raises the lazy GUI. Reusing the existing
+    // REMOVE_ACCOUNT handler keeps one UI reaction path; it is idempotent because
+    // AccountRemovalService short-circuits once the wipe has happened.
+    accountRemoval.WipeCompleted += () =>
+    {
+        App.PendingRemoveAccount = true;
+        try
+        {
+            SingleInstanceService.OnRemoveAccountRequested?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[client] Post-wipe UI reaction failed: {ex.Message}");
+        }
+    };
+
     await host.StartAsync(CancellationToken.None);
 
     // The lifetime is now available - wire the ApplicationStopping hook.
@@ -446,6 +529,51 @@ try
 
     // Set service provider for App to resolve ViewModels from DI
     App.ServiceProvider = host.Services;
+
+    // ─── Cold-start / background `client --remove-account` (R4/R5) ────────────
+    // The host is running now, so the sync engine is alive and the final drain is
+    // real (previously this fired at a host that had not been started — the drain
+    // never ran and the server was never told). AccountRemovalService stops
+    // collection, waits for the drain, POSTs /devices/self-remove, then wipes the
+    // local DB + machine id. Killed siblings and a clean shutdown follow.
+    if (isRemoveAccount)
+    {
+        Console.WriteLine("Removing this machine's account: draining pending data, notifying the server...");
+        var notified = await accountRemoval.RunAsync(CancellationToken.None);
+        Console.WriteLine(notified
+            ? "Server notified — this machine is marked old and the employee is untracked."
+            : "Server could not be reached — local account removed locally (pending rows may be lost).");
+
+        // Cold start must not leave a sibling tracker behind (the mutex branch above
+        // handles the already-running case by signalling instead).
+        try
+        {
+            var currentId = Environment.ProcessId;
+            foreach (var proc in System.Diagnostics.Process.GetProcessesByName("client"))
+            {
+                if (proc.Id != currentId)
+                {
+                    try { proc.Kill(entireProcessTree: true); } catch { }
+                }
+            }
+            foreach (var proc in System.Diagnostics.Process.GetProcessesByName("AlphaAI"))
+            {
+                if (proc.Id != currentId)
+                {
+                    try { proc.Kill(entireProcessTree: true); } catch { }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[remove-account] Failed to kill sibling processes: {ex.Message}");
+        }
+
+        await host.StopAsync(CancellationToken.None);
+        shutdownSentinel.PowerOffWritten.Wait(TimeSpan.FromSeconds(3));
+        host.Dispose();
+        return;
+    }
 
     if (isBackground)
     {
@@ -465,7 +593,7 @@ try
         // no data gap. After the UI initializes, App.axaml.cs takes over
         // OnShowRequested to bring the existing window forward for further launches.
         var uiStarted = 0;
-        SingleInstanceService.OnShowRequested = () =>
+        void StartLazyGui()
         {
             if (Interlocked.Exchange(ref uiStarted, 1) == 1) return;
             try
@@ -496,6 +624,31 @@ try
             {
                 Console.Error.WriteLine($"[client] Failed to start GUI thread: {ex.Message}");
             }
+        }
+
+        SingleInstanceService.OnShowRequested = StartLazyGui;
+
+        // ─── Account removal while running HEADLESS (client --remove-account) ───
+        // This process owns the SQLite connection, so the routine runs HERE, in place:
+        // stop collecting → bounded drain → POST /devices/self-remove → wipe + new
+        // machine id on next login (AccountRemovalService). App.PendingRemoveAccount
+        // additionally tells a GUI that is still booting to reconcile the state it may
+        // have read before the wipe (App.axaml.cs); once the GUI is live it replaces
+        // this handler with its own, which resets the shell.
+        SingleInstanceService.OnRemoveAccountRequested = () =>
+        {
+            try
+            {
+                accountRemoval.RunAsync(CancellationToken.None).GetAwaiter().GetResult();
+                Console.WriteLine("Local account removed — opening the sign-in page.");
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[client] Account removal failed: {ex.Message}");
+            }
+
+            App.PendingRemoveAccount = true;
+            StartLazyGui();
         };
         // WaitForShutdownAsync is tied to IHostApplicationLifetime. The previous
         // uncancellable Task.Delay kept the process alive after SIGTERM even though
@@ -559,7 +712,7 @@ static async Task RunTermsAgentAsync(string[] args)
 
     builder.Services.AddSingleton(config);
     builder.Services.AddSingleton<ILogStore>(sp =>
-        new SqliteLogStore(ResolveDbPath(config.DbPath), config.DbEncryptionKey));
+        new SqliteLogStore(ResolveDbPath(config.DbPath), config.DbEncryptionKey, null, () => config.ClientId));
     builder.Services.AddSingleton<HttpClient>(sp => new HttpClient { Timeout = TimeSpan.FromSeconds(30) });
     builder.Services.AddSingleton<client.Services.TermsService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.TermsService>());

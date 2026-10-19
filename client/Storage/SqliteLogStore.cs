@@ -3,6 +3,7 @@ using Microsoft.Data.Sqlite;
 using client.Core;
 using client.Core.Abstractions;
 using client.Core.Models;
+using client.Configuration;
 
 namespace client.Storage;
 
@@ -10,6 +11,12 @@ public class SqliteLogStore : ILogStore, IDisposable
 {
     private readonly string _dbPath;
     private readonly string _connectionString;
+    // Machine identity (R2/R7, 2026-10-19). Resolved LAZILY on every use instead of
+    // being captured at construction: `--remove-account` resets AppConfig.ClientId to
+    // empty so the next login mints a brand-new id, and a store holding the old value
+    // would stamp the retired machine id onto the fresh account.
+    private readonly Func<string>? _machineIdProvider;
+    private string MachineId => _machineIdProvider?.Invoke() ?? string.Empty;
     private SqliteConnection? _connection;
 
     /// <summary>
@@ -36,9 +43,12 @@ public class SqliteLogStore : ILogStore, IDisposable
     private readonly SemaphoreSlim _initializationGate = new(1, 1);
     private bool _initialized;
 
-    public SqliteLogStore(string dbPath, string? encryptionKey = null)
+    public SqliteLogStore(string dbPath, string? encryptionKey = null, string? machineId = null, Func<string>? machineIdProvider = null)
     {
         _dbPath = dbPath;
+        // Either a fixed id (legacy call sites) or a live provider (Program.cs passes
+        // `() => config.ClientId` so a wipe + re-login in the same process is correct).
+        _machineIdProvider = machineIdProvider ?? (string.IsNullOrEmpty(machineId) ? null : () => machineId);
         // Cache=Shared is the WAL-friendly connection string: the same .db file
         // can be opened by the read connection without re-opening the file.
         var cs = $"Data Source={dbPath};Mode=ReadWriteCreate;Cache=Shared";
@@ -98,6 +108,12 @@ public class SqliteLogStore : ILogStore, IDisposable
             await cmd.ExecuteNonQueryAsync(ct);
 
             await RunMigrationsAsync(ct);
+
+            // Machine identity (R2): every telemetry INSERT reads its machine_id from
+            // this single row, so writing it here is the one place the identity is
+            // established. Upsert keeps it current if the id changed (e.g. after a
+            // prior wipe generated a new one).
+            await SetMachineIdentityCoreAsync(ct);
         }
         finally
         {
@@ -1647,12 +1663,13 @@ public class SqliteLogStore : ILogStore, IDisposable
             var cmd = _connection.CreateCommand();
             cmd.CommandText = @"
                 INSERT INTO daily_attendance_cache
-                    (employee_id, work_date, first_active_at, last_active_at,
+                    (employee_id, machine_id, work_date, first_active_at, last_active_at,
                      active_seconds, idle_seconds, off_shift_seconds, status, late_minutes, updated_at)
                 VALUES
-                    ($eid, $date, $fa, $la, $a, $i, $o, $st, $lm,
+                    ($eid, COALESCE((SELECT machine_id FROM machine_identity WHERE id = 1), ''), $date, $fa, $la, $a, $i, $o, $st, $lm,
                      strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
                 ON CONFLICT(employee_id, work_date) DO UPDATE SET
+                    machine_id = COALESCE(NULLIF(excluded.machine_id, ''), daily_attendance_cache.machine_id),
                     first_active_at = COALESCE(NULLIF(excluded.first_active_at, ''), daily_attendance_cache.first_active_at),
                     last_active_at = excluded.last_active_at,
                     active_seconds = excluded.active_seconds,
@@ -3174,6 +3191,32 @@ public class SqliteLogStore : ILogStore, IDisposable
         }
     }
 
+    /// <summary>
+    /// Writes THIS machine's id into the single-row `machine_identity` table — the one
+    /// value every telemetry INSERT reads (R2). Called at initialization and on every
+    /// login so a re-login after a wipe stores the freshly generated id (R7).
+    /// Ungated: callers already hold <see cref="_connectionGate"/>.
+    /// </summary>
+    private async Task SetMachineIdentityCoreAsync(CancellationToken ct)
+    {
+        if (_connection == null)
+            return;
+
+        var machineId = MachineId;
+        if (string.IsNullOrEmpty(machineId))
+            return;
+
+        using var identCmd = _connection.CreateCommand();
+        identCmd.CommandText = @"
+            INSERT INTO machine_identity (id, machine_id, updated_at)
+            VALUES (1, $mid, strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+            ON CONFLICT(id) DO UPDATE SET
+                machine_id = excluded.machine_id,
+                updated_at = excluded.updated_at";
+        identCmd.Parameters.AddWithValue("$mid", machineId);
+        await identCmd.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task SaveEmployeeInfoAsync(EmployeeInfo employee, CancellationToken ct)
     {
         if (_connection == null) return;
@@ -3181,15 +3224,24 @@ public class SqliteLogStore : ILogStore, IDisposable
         await _connectionGate.WaitAsync(ct);
         try
         {
+            // R7: a login (re-)establishes the machine identity, so the registry row and
+            // the account row below always carry the id this login was made with.
+            await SetMachineIdentityCoreAsync(ct);
+
             var clearCmd = _connection.CreateCommand();
             clearCmd.CommandText = "DELETE FROM employee_info";
             await clearCmd.ExecuteNonQueryAsync(ct);
 
             var cmd = _connection.CreateCommand();
+            // machine_id (R2/R7, 2026-10-19): mirrors machine_identity, so the durable
+            // local record of the logged-in account also states WHICH machine it was
+            // established on. Cleared together with the row by the account wipe, so a
+            // re-login after a wipe stores the freshly generated machine id.
             cmd.CommandText = @"
-                INSERT INTO employee_info (id, employee_id, name, email, role, department, shift, avatar, avatar_color, token, device_token, logged_in_at)
-                VALUES ($id, $employee_id, $name, $email, $role, $department, $shift, $avatar, $avatar_color, $token, $device_token, strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+                INSERT INTO employee_info (id, machine_id, employee_id, name, email, role, department, shift, avatar, avatar_color, token, device_token, logged_in_at)
+                VALUES ($id, $machine_id, $employee_id, $name, $email, $role, $department, $shift, $avatar, $avatar_color, $token, $device_token, strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
             ";
+            cmd.Parameters.AddWithValue("$machine_id", MachineId);
             cmd.Parameters.AddWithValue("$id", employee.Id);
             cmd.Parameters.AddWithValue("$employee_id", employee.EmployeeId);
             cmd.Parameters.AddWithValue("$name", employee.Name);
@@ -3247,6 +3299,111 @@ public class SqliteLogStore : ILogStore, IDisposable
         {
             _connectionGate.Release();
         }
+    }
+
+    public async Task WipeLocalAccountDataAsync(CancellationToken ct)
+    {
+        if (_connection == null) return;
+
+        await _connectionGate.WaitAsync(ct);
+        try
+        {
+            // The table list is read from the database itself (sqlite_master) instead of a
+            // hardcoded array, so a table added in a later release is wiped automatically —
+            // a hardcoded list would silently leak the new table's rows past the removal.
+            var tables = new List<string>();
+            var listCmd = _connection.CreateCommand();
+            listCmd.CommandText =
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'";
+            await using (var reader = await listCmd.ExecuteReaderAsync(ct))
+            {
+                while (await reader.ReadAsync(ct))
+                {
+                    tables.Add(reader.GetString(0));
+                }
+            }
+
+            // Foreign-key enforcement is turned OFF for the sweep. sqlite_master returns
+            // tables in CREATION order, not dependency order, so deleting a parent
+            // (app_sessions) before its children (app_items) aborts the whole transaction
+            // with SQLITE_CONSTRAINT_FOREIGNKEY — which left the account on disk. Every
+            // table is emptied in ONE transaction, so the database still lands consistent:
+            // a fully empty database has no row left that could dangle. The pragma is a
+            // no-op inside a transaction, so it must be set before BEGIN and restored
+            // after COMMIT.
+            var foreignKeysWereEnforced = await ReadForeignKeysPragmaAsync(ct);
+            await WriteForeignKeysPragmaAsync(false, ct);
+            try
+            {
+                await using (var tx = await _connection.BeginTransactionAsync(ct))
+                {
+                    foreach (var table in tables)
+                    {
+                        var cmd = _connection.CreateCommand();
+                        cmd.Transaction = (SqliteTransaction)tx;
+                        // Table names come from sqlite_master (never caller input); quoted so a
+                        // name that collides with a keyword can never break the statement.
+                        cmd.CommandText = $"DELETE FROM \"{table}\"";
+                        await cmd.ExecuteNonQueryAsync(ct);
+                    }
+
+                    await tx.CommitAsync(ct);
+                }
+            }
+            finally
+            {
+                if (foreignKeysWereEnforced)
+                    await WriteForeignKeysPragmaAsync(true, ct);
+            }
+
+            // Physically reclaim the freed pages so nothing from the removed account is
+            // left readable in the file. Deliberately best-effort: VACUUM needs exclusive
+            // access, and the read-only connection used by the attendance rollup may be
+            // mid-query — the DELETEs above ARE the removal, this only compacts the file.
+            try
+            {
+                var vacuum = _connection.CreateCommand();
+                vacuum.CommandText = "VACUUM";
+                await vacuum.ExecuteNonQueryAsync(ct);
+            }
+            catch (SqliteException)
+            {
+                // Data is already gone; a failed compaction must not fail the removal.
+            }
+        }
+        finally
+        {
+            _connectionGate.Release();
+        }
+
+        // Remove .machine-id and device_id files from disk
+        AppConfig.RemoveMachineAndDeviceIdentifiers();
+    }
+
+    /// <summary>
+    /// Reads <c>PRAGMA foreign_keys</c> for the current connection (true = enforced).
+    /// Used to restore the connection's setting after the wipe disables it.
+    /// </summary>
+    private async Task<bool> ReadForeignKeysPragmaAsync(CancellationToken ct)
+    {
+        if (_connection == null) return false;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = "PRAGMA foreign_keys";
+        var value = await cmd.ExecuteScalarAsync(ct);
+        return value != null && Convert.ToInt64(value) != 0;
+    }
+
+    /// <summary>
+    /// Toggles <c>PRAGMA foreign_keys</c> on the shared connection. SQLite silently
+    /// ignores the pragma inside a transaction, so callers must invoke it outside one
+    /// (see <see cref="WipeLocalAccountDataAsync"/>).
+    /// </summary>
+    private async Task WriteForeignKeysPragmaAsync(bool enforced, CancellationToken ct)
+    {
+        if (_connection == null) return;
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = enforced ? "PRAGMA foreign_keys = ON" : "PRAGMA foreign_keys = OFF";
+        await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public void Dispose()

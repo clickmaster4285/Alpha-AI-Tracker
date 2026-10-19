@@ -85,6 +85,13 @@ public class SyncService : BackgroundService
         public List<string>? RejectedIds { get; set; }
         /// <summary>Parent session IDs the server does NOT have — the client must re-queue them.</summary>
         public List<string>? MissingSessionIds { get; set; }
+        /// <summary>
+        /// Server-side instruction for THIS device (R6, 2026-10-19). Currently the only
+        /// value is "wipe_local": an admin removed this device, the server already
+        /// persisted the batch that carried this response, and now wants the client to
+        /// wipe its local DB + machine id and return to the sign-in page.
+        /// </summary>
+        public string? Action { get; set; }
     }
 
     private static readonly JsonSerializerOptions SyncResponseJsonOpts = new()
@@ -99,6 +106,139 @@ public class SyncService : BackgroundService
     /// letting the warning loop silently retry.
     /// </summary>
     public event Action? OnAuthCredentialsDead;
+
+    /// <summary>
+    /// Raised ONCE per process when the server answers a sync with
+    /// <c>{"action":"wipe_local"}</c> — the admin removed this device
+    /// (R6, 2026-10-19) and the batch that carried the response has already
+    /// been persisted server-side. The listener (AccountRemovalService) stops
+    /// collection, wipes the local DB + machine id and shows the sign-in page.
+    /// </summary>
+    public event Action? OnServerRequestedWipe;
+
+    private bool _wipeRequestedFromServer;
+
+    // ── Drain-pass completion signal (R4 / R6) ──────────────────────────────
+    // --remove-account (and the self-remove flow) must WAIT for the pending rows
+    // to reach the server before wiping the local DB, otherwise unsynced data is
+    // destroyed. Each pass that finishes its drain loop publishes here; a pass is
+    // "fully drained" only when it neither failed nor hit the per-pass budget.
+    private TaskCompletionSource<bool> _passCompletedTcs =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private volatile bool _lastPassDrainedAll;
+
+    /// <summary>
+    /// Requests an immediate drain and waits (bounded by <paramref name="timeout"/>)
+    /// until a pass transfers everything without failure or budget exhaustion.
+    /// Returns true when the queue is empty; false on timeout — callers proceed
+    /// either way (a huge backlog must never block account removal forever).
+    /// </summary>
+    public async Task<bool> WaitForDrainAsync(TimeSpan timeout, CancellationToken ct)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        linked.CancelAfter(timeout);
+        try
+        {
+            while (!linked.IsCancellationRequested)
+            {
+                var passTcs = _passCompletedTcs;
+                RequestImmediateSync();
+                await passTcs.Task.WaitAsync(linked.Token);
+                if (_lastPassDrainedAll)
+                    return true;
+            }
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // Timeout — bounded wait, caller proceeds with the wipe.
+        }
+        return _lastPassDrainedAll;
+    }
+
+    /// <summary>Publishes the outcome of a completed drain pass to <see cref="WaitForDrainAsync"/>.</summary>
+    private void CompletePass(bool drainedAll)
+    {
+        _lastPassDrainedAll = drainedAll;
+        var tcs = _passCompletedTcs;
+        _passCompletedTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        tcs.TrySetResult(true);
+    }
+
+    /// <summary>
+    /// Inspects a sync response body for a server-side device action. Raises
+    /// <see cref="OnServerRequestedWipe"/> at most once per process.
+    /// </summary>
+    private void CheckServerAction(string? body)
+    {
+        if (_wipeRequestedFromServer || string.IsNullOrEmpty(body))
+            return;
+
+        bool wipe;
+        try
+        {
+            var resp = JsonSerializer.Deserialize<SyncBatchResponse>(body, SyncResponseJsonOpts);
+            wipe = string.Equals(resp?.Action, "wipe_local", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (JsonException)
+        {
+            return;
+        }
+
+        if (!wipe)
+            return;
+
+        _wipeRequestedFromServer = true;
+        _logger.LogWarning(
+            "Server requested a local wipe (device removed) — notifying listeners to wipe local DB + machine id");
+        OnServerRequestedWipe?.Invoke();
+    }
+
+    /// <summary>
+    /// Tells the server this machine's account is being removed (R4/R5, 2026-10-19):
+    /// <c>POST /api/v1/devices/self-remove</c> under DeviceAuth. The server marks the
+    /// employee <c>untracked</c>, the machine <c>old</c> and advances <c>last_track_at</c>.
+    /// Runs AFTER the final drain so the batch that carried the last rows is already
+    /// persisted. Returns true when the server acknowledged; false when it could not be
+    /// reached (callers proceed with the local wipe regardless — the local wipe is what
+    /// the operator asked for).
+    /// </summary>
+    public async Task<bool> SelfRemoveAsync(CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(_deviceToken) && string.IsNullOrEmpty(_token))
+            return false;
+
+        var serverUrl = _config.ServerUrl ?? "http://localhost:8080";
+        try
+        {
+            using var request = new HttpRequestMessage(
+                HttpMethod.Post, $"{serverUrl}/api/v1/devices/self-remove");
+            request.Content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json");
+            if (!string.IsNullOrEmpty(_deviceToken))
+                request.Headers.Authorization = new AuthenticationHeaderValue("Device", _deviceToken);
+            else
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _token);
+            ClientIdentityHeaders.Apply(request);
+
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(30));
+            var response = await _httpClient.SendAsync(request, cts.Token);
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("Server acknowledged self-remove for this machine");
+                return true;
+            }
+
+            var errBody = await response.Content.ReadAsStringAsync(ct);
+            _logger.LogWarning("Self-remove failed (status {Status}): {Body}",
+                (int)response.StatusCode, errBody);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Self-remove request failed (server unreachable?)");
+            return false;
+        }
+    }
 
     // Exponential backoff on failed passes: 5s → 10s → 20s → … → SyncBackoffMaxSec.
     private TimeSpan _backoff = TimeSpan.FromSeconds(5);
@@ -203,6 +343,10 @@ public class SyncService : BackgroundService
                 if (!await RefreshEmployeeInfoAsync(stoppingToken))
                 {
                     // Not logged in yet — poll until employee credentials persist (Login flow).
+                    // Publish a trivially-complete pass: with no credentials there is nothing
+                    // to send, so `--remove-account` must not sit out its whole drain timeout
+                    // waiting for a pass that can never run (R4).
+                    CompletePass(drainedAll: true);
                     await Task.Delay(LoginPollDelay, stoppingToken);
                     continue;
                 }
@@ -211,9 +355,10 @@ public class SyncService : BackgroundService
                 var passBudget = TimeSpan.FromSeconds(Math.Max(10, _config.SyncMaxDurationSec));
 
                 bool failed = false;
+                bool budgetExhausted = false;
                 foreach (var drain in _drainPass)
                 {
-                    if (passSw.Elapsed >= passBudget) break;
+                    if (passSw.Elapsed >= passBudget) { budgetExhausted = true; break; }
                     if (await drain(passSw, passBudget, stoppingToken))
                         failed = true;
                 }
@@ -246,6 +391,10 @@ public class SyncService : BackgroundService
                 {
                     _backoff = TimeSpan.FromSeconds(5);
                 }
+
+                // Publish pass completion for --remove-account / self-remove (R4/R6):
+                // a pass that neither failed nor ran out of budget drained every table.
+                CompletePass(drainedAll: !failed && !budgetExhausted);
 
                 // Between passes: grow the wait on failure (backoff), otherwise the idle interval.
                 // The wait is interruptible — RequestImmediateSync() (login) releases the
@@ -579,9 +728,11 @@ public class SyncService : BackgroundService
                         slice = slice.Take(slice.Count / 2).ToList();
                     }
 
-                    var (sentOk, _) = await SendAsync(endpoint, json, ct);
+                    var (sentOk, body) = await SendAsync(endpoint, json, ct);
                     if (!sentOk)
                         return true;
+
+                    CheckServerAction(body);
 
                     var ids = slice.SelectMany(a => a.SourceIds).Distinct().ToList();
                     if (ids.Count > 0)
@@ -721,6 +872,10 @@ public class SyncService : BackgroundService
                     var (ok, body) = await SendAsync(endpoint, json, ct);
                     if (!ok)
                         return true; // failed — stop this table, back off, resume next pass
+
+                    // R6: the server may piggyback a device action (wipe_local) on any
+                    // successful sync — the rows in this slice are already persisted.
+                    CheckServerAction(body);
 
                     var ids = slice.Select(idOf).Where(id => !string.IsNullOrEmpty(id)).Cast<string>().ToList();
 

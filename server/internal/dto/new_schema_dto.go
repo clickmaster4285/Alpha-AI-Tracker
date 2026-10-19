@@ -28,6 +28,31 @@ type SyncBatchResponse struct {
 	// breaking the permanent orphan deadlock (Bug #9 follow-up).
 	// Currently populated only by SyncAppItems.
 	MissingSessionIds []string `json:"missingSessionIds,omitempty"`
+	// Action is a server→client instruction. Today the only value is "wipe_local":
+	// the caller's device was removed ("Remove current device"), this batch has now
+	// been persisted, and the client must wipe its local DB + machine id and sign
+	// out (R6). omitempty keeps every other response's wire format unchanged, so an
+	// older client ignores it and a new client talking to an older server never
+	// sees it (and therefore never wipes spuriously).
+	Action string `json:"action,omitempty"`
+}
+
+// SelfRemoveAccountRequest is the body of POST /api/v1/devices/self-remove.
+// It carries no identity: the device token is the identity, and the server reads
+// employee_id + machine_id from the DeviceAuth context (Machine-Scoped Data Rule).
+type SelfRemoveAccountRequest struct {
+	Reason    string `json:"reason,omitempty"`
+	Token     string `json:"token,omitempty"`
+	MachineID string `json:"machineId,omitempty"`
+}
+
+// SelfRemoveAccountResponse reports what "remove the account" changed on the server.
+type SelfRemoveAccountResponse struct {
+	Removed        bool      `json:"removed"`
+	MachineID      string    `json:"machineId"`
+	Status         string    `json:"status"`
+	LastTrackAt    time.Time `json:"lastTrackAt"`
+	TrackingStatus string    `json:"trackingStatus"`
 }
 
 // ────────────────────────────────
@@ -52,7 +77,10 @@ type DeviceHardwareInfoEntry struct {
 type SyncDeviceHardwareRequest struct {
 	EmployeeID string                    `json:"employeeId"`
 	Token      string                    `json:"token"`
-	Entries    []DeviceHardwareInfoEntry `json:"entries"`
+	// MachineID is filled by the handler from the DeviceAuth context (never trusted
+	// from the body) so every row can be scoped to the reporting device.
+	MachineID string                    `json:"-"`
+	Entries   []DeviceHardwareInfoEntry `json:"entries"`
 }
 
 type DeviceHardwareInfoResponse struct {
@@ -95,6 +123,7 @@ type InstalledApplicationEntry struct {
 type SyncInstalledAppsRequest struct {
 	EmployeeID string                      `json:"employeeId"`
 	Token      string                      `json:"token"`
+	MachineID  string                      `json:"-"`
 	Entries    []InstalledApplicationEntry `json:"entries"`
 }
 
@@ -140,6 +169,7 @@ type InstalledPackageEntry struct {
 type SyncInstalledPackagesRequest struct {
 	EmployeeID string                  `json:"employeeId"`
 	Token      string                  `json:"token"`
+	MachineID  string                  `json:"-"`
 	Entries    []InstalledPackageEntry `json:"entries"`
 }
 
@@ -160,6 +190,7 @@ type InstalledPackageResponse struct {
 type SyncNetworkInfoRequest struct {
 	EmployeeID string             `json:"employeeId"`
 	Token      string             `json:"token"`
+	MachineID  string             `json:"-"`
 	Entries    []NetworkInfoEntry `json:"entries"`
 }
 
@@ -191,6 +222,8 @@ type SessionEventEntry struct {
 type SyncSessionEventsRequest struct {
 	EmployeeID string              `json:"employeeId"`
 	Token      string              `json:"token"`
+	// MachineID is filled by the handler from DeviceAuth (never trusted from the body).
+	MachineID string              `json:"-"`
 	Entries    []SessionEventEntry `json:"entries"`
 }
 
@@ -322,6 +355,8 @@ type AppItemEntry struct {
 type SyncAppItemsRequest struct {
 	EmployeeID string         `json:"employeeId"`
 	Token      string         `json:"token"`
+	// MachineID is filled by the handler from DeviceAuth (never trusted from the body).
+	MachineID string         `json:"-"`
 	Entries    []AppItemEntry `json:"entries"`
 }
 
@@ -385,6 +420,7 @@ type AppStatusEntry struct {
 type SyncAppStatusRequest struct {
 	EmployeeID string           `json:"employeeId"`
 	Token      string           `json:"token"`
+	MachineID  string           `json:"-"`
 	Entries    []AppStatusEntry `json:"entries"`
 }
 
@@ -403,6 +439,7 @@ type HardwareDeviceEntry struct {
 type SyncHardwareDevicesRequest struct {
 	EmployeeID string                `json:"employeeId"`
 	Token      string                `json:"token"`
+	MachineID  string                `json:"-"`
 	Entries    []HardwareDeviceEntry `json:"entries"`
 }
 
@@ -420,6 +457,7 @@ type PermissionStatusEntry struct {
 type SyncPermissionStatusRequest struct {
 	EmployeeID string                  `json:"employeeId"`
 	Token      string                  `json:"token"`
+	MachineID  string                  `json:"-"`
 	Entries    []PermissionStatusEntry `json:"entries"`
 }
 
@@ -434,6 +472,7 @@ type StorageDeviceEntry struct {
 type SyncStorageDevicesRequest struct {
 	EmployeeID string               `json:"employeeId"`
 	Token      string               `json:"token"`
+	MachineID  string               `json:"-"`
 	Entries    []StorageDeviceEntry `json:"entries"`
 }
 
@@ -455,6 +494,8 @@ type LocationSampleEntry struct {
 type SyncLocationSamplesRequest struct {
 	EmployeeID string                `json:"employeeId"`
 	Token      string                `json:"token"`
+	// MachineID is filled by the handler from DeviceAuth (never trusted from the body).
+	MachineID string                `json:"-"`
 	Entries    []LocationSampleEntry `json:"entries"`
 }
 

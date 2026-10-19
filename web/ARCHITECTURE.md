@@ -1,7 +1,54 @@
 # Web Architecture — Alpha AI Tracker Dashboard
 
-> **Last audited:** 2026-10-05 (dashboard summary-first home)
+> **Last audited:** 2026-10-19 (device lifecycle status in Device Specs)
 > **Changelog:**
+> - 2026-10-19 (late): **"All devices" removed from the Device Specs machine dropdown (user request).**
+>   `components/employees/EmployeePage.tsx` no longer renders the `__all__` sentinel (the
+>   `ALL_DEVICES` constant and its `SelectItem` are gone, and the trigger placeholder is now
+>   "Select device"). Whenever the employee has 2+ machines the shell ALWAYS scopes to exactly one
+>   machine: the machine id in `?deviceId=` while it is still a registered machine, otherwise the
+>   first entry of `devices[]` (the server orders machines active-first, then most recently tracked,
+>   so the default is the live machine). The resolved scope is mirrored back into the URL
+>   (`useEffect` → `setExtra`, never inside a setState updater — URL-Synced Filters Rule), the
+>   render-prop now hands bodies `deviceId: effectiveDeviceId`, and a stale/unknown `?deviceId=`
+>   falls back the same way. Single-machine employees are untouched: no dropdown is rendered and the
+>   employee-wide aggregate (server `deviceId` omitted) is what they already saw. Verified:
+>   `npx tsc --noEmit` clean, `next build` passes, and the running dev server recompiles
+>   `/device-specs` (200) with the new chunk.
+> - 2026-10-19: **Device Specs machine dropdown shows the machine lifecycle status (`EmployeeDevice` fix).**
+>   `EmployeeDevice` in `src/lib/api.ts` dropped the stale `isActive` field (the server had been
+>   emitting `isActiveDevice`, so `isActive` was always `undefined` and **every** device rendered as
+>   "removed") and now mirrors the server DTO: `status` (`active` | `old`), `firstTrackAt`,
+>   `lastTrackAt`, `wipeRequestedAt`, `isActiveDevice`, `removeAt`. The list itself now comes from the
+>   server's canonical `employee_machines` registry (migration 049) — one entry per physical machine,
+>   deduplicated even though `employee_devices` rotates a token row per login.
+>   `components/employees/EmployeePage.tsx` renders each entry as
+>   `"{employee} ({hostname})" · active` / `"· old · removed (last tracked …)"` via the new
+>   `deviceStatusLabel`, and `app/(app)/device-specs/page.tsx` keys its removed-device empty state off
+>   `status === 'old'` (Retired-Device History Rule: a removed machine keeps its last-known data and
+>   must not claim the client "will upload one after login"). The URL-synced `?deviceId=` selector and
+>   the `__all__` aggregate are unchanged. Verified: `npx tsc --noEmit` clean.
+> - 2026-10-16: **Sidebar/route gating fixed for Terms & Conditions — the nav entry had no `module` key.**
+>   `AppSidebar.tsx` rendered **Settings → Terms & Conditions** for every authenticated user (a
+>   module-less child short-circuits both `isItemVisible` and `visibleChildrenOf` to `true`), and
+>   `findModuleForPath` fell through its exact-match pass to the `/settings` prefix, so the page was
+>   actually gated by the unrelated **General Settings** permission: a role without it (HR-only) saw
+>   the item and was bounced to `/unauthorized` on click, while a role holding plain `settings` got
+>   T&C create/edit/delete. The entry now carries `module: "settings/terms-and-conditions"`, matching
+>   the new server submodule key, so nav visibility and the route guard agree. `/settings/profile` is
+>   the only remaining module-less entry and is intentionally ungated (`RouteGuard.ALWAYS_ALLOWED`).
+>   Verified: `npx tsc --noEmit` clean; `GET /modules` returns the key (Settings 8/8 for `company_admin`).
+> - 2026-10-15: **Live stream — remote ICE is queued until the answer is applied (fixes LIVE tiles with zero frames).**
+>   `useLiveStreamSocket` held a single `pcRef` and applied every `ice` message immediately; because the
+>   SFU trickles candidates from a separate goroutine (they can precede the `answer`), a candidate could
+>   arrive while `remoteDescription` was still null — `addIceCandidate` throws `InvalidStateError`, the
+>   candidate was silently dropped, ICE/DTLS never completed, and the tile stayed LIVE / `--- FPS` while
+>   the 5s renegotiation loop spun. New per-PC `PcEntry { pc, remoteReady, queue }` in `pcStateRef`: the
+>   `answer` branch awaits `setRemoteDescription`, flips `remoteReady`, then flushes the queue in arrival
+>   order; the `ice` branch queues while `!remoteReady` and only calls `addIceCandidate` once ready;
+>   `cleanupPc` nulls the entry so a renegotiated PC gets fresh state. `ws.onmessage` became `async` for
+>   the awaited set. No server contract or page change beyond the hook.
+>   Verified: `npx tsc --noEmit` clean.
 > - 2026-10-05: **Dashboard home redesign — summary-first.**
 >   `/dashboard` consumes `dashboardApi.summary` + capped
 >   `liveStreamApi.employees({ onlineOnly, limit })` + departments filter.

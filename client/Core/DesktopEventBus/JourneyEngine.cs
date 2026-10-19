@@ -9,6 +9,7 @@ public class JourneyEngine
 {
     private readonly ILogStore _store;
     private readonly ILogger<JourneyEngine> _logger;
+    private readonly client.Configuration.AppConfig _config;
     private readonly Dictionary<string, string> _journeyAppSessionCache = new();
     private readonly SemaphoreSlim _gate = new(1, 1);
 
@@ -24,10 +25,11 @@ public class JourneyEngine
         "navigate", "open", "create", "delete", "rename", "modify", "close",
     };
 
-    public JourneyEngine(ILogStore store, ILogger<JourneyEngine> logger)
+    public JourneyEngine(ILogStore store, ILogger<JourneyEngine> logger, client.Configuration.AppConfig config)
     {
         _store = store;
         _logger = logger;
+        _config = config;
     }
 
     public async Task ProcessEventAsync(DesktopEvent evt, CancellationToken ct)
@@ -107,7 +109,7 @@ public class JourneyEngine
             ProcessName = processName,
             AppDisplayName = appDisplayName,
             StartedAt = evt.Timestamp,
-            MachineId = Environment.MachineName,
+            MachineId = _config.ClientId,
             SessionId = string.Empty,
             Platform = GetPlatform(),
         };

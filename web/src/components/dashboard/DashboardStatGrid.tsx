@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import {
   Users, UserCheck, Wifi, MonitorSmartphone, Globe, Radio,
-  AlertTriangle, AppWindow, Building2, Loader2,
+  AlertTriangle, AppWindow, Building2, Loader2, CalendarCheck,
 } from 'lucide-react';
 import StatsCard from '@/components/ui/StatsCard';
 import type { DashboardSummaryResponse } from '@/lib/api';
@@ -172,48 +172,45 @@ export function AttentionStrip({ summary }: { summary?: DashboardSummaryResponse
   );
 }
 
-export function FleetHealthCard({ summary, loading }: { summary?: DashboardSummaryResponse; loading?: boolean }) {
+export function AttendanceCard({ summary, loading }: { summary?: DashboardSummaryResponse; loading?: boolean }) {
+  const attendance = summary?.attendance;
+  const rows = attendance
+    ? [
+        { label: 'Present', value: attendance.present, color: 'text-success' },
+        { label: 'Late', value: attendance.late, color: attendance.late > 0 ? 'text-warning' : '' },
+        { label: 'Absent', value: attendance.absent, color: attendance.absent > 0 ? 'text-destructive' : '' },
+        { label: 'Off shift', value: attendance.offShift, color: '' },
+        // Surfaced only when non-zero so an unconfigured shift doesn't render
+        // as a silently all-zero card (the /attendance page hides it too).
+        ...(attendance.halfDay > 0 ? [{ label: 'Half day', value: attendance.halfDay, color: 'text-warning' }] : []),
+        ...(attendance.unknown > 0 ? [{ label: 'Not recorded', value: attendance.unknown, color: 'text-muted-foreground' }] : []),
+      ]
+    : [];
+
   return (
     <div className="bg-card rounded-xl border border-border p-5 h-full">
       <h3 className="font-display font-bold text-foreground mb-3 flex items-center gap-2">
-        <MonitorSmartphone className="w-4 h-4 text-primary" /> Fleet health
+        <CalendarCheck className="w-4 h-4 text-primary" /> Attendance
+        <span className="ml-auto text-xs font-normal text-muted-foreground">Today</span>
       </h3>
       {loading && !summary ? (
         <div className="flex justify-center py-8"><Loader2 className="w-5 h-5 animate-spin text-primary" /></div>
-      ) : !summary ? (
-        <p className="text-sm text-muted-foreground">No fleet data.</p>
+      ) : !attendance ? (
+        <p className="text-sm text-muted-foreground">No attendance data.</p>
       ) : (
         <div className="space-y-3 text-sm">
-          <div className="flex justify-between">
-            <span className="text-muted-foreground">Active devices</span>
-            <span className="font-medium">{summary.devices.active}</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-muted-foreground">Seen · 15m / 24h</span>
-            <span className="font-medium">{summary.devices.seen15m} / {summary.devices.seen24h}</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-muted-foreground">Stale · 7d+</span>
-            <span className={`font-medium ${summary.devices.stale7d > 0 ? 'text-warning' : ''}`}>
-              {summary.devices.stale7d}
-            </span>
-          </div>
-          {summary.devices.versions.length > 0 && (
-            <div className="pt-2 border-t border-border">
-              <p className="text-xs text-muted-foreground mb-2">Client versions</p>
-              <ul className="space-y-1">
-                {summary.devices.versions.slice(0, 5).map((v) => (
-                  <li key={v.version} className="flex justify-between text-xs">
-                    <span className="font-mono">{v.version}</span>
-                    <span className="text-muted-foreground">{v.count}</span>
-                  </li>
-                ))}
-              </ul>
+          {rows.map((row) => (
+            <div key={row.label} className="flex justify-between">
+              <span className="text-muted-foreground">{row.label}</span>
+              <span className={`font-medium ${row.color}`}>{row.value}</span>
             </div>
-          )}
-          <Link href="/employees" className="text-xs text-primary hover:underline inline-block pt-1">
-            Manage employees →
-          </Link>
+          ))}
+          <div className="flex items-center justify-between border-t border-border pt-2">
+            <span className="text-xs text-muted-foreground">{attendance.total} employees</span>
+            <Link href="/attendance" className="text-xs text-primary hover:underline">
+              View attendance →
+            </Link>
+          </div>
         </div>
       )}
     </div>
