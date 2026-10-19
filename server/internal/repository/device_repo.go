@@ -209,8 +209,8 @@ func MarkEmployeeMachineOld(ctx context.Context, pool *pgxpool.Pool, employeeID,
 	return err
 }
 
-// MarkAllEmployeeMachinesOld flips every machine of an employee to 'old'. Used by the
-// "remove the account" path: the employee is leaving this PC, so no machine stays current.
+// MarkAllEmployeeMachinesOld flips every ACTIVE machine of an employee to 'old'. Machines
+// already 'old' are left untouched (their last_track_at / wipe_requested_at stay historical).
 func MarkAllEmployeeMachinesOld(ctx context.Context, pool *pgxpool.Pool, employeeID string) error {
 	if employeeID == "" {
 		return nil
@@ -218,14 +218,16 @@ func MarkAllEmployeeMachinesOld(ctx context.Context, pool *pgxpool.Pool, employe
 	_, err := pool.Exec(ctx, `
 		UPDATE employee_machines
 		SET status = 'old', last_track_at = NOW(), updated_at = NOW()
-		WHERE employee_id = $1 AND deleted_at IS NULL
+		WHERE employee_id = $1 AND status = 'active' AND deleted_at IS NULL
 	`, employeeID)
 	return err
 }
 
-// MarkAllEmployeeMachinesOldWithWipe flips every machine of an employee to 'old' AND
+// MarkAllEmployeeMachinesOldWithWipe flips every ACTIVE machine of an employee to 'old' AND
 // stamps wipe_requested_at on each — the "Remove current device" trigger (R6). The
 // machines' next syncs persist their outstanding data and are answered wipe_local.
+// Machines already 'old' are skipped so their last_track_at / wipe_requested_at are never
+// clobbered by a later removal.
 func MarkAllEmployeeMachinesOldWithWipe(ctx context.Context, pool *pgxpool.Pool, employeeID string) error {
 	if employeeID == "" {
 		return nil
@@ -236,7 +238,7 @@ func MarkAllEmployeeMachinesOldWithWipe(ctx context.Context, pool *pgxpool.Pool,
 		    last_track_at = NOW(),
 		    wipe_requested_at = COALESCE(wipe_requested_at, NOW()),
 		    updated_at = NOW()
-		WHERE employee_id = $1 AND deleted_at IS NULL
+		WHERE employee_id = $1 AND status = 'active' AND deleted_at IS NULL
 	`, employeeID)
 	return err
 }

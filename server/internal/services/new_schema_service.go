@@ -1290,9 +1290,10 @@ func (s *NewSchemaService) RemoveEmployeeDevices(ctx context.Context, id string)
 		return nil, err
 	}
 
-	// R6 trigger: every machine of this employee is now 'old' and flagged for a wipe.
-	// The next sync from any of them persists its outstanding rows (DeviceAuth accepts
-	// the revoked token) and is answered with action=wipe_local.
+	// R6 trigger: every ACTIVE machine of this employee is now 'old' and flagged for a
+	// wipe (machines already 'old' are untouched). The next sync from any of them
+	// persists its outstanding rows (DeviceAuth accepts the revoked token) and is
+	// answered with action=wipe_local.
 	if err := s.repo.MarkAllEmployeeMachinesOldWithWipe(ctx, emp.EmployeeID); err != nil {
 		return nil, err
 	}

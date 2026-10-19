@@ -1376,12 +1376,13 @@ func (r *NewSchemaRepo) MarkEmployeeMachineOld(ctx context.Context, employeeID, 
 	return MarkEmployeeMachineOld(ctx, r.pool, employeeID, machineID, requestWipe)
 }
 
-// MarkAllEmployeeMachinesOld flips every machine of an employee to 'old' (remove-account).
+// MarkAllEmployeeMachinesOld flips every ACTIVE machine of an employee to 'old' (remove-account).
 func (r *NewSchemaRepo) MarkAllEmployeeMachinesOld(ctx context.Context, employeeID string) error {
 	return MarkAllEmployeeMachinesOld(ctx, r.pool, employeeID)
 }
 
-// MarkAllEmployeeMachinesOldWithWipe flips every machine to 'old' and stamps wipe_requested_at (R6).
+// MarkAllEmployeeMachinesOldWithWipe flips every ACTIVE machine to 'old' and stamps
+// wipe_requested_at (R6). Machines already 'old' are skipped.
 func (r *NewSchemaRepo) MarkAllEmployeeMachinesOldWithWipe(ctx context.Context, employeeID string) error {
 	return MarkAllEmployeeMachinesOldWithWipe(ctx, r.pool, employeeID)
 }
