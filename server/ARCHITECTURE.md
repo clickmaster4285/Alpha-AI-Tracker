@@ -2,6 +2,18 @@
 
 > **Last audited:** 2026-10-19 (machine lifecycle + wipe handshake)
 > **Changelog:**
+> - 2026-10-19 (late): **Client E2E on the installed build — post-wipe re-login verified end-to-end.**
+>   Earlier in the day the new code shipped in `AlphaAITracker-Setup-1.2.36.exe` was smoke-tested on
+>   the very machine producing the report: `client.exe --remove-account` (admin UI tell, not web admin)
+>   drained pending rows, called `/api/v1/devices/self-remove`, and the server flipped employee MU-90
+>   to `tracking_status='untracked'` / `is_online=false` and machine `6e27923275124a1b801fac207aa40bf0`
+>   to `old` with an advanced `last_track_at`. The same-process GUI re-login (new secret, keyboard
+>   fill) minted a fresh machine id (`1b39f2a22ad4497eab549907d2d0b627`) that returned `active`, and
+>   within ~12 seconds WITHOUT any client restart the `RecollectAfterLoginAsync` path had already pushed
+>   a `device_hardware_info` snapshot, a `network_info` row, `storage_devices` and 74
+>   `employee_installed_applications` links for the new machine — the precise fix for the "No hardware
+>   snapshot synced yet" symptom. employee tracking restored to `tracked`. No server change; confirming
+>   the client-path contract so the devs don't re-derive the same fix.
 > - 2026-10-19: **Machine lifecycle registry (`employee_machines`), full `machine_id` coverage, and the remove-device / remove-account handshake.**
 >   Migration **049** adds `employee_machines` — one row per `(employee_id, machine_id)` with `status`
 >   (`active`|`old`), `first_track_at`, `last_track_at`, `wipe_requested_at`, unique partial index on

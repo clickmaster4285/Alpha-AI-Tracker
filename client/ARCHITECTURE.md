@@ -2,6 +2,34 @@
 
 > **Last audited:** 2026-10-19 (machine id coverage + account/device removal)
 > **Changelog:**
+> - 2026-10-19 (late): **Post-wipe re-login re-collects hardware / network / software; the Linux setup wizard can pass step 2.**
+>   *Defect 1 ("No hardware snapshot synced yet" on a device that re-logged in after a removal):* a
+>   removal wipe runs inside the ALREADY-RUNNING process — it deletes every SQLite row, but the
+>   collector's in-memory dedup fingerprints (`_lastHardwareFingerprint`,
+>   `_lastNetworkPublicIp`/`_lastNetworkPrivateIp`) survive it and the installed-software scan only
+>   runs at STARTUP (inventory is event-driven, no periodic scan — user rule 2026-08-10). The machine
+>   still "looks unchanged", so every periodic collect took the same-process fast path and the startup
+>   scan never ran again: the machine id minted for the re-login received zero `device_hardware_info`,
+>   `network_info`, `storage_devices` and `employee_installed_applications` rows (live evidence:
+>   employee MU-90's third machine had sessions/items/status but no snapshot at all). New
+>   `LogCollectorService.RecollectAfterLoginAsync()` drops the fingerprints (dedup then falls back to
+>   the wiped, empty DB) and re-runs hardware → network → `RescanInventoryAsync`; `MainViewModel.LoginAsync`
+>   fires it after `StartTracking()` and wakes `SyncService` again when it completes. Login also wipes
+>   a leftover local DB belonging to a DIFFERENT employee BEFORE the login request (with
+>   `ResetMachineId()` + `EncryptedConfigService.ResetCache()`), so the rotated machine id and the
+>   server-side device registration always agree (R7). *Defect 2 (wizard stuck on SETUP STEP 2 OF 4 on
+>   Linux):* step 2's gate `IsBackgroundGuardConfigured()` requires the systemd USER unit, but
+>   `GrantBackgroundRunningAsync` only called `EnableAutoStartForced()` — which writes the `.desktop`
+>   entry and runs `systemctl --user enable` against a unit file that does not exist yet — so the step
+>   reported success and re-evaluated to itself forever. New `AutoStartService.EnsureBackgroundGuardAsync()`
+>   writes the unit, daemon-reloads and enables it (deliberately NOT started: the wizard runs inside
+>   the live process; starting it would spawn a mutex-fighting `Restart=always` twin); the step throws
+>   honestly if that fails, and the macOS gate checks the launchd plist instead of always returning
+>   false. Verified: `dotnet build` 0/0 **and** the full `AlphaAITracker-Setup-1.2.36.exe` installed
+>   build — remove-account (machine `old`, employee `untracked`) → same-process GUI re-login minted a
+>   new machine id and, WITHIN 12 SECONDS and without any restart, synced `device_hardware_info`,
+>   `network_info`, `storage_devices` and 74 installed-app links for it (the exact sequence of
+>   `RecollectAfterLoginAsync`), employee back to `tracked`.
 > - 2026-10-19: **`machine_id` on every local table + one account-removal routine + server-initiated wipe.**
 >   **Identity:** a new single-row `machine_identity` table (id=1, `machine_id`) holds THIS machine's
 >   id, and every telemetry INSERT reads it in SQL —

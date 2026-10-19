@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect } from 'react';
 import { Loader2, UserX, Laptop } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import EmployeeSelector from '@/components/EmployeeSelector';
@@ -8,9 +9,6 @@ import { useUrlActivityFilter } from '@/hooks/use-url-activity-filter';
 import { formatRelative } from '@/lib/format';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { employeesApi, type Employee, type EmployeeDevice, type EmployeeDetail } from '@/lib/api';
-
-/** "All devices" sentinel — Radix Select cannot use an empty string as an item value. */
-const ALL_DEVICES = '__all__';
 
 /**
  * Device label used everywhere in Device Specs: "{employee name} ({hostname})".
@@ -170,8 +168,30 @@ export default function EmployeePage({
   };
 
   const devices = detailQuery.data?.devices ?? [];
+
+  // "All devices" was removed from the dropdown (2026-10-19, user request): whenever
+  // the employee has more than one machine the shell ALWAYS scopes to exactly one —
+  // the machine in the URL while it is still registered, otherwise the first entry
+  // (the server orders machines active-first, then most-recently-tracked, so that
+  // default is the live machine). Single-machine employees keep the employee-wide
+  // view they already got (no dropdown was ever rendered for them), and a stale
+  // `?deviceId=` for a machine that no longer exists falls back the same way.
+  const urlDeviceValid = deviceId !== '' && devices.some(d => d.machineId === deviceId);
+  const effectiveDeviceId = urlDeviceValid
+    ? deviceId
+    : (devices.length > 1 ? (devices[0]?.machineId ?? '') : '');
+
+  // The URL stays the single source of truth (URL-Synced Filters Rule): mirror the
+  // resolved scope back into `?deviceId=` so back/forward, a shared link and the
+  // rendered scope always agree. Empty is stripped from the URL by the hook.
+  useEffect(() => {
+    if (employee && effectiveDeviceId !== deviceId) {
+      setExtra({ deviceId: effectiveDeviceId });
+    }
+  }, [employee, deviceId, effectiveDeviceId, setExtra]);
+
   const handleDeviceChange = (value: string) => {
-    setExtra({ deviceId: value === ALL_DEVICES ? '' : value });
+    setExtra({ deviceId: value });
   };
 
   return (
@@ -202,13 +222,12 @@ export default function EmployeePage({
               machine (R8). The value is the machine id (stable across re-logins);
               each entry carries the machine lifecycle status from employee_machines. */}
           {employee && devices.length > 1 && (
-            <Select value={deviceId || ALL_DEVICES} onValueChange={handleDeviceChange}>
+            <Select value={effectiveDeviceId} onValueChange={handleDeviceChange}>
               <SelectTrigger className="h-9 w-full sm:w-[240px] bg-card border border-border overflow-hidden">
                 <Laptop className="w-4 h-4 text-muted-foreground shrink-0" />
-                <SelectValue placeholder="All devices" />
+                <SelectValue placeholder="Select device" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value={ALL_DEVICES}>All devices</SelectItem>
                 {devices.map(device => (
                   <SelectItem key={device.machineId} value={device.machineId}>
                     {deviceLabel(device, employee)}
@@ -256,7 +275,7 @@ export default function EmployeePage({
           setEmployeeId: (id: string) => setExtra({ employeeId: id }),
           filter,
           setFilter,
-          deviceId,
+          deviceId: effectiveDeviceId,
           devices,
           body,
           // `setBody` only writes the body keys (never the picker's

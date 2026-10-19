@@ -623,6 +623,15 @@ public partial class MainViewModel : ViewModelBase
             return Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
                 @"Software\Microsoft\Windows\CurrentVersion\Run")?.GetValue("AlphaAITracker") != null;
         }
+        if (OperatingSystem.IsMacOS())
+        {
+            // launchd KeepAlive plist = the macOS background guard; EnableAutoStart writes
+            // it, so the gate mirrors that check instead of returning false unconditionally
+            // (which would strand macOS on step 2 exactly like the missing Linux unit).
+            return File.Exists(Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                "Library", "LaunchAgents", "com.alphaai.tracker.plist"));
+        }
         return false;
     }
 
@@ -880,6 +889,24 @@ public partial class MainViewModel : ViewModelBase
 
         try
         {
+            // Fresh local database on login (2026-10-19): a login must never inherit
+            // another account's local history. A removal wipe normally leaves the DB
+            // empty already, but if rows belonging to a DIFFERENT employee are still on
+            // disk (a removal that never ran — machine handed over by hand, interrupted
+            // wipe — clear them BEFORE the login request). Order matters: the wipe
+            // rotates the machine id, so the server registers this login under the very
+            // identity the freshly created local rows will be stamped with — otherwise
+            // the device registry and the row stamping disagree and Device Specs shows
+            // an empty device.
+            var prior = await _store.GetEmployeeInfoAsync(CancellationToken.None);
+            if (prior != null && !string.IsNullOrWhiteSpace(prior.EmployeeId) &&
+                !string.Equals(prior.EmployeeId, EmployeeId.Trim(), StringComparison.OrdinalIgnoreCase))
+            {
+                await _store.WipeLocalAccountDataAsync(CancellationToken.None);
+                _config.ResetMachineId();
+                EncryptedConfigService.ResetCache();
+            }
+
             var serverUrl = _config.ServerUrl ?? "http://localhost:8080";
             // Include machineId/platform/clientVersion so the server binds the device
             // record to THIS specific machine (its persisted .machine-id), not the
@@ -957,6 +984,20 @@ public partial class MainViewModel : ViewModelBase
             // on the server right now, not on the next 60s idle tick. The SyncService loop
             // picks up the signal and drains every unsent table in byte-bounded chunks.
             _syncService.RequestImmediateSync();
+
+            // Hardware / network / software were last collected at process start — possibly
+            // BEFORE this machine's local wipe — and their in-memory dedup fingerprints
+            // survived that wipe, so the periodic collects would skip forever and this
+            // login's machine id would never get a snapshot. Re-collect for the identity
+            // this login just established, then wake the sync engine again so those rows
+            // are pushed immediately. Fire-and-forget: the OS probes (GPU via PowerShell,
+            // package-manager walks) must not block the UI thread, and
+            // RecollectAfterLoginAsync logs its own failures.
+            _ = Task.Run(async () =>
+            {
+                await _logCollector.RecollectAfterLoginAsync(CancellationToken.None);
+                _syncService.RequestImmediateSync();
+            });
 
             IsLoggedIn = true;
             EmployeeName = emp.Name;
@@ -1051,11 +1092,21 @@ public partial class MainViewModel : ViewModelBase
         return Task.CompletedTask;
     }
 
-    private Task GrantBackgroundRunningAsync()
+    private async Task GrantBackgroundRunningAsync()
     {
         _autoStart.EnableAutoStartForced();
+
+        // Step 2's gate (IsBackgroundGuardConfigured) checks for the systemd USER unit
+        // on Linux, but nothing used to create it: EnableAutoStartForced only wrote the
+        // .desktop autostart entry and ran `systemctl --user enable` against a unit file
+        // that did not exist yet. The step therefore re-evaluated to ITSELF after showing
+        // its success message — "Background guard enabled successfully." and no way to
+        // reach step 3 (stuck on SETUP STEP 2 OF 4, 2026-10-19). Install the unit here.
+        if (!await _autoStart.EnsureBackgroundGuardAsync())
+            throw new InvalidOperationException(
+                "Failed to install the background guard service (systemd user unit). Check that systemd is available and try again.");
+
         StepStatusText = "Background guard enabled successfully.";
-        return Task.CompletedTask;
     }
 
     private async Task InstallDependenciesAsync()

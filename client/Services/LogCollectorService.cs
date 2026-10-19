@@ -1842,6 +1842,44 @@ public class LogCollectorService : BackgroundService
     // ────────────────────────────────────────────
 
     /// <summary>
+    /// Re-runs the startup collects right after an EXPLICIT login, because a local
+    /// account wipe may have run in this very process (remove-account CLI, GUI removal,
+    /// or the server's {"action":"wipe_local"} response — 2026-10-19).
+    ///
+    /// Why a plain login is not enough: hardware and network collection dedup against
+    /// BOTH the last row persisted in SQLite and the in-memory fingerprints captured
+    /// earlier in this process, and the installed-software scan only runs at startup
+    /// (inventory detection is event-driven — there is deliberately no periodic scan).
+    /// A wipe deletes the rows but leaves those in-memory fingerprints intact, so the
+    /// machine still "looks unchanged": every later collect takes the fast path, and
+    /// the machine id minted for the re-login never receives a hardware snapshot, a
+    /// network row or a software inventory — the web Device Specs page then shows
+    /// "No hardware snapshot synced yet" / "No installed applications synced yet"
+    /// forever for that device. Dropping the fingerprints here makes the dedup fall
+    /// back to the (wiped, therefore empty) DB, which stores fresh rows stamped with
+    /// the new machine identity.
+    ///
+    /// Safe on an ordinary login: the same DB-compare dedup prevents duplicate rows.
+    /// </summary>
+    public async Task RecollectAfterLoginAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            _lastHardwareFingerprint = null;
+            _lastNetworkPublicIp = null;
+            _lastNetworkPrivateIp = null;
+
+            await CollectDeviceHardwareAsync(ct);
+            await CollectNetworkInfoAsync(ct);
+            await RescanInventoryAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Post-login recollection (hardware / network / software) failed");
+        }
+    }
+
+    /// <summary>
     /// On-demand OS inventory rescan — used by the Installed Applications page's
     /// Rescan button AND the InstalledSoftwareWatcher background service. Re-runs
     /// the SAME joint app+package scan the periodic loop uses (deduped + classified

@@ -353,7 +353,7 @@ export const employeesApi = {
   // Aggregate machine picture: latest hardware, storage, network, installed apps/packages,
   // peripherals, permission checks, app status and activity stats.
   // `deviceId` is the device's machine id — it scopes every device-level surface to that
-  // machine; omitted means the employee-wide aggregate ("All devices").
+  // machine; omitted means the employee-wide aggregate ("all machines").
   detail: (id: string, deviceId?: string) =>
     request<EmployeeDetail>('/employees/' + id + '/detail', {
       params: deviceId ? { deviceId } : undefined,

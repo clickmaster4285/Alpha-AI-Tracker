@@ -2,6 +2,19 @@
 
 > **Last audited:** 2026-10-19 (device lifecycle status in Device Specs)
 > **Changelog:**
+> - 2026-10-19 (late): **"All devices" removed from the Device Specs machine dropdown (user request).**
+>   `components/employees/EmployeePage.tsx` no longer renders the `__all__` sentinel (the
+>   `ALL_DEVICES` constant and its `SelectItem` are gone, and the trigger placeholder is now
+>   "Select device"). Whenever the employee has 2+ machines the shell ALWAYS scopes to exactly one
+>   machine: the machine id in `?deviceId=` while it is still a registered machine, otherwise the
+>   first entry of `devices[]` (the server orders machines active-first, then most recently tracked,
+>   so the default is the live machine). The resolved scope is mirrored back into the URL
+>   (`useEffect` → `setExtra`, never inside a setState updater — URL-Synced Filters Rule), the
+>   render-prop now hands bodies `deviceId: effectiveDeviceId`, and a stale/unknown `?deviceId=`
+>   falls back the same way. Single-machine employees are untouched: no dropdown is rendered and the
+>   employee-wide aggregate (server `deviceId` omitted) is what they already saw. Verified:
+>   `npx tsc --noEmit` clean, `next build` passes, and the running dev server recompiles
+>   `/device-specs` (200) with the new chunk.
 > - 2026-10-19: **Device Specs machine dropdown shows the machine lifecycle status (`EmployeeDevice` fix).**
 >   `EmployeeDevice` in `src/lib/api.ts` dropped the stale `isActive` field (the server had been
 >   emitting `isActiveDevice`, so `isActive` was always `undefined` and **every** device rendered as
