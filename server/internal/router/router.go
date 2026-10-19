@@ -100,6 +100,11 @@ func Setup(
 	syncGroup.POST("/permission-status/sync", newSchemaHandler.SyncPermissionStatus)
 	syncGroup.POST("/storage-devices/sync", newSchemaHandler.SyncStorageDevices)
 	syncGroup.POST("/location-samples/sync", newSchemaHandler.SyncLocationSamples)
+	// "Remove the account" signal (R4/R5): called by the client AFTER it has drained its
+	// unsynced rows. Marks the CALLING machine 'old' and the employee untracked; the client
+	// then wipes its local DB + machine id. Lives in the DeviceAuth group because a device
+	// token (not a web-admin session) identifies the machine.
+	syncGroup.POST("/devices/self-remove", newSchemaHandler.SelfRemoveAccount)
 	syncGroup.GET("/schedules/me", timeAttendanceHandler.GetMySchedule)
 
 	// ─── Terms & Conditions (CLIENT surface — DeviceAuth) ───

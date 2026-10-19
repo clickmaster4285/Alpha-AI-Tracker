@@ -21,6 +21,7 @@ public partial class MainViewModel : ViewModelBase
     private readonly AutoStartService _autoStart;
     private readonly LogCollectorService _logCollector;
     private readonly SyncService _syncService;
+    private readonly AccountRemovalService _accountRemoval;
     private readonly TermsService _terms;
 
     /// <summary>Self-update state — bound by the top-bar buttons and the dashboard banner.</summary>
@@ -349,6 +350,7 @@ public partial class MainViewModel : ViewModelBase
         AutoStartService autoStart,
         LogCollectorService logCollector,
         SyncService syncService,
+        AccountRemovalService accountRemoval,
         AppUpdateService updateService,
         TermsService terms,
         DashboardViewModel dashboard,
@@ -362,6 +364,7 @@ public partial class MainViewModel : ViewModelBase
         _autoStart = autoStart;
         _logCollector = logCollector;
         _syncService = syncService;
+        _accountRemoval = accountRemoval;
         _terms = terms;
         Update = updateService;
         Dashboard = dashboard;
@@ -527,18 +530,16 @@ public partial class MainViewModel : ViewModelBase
     ///
     /// Order matters: collecting stops BEFORE the wipe, otherwise the collector's next
     /// cycle would write a session straight back into the freshly emptied tables.
+    ///
+    /// The actual sequence (stop → bounded drain → POST /devices/self-remove → wipe) is
+    /// owned by <see cref="AccountRemovalService"/> so every entry point behaves the same
+    /// (R4/R5, 2026-10-19). This method only resets the view-model state.
     /// </summary>
     public async Task RemoveAccountAsync(CancellationToken ct = default)
     {
-        // 1. Stop the one producer that keeps writing without re-reading credentials.
-        _logCollector.StopTracking();
-
-        // 2. Drop every locally stored row — credentials + device token, collected
-        //    activity, inventory/hardware/network caches, mirrored schedules and terms.
-        await _store.WipeLocalAccountDataAsync(ct);
-        AppConfig.RemoveMachineAndDeviceIdentifiers();
-        _config.ResetMachineId();
-        EncryptedConfigService.ResetCache();
+        // 1-2. Stop collecting, drain pending rows to the server, notify the server this
+        //      machine is going away, then wipe the local DB + machine/device identifiers.
+        await _accountRemoval.RunAsync(ct);
 
         // 3. Land on the sign-in page. IsLoggedIn=false flips MainWindow from the
         //    shell / permission wizard to LoginPage and disarms the terms gate;

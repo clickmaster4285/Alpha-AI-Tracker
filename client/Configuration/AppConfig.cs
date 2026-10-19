@@ -58,6 +58,11 @@ public class AppConfig
     public int SyncBackoffMaxSec { get; init; } = 300;       // exponential-backoff ceiling on failure (5 min)
     public bool SyncCompression { get; init; } = true;       // gzip request bodies (server: middleware.Decompress)
     public int SyncRetentionHours { get; init; } = 24;       // retention: synced app_items/app_sessions older than this are deleted client-side
+    // Account removal (R4, 2026-10-19): how long `client --remove-account` waits for the
+    // final drain before wiping anyway. Bounded so a huge backlog / offline machine can
+    // never block removal forever (Removal always proceeds; the unsent rows are the
+    // operator's explicit trade-off and are reported).
+    public int RemoveAccountSyncTimeoutSec { get; init; } = 120;
 
     // ─── Time & Attendance (Phase 1, finalplan §3) ───
     // Idle thresholds (A.4): when does "idle" start, and how often to poll the OS
@@ -166,6 +171,7 @@ public class AppConfig
             SyncBackoffMaxSec = Math.Max(5, int.TryParse(GetEnv("ALPHA_SYNC_BACKOFF_MAX_SEC"), out var syncBack) ? syncBack : 300),
             SyncCompression = GetEnv("ALPHA_SYNC_COMPRESSION") is not ("0" or "false" or "False"),
             SyncRetentionHours = Math.Max(1, int.TryParse(GetEnv("ALPHA_SYNC_RETENTION_HOURS"), out var syncRet) ? syncRet : 24),
+            RemoveAccountSyncTimeoutSec = Math.Max(5, int.TryParse(GetEnv("ALPHA_REMOVE_ACCOUNT_SYNC_TIMEOUT_SEC"), out var remTmo) ? remTmo : 120),
             UpdateRepo = FirstNonEmpty(GetEnv("ALPHA_UPDATE_REPO"), GetEnv("REPO")) ?? string.Empty,
             UpdateEnabled = GetEnv("ALPHA_UPDATE_ENABLED") is not ("0" or "false" or "False"),
             UpdateAutoCheckHours = Math.Max(1, int.TryParse(GetEnv("ALPHA_UPDATE_AUTO_CHECK_HOURS"), out var updHours) ? updHours : 24),

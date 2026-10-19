@@ -415,6 +415,14 @@ func (h *AuthHandler) EmployeeLogin(c echo.Context) error {
 				resp.DeviceToken = rawDeviceToken
 				resp.DeviceID = device.ID
 			}
+
+			// R3/R7: record the machine in the canonical lifecycle registry. A machine
+			// that was marked 'old' and logs in again — or a brand-new machine id after
+			// a local wipe — becomes 'active'; first_track_at is preserved for a machine
+			// we have already seen, so re-login never restarts its history.
+			if _, merr := h.deviceRepo.UpsertEmployeeMachineActive(c.Request().Context(), emp.EmployeeID, machineID); merr != nil {
+				c.Logger().Errorf("failed to upsert employee machine: %v", merr)
+			}
 		}
 	}
 

@@ -231,18 +231,27 @@ type EmployeeActivityStats struct {
 // device "{employee name} ({hostname})" so a device is never shown as "Unknown device".
 // is_active_device tracks whether the device is still actively reporting.
 // remove_at records when the device was marked inactive (for audit trail).
+//
+// Status / FirstTrackAt / LastTrackAt come from the canonical `employee_machines`
+// lifecycle registry (migration 049): Status is "active" | "old", and the machine list
+// is deduplicated to one entry per physical machine even though the auth-token registry
+// (employee_devices) may hold several revoked rows for it.
 type EmployeeDeviceDto struct {
-	ID            string     `json:"id"`
-	EmployeeID    string     `json:"employeeId"`
-	MachineID     string     `json:"machineId"`
-	Platform      string     `json:"platform"`
-	ClientVersion string     `json:"clientVersion"`
-	DeviceName    string     `json:"deviceName"`
-	Hostname      string     `json:"hostname"`
-	LastSeenAt    time.Time  `json:"lastSeenAt"`
-	RevokedAt     *time.Time `json:"revokedAt,omitempty"`
+	ID             string     `json:"id"`
+	EmployeeID     string     `json:"employeeId"`
+	MachineID      string     `json:"machineId"`
+	Platform       string     `json:"platform"`
+	ClientVersion  string     `json:"clientVersion"`
+	DeviceName     string     `json:"deviceName"`
+	Hostname       string     `json:"hostname"`
+	LastSeenAt     time.Time  `json:"lastSeenAt"`
+	RevokedAt      *time.Time `json:"revokedAt,omitempty"`
 	IsActiveDevice bool       `json:"isActiveDevice"`
-	RemoveAt      *time.Time `json:"removeAt,omitempty"`
+	RemoveAt       *time.Time `json:"removeAt,omitempty"`
+	Status         string     `json:"status"`
+	FirstTrackAt   time.Time  `json:"firstTrackAt"`
+	LastTrackAt    time.Time  `json:"lastTrackAt"`
+	WipeRequestedAt *time.Time `json:"wipeRequestedAt,omitempty"`
 }
 
 // RemoveEmployeeDeviceResponse reports what "Remove current device" changed.

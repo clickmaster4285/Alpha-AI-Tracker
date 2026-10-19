@@ -262,28 +262,29 @@ func (r *NewSchemaRepo) BulkInsertSessionEvents(ctx context.Context, entries []m
 		}
 		batch := entries[i:end]
 		valueStrings := make([]string, 0, len(batch))
-		args := make([]interface{}, 0, len(batch)*9)
+		args := make([]interface{}, 0, len(batch)*10)
 		argIdx := 1
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
-				argIdx+5, argIdx+6, argIdx+7, argIdx+8,
+				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
 			))
 			args = append(args,
-				e.ID, e.EmployeeID, e.EventType, e.OsUsername, e.EventAt,
+				e.ID, e.EmployeeID, e.MachineID, e.EventType, e.OsUsername, e.EventAt,
 				e.EventCount, e.FirstAt, e.LastAt, time.Now(),
 			)
-			argIdx += 9
+			argIdx += 10
 		}
 
 		query := fmt.Sprintf(`
 			INSERT INTO session_events
-				(id, employee_id, event_type, os_username, event_at,
+				(id, employee_id, machine_id, event_type, os_username, event_at,
 				 event_count, first_at, last_at, synced_at)
 			VALUES %s
 			ON CONFLICT (id) DO UPDATE SET
+				machine_id = EXCLUDED.machine_id,
 				event_type = EXCLUDED.event_type,
 				os_username = EXCLUDED.os_username,
 				event_at = EXCLUDED.event_at,
@@ -486,35 +487,36 @@ func (r *NewSchemaRepo) BulkInsertAppItems(ctx context.Context, entries []models
 		batch = survivorIdxOf(batch, survivorIdx)
 
 		valueStrings := make([]string, 0, len(batch))
-		args := make([]interface{}, 0, len(batch)*21)
+		args := make([]interface{}, 0, len(batch)*22)
 		argIdx := 1
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
 				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4,
 				argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
 				argIdx+10, argIdx+11, argIdx+12, argIdx+13, argIdx+14,
 				argIdx+15, argIdx+16, argIdx+17, argIdx+18, argIdx+19,
-				argIdx+20,
+				argIdx+20, argIdx+21,
 			))
 			args = append(args,
-				e.ID, e.EmployeeID, e.AppSessionID, e.ParentItemID, e.ItemType,
+				e.ID, e.EmployeeID, e.MachineID, e.AppSessionID, e.ParentItemID, e.ItemType,
 				e.Title, e.Identifier, e.Url, e.Domain, e.OpenedAt, e.ClosedAt,
 				e.ProcessID, e.ObjectType, e.Action, e.JourneyID, e.Sequence,
 				e.PreviousPath, e.CurrentPath, e.WindowID, e.TabID, e.MetadataJSON,
 			)
-			argIdx += 21
+			argIdx += 22
 		}
 
 		query := fmt.Sprintf(`
 			INSERT INTO app_items
-				(id, employee_id, app_session_id, parent_item_id, item_type,
+				(id, employee_id, machine_id, app_session_id, parent_item_id, item_type,
 				 title, identifier, url, domain, opened_at, closed_at,
 				 process_id, object_type, action, journey_id, sequence,
 				 previous_path, current_path, window_id, tab_id, metadata_json, synced_at)
 			VALUES %s
 			ON CONFLICT (id) DO UPDATE SET
+				machine_id = COALESCE(NULLIF(EXCLUDED.machine_id, ''), app_items.machine_id),
 				title = EXCLUDED.title,
 				identifier = EXCLUDED.identifier,
 				url = COALESCE(NULLIF(EXCLUDED.url, ''), app_items.url),
@@ -1353,6 +1355,37 @@ func (r *NewSchemaRepo) ListEmployeeDevices(ctx context.Context, employeeID stri
 	return ListEmployeeDevices(ctx, r.pool, employeeID)
 }
 
+// ListEmployeeMachines returns the canonical per-machine lifecycle rows for an
+// employee (employee_machines, migration 049) — one entry per physical machine.
+func (r *NewSchemaRepo) ListEmployeeMachines(ctx context.Context, employeeID string) ([]models.EmployeeMachine, error) {
+	return ListEmployeeMachines(ctx, r.pool, employeeID)
+}
+
+// UpsertEmployeeMachineActive marks (employee, machine) current, preserving first_track_at.
+func (r *NewSchemaRepo) UpsertEmployeeMachineActive(ctx context.Context, employeeID, machineID string) (*models.EmployeeMachine, error) {
+	return UpsertEmployeeMachineActive(ctx, r.pool, employeeID, machineID)
+}
+
+// TouchEmployeeMachineLastTrack advances last_track_at for one machine.
+func (r *NewSchemaRepo) TouchEmployeeMachineLastTrack(ctx context.Context, employeeID, machineID string) error {
+	return TouchEmployeeMachineLastTrack(ctx, r.pool, employeeID, machineID)
+}
+
+// MarkEmployeeMachineOld flips one machine to 'old'; requestWipe stamps wipe_requested_at (R6).
+func (r *NewSchemaRepo) MarkEmployeeMachineOld(ctx context.Context, employeeID, machineID string, requestWipe bool) error {
+	return MarkEmployeeMachineOld(ctx, r.pool, employeeID, machineID, requestWipe)
+}
+
+// MarkAllEmployeeMachinesOld flips every machine of an employee to 'old' (remove-account).
+func (r *NewSchemaRepo) MarkAllEmployeeMachinesOld(ctx context.Context, employeeID string) error {
+	return MarkAllEmployeeMachinesOld(ctx, r.pool, employeeID)
+}
+
+// MarkAllEmployeeMachinesOldWithWipe flips every machine to 'old' and stamps wipe_requested_at (R6).
+func (r *NewSchemaRepo) MarkAllEmployeeMachinesOldWithWipe(ctx context.Context, employeeID string) error {
+	return MarkAllEmployeeMachinesOldWithWipe(ctx, r.pool, employeeID)
+}
+
 // ListEmployeeDevices is a shared helper that queries employee_devices for an employee.
 func ListEmployeeDevices(ctx context.Context, pool *pgxpool.Pool, employeeID string) ([]models.EmployeeDevice, error) {
 	query := `
@@ -2168,26 +2201,27 @@ func (r *NewSchemaRepo) BulkUpsertLocationSamples(ctx context.Context, entries [
 		}
 		batch := entries[i:end]
 		valueStrings := make([]string, 0, len(batch))
-		args := make([]interface{}, 0, len(batch)*9)
+		args := make([]interface{}, 0, len(batch)*10)
 		argIdx := 1
 
 		for _, e := range batch {
 			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
-				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4, argIdx+5, argIdx+6, argIdx+7, argIdx+8,
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, NOW())",
+				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4, argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
 			))
 			args = append(args,
-				e.ID, e.EmployeeID, e.Latitude, e.Longitude, e.AccuracyM, e.AltitudeM,
+				e.ID, e.EmployeeID, e.MachineID, e.Latitude, e.Longitude, e.AccuracyM, e.AltitudeM,
 				e.Source, e.Address, e.CapturedAt,
 			)
-			argIdx += 9
+			argIdx += 10
 		}
 
 		query := fmt.Sprintf(`
 			INSERT INTO location_samples
-				(id, employee_id, latitude, longitude, accuracy_m, altitude_m, source, address, captured_at, synced_at)
+				(id, employee_id, machine_id, latitude, longitude, accuracy_m, altitude_m, source, address, captured_at, synced_at)
 			VALUES %s
 			ON CONFLICT (id) DO UPDATE SET
+				machine_id = COALESCE(NULLIF(EXCLUDED.machine_id, ''), location_samples.machine_id),
 				latitude = EXCLUDED.latitude,
 				longitude = EXCLUDED.longitude,
 				accuracy_m = EXCLUDED.accuracy_m,

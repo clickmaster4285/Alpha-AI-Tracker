@@ -3,10 +3,24 @@ namespace client.Storage;
 internal static class DatabaseSchema
 {
     internal const string CreateTableSql = @"
+        -- ── MACHINE IDENTITY (R2, 2026-10-19) ─────────────────────────────────
+        -- Single-row table holding THIS machine's identity (AppConfig.ClientId).
+        -- Every telemetry table carries `machine_id` and its INSERT reads the value
+        -- from here, so the identity is stamped in SQL without threading a parameter
+        -- through every store method. The row is (re)written on every InitializeAsync
+        -- and cleared together with the local DB on account removal, so a wipe always
+        -- yields a brand-new machine id on the next login (R7).
+        CREATE TABLE IF NOT EXISTS machine_identity (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            machine_id  TEXT NOT NULL DEFAULT '',
+            updated_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+        );
+
         -- DEVICE & SYSTEM INFO TABLES
 
         CREATE TABLE IF NOT EXISTS device_hardware_info (
             id               TEXT PRIMARY KEY,
+            machine_id       TEXT NOT NULL DEFAULT '',
             mac_address      TEXT NOT NULL DEFAULT '',
             hostname         TEXT NOT NULL DEFAULT '',
             os_name          TEXT NOT NULL DEFAULT '',
@@ -25,6 +39,7 @@ internal static class DatabaseSchema
         -- Relational storage devices (replaces JSON storage_devices column from device_hardware_info)
         CREATE TABLE IF NOT EXISTS storage_devices (
             id                  TEXT PRIMARY KEY,
+            machine_id          TEXT NOT NULL DEFAULT '',
             device_hardware_id  TEXT NOT NULL REFERENCES device_hardware_info(id),
             device_type         TEXT NOT NULL DEFAULT '',
             model               TEXT NOT NULL DEFAULT '',
@@ -47,6 +62,7 @@ internal static class DatabaseSchema
         -- (Linux) and only newly detected installs get stamped with the detection time.
         CREATE TABLE IF NOT EXISTS installed_applications (
             id               TEXT PRIMARY KEY,
+            machine_id       TEXT NOT NULL DEFAULT '',
             app_name         TEXT NOT NULL,
             binary_name      TEXT NOT NULL DEFAULT '',
             app_version      TEXT NOT NULL DEFAULT '',
@@ -80,6 +96,7 @@ internal static class DatabaseSchema
 
         CREATE TABLE IF NOT EXISTS installed_packages (
             id               TEXT PRIMARY KEY,
+            machine_id       TEXT NOT NULL DEFAULT '',
             package_name     TEXT NOT NULL,
             version          TEXT NOT NULL DEFAULT '',
             category         TEXT NOT NULL DEFAULT 'tool',
@@ -107,6 +124,7 @@ internal static class DatabaseSchema
 
         CREATE TABLE IF NOT EXISTS network_info (
             id                   TEXT PRIMARY KEY,
+            machine_id           TEXT NOT NULL DEFAULT '',
             public_ip            TEXT NOT NULL DEFAULT '',
             private_ip           TEXT NOT NULL DEFAULT '',
             network_interface_name TEXT NOT NULL DEFAULT '',
@@ -127,6 +145,7 @@ internal static class DatabaseSchema
         -- bus_path = udev DEVPATH (stable identity per physical plug), unplugged_at NULL while plugged.
         CREATE TABLE IF NOT EXISTS hardware_devices (
             id               TEXT PRIMARY KEY,
+            machine_id       TEXT NOT NULL DEFAULT '',
             device_class     TEXT NOT NULL DEFAULT 'other',
             vendor           TEXT NOT NULL DEFAULT '',
             product          TEXT NOT NULL DEFAULT '',
@@ -148,6 +167,7 @@ internal static class DatabaseSchema
 
         CREATE TABLE IF NOT EXISTS session_events (
             id               TEXT PRIMARY KEY,
+            machine_id       TEXT NOT NULL DEFAULT '',
             event_type       TEXT NOT NULL,
             os_username      TEXT NOT NULL DEFAULT '',
             event_at         TEXT NOT NULL,
@@ -212,6 +232,7 @@ internal static class DatabaseSchema
 
         CREATE TABLE IF NOT EXISTS app_items (
             id                TEXT PRIMARY KEY,
+            machine_id        TEXT NOT NULL DEFAULT '',
             app_session_id    TEXT NOT NULL REFERENCES app_sessions(id),
             parent_item_id    TEXT REFERENCES app_items(id),
             item_type         TEXT NOT NULL DEFAULT '',
@@ -258,6 +279,7 @@ internal static class DatabaseSchema
 
         CREATE TABLE IF NOT EXISTS app_status (
             key             TEXT PRIMARY KEY,
+            machine_id      TEXT NOT NULL DEFAULT '',
             value           TEXT NOT NULL,
             updated_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')),
             is_synced       INTEGER NOT NULL DEFAULT 0,
@@ -266,6 +288,7 @@ internal static class DatabaseSchema
 
         CREATE TABLE IF NOT EXISTS permission_status (
             check_id        TEXT PRIMARY KEY,
+            machine_id      TEXT NOT NULL DEFAULT '',
             session_id      TEXT NOT NULL,
             session_type    TEXT NOT NULL,
             platform        TEXT NOT NULL,
@@ -281,6 +304,7 @@ internal static class DatabaseSchema
 
         CREATE TABLE IF NOT EXISTS employee_info (
             id              TEXT PRIMARY KEY,
+            machine_id      TEXT NOT NULL DEFAULT '',
             employee_id     TEXT NOT NULL,
             name            TEXT NOT NULL,
             email           TEXT NOT NULL,
@@ -338,6 +362,7 @@ internal static class DatabaseSchema
         -- AttendanceAggregator (A.8).
         CREATE TABLE IF NOT EXISTS daily_attendance_cache (
             employee_id        TEXT NOT NULL,
+            machine_id         TEXT NOT NULL DEFAULT '',
             work_date          TEXT NOT NULL,        -- ISO date 'YYYY-MM-DD' in the employee's tz
             first_active_at    TEXT,
             last_active_at     TEXT,
@@ -367,6 +392,7 @@ internal static class DatabaseSchema
         -- GPS / location samples (Phase 3, finalplan §16). Synced to server; retained locally.
         CREATE TABLE IF NOT EXISTS location_samples (
             id               TEXT PRIMARY KEY,
+            machine_id       TEXT NOT NULL DEFAULT '',
             latitude         REAL NOT NULL,
             longitude        REAL NOT NULL,
             accuracy_m       REAL,
@@ -412,6 +438,38 @@ internal static class DatabaseSchema
     ";
 
     internal const string MigrateSql = @"
+        -- ── MACHINE_ID COVERAGE (R2, 2026-10-19) ──────────────────────────────
+        -- CreateTableSql above only runs on FRESH databases, so every pre-existing
+        -- install needs the machine_id columns added here. The single-row
+        -- machine_identity table is the source of the value for every INSERT.
+        CREATE TABLE IF NOT EXISTS machine_identity (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            machine_id  TEXT NOT NULL DEFAULT '',
+            updated_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'))
+        );
+        ALTER TABLE device_hardware_info ADD COLUMN machine_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE storage_devices ADD COLUMN machine_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE installed_applications ADD COLUMN machine_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE installed_packages ADD COLUMN machine_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE network_info ADD COLUMN machine_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE hardware_devices ADD COLUMN machine_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE session_events ADD COLUMN machine_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE app_items ADD COLUMN machine_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE app_status ADD COLUMN machine_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE permission_status ADD COLUMN machine_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE employee_info ADD COLUMN machine_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE location_samples ADD COLUMN machine_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE daily_attendance_cache ADD COLUMN machine_id TEXT NOT NULL DEFAULT '';
+        -- Backfill every legacy row that already carries a machine id on app_sessions:
+        -- its children (app_items) and the session's own sibling telemetry were produced
+        -- by the same machine, so the session's machine_id is the honest attribution.
+        UPDATE app_items SET machine_id = (
+            SELECT s.machine_id FROM app_sessions s WHERE s.id = app_items.app_session_id
+        ) WHERE machine_id = '' AND EXISTS (
+            SELECT 1 FROM app_sessions s WHERE s.id = app_items.app_session_id AND s.machine_id != ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_app_items_machine ON app_items(machine_id, opened_at);
+        CREATE INDEX IF NOT EXISTS idx_session_events_machine ON session_events(machine_id, event_at);
         ALTER TABLE app_sessions ADD COLUMN process_id INTEGER;
         ALTER TABLE app_sessions ADD COLUMN parent_process_id INTEGER;
         ALTER TABLE app_items ADD COLUMN process_id INTEGER;
@@ -541,18 +599,18 @@ internal static class DatabaseSchema
 
     internal const string InsertDeviceHardwareInfoSql = @"
         INSERT INTO device_hardware_info
-            (id, mac_address, hostname, os_name, os_version, cpu_model, cpu_cores,
+            (id, machine_id, mac_address, hostname, os_name, os_version, cpu_model, cpu_cores,
              ram_total_mb, gpu_model, gpu_vram_mb, collected_at)
         VALUES
-            ($id, $mac_address, $hostname, $os_name, $os_version, $cpu_model, $cpu_cores,
+            ($id, COALESCE((SELECT machine_id FROM machine_identity WHERE id = 1), ''), $mac_address, $hostname, $os_name, $os_version, $cpu_model, $cpu_cores,
              $ram_total_mb, $gpu_model, $gpu_vram_mb, $collected_at)
     ";
 
     internal const string InsertStorageDeviceSql = @"
         INSERT INTO storage_devices
-            (id, device_hardware_id, device_type, model, capacity_mb)
+            (id, machine_id, device_hardware_id, device_type, model, capacity_mb)
         VALUES
-            ($id, $device_hardware_id, $device_type, $model, $capacity_mb)
+            ($id, COALESCE((SELECT machine_id FROM machine_identity WHERE id = 1), ''), $device_hardware_id, $device_type, $model, $capacity_mb)
     ";
 
     internal const string MarkDeviceHardwareSentSql = @"
@@ -569,11 +627,11 @@ internal static class DatabaseSchema
 
     internal const string InsertInstalledApplicationSql = @"
         INSERT INTO installed_applications
-            (id, app_name, binary_name, app_version, publisher, install_path, install_date,
+            (id, machine_id, app_name, binary_name, app_version, publisher, install_path, install_date,
              uninstall_string, change_type, is_installed, uninstall_date,
              is_browser, desktop_id, categories, detected_at)
         VALUES
-            ($id, $app_name, $binary_name, $app_version, $publisher, $install_path, $install_date,
+            ($id, COALESCE((SELECT machine_id FROM machine_identity WHERE id = 1), ''), $app_name, $binary_name, $app_version, $publisher, $install_path, $install_date,
              $uninstall_string, $change_type, $is_installed, $uninstall_date,
              $is_browser, $desktop_id, $categories, $detected_at)
         -- NOTE: app_name is NOT unique (rows-per-cycle model). Upsert-vs-insert is decided in
@@ -589,10 +647,10 @@ internal static class DatabaseSchema
 
     internal const string InsertInstalledPackageSql = @"
         INSERT INTO installed_packages
-            (id, package_name, version, category, source_manager, install_path,
+            (id, machine_id, package_name, version, category, source_manager, install_path,
              publisher, description, install_date, is_installed, uninstall_date, detected_at)
         VALUES
-            ($id, $package_name, $version, $category, $source_manager, $install_path,
+            ($id, COALESCE((SELECT machine_id FROM machine_identity WHERE id = 1), ''), $package_name, $version, $category, $source_manager, $install_path,
              $publisher, $description, $install_date, $is_installed, $uninstall_date, $detected_at)
         -- NOTE: (package_name, source_manager) is NOT unique (rows-per-cycle model).
     ";
@@ -605,9 +663,9 @@ internal static class DatabaseSchema
 
     internal const string InsertNetworkInfoSql = @"
         INSERT INTO network_info
-            (id, public_ip, private_ip, network_interface_name, collected_at, first_seen_at, last_seen_at, is_current)
+            (id, machine_id, public_ip, private_ip, network_interface_name, collected_at, first_seen_at, last_seen_at, is_current)
         VALUES
-            ($id, $public_ip, $private_ip, $network_interface_name, $collected_at, $first_seen_at, $last_seen_at, $is_current)
+            ($id, COALESCE((SELECT machine_id FROM machine_identity WHERE id = 1), ''), $public_ip, $private_ip, $network_interface_name, $collected_at, $first_seen_at, $last_seen_at, $is_current)
     ";
 
     internal const string MarkNetworkInfoSentSql = @"
@@ -618,17 +676,17 @@ internal static class DatabaseSchema
 
     internal const string InsertHardwareDeviceSql = @"
         INSERT INTO hardware_devices
-            (id, device_class, vendor, product, serial, bus_path, device_node, plugged_at)
+            (id, machine_id, device_class, vendor, product, serial, bus_path, device_node, plugged_at)
         VALUES
-            ($id, $device_class, $vendor, $product, $serial, $bus_path, $device_node, $plugged_at)
+            ($id, COALESCE((SELECT machine_id FROM machine_identity WHERE id = 1), ''), $device_class, $vendor, $product, $serial, $bus_path, $device_node, $plugged_at)
         ON CONFLICT(bus_path) WHERE unplugged_at IS NULL AND bus_path != '' DO NOTHING
     ";
 
     internal const string InsertSessionEventSql = @"
         INSERT INTO session_events
-            (id, event_type, os_username, event_at, event_count, first_at, last_at)
+            (id, machine_id, event_type, os_username, event_at, event_count, first_at, last_at)
         VALUES
-            ($id, $event_type, $os_username, $event_at, $event_count, $first_at, $last_at)
+            ($id, COALESCE((SELECT machine_id FROM machine_identity WHERE id = 1), ''), $event_type, $os_username, $event_at, $event_count, $first_at, $last_at)
     ";
 
     internal const string MarkSessionEventsSentSql = @"
@@ -639,9 +697,9 @@ internal static class DatabaseSchema
 
     internal const string InsertLocationSampleSql = @"
         INSERT INTO location_samples
-            (id, latitude, longitude, accuracy_m, altitude_m, source, address, captured_at)
+            (id, machine_id, latitude, longitude, accuracy_m, altitude_m, source, address, captured_at)
         VALUES
-            ($id, $latitude, $longitude, $accuracy_m, $altitude_m, $source, $address, $captured_at)
+            ($id, COALESCE((SELECT machine_id FROM machine_identity WHERE id = 1), ''), $latitude, $longitude, $accuracy_m, $altitude_m, $source, $address, $captured_at)
     ";
 
     internal const string MarkLocationSamplesSentSql = @"
@@ -732,16 +790,17 @@ internal static class DatabaseSchema
 
     internal const string InsertAppItemSql = @"
         INSERT INTO app_items
-            (id, app_session_id, parent_item_id, item_type, title, identifier, url, domain,
+            (id, machine_id, app_session_id, parent_item_id, item_type, title, identifier, url, domain,
              opened_at, closed_at, process_id,
              object_type, action, journey_id, sequence, previous_path, current_path,
              window_id, tab_id, metadata_json)
         VALUES
-            ($id, $app_session_id, $parent_item_id, $item_type, $title, $identifier, $url, $domain,
+            ($id, COALESCE((SELECT machine_id FROM machine_identity WHERE id = 1), ''), $app_session_id, $parent_item_id, $item_type, $title, $identifier, $url, $domain,
              $opened_at, $closed_at, $process_id,
              $object_type, $action, $journey_id, $sequence, $previous_path, $current_path,
              $window_id, $tab_id, $metadata_json)
         ON CONFLICT(id) DO UPDATE SET
+            machine_id = COALESCE(NULLIF(excluded.machine_id, ''), app_items.machine_id),
             title = excluded.title,
             identifier = excluded.identifier,
             url = COALESCE(NULLIF(excluded.url, ''), app_items.url),
@@ -774,9 +833,10 @@ internal static class DatabaseSchema
     // UTILITY STATEMENTS
 
     internal const string UpsertStatusSql = @"
-        INSERT INTO app_status (key, value, updated_at, is_synced)
-        VALUES ($key, $value, strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'), 0)
+        INSERT INTO app_status (key, machine_id, value, updated_at, is_synced)
+        VALUES ($key, COALESCE((SELECT machine_id FROM machine_identity WHERE id = 1), ''), $value, strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now'), 0)
         ON CONFLICT(key) DO UPDATE SET
+            machine_id = COALESCE(NULLIF(excluded.machine_id, ''), app_status.machine_id),
             value = excluded.value,
             updated_at = excluded.updated_at,
             is_synced = 0
@@ -784,10 +844,11 @@ internal static class DatabaseSchema
 
     internal const string InsertPermissionSql = @"
         INSERT INTO permission_status
-            (check_id, session_id, session_type, platform, checked_at, method, works, details, employee_id, employee_name, is_synced)
+            (check_id, machine_id, session_id, session_type, platform, checked_at, method, works, details, employee_id, employee_name, is_synced)
         VALUES
-            ($check_id, $session_id, $session_type, $platform, $checked_at, $method, $works, $details, $employee_id, $employee_name, 0)
+            ($check_id, COALESCE((SELECT machine_id FROM machine_identity WHERE id = 1), ''), $session_id, $session_type, $platform, $checked_at, $method, $works, $details, $employee_id, $employee_name, 0)
         ON CONFLICT(check_id) DO UPDATE SET
+            machine_id = COALESCE(NULLIF(excluded.machine_id, ''), permission_status.machine_id),
             works = excluded.works,
             details = excluded.details,
             checked_at = excluded.checked_at,

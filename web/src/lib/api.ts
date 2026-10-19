@@ -469,8 +469,15 @@ export interface DeviceHardwareDetail {
   syncedAt?: string;
 }
 
-/** One of an employee's registered desktop devices (employee_devices).
- *  Used by the device-specs page dropdown when an employee has multiple devices. */
+/** One of an employee's registered desktop devices (employee_machines).
+ *  Used by the device-specs page dropdown when an employee has multiple machines.
+ *
+ *  `status` / `firstTrackAt` / `lastTrackAt` come from the canonical
+ *  `employee_machines` lifecycle registry (server migration 049): one row per
+ *  physical machine, deduplicated even though the auth-token registry
+ *  (`employee_devices`) may hold several revoked rows for the same machine.
+ *  `isActiveDevice` mirrors `status === 'active'` (the lifecycle row is
+ *  authoritative for "is this machine current"). */
 export interface EmployeeDevice {
   id: string;
   employeeId: string;
@@ -482,12 +489,20 @@ export interface EmployeeDevice {
   hostname: string;
   /** ISO timestamp — when the device last checked in. */
   lastSeenAt: string;
-  /** Whether this device has been revoked by an admin. */
+  /** Whether this device registration has been revoked by an admin. */
   revokedAt: string | null;
-  /** True while the registration is unrevoked and unexpired. */
-  isActive: boolean;
+  /** True while the machine's lifecycle status is 'active'. */
+  isActiveDevice: boolean;
   /** When the device was revoked (null when still active). */
   removeAt: string | null;
+  /** Machine lifecycle status from `employee_machines`: 'active' | 'old'. */
+  status: 'active' | 'old';
+  /** ISO timestamp — when this machine was first tracked. */
+  firstTrackAt: string;
+  /** ISO timestamp — when this machine last reported (advances on every sync). */
+  lastTrackAt: string;
+  /** Set when an admin removed this device and the client still owes a local wipe. */
+  wipeRequestedAt?: string | null;
 }
 
 /** Result of POST /employees/:id/devices/remove ("Remove current device"). */

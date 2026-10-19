@@ -66,6 +66,7 @@ type StorageDevice struct {
 type LocationSample struct {
 	ID           string     `json:"id" db:"id"`
 	EmployeeID   string     `json:"employeeId" db:"employee_id"`
+	MachineID    string     `json:"machineId" db:"machine_id"`
 	EmployeeName string     `json:"employeeName,omitempty" db:"-"`
 	Latitude     float64    `json:"latitude" db:"latitude"`
 	Longitude  float64    `json:"longitude" db:"longitude"`

@@ -22,7 +22,9 @@ export default function DeviceSpecsHardware() {
         // will upload one after login" wording would be false for it — name the real
         // reason instead.
         const selectedDevice = deviceId ? devices.find(d => d.machineId === deviceId) : undefined;
-        const deviceRemoved = !!selectedDevice && !selectedDevice.isActive;
+        // `status` comes from the employee_machines lifecycle registry (migration 049):
+        // 'old' means the admin removed this machine and the client wiped itself.
+        const deviceRemoved = !!selectedDevice && selectedDevice.status === 'old';
 
         const specs = [
           { icon: Cpu, label: 'Processor', value: deviceHardware?.cpuModel ? `${deviceHardware.cpuModel} · ${deviceHardware.cpuCores} cores` : '—' },

@@ -1,7 +1,37 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-10-17 (dashboard attendance aggregate)
+> **Last audited:** 2026-10-19 (machine lifecycle + wipe handshake)
 > **Changelog:**
+> - 2026-10-19: **Machine lifecycle registry (`employee_machines`), full `machine_id` coverage, and the remove-device / remove-account handshake.**
+>   Migration **049** adds `employee_machines` — one row per `(employee_id, machine_id)` with `status`
+>   (`active`|`old`), `first_track_at`, `last_track_at`, `wipe_requested_at`, unique partial index on
+>   `(employee_id, machine_id) WHERE deleted_at IS NULL`, plus a backfill from `employee_devices`
+>   (`active` when any registration is unrevoked, `MIN(created_at)` / `MAX(last_seen_at)` as the
+>   window). It exists because `employee_devices` is the AUTH-TOKEN registry and `UpsertDevice`
+>   revokes + re-inserts on every login, so a machine list built from it duplicated machines. New repo
+>   helpers in `repository/device_repo.go` (`UpsertEmployeeMachineActive`,
+>   `TouchEmployeeMachineLastTrack`, `MarkEmployeeMachineOld`, `MarkAllEmployeeMachinesOld[WithWipe]`,
+>   `ListEmployeeMachines`). `EmployeeLogin` upserts the machine `active` (preserving
+>   `first_track_at`); `DeviceAuth` advances `last_track_at` alongside `TouchLastSeen`.
+>   Migration **050** adds `machine_id` to `session_events`, `app_items` and `location_samples`
+>   (+ `(employee_id, machine_id, …)` indexes, 047-style attribution from the device activity window;
+>   `app_items` attributes exactly from its parent `app_sessions.machine_id`). `session_events` /
+>   `app_items` / `location_samples` sync requests gained `MachineID` (`json:"-"`) filled by the
+>   handler from `DeviceAuth` — never trusted from the body. `terms_consent` stays employee-scoped.
+>   **Remove-device (R6):** `DeviceAuth` now resolves revoked tokens too
+>   (`GetByTokenHashIncludingRevoked`), sets `device_removed` and skips `TouchLastSeen`; every sync
+>   handler passes its response through `applyDeviceAction`, which appends `action="wipe_local"`
+>   **after** the batch was persisted. `RemoveEmployeeDevices` additionally marks the employee's
+>   machines `old` + `wipe_requested_at`. **Remove-account (R4/R5):** new DeviceAuth endpoint
+>   `POST /api/v1/devices/self-remove` → `NewSchemaService.RemoveAccount` (mark the calling machine
+>   `old`, revoke devices, close open activity, `tracking_status='untracked'`), returns
+>   `SelfRemoveAccountResponse`. `GET /employees/:id/detail` now maps `devices[]` from
+>   `employee_machines` (deduped) and each entry carries `status`, `firstTrackAt`, `lastTrackAt`,
+>   `wipeRequestedAt`. Verified live on the dev DB: 049/050 applied; login → `active`; hardware /
+>   session-events / location syncs carried the device's `machine_id`; admin remove → `old` +
+>   `wipe_requested_at` and the revoked token's next batch was persisted **and** answered
+>   `{"action":"wipe_local"}`; second login + `self-remove` → `{removed:true,…,"trackingStatus":"untracked"}`;
+>   detail listed one row per machine with status. `go build` / `go vet` / `go test ./internal/...` clean.
 > - 2026-10-17: **Dashboard summary now carries today's attendance (`attendance` block).**
 >   `DashboardSummaryResponse` gains `attendance` (`date`, `total`, `present`, `late`, `absent`,
 >   `halfDay`, `offShift`, `unknown`). New `TimeAttendanceService.AttendanceDayCounts(ctx, employeeIDs)`
@@ -465,6 +495,14 @@ Employee token is carried in the request body (`{employeeId, token, entries: [..
 | POST | `/hardware-devices/sync` | `hardware_devices` | Bulk upsert |
 | POST | `/permission-status/sync` | `permission_status` | Bulk upsert by check_id |
 | POST | `/storage-devices/sync` | `storage_devices` | Bulk upsert |
+| POST | `/devices/self-remove` | `employee_machines`, `employee_devices` | **Remove the account** (DeviceAuth). Marks the CALLING machine `old` + advances `last_track_at`, revokes its device rows, closes open sessions/items and sets `tracking_status='untracked'`. Returns `{removed, machineId, status, lastTrackAt, trackingStatus}`. Called by the client AFTER its final drain. |
+
+> **Server→client wipe instruction (`action`, 2026-10-19).** `SyncBatchResponse` gained
+> `action,omitempty`. When `DeviceAuth` authenticated a **revoked** device token (that machine was
+> removed via the dashboard) it flags `device_removed`, and every sync handler appends
+> `{"action":"wipe_local"}` through `applyDeviceAction` — but **only after** the incoming batch has
+> been persisted, so no data is lost to the wipe. The key is absent from every other response, so an
+> older client ignores it and a new client never sees it from an older server.
 
 ### App Sessions & App Items (Protected — web admin reads)
 
@@ -481,7 +519,15 @@ Employee token is carried in the request body (`{employeeId, token, entries: [..
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/employees/:id/detail` | **Aggregate machine picture** for one employee: employee record, latest `device_hardware_info`, `storage_devices`, latest `network_info`, currently-installed apps/packages (active junction links), `hardware_devices` peripherals, `permission_status`, `app_status` map and activity stats. Consumed by the web `/users/[id]` page. |
+| GET | `/employees/:id/detail` | **Aggregate machine picture** for one employee: employee record, latest `device_hardware_info`, `storage_devices`, latest `network_info`, currently-installed apps/packages (active junction links), `hardware_devices` peripherals, `permission_status`, `app_status` map, the machine list and activity stats. `?deviceId=<machineId>` scopes every machine-data block to that machine (`""` = employee-wide aggregate). Consumed by the web Device Specs module (`EmployeePage` shell). |
+
+> **`devices[]` comes from `employee_machines` (2026-10-19).** The device list is sourced from the
+> canonical lifecycle registry — **one entry per physical machine** — not from `employee_devices`,
+> which rotates a row on every login and therefore listed the same PC several times. Each entry
+> carries `status` (`active`|`old`), `firstTrackAt`, `lastTrackAt`, `wipeRequestedAt`,
+> `isActiveDevice` (derived from `status === 'active'`) and the newest registration's
+> `platform`/`clientVersion`/`lastSeenAt`/`revokedAt`/`removeAt`. `deviceName`/`hostname` fall back
+> device name → hostname → machine id so a device is never rendered "Unknown device".
 
 ### Time & Attendance (Protected — web admin reads)
 
@@ -556,6 +602,27 @@ SFU: `internal/stream/sfu.go` (Pion) + `hub.go`. Cluster: `internal/redis/cluste
 > 2026-08-25: migration 025 adds the RBAC cluster (`roles`, `modules`, `submodules`,
 > `role_submodule_permissions`) and drops the legacy `users.role` / `users.department` /
 > `users.is_company_admin` columns — **`users.role_id` is now the sole role source of truth**.
+
+**`employee_machines`** — Canonical per-machine lifecycle registry (migration 049)
+```
+id                UUID PK (gen_random_uuid())
+employee_id       VARCHAR(20) → FK → employees(employee_id) ON DELETE CASCADE
+machine_id        VARCHAR(255) NOT NULL
+status            VARCHAR(10) NOT NULL DEFAULT 'active' CHECK (status IN ('active','old'))
+first_track_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+last_track_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+wipe_requested_at TIMESTAMPTZ NULL   ← stamped by "Remove current device" (R6)
+created_at / updated_at TIMESTAMPTZ
+UNIQUE (employee_id, machine_id) WHERE deleted_at IS NULL
+INDEX (employee_id)
+```
+
+> **Why a second table next to `employee_devices`.** `employee_devices` is the AUTH-TOKEN registry:
+> `UpsertDevice` revokes the previous `(employee, machine)` row and inserts a NEW one on every login,
+> so one physical PC appears as many rows over time and no row can carry an honest
+> `active|old` lifecycle state. `employee_machines` holds exactly one row per physical machine and is
+> what the web Device Specs dropdown and the active→old transition read; the two are joined on
+> `(employee_id, machine_id)`.
 
 **`users`** — Web admin users (role via role_id)
 ```

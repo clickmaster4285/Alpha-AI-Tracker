@@ -46,20 +46,37 @@ func DeviceAuth(deviceRepo *repository.DeviceRepo, userRepo *repository.UserRepo
 			hasher.Write([]byte(token))
 			tokenHash := hex.EncodeToString(hasher.Sum(nil))
 
-			device, err := deviceRepo.GetByTokenHash(c.Request().Context(), tokenHash)
+			device, err := deviceRepo.GetByTokenHashIncludingRevoked(c.Request().Context(), tokenHash)
 			if err == nil && device != nil {
+				// A revoked (removed) device is accepted on purpose so a machine whose
+				// device was removed can still deliver its final batch of data — the
+				// handler persists it FIRST, then answers action=wipe_local (R6).
+				// We must not refresh last_seen for it: the machine is no longer tracked.
+				if device.RevokedAt != nil {
+					c.Set("employee_id", device.EmployeeID)
+					c.Set("device_id", device.ID)
+					c.Set("device_machine_id", device.MachineID)
+					c.Set("device_removed", true)
+					return next(c)
+				}
+
 				// Copy ID out of the pooled Echo context; use Background + timeout
 				// so TouchLastSeen does not race request cancellation after WS upgrade.
 				// Version/platform headers let a reinstalled client refresh employee_devices
 				// without requiring a fresh employee-login (web Client Version column).
 				devID := device.ID
+				empID := device.EmployeeID
+				machineID := device.MachineID
 				clientVer := strings.TrimSpace(c.Request().Header.Get("X-Client-Version"))
 				platform := strings.TrimSpace(c.Request().Header.Get("X-Client-Platform"))
-				go func(id, ver, plat string) {
+				go func(id, emp, machine, ver, plat string) {
 					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer cancel()
 					_ = deviceRepo.TouchLastSeen(ctx, id, ver, plat)
-				}(devID, clientVer, platform)
+					// Keep the machine registry's activity window current so legacy
+					// attribution (migrations 047/050) has a live upper bound.
+					_ = deviceRepo.TouchEmployeeMachineLastTrack(ctx, emp, machine)
+				}(devID, empID, machineID, clientVer, platform)
 
 				c.Set("employee_id", device.EmployeeID)
 				c.Set("device_id", device.ID)

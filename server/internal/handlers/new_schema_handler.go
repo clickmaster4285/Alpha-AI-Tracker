@@ -39,6 +39,25 @@ func getAuthenticatedMachineID(c echo.Context) string {
 	return machineID
 }
 
+// deviceRemoved reports whether DeviceAuth accepted a REVOKED device token — i.e. this
+// machine was removed via the dashboard ("Remove current device"). The sync handler must
+// persist the incoming batch FIRST, then let applyDeviceAction answer with the wipe
+// instruction (R6). Never set on the Bearer fallback.
+func deviceRemoved(c echo.Context) bool {
+	v, _ := c.Get("device_removed").(bool)
+	return v
+}
+
+// applyDeviceAction decorates a sync response with the server→client instruction when the
+// reporting device has been removed. Called after the service persisted the batch, so the
+// data is stored BEFORE the client is told to wipe its local DB + machine id (R6).
+func applyDeviceAction(c echo.Context, resp *dto.SyncBatchResponse) *dto.SyncBatchResponse {
+	if resp != nil && deviceRemoved(c) {
+		resp.Action = "wipe_local"
+	}
+	return resp
+}
+
 // ────────────────────────────────
 // Phase 1: Device Hardware Info
 // ────────────────────────────────
@@ -60,7 +79,7 @@ func (h *NewSchemaHandler) SyncDeviceHardware(c echo.Context) error {
 		log.Printf("[new_schema] SyncDeviceHardware error: %v", err)
 		return c.JSON(http.StatusInternalServerError, dto.APIError{Code: http.StatusInternalServerError, Message: "Failed to sync", Detail: err.Error()})
 	}
-	return c.JSON(http.StatusOK, resp)
+	return c.JSON(http.StatusOK, applyDeviceAction(c, resp))
 }
 
 // ────────────────────────────────
@@ -84,7 +103,7 @@ func (h *NewSchemaHandler) SyncInstalledApps(c echo.Context) error {
 		log.Printf("[new_schema] SyncInstalledApps error: %v", err)
 		return c.JSON(http.StatusInternalServerError, dto.APIError{Code: http.StatusInternalServerError, Message: "Failed to sync", Detail: err.Error()})
 	}
-	return c.JSON(http.StatusOK, resp)
+	return c.JSON(http.StatusOK, applyDeviceAction(c, resp))
 }
 
 // ────────────────────────────────
@@ -108,7 +127,7 @@ func (h *NewSchemaHandler) SyncInstalledPackages(c echo.Context) error {
 		log.Printf("[new_schema] SyncInstalledPackages error: %v", err)
 		return c.JSON(http.StatusInternalServerError, dto.APIError{Code: http.StatusInternalServerError, Message: "Failed to sync", Detail: err.Error()})
 	}
-	return c.JSON(http.StatusOK, resp)
+	return c.JSON(http.StatusOK, applyDeviceAction(c, resp))
 }
 
 // ────────────────────────────────
@@ -132,7 +151,7 @@ func (h *NewSchemaHandler) SyncNetworkInfo(c echo.Context) error {
 		log.Printf("[new_schema] SyncNetworkInfo error: %v", err)
 		return c.JSON(http.StatusInternalServerError, dto.APIError{Code: http.StatusInternalServerError, Message: "Failed to sync", Detail: err.Error()})
 	}
-	return c.JSON(http.StatusOK, resp)
+	return c.JSON(http.StatusOK, applyDeviceAction(c, resp))
 }
 
 // ────────────────────────────────
@@ -149,13 +168,14 @@ func (h *NewSchemaHandler) SyncSessionEvents(c echo.Context) error {
 		return errResp
 	}
 	req.EmployeeID = empID
+	req.MachineID = getAuthenticatedMachineID(c)
 
 	resp, err := h.service.SyncSessionEvents(c.Request().Context(), &req)
 	if err != nil {
 		log.Printf("[new_schema] SyncSessionEvents error: %v", err)
 		return c.JSON(http.StatusInternalServerError, dto.APIError{Code: http.StatusInternalServerError, Message: "Failed to sync", Detail: err.Error()})
 	}
-	return c.JSON(http.StatusOK, resp)
+	return c.JSON(http.StatusOK, applyDeviceAction(c, resp))
 }
 
 // ────────────────────────────────
@@ -178,7 +198,7 @@ func (h *NewSchemaHandler) SyncAppSessions(c echo.Context) error {
 		log.Printf("[new_schema] SyncAppSessions error: %v", err)
 		return c.JSON(http.StatusInternalServerError, dto.APIError{Code: http.StatusInternalServerError, Message: "Failed to sync", Detail: err.Error()})
 	}
-	return c.JSON(http.StatusOK, resp)
+	return c.JSON(http.StatusOK, applyDeviceAction(c, resp))
 }
 
 // ────────────────────────────────
@@ -195,13 +215,14 @@ func (h *NewSchemaHandler) SyncAppItems(c echo.Context) error {
 		return errResp
 	}
 	req.EmployeeID = empID
+	req.MachineID = getAuthenticatedMachineID(c)
 
 	resp, err := h.service.SyncAppItems(c.Request().Context(), &req)
 	if err != nil {
 		log.Printf("[new_schema] SyncAppItems error: %v", err)
 		return c.JSON(http.StatusInternalServerError, dto.APIError{Code: http.StatusInternalServerError, Message: "Failed to sync", Detail: err.Error()})
 	}
-	return c.JSON(http.StatusOK, resp)
+	return c.JSON(http.StatusOK, applyDeviceAction(c, resp))
 }
 
 // ────────────────────────────────
@@ -383,7 +404,7 @@ func (h *NewSchemaHandler) SyncAppStatus(c echo.Context) error {
 		log.Printf("[new_schema] SyncAppStatus error: %v", err)
 		return c.JSON(http.StatusInternalServerError, dto.APIError{Code: http.StatusInternalServerError, Message: "Failed to sync", Detail: err.Error()})
 	}
-	return c.JSON(http.StatusOK, resp)
+	return c.JSON(http.StatusOK, applyDeviceAction(c, resp))
 }
 
 // ────────────────────────────────
@@ -407,7 +428,7 @@ func (h *NewSchemaHandler) SyncHardwareDevices(c echo.Context) error {
 		log.Printf("[new_schema] SyncHardwareDevices error: %v", err)
 		return c.JSON(http.StatusInternalServerError, dto.APIError{Code: http.StatusInternalServerError, Message: "Failed to sync", Detail: err.Error()})
 	}
-	return c.JSON(http.StatusOK, resp)
+	return c.JSON(http.StatusOK, applyDeviceAction(c, resp))
 }
 
 // ────────────────────────────────
@@ -431,7 +452,7 @@ func (h *NewSchemaHandler) SyncPermissionStatus(c echo.Context) error {
 		log.Printf("[new_schema] SyncPermissionStatus error: %v", err)
 		return c.JSON(http.StatusInternalServerError, dto.APIError{Code: http.StatusInternalServerError, Message: "Failed to sync", Detail: err.Error()})
 	}
-	return c.JSON(http.StatusOK, resp)
+	return c.JSON(http.StatusOK, applyDeviceAction(c, resp))
 }
 
 // ────────────────────────────────
@@ -455,7 +476,7 @@ func (h *NewSchemaHandler) SyncStorageDevices(c echo.Context) error {
 		log.Printf("[new_schema] SyncStorageDevices error: %v", err)
 		return c.JSON(http.StatusInternalServerError, dto.APIError{Code: http.StatusInternalServerError, Message: "Failed to sync", Detail: err.Error()})
 	}
-	return c.JSON(http.StatusOK, resp)
+	return c.JSON(http.StatusOK, applyDeviceAction(c, resp))
 }
 
 // ────────────────────────────────
@@ -472,13 +493,14 @@ func (h *NewSchemaHandler) SyncLocationSamples(c echo.Context) error {
 		return errResp
 	}
 	req.EmployeeID = empID
+	req.MachineID = getAuthenticatedMachineID(c)
 
 	resp, err := h.service.SyncLocationSamples(c.Request().Context(), &req)
 	if err != nil {
 		log.Printf("[new_schema] SyncLocationSamples error: %v", err)
 		return c.JSON(http.StatusInternalServerError, dto.APIError{Code: http.StatusInternalServerError, Message: "Failed to sync", Detail: err.Error()})
 	}
-	return c.JSON(http.StatusOK, resp)
+	return c.JSON(http.StatusOK, applyDeviceAction(c, resp))
 }
 
 func (h *NewSchemaHandler) ListLocationSamples(c echo.Context) error {
@@ -539,6 +561,34 @@ func (h *NewSchemaHandler) RemoveEmployeeDevice(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, dto.APIError{
 			Code:    http.StatusInternalServerError,
 			Message: "Failed to remove the employee device",
+			Detail:  err.Error(),
+		})
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// SelfRemoveAccount handles POST /api/v1/devices/self-remove (DeviceAuth). The client
+// calls it AFTER draining its unsynced rows, when the employee runs
+// `client.exe --remove-account`: the CALLING machine is marked 'old' with last_track_at
+// advanced, its device registrations revoked, open activity closed and the employee
+// flipped to untracked. Nothing is deleted (R4/R5). The client then wipes its local DB +
+// machine id, and the next login generates a brand-new machine id (R7).
+func (h *NewSchemaHandler) SelfRemoveAccount(c echo.Context) error {
+	employeeID, errResp := getAuthenticatedEmployeeID(c)
+	if errResp != nil {
+		return errResp
+	}
+	machineID := getAuthenticatedMachineID(c)
+
+	resp, err := h.service.RemoveAccount(c.Request().Context(), employeeID, machineID)
+	if err != nil {
+		if err.Error() == "employee not found" {
+			return c.JSON(http.StatusNotFound, dto.APIError{Code: http.StatusNotFound, Message: "Employee not found"})
+		}
+		log.Printf("[new_schema] SelfRemoveAccount error: %v", err)
+		return c.JSON(http.StatusInternalServerError, dto.APIError{
+			Code:    http.StatusInternalServerError,
+			Message: "Failed to remove the account",
 			Detail:  err.Error(),
 		})
 	}

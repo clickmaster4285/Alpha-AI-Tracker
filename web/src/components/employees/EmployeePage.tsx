@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query';
 import EmployeeSelector from '@/components/EmployeeSelector';
 import { useEmployeeDetail } from '@/hooks/use-employee-detail';
 import { useUrlActivityFilter } from '@/hooks/use-url-activity-filter';
+import { formatRelative } from '@/lib/format';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { employeesApi, type Employee, type EmployeeDevice, type EmployeeDetail } from '@/lib/api';
 
@@ -19,6 +20,15 @@ const ALL_DEVICES = '__all__';
 export function deviceLabel(device: EmployeeDevice, employee: Employee): string {
   const host = (device.hostname || device.deviceName || device.machineId || '').trim();
   return host ? `${employee.name} (${host})` : employee.name;
+}
+
+/**
+ * Machine lifecycle badge for the Device Specs dropdown (R8, 2026-10-19):
+ * "active" machines are currently tracked; "old" machines were removed (the admin
+ * revoked the device and the client wiped itself) but keep their history.
+ */
+export function deviceStatusLabel(device: EmployeeDevice): string {
+  return device.status === 'old' ? 'old · removed' : 'active';
 }
 
 export interface EmployeePageContext {
@@ -188,8 +198,9 @@ export default function EmployeePage({
             onChange={handleChange}
             className="sm:w-[240px] sm:max-w-full"
           />
-          {/* Device dropdown — only when the employee has more than one registered
-              machine. The value is the machine id (stable across re-logins). */}
+          {/* Device dropdown — when the employee has more than one registered
+              machine (R8). The value is the machine id (stable across re-logins);
+              each entry carries the machine lifecycle status from employee_machines. */}
           {employee && devices.length > 1 && (
             <Select value={deviceId || ALL_DEVICES} onValueChange={handleDeviceChange}>
               <SelectTrigger className="h-9 w-full sm:w-[240px] bg-card border border-border overflow-hidden">
@@ -199,9 +210,12 @@ export default function EmployeePage({
               <SelectContent>
                 <SelectItem value={ALL_DEVICES}>All devices</SelectItem>
                 {devices.map(device => (
-                  <SelectItem key={device.id} value={device.machineId}>
+                  <SelectItem key={device.machineId} value={device.machineId}>
                     {deviceLabel(device, employee)}
-                    {device.isActive ? ' · current' : ' · removed'}
+                    {` · ${deviceStatusLabel(device)}`}
+                    {device.status === 'old' && device.lastTrackAt
+                      ? ` (last tracked ${formatRelative(device.lastTrackAt)})`
+                      : ''}
                   </SelectItem>
                 ))}
               </SelectContent>

@@ -1,7 +1,50 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-10-17
+> **Last audited:** 2026-10-19
 > **Changelog:**
+>
+> - 2026-10-19: **Device lifecycle — `employee_machines` registry, full `machine_id` coverage, and the remove-account / remove-device wipe handshake (server + client + web).**
+>   **Server:** migration **049** adds `employee_machines` — the canonical one-row-per-physical-machine
+>   lifecycle record (`status` `active|old`, `first_track_at`, `last_track_at`, `wipe_requested_at`),
+>   backfilled from `employee_devices`. It exists because `employee_devices` is the AUTH-TOKEN registry
+>   and `UpsertDevice` revokes + re-inserts a row on every login, so one physical PC appeared as many
+>   rows and the Device Specs dropdown could not tell machines apart. Every employee login upserts the
+>   machine as `active` (preserving `first_track_at`); `DeviceAuth` advances `last_track_at`. Migration
+>   **050** completes `machine_id` coverage on `session_events`, `app_items` and `location_samples`
+>   (per-table indexes + 047-style attribution from the device activity window; `app_items` attributes
+>   exactly from its parent session). `terms_consent` deliberately stays employee-scoped — a consent is
+>   the person accepting terms, not the machine. **R6 handshake:** `DeviceAuth` now also resolves
+>   REVOKED device tokens (`GetByTokenHashIncludingRevoked`), sets `device_removed` and skips
+>   `TouchLastSeen`; every sync handler persists the incoming batch FIRST and only then adds
+>   `{"action":"wipe_local"}` to the response (`applyDeviceAction`). `POST /employees/:id/devices/remove`
+>   additionally marks the employee's machines `old` and stamps `wipe_requested_at`. **R4/R5:** new
+>   DeviceAuth endpoint `POST /api/v1/devices/self-remove` marks the CALLING machine `old`, advances
+>   `last_track_at`, revokes its device rows, closes open activity and flips the employee to
+>   `untracked` (non-destructive — nothing is deleted). `GET /employees/:id/detail` now sources
+>   `devices[]` from `employee_machines` (deduped to one row per machine) with `status`, `firstTrackAt`,
+>   `lastTrackAt`, `wipeRequestedAt` and a corrected `isActiveDevice`.
+>   **Client:** every telemetry INSERT stamps `machine_id` from a new single-row `machine_identity`
+>   table, written from a lazy `AppConfig.ClientId` provider so a wipe + re-login in the same process
+>   stores the NEW id (the `employee_info.machine_id` column is written on login too); `JourneyEngine`
+>   no longer uses the hostname as the machine id. New `Services/AccountRemovalService.cs` owns the one
+>   removal routine — stop collecting → bounded `SyncService.WaitForDrainAsync` →
+>   `POST /devices/self-remove` → wipe local DB + `.machine-id` + `ResetMachineId()` — and serves the
+>   `--remove-account` CLI (cold-start and background), the running-instance signal AND the
+>   server-initiated wipe; `SyncService` parses the response `action` and raises
+>   `OnServerRequestedWipe` (once per process). The cold-start path now starts the host first (the old
+>   code fired `RequestImmediateSync()` at a host that had not started, so the drain never ran and the
+>   server was never told).
+>   **Web:** `EmployeeDevice` drops `isActive` for the lifecycle `status` / `firstTrackAt` /
+>   `lastTrackAt` / `wipeRequestedAt`; the Device Specs dropdown shows each machine with its status
+>   (`active` / `old · removed` + last tracked); the Hardware Overview empty state keys off
+>   `status === 'old'`.
+>   Verified live against the dev DB: 049/050 applied (24 backfilled machine rows); employee login →
+>   machine `active`; hardware / session-event / location syncs stamped the device's `machine_id`;
+>   admin remove → machine `old` + `wipe_requested_at` and the revoked token's next batch was
+>   **persisted and** answered `{"action":"wipe_local"}`; second machine login + `self-remove` →
+>   `{removed:true, machineId, status:"old", trackingStatus:"untracked"}`; detail `devices[]` returned
+>   one row per machine with status. `go build`/`go vet`/`go test ./internal/...` clean, `dotnet build`
+>   0/0, `npx tsc --noEmit` clean. Rule codified: **Device Lifecycle Rule** (§6).
 >
 > - 2026-10-17: **Dashboard — the "Fleet health" card is replaced by an "Attendance" card (server + web).**
 >   The home page's fleet panel is gone; its slot now shows **today's attendance breakdown**
@@ -1157,6 +1200,8 @@ flowchart LR
 | Live stream push (client → SFU)            | WS `GET /api/v1/live-stream/push` + WebRTC VP8 | `Authorization: Device <token>`    | Signaling JSON (`hello`/`offer`/`ice`/`start`/`stop`/`select_monitor`/`force_keyframe`); media via WebRTC |
 | Live stream uplink probe (client → server) | REST POST `/api/v1/live-stream/uplink-probe` | `Authorization: Device <token>`     | Timed body (discarded); client measures RTT → bitrate ladder |
 | Presence keep-alive (client → server)      | WS `GET /api/v1/ws`                         | `Authorization: Device <token>`       | Ping/pong; Online/`wsConnected` (Redis-mirrored when available) |
+| Remove the account (client → server)       | REST POST `/api/v1/devices/self-remove`     | `Authorization: Device <token>`       | Empty JSON body → `{removed, machineId, status, lastTrackAt, trackingStatus}`; called AFTER the final drain |
+| Server-requested wipe (server → client)    | inline in every `*/sync` response            | —                                     | `{"action":"wipe_local"}` appended only when the reporting device was removed; the batch in that response is already persisted |
 
 ### Server ↔ Web
 
@@ -1326,6 +1371,7 @@ flowchart LR
 | **RBAC nav → catalog parity** | Every permission-gated nav entry carries a `module` key that matches a submodule seeded in the server `rbacCatalog`; both halves change together and `module` is NEVER omitted (see *RBAC Nav → Catalog Parity Rule* below) |
 | **Machine-scoped data** | Every synced row that describes a specific machine carries `machine_id`, stamped server-side from `DeviceAuth` (never from the request body); device-level reads take `machineID` where `""` = all devices (see *Machine-Scoped Data Rule* below) |
 | **Retired-device history** | A removed device keeps showing its last-known data: legacy rows are attributed to it from the device registry's activity window (migration 047), and device-scoped software reads include the staleness-swept `is_active = false` links while the aggregate keeps the filter (see *Retired-Device History Rule* below) |
+| **Device lifecycle** | `employee_machines` is the canonical one-row-per-machine registry (`status` `active|old`, `first_track_at`, `last_track_at`, `wipe_requested_at`); `employee_devices` stays the rotating auth-token registry. Removal is a handshake: persist first, then instruct the client to wipe (see *Device Lifecycle Rule* below) |
 
 ### Web Infinite-Scroll Rule (mandatory)
 
@@ -1528,6 +1574,43 @@ blank after a device swap.
 4. **Verify with the device registry, not just the API.** Check that the device id the dropdown sends
    (`employee_devices.machine_id`, e.g. the `default-EMP-XXXXX` login fallback) is the id the rows now
    carry, and measure per-device vs aggregate counts (a correct fix leaves the aggregate unchanged).
+
+### Device Lifecycle Rule (mandatory since 2026-10-19)
+
+**A machine's lifecycle has ONE source of truth (`employee_machines`), and every removal is a
+"persist first, then instruct" handshake — the server never tells a client to wipe before it has
+stored the data that client just sent.**
+
+1. **Registry split.** `employee_machines` (one row per `(employee_id, machine_id)`, `status`
+   `active|old`, `first_track_at`, `last_track_at`, `wipe_requested_at`) is the canonical lifecycle
+   record. `employee_devices` keeps owning the auth-token state and **rotates a row on every login**
+   — never drive a machine list or a status badge off it. A machine that logs in again becomes
+   `active` with `first_track_at` preserved; `DeviceAuth` keeps `last_track_at` current on every
+   request.
+2. **`machine_id` is everywhere.** Server (migrations 046/050): every device-scoped sync table plus
+   `session_events`, `app_items`, `location_samples` carry it, stamped from the authenticated device
+   (`json:"-"` `MachineID` on the DTO), never from the request body. Client: every local table has
+   the column and stamps it from the single-row `machine_identity` table, whose value comes from a
+   **lazy** `AppConfig.ClientId` provider (a wipe resets the id, so a re-login in the same process
+   must persist the new one — a value captured at construction would stamp the retired machine).
+   `terms_consent` is intentionally employee-scoped.
+3. **Devices with `machine_id = ''`** are the honest "unknown machine" bucket: they appear only in
+   the employee-wide aggregate, never under a specific device.
+4. **Remove current device (admin) = persist-then-wipe.** `POST /employees/:id/devices/remove`
+   revokes the devices, closes open activity, sets `tracking_status='untracked'` **and** marks the
+   machines `old` + `wipe_requested_at=NOW()`. `DeviceAuth` deliberately still accepts the now
+   **revoked** token (`GetByTokenHashIncludingRevoked`), flags `device_removed`, and the sync handler
+   persists the batch FIRST and only then answers `{"action":"wipe_local"}`. The client wipes its
+   local DB + machine id and lands on the sign-in page; its next login mints a **new** machine id and
+   a new `employee_machines` row, while the old row stays `old` with its history.
+5. **Remove the account (employee) = drain then notify.** `client.exe --remove-account` starts the
+   host, drains every unsynced row (bounded by `ALPHA_REMOVE_ACCOUNT_SYNC_TIMEOUT_SEC`), then calls
+   `POST /api/v1/devices/self-remove` (DeviceAuth) — which marks the calling machine `old`, advances
+   `last_track_at`, revokes its devices and flips the employee to `untracked` — and only then wipes
+   locally. One routine (`AccountRemovalService`) serves the CLI burst, the running-instance signal
+   and the server-initiated wipe; a failed drain/server call never blocks the local wipe.
+6. **Never delete to remove.** Every removal path only changes statuses; history and last-known data
+   stay readable (see *Retired-Device History Rule*).
 
 ### Cross-Platform Analyzer Safety Rule (mandatory)
 

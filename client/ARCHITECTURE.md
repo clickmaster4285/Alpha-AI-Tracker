@@ -1,7 +1,40 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-10-15 (live-stream ICE buffering)
+> **Last audited:** 2026-10-19 (machine id coverage + account/device removal)
 > **Changelog:**
+> - 2026-10-19: **`machine_id` on every local table + one account-removal routine + server-initiated wipe.**
+>   **Identity:** a new single-row `machine_identity` table (id=1, `machine_id`) holds THIS machine's
+>   id, and every telemetry INSERT reads it in SQL —
+>   `COALESCE((SELECT machine_id FROM machine_identity WHERE id = 1), '')` — so no store method needed
+>   a new parameter. `machine_id TEXT NOT NULL DEFAULT ''` was added to `device_hardware_info`,
+>   `storage_devices`, `installed_applications`, `installed_packages`, `network_info`,
+>   `hardware_devices`, `session_events`, `app_items`, `app_status`, `permission_status`,
+>   `employee_info`, `location_samples` and `daily_attendance_cache` (both in `CreateTableSql` for new
+>   installs and in `MigrateSql` for existing DBs, plus an `app_items` backfill from its parent
+>   session). `SqliteLogStore` takes a **lazy** `Func<string>` provider (`() => config.ClientId`) and
+>   refreshes `machine_identity` at initialization AND on every login — the id is reset by a wipe, so a
+>   value captured at construction would stamp the retired machine onto the fresh account.
+>   `employee_info.machine_id` is written on login (R7 "save on both DBs").
+>   `Core/DesktopEventBus/JourneyEngine` no longer stamps `Environment.MachineName` on journey
+>   sessions — it uses `AppConfig.ClientId`, the same id every other surface uses.
+>   **Removal:** new `Services/AccountRemovalService.cs` is the ONE removal routine — stop collecting
+>   (`LogCollectorService.StopTracking`) → bounded `SyncService.WaitForDrainAsync`
+>   (`ALPHA_REMOVE_ACCOUNT_SYNC_TIMEOUT_SEC`, default 120s) → `SyncService.SelfRemoveAsync`
+>   (`POST /api/v1/devices/self-remove`, DeviceAuth) → wipe the SQLite DB + `.machine-id` /
+>   device-id files + `ResetMachineId()` + `EncryptedConfigService.ResetCache()`. `SyncService` gained
+>   `Action` parsing on `SyncBatchResponse` and `OnServerRequestedWipe`, raised **once** per process when
+>   a sync answer carries `{"action":"wipe_local"}` (the admin removed this device; that batch is
+>   already persisted server-side) — `Program.cs` wires it to the same service so a removed device
+>   wipes itself and lands on the sign-in page. `WaitForDrainAsync` waits on a real per-pass
+>   completion signal (`CompletePass(drainedAll)`); a pass is "drained" only when nothing failed and
+>   the per-pass budget was not exhausted, and the not-logged-in branch publishes a trivially complete
+>   pass so `--remove-account` can't sit out its whole timeout.
+>   **`--remove-account`:** all entry points converge on the service. The cold-start/background path
+>   now starts the host FIRST (the old code called `RequestImmediateSync()` before `host.StartAsync()`, so
+>   the drain never ran and the server was never told), then drains, notifies, wipes, kills siblings and
+>   stops the host; the running-instance branch still signals the live process, which runs the same
+>   routine in place; `MainViewModel.RemoveAccountAsync` delegates too. Verified: `dotnet build` 0
+>   warnings / 0 errors.
 > - 2026-10-15: **Live stream publisher — ICE buffered until the answer is applied (`LiveStreamClient`).**
 >   The publisher applied each server `ice` message immediately, but the SFU trickles candidates from a
 >   separate goroutine, so a candidate could arrive before the `answer`. `addIceCandidate` with a null

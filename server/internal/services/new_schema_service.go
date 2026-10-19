@@ -336,6 +336,7 @@ func (s *NewSchemaService) SyncSessionEvents(ctx context.Context, req *dto.SyncS
 		entries = append(entries, models.SessionEvent{
 			ID:         e.ID,
 			EmployeeID: req.EmployeeID,
+			MachineID:  req.MachineID,
 			EventType:  e.EventType,
 			OsUsername: e.OsUsername,
 			EventAt:    ts,
@@ -441,6 +442,7 @@ func (s *NewSchemaService) SyncAppItems(ctx context.Context, req *dto.SyncAppIte
 		entries = append(entries, models.AppItem{
 			ID:           e.ID,
 			EmployeeID:   req.EmployeeID,
+			MachineID:    req.MachineID,
 			AppSessionID: e.AppSessionID,
 			ParentItemID: e.ParentItemID,
 			ItemType:     e.ItemType,
@@ -881,6 +883,7 @@ func (s *NewSchemaService) SyncLocationSamples(ctx context.Context, req *dto.Syn
 		entries = append(entries, models.LocationSample{
 			ID:         e.ID,
 			EmployeeID: req.EmployeeID,
+			MachineID:  req.MachineID,
 			Latitude:   e.Latitude,
 			Longitude:  e.Longitude,
 			AccuracyM:  e.AccuracyM,
@@ -1132,7 +1135,15 @@ func (s *NewSchemaService) GetEmployeeDetail(ctx context.Context, id, machineID 
 		LastActivityAt: stats.LastActivityAt,
 	}
 
-	// Registered devices (employee_devices) — used by the device-specs dropdown.
+	// Machine list — the CANONICAL source is employee_machines (one row per physical
+	// machine, migration 049). The auth-token registry (employee_devices) rotates a row
+	// on every re-login, so driving the dropdown off it duplicated machines (G8). The
+	// registry is still consulted for the newest platform/client version and the
+	// token-level active flag of each machine.
+	machineList, err := s.repo.ListEmployeeMachines(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
 	deviceList, err := s.repo.ListEmployeeDevices(ctx, employeeID)
 	if err != nil {
 		return nil, err
@@ -1141,34 +1152,120 @@ func (s *NewSchemaService) GetEmployeeDetail(ctx context.Context, id, machineID 
 	if err != nil {
 		return nil, err
 	}
+
+	// Newest device registration per machine (registry rows come back last_seen DESC).
+	latestByMachine := make(map[string]models.EmployeeDevice, len(deviceList))
 	for _, d := range deviceList {
-		hostname := strings.TrimSpace(hostnames[d.MachineID])
-		deviceName := strings.TrimSpace(d.DeviceName)
+		if _, ok := latestByMachine[d.MachineID]; !ok {
+			latestByMachine[d.MachineID] = d
+		}
+	}
+
+	for _, m := range machineList {
+		machineID := m.MachineID
+		hostname := strings.TrimSpace(hostnames[machineID])
+		var reg models.EmployeeDevice
+		var hasReg bool
+		if r, ok := latestByMachine[machineID]; ok {
+			reg, hasReg = r, true
+		}
+
+		deviceName := ""
+		if hasReg {
+			deviceName = strings.TrimSpace(reg.DeviceName)
+		}
 		// Never surface a nameless device: fall back to the hostname the machine
 		// reported, and finally to the machine id so the dropdown is always readable.
 		if deviceName == "" {
 			deviceName = hostname
 		}
 		if deviceName == "" {
-			deviceName = d.MachineID
+			deviceName = machineID
 		}
 		if hostname == "" {
 			hostname = deviceName
 		}
-		_isActive := d.IsActiveDevice && (d.RemoveAt == nil)
-		resp.Devices = append(resp.Devices, dto.EmployeeDeviceDto{
-			ID:            d.ID,
-			EmployeeID:    d.EmployeeID,
-			MachineID:     d.MachineID,
-			Platform:      d.Platform,
-			ClientVersion: d.ClientVersion,
-			DeviceName:    deviceName,
-			Hostname:      hostname,
-			LastSeenAt:    d.LastSeenAt,
-			RevokedAt:     d.RevokedAt,
-			IsActiveDevice: _isActive,
-			RemoveAt:      d.RemoveAt,
-		})
+
+		dtoDev := dto.EmployeeDeviceDto{
+			EmployeeID:      employeeID,
+			MachineID:       machineID,
+			DeviceName:      deviceName,
+			Hostname:        hostname,
+			Status:          m.Status,
+			FirstTrackAt:    m.FirstTrackAt,
+			LastTrackAt:     m.LastTrackAt,
+			WipeRequestedAt: m.WipeRequestedAt,
+			// The lifecycle row is authoritative for "is this machine current".
+			IsActiveDevice: m.Status == models.MachineStatusActive,
+		}
+		if hasReg {
+			dtoDev.ID = reg.ID
+			dtoDev.Platform = reg.Platform
+			dtoDev.ClientVersion = reg.ClientVersion
+			dtoDev.LastSeenAt = reg.LastSeenAt
+			dtoDev.RevokedAt = reg.RevokedAt
+			dtoDev.RemoveAt = reg.RemoveAt
+		}
+		resp.Devices = append(resp.Devices, dtoDev)
+	}
+	return resp, nil
+}
+
+// RemoveAccount handles the client's "remove the account" signal (R4/R5). The calling
+// machine has already drained its unsynced rows; this marks that machine 'old', advances
+// last_track_at, revokes its device registrations, closes its open activity and flips the
+// employee to untracked. Non-destructive: nothing is deleted.
+func (s *NewSchemaService) RemoveAccount(ctx context.Context, employeeID, machineID string) (*dto.SelfRemoveAccountResponse, error) {
+	emp, err := s.employeeRepo.GetByEmployeeID(ctx, employeeID)
+	if err != nil {
+		return nil, fmt.Errorf("get employee: %w", err)
+	}
+	if emp == nil {
+		return nil, fmt.Errorf("employee not found")
+	}
+
+	if machineID != "" {
+		if err := s.repo.MarkEmployeeMachineOld(ctx, employeeID, machineID, false); err != nil {
+			return nil, err
+		}
+	}
+
+	revoked, err := s.repo.RevokeEmployeeDevices(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	_ = revoked
+
+	sessions, items, err := s.repo.CloseOpenActivity(ctx, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	_ = sessions
+	_ = items
+
+	if _, err := s.employeeRepo.Update(ctx, emp.ID, map[string]interface{}{
+		"tracking_status": "untracked",
+		"is_online":       false,
+	}); err != nil {
+		return nil, fmt.Errorf("update employee tracking status: %w", err)
+	}
+
+	// Read back the machine row for an honest lastTrackAt/status in the response.
+	resp := &dto.SelfRemoveAccountResponse{
+		Removed:        true,
+		MachineID:      machineID,
+		Status:         models.MachineStatusOld,
+		LastTrackAt:    time.Now().UTC(),
+		TrackingStatus: "untracked",
+	}
+	if machines, lerr := s.repo.ListEmployeeMachines(ctx, employeeID); lerr == nil {
+		for _, m := range machines {
+			if m.MachineID == machineID {
+				resp.Status = m.Status
+				resp.LastTrackAt = m.LastTrackAt
+				break
+			}
+		}
 	}
 	return resp, nil
 }
@@ -1190,6 +1287,13 @@ func (s *NewSchemaService) RemoveEmployeeDevices(ctx context.Context, id string)
 
 	revoked, err := s.repo.RevokeEmployeeDevices(ctx, emp.EmployeeID)
 	if err != nil {
+		return nil, err
+	}
+
+	// R6 trigger: every machine of this employee is now 'old' and flagged for a wipe.
+	// The next sync from any of them persists its outstanding rows (DeviceAuth accepts
+	// the revoked token) and is answered with action=wipe_local.
+	if err := s.repo.MarkAllEmployeeMachinesOldWithWipe(ctx, emp.EmployeeID); err != nil {
 		return nil, err
 	}
 

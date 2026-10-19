@@ -1,7 +1,20 @@
 # Web Architecture — Alpha AI Tracker Dashboard
 
-> **Last audited:** 2026-10-16 (RBAC sidebar gating)
+> **Last audited:** 2026-10-19 (device lifecycle status in Device Specs)
 > **Changelog:**
+> - 2026-10-19: **Device Specs machine dropdown shows the machine lifecycle status (`EmployeeDevice` fix).**
+>   `EmployeeDevice` in `src/lib/api.ts` dropped the stale `isActive` field (the server had been
+>   emitting `isActiveDevice`, so `isActive` was always `undefined` and **every** device rendered as
+>   "removed") and now mirrors the server DTO: `status` (`active` | `old`), `firstTrackAt`,
+>   `lastTrackAt`, `wipeRequestedAt`, `isActiveDevice`, `removeAt`. The list itself now comes from the
+>   server's canonical `employee_machines` registry (migration 049) — one entry per physical machine,
+>   deduplicated even though `employee_devices` rotates a token row per login.
+>   `components/employees/EmployeePage.tsx` renders each entry as
+>   `"{employee} ({hostname})" · active` / `"· old · removed (last tracked …)"` via the new
+>   `deviceStatusLabel`, and `app/(app)/device-specs/page.tsx` keys its removed-device empty state off
+>   `status === 'old'` (Retired-Device History Rule: a removed machine keeps its last-known data and
+>   must not claim the client "will upload one after login"). The URL-synced `?deviceId=` selector and
+>   the `__all__` aggregate are unchanged. Verified: `npx tsc --noEmit` clean.
 > - 2026-10-16: **Sidebar/route gating fixed for Terms & Conditions — the nav entry had no `module` key.**
 >   `AppSidebar.tsx` rendered **Settings → Terms & Conditions** for every authenticated user (a
 >   module-less child short-circuits both `isItemVisible` and `visibleChildrenOf` to `true`), and

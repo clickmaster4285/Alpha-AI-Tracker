@@ -11,16 +11,16 @@
 
 ## 1. Requirements (from `request.txt`)
 
-| # | Requirement |
-|---|---|
-| **R1** | Manage devices per employee — define exactly what happens when an employee changes device/system. |
-| **R2** | Link **every table** with `machine_id` on the client local DB **and** the server DB. |
-| **R3** | New server table storing `employee_id` + `machine_id` + `status` (`active`\|`old`) + `first_track_at` + `last_track_at`. |
-| **R4** | Client `client.exe --remove-account`: **first sync all unsynced data** to the server **with a "remove the account" signal**, **then** wipe the local DB and machine id. |
-| **R5** | Server receives "remove the account" → set employee `tracking_status = untracked`, machine `status = old`, update `last_track_at`. |
+| #            | Requirement                                                                                                                                                                                                                    |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **R1** | Manage devices per employee — define exactly what happens when an employee changes device/system.                                                                                                                             |
+| **R2** | Link **every table** with `machine_id` on the client local DB **and** the server DB.                                                                                                                             |
+| **R3** | New server table storing `employee_id` + `machine_id` + `status` (`active`\|`old`) + `first_track_at` + `last_track_at`.                                                                                         |
+| **R4** | Client `client.exe --remove-account`: **first sync all unsynced data** to the server **with a "remove the account" signal**, **then** wipe the local DB and machine id.                                    |
+| **R5** | Server receives "remove the account" → set employee `tracking_status = untracked`, machine `status = old`, update `last_track_at`.                                                                                      |
 | **R6** | Server "Remove current device" → on the employee's **next sync** the server **first persists the incoming data**, then **responds** telling the client to wipe its local DB + machine id; the client wipes. |
-| **R7** | On re-login, **create a new machine id** and save it on both DBs. |
-| **R8** | Web `/device-specs`, `/device-specs/software`, `/device-specs/peripherals`, `/device-specs/permissions`: when an employee has **multiple machines**, show a **dropdown machine list with status**. |
+| **R7** | On re-login, **create a new machine id** and save it on both DBs.                                                                                                                                                        |
+| **R8** | Web `/device-specs`, `/device-specs/software`, `/device-specs/peripherals`, `/device-specs/permissions`: when an employee has **multiple machines**, show a **dropdown machine list with status**.         |
 
 ---
 
@@ -51,18 +51,18 @@ Specs, `POST /employees/:id/devices/remove`) and 2026-10-17/19 (migration 048,
 
 ### 2.2 Gaps and defects found (must be fixed for the requirements)
 
-| ID | Gap / defect | Evidence |
-|---|---|---|
-| **G1** | **No `employee_machines` table** (R3). `employee_devices` has no `status`, `first_track_at`, or `last_track_at`. | `migrations/021`, `048`; `models/device.go` |
-| **G2** | **`machine_id` coverage is partial.** Server: `session_events`, `app_items`, `location_samples`, `terms_consent` have none. Client: **only `app_sessions`** has it locally — every other local table (device_hardware_info, storage_devices, installed_applications, installed_packages, network_info, hardware_devices, session_events, app_items, app_status, permission_status, location_samples) lacks it. | `client/Storage/DatabaseSchema.cs`; `server/migrations/006,008,029,036` |
-| **G3** | **`--remove-account` does not sync, and does not notify the server.** `RequestImmediateSync()` is called **before** `host.StartAsync()` (so `SyncService.ExecuteAsync` isn't running); no HTTP "remove account" call exists anywhere. | `client/Program.cs:527-589`; grep for remove-account in `server/internal` → none |
-| **G4** | **No server→client "wipe" instruction.** `dto.SyncBatchResponse = {synced, message, rejectedIds?, missingSessionIds?}`; the client parses no `action`/`wipe` field. | `server/internal/dto/new_schema_dto.go:15-31`; `client/Services/SyncService.cs:81-88` |
-| **G5** | **Revoked device tokens are rejected by `DeviceAuth`**, so a removed machine's sync falls back to the employee Bearer JWT and its rows land with `machine_id = ''`. There is no way to persist-then-instruct. | `middleware/device_auth.go:45-49,70-90` |
-| **G6** | **Detail `devices` list loses status.** The shared `ListEmployeeDevices` SELECT omits `is_active_device`/`remove_at`, so `isActiveDevice` is always `false`. | `repository/new_schema_repo.go:1352-1386` vs `repository/device_repo.go:137-169` |
-| **G7** | **Web/server key mismatch.** Server emits `isActiveDevice`; the web type/consumers read `isActive` → always `undefined` → every device shows "removed". | `server/internal/dto/employee_dto.go:234-246`; `web/src/lib/api.ts:474-491`; `EmployeePage.tsx:204`; `device-specs/page.tsx:25` |
-| **G8** | **Every login rotates the device row** (`UpsertDevice` revokes the prior `(employee,machine)` row then inserts a new one), so one physical machine appears as many `employee_devices` rows — the dropdown can therefore duplicate a machine. | `repository/device_repo.go:23-66` |
-| **G9** | **Journey sessions use the hostname as `machine_id`**, not `AppConfig.ClientId` — inconsistent machine identity. | `client/Core/DesktopEventBus/JourneyEngine.cs:110` |
-| **G10** | **No relogin-new-machine-id guarantee after a server-initiated wipe** — the client has no code path that regenerates the id outside `--remove-account`. | `AppConfig.cs:259`, `Program.cs` |
+| ID            | Gap / defect                                                                                                                                                                                                                                                                                                                                                                                                                            | Evidence                                                                                                                                |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| **G1**  | **No `employee_machines` table** (R3). `employee_devices` has no `status`, `first_track_at`, or `last_track_at`.                                                                                                                                                                                                                                                                                                        | `migrations/021`, `048`; `models/device.go`                                                                                       |
+| **G2**  | **`machine_id` coverage is partial.** Server: `session_events`, `app_items`, `location_samples`, `terms_consent` have none. Client: **only `app_sessions`** has it locally — every other local table (device_hardware_info, storage_devices, installed_applications, installed_packages, network_info, hardware_devices, session_events, app_items, app_status, permission_status, location_samples) lacks it. | `client/Storage/DatabaseSchema.cs`; `server/migrations/006,008,029,036`                                                             |
+| **G3**  | **`--remove-account` does not sync, and does not notify the server.** `RequestImmediateSync()` is called **before** `host.StartAsync()` (so `SyncService.ExecuteAsync` isn't running); no HTTP "remove account" call exists anywhere.                                                                                                                                                                               | `client/Program.cs:527-589`; grep for remove-account in `server/internal` → none                                                   |
+| **G4**  | **No server→client "wipe" instruction.** `dto.SyncBatchResponse = {synced, message, rejectedIds?, missingSessionIds?}`; the client parses no `action`/`wipe` field.                                                                                                                                                                                                                                                        | `server/internal/dto/new_schema_dto.go:15-31`; `client/Services/SyncService.cs:81-88`                                               |
+| **G5**  | **Revoked device tokens are rejected by `DeviceAuth`**, so a removed machine's sync falls back to the employee Bearer JWT and its rows land with `machine_id = ''`. There is no way to persist-then-instruct.                                                                                                                                                                                                                 | `middleware/device_auth.go:45-49,70-90`                                                                                               |
+| **G6**  | **Detail `devices` list loses status.** The shared `ListEmployeeDevices` SELECT omits `is_active_device`/`remove_at`, so `isActiveDevice` is always `false`.                                                                                                                                                                                                                                                          | `repository/new_schema_repo.go:1352-1386` vs `repository/device_repo.go:137-169`                                                    |
+| **G7**  | **Web/server key mismatch.** Server emits `isActiveDevice`; the web type/consumers read `isActive` → always `undefined` → every device shows "removed".                                                                                                                                                                                                                                                                   | `server/internal/dto/employee_dto.go:234-246`; `web/src/lib/api.ts:474-491`; `EmployeePage.tsx:204`; `device-specs/page.tsx:25` |
+| **G8**  | **Every login rotates the device row** (`UpsertDevice` revokes the prior `(employee,machine)` row then inserts a new one), so one physical machine appears as many `employee_devices` rows — the dropdown can therefore duplicate a machine.                                                                                                                                                                               | `repository/device_repo.go:23-66`                                                                                                     |
+| **G9**  | **Journey sessions use the hostname as `machine_id`**, not `AppConfig.ClientId` — inconsistent machine identity.                                                                                                                                                                                                                                                                                                             | `client/Core/DesktopEventBus/JourneyEngine.cs:110`                                                                                    |
+| **G10** | **No relogin-new-machine-id guarantee after a server-initiated wipe** — the client has no code path that regenerates the id outside `--remove-account`.                                                                                                                                                                                                                                                                        | `AppConfig.cs:259`, `Program.cs`                                                                                                    |
 
 ---
 
@@ -142,11 +142,11 @@ The server-initiated wipe (R6) reuses steps 1 + 4 + 5 (the data is already store
 
 ### 4.1 Server migrations
 
-| Migration | Contents |
-|---|---|
-| **049_employee_machines.sql** | New `employee_machines` table (D1). |
+| Migration                             | Contents                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **049_employee_machines.sql**   | New `employee_machines` table (D1).                                                                                                                                                                                                                                                                                                                                                                             |
 | **050_machine_id_coverage.sql** | `ADD COLUMN machine_id TEXT NOT NULL DEFAULT ''` to `session_events`, `app_items`, `location_samples` (and `terms_consent` — see open question Q2); per-table `(employee_id, machine_id, …)` indexes; best-effort backfill from the owning `app_sessions.machine_id` for `app_items`, and from `employee_devices` activity windows for `session_events`/`location_samples` (047 pattern). |
-| *(no migration)* | `wipe_requested_at` lives on `employee_machines` in 049. |
+| *(no migration)*                    | `wipe_requested_at` lives on `employee_machines` in 049.                                                                                                                                                                                                                                                                                                                                                      |
 
 - Keep `employee_devices.is_active_device` / `remove_at` (048) — token-level state.
 - Backfill `employee_machines` from `employee_devices`: one row per `(employee_id, machine_id)` with
@@ -177,19 +177,21 @@ match.
 All client-facing routes are mounted under **`syncGroup` / `DeviceAuth`** (Client-vs-Web Auth
 Separation Rule). Web routes stay under `protected` / `JWTAuth`.
 
-| Endpoint | Group | Change |
-|---|---|---|
-| `POST /api/v1/devices/self-remove` | DeviceAuth | **New.** Marks the calling machine `old`, updates `last_track_at`, revokes its device rows, closes sessions/items, sets employee `untracked`. Returns `{removed:true, machineId, lastTrackAt}`. |
-| `POST /api/v1/*/sync` (all 11 + location/terms) | DeviceAuth | Response `SyncBatchResponse` gains `action,omitempty` (`"wipe_local"`). Set when `device_removed`. **Incoming rows are persisted before the flag is returned.** |
-| `GET /api/v1/employees/:id/detail?deviceId=` | JWTAuth | `devices[]` now sourced from `employee_machines` (one row/machine) and each entry carries `status` (`active`\|`old`), `firstTrackAt`, `lastTrackAt`, and the corrected `isActiveDevice`/`removeAt` (fixes G6). |
-| `POST /api/v1/employees/:id/devices/remove` | JWTAuth | Also sets `employee_machines.status='old'`, `last_track_at=NOW()`, `wipe_requested_at=NOW()` (R6 trigger). Behaviour/response otherwise unchanged. |
+| Endpoint                                          | Group      | Change                                                                                                                                                                                                                           |
+| ------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /api/v1/devices/self-remove`              | DeviceAuth | **New.** Marks the calling machine `old`, updates `last_track_at`, revokes its device rows, closes sessions/items, sets employee `untracked`. Returns `{removed:true, machineId, lastTrackAt}`.                    |
+| `POST /api/v1/*/sync` (all 11 + location/terms) | DeviceAuth | Response `SyncBatchResponse` gains `action,omitempty` (`"wipe_local"`). Set when `device_removed`. **Incoming rows are persisted before the flag is returned.**                                                    |
+| `GET /api/v1/employees/:id/detail?deviceId=`    | JWTAuth    | `devices[]` now sourced from `employee_machines` (one row/machine) and each entry carries `status` (`active`\|`old`), `firstTrackAt`, `lastTrackAt`, and the corrected `isActiveDevice`/`removeAt` (fixes G6). |
+| `POST /api/v1/employees/:id/devices/remove`     | JWTAuth    | Also sets `employee_machines.status='old'`, `last_track_at=NOW()`, `wipe_requested_at=NOW()` (R6 trigger). Behaviour/response otherwise unchanged.                                                                         |
 
 DTOs (`server/internal/dto/`):
+
 - `SyncBatchResponse` — add `Action string \`json:"action,omitempty"\``.
 - `EmployeeDeviceDto` — add `Status`, `FirstTrackAt`, `LastTrackAt`.
 - New `SelfRemoveAccountResponse`.
 
 Web types (`web/src/lib/api.ts`):
+
 - `EmployeeDevice` — replace `isActive: boolean` with `status: 'active' | 'old'`, keep
   `isActiveDevice: boolean`, add `firstTrackAt`, `lastTrackAt` (fixes G7).
 
@@ -198,6 +200,7 @@ Web types (`web/src/lib/api.ts`):
 ## 6. Phased implementation
 
 ### Phase 0 — Schema foundation
+
 1. `server/migrations/049_employee_machines.sql` (+ backfill from `employee_devices`).
 2. `server/migrations/050_machine_id_coverage.sql` (+ backfill).
 3. Client: `DatabaseSchema.cs` — `machine_id` on the tables in §4.2 (fresh + `MigrateSql` ALTERs).
@@ -206,6 +209,7 @@ Web types (`web/src/lib/api.ts`):
 `RunMigrationsAsync` is idempotent on an existing DB.
 
 ### Phase 1 — Server
+
 4. `models/device.go` + `repository/device_repo.go`:
    - `EmployeeMachine` model; `UpsertEmployeeMachineActive`, `TouchEmployeeMachineLastTrack` (bulk
      update keyed by `device_id`), `MarkEmployeeMachineOld(employeeID, machineID)`.
@@ -233,6 +237,7 @@ Web types (`web/src/lib/api.ts`):
 `{"action":"wipe_local"}` returned; `self-remove` → `untracked` + `old` + `last_track_at` advanced.
 
 ### Phase 2 — Client
+
 11. Stamp `machine_id` on every insert path (§4.2); fix `JourneyEngine` (G9).
 12. `Services/SyncService.cs`:
     - `SyncBatchResponse` gains `Action`; parse it in `SendAsync`.
@@ -259,6 +264,7 @@ receives the rows **and** the self-remove call, then local DB + `.machine-id` ar
 sends a **different** `machineId` and the server records a new `employee_machines` row (`active`).
 
 ### Phase 3 — Web
+
 17. `web/src/lib/api.ts`: fix `EmployeeDevice` (G7) and add `status`/`firstTrackAt`/`lastTrackAt`.
 18. `web/src/components/employees/EmployeePage.tsx`: dropdown renders when `devices.length > 1`
     (already) — show the machine status (`Active` / `Old · removed`, with `lastTrackAt` in the
@@ -273,6 +279,7 @@ with correct statuses; selecting an old machine shows its last-known data (Retir
 Rule) and the truthful empty state; selecting a live machine hides its uninstalled apps.
 
 ### Phase 4 — Contract + docs + installer parity
+
 20. Update `server/ARCHITECTURE.md`, `client/ARCHITECTURE.md`, `web/ARCHITECTURE.md`, and
     `AGENTS.md` §4/§5/§6 (changelog entry + the machine-lifecycle contract). Add a **Device Lifecycle
     Rule** subsection documenting: login → `employee_machines` active; remove-device → old +
@@ -286,24 +293,25 @@ Rule) and the truthful empty state; selecting a live machine hides its uninstall
 
 ## 7. Verification matrix
 
-| Check | Command / method | Expected |
-|---|---|---|
-| Server build/vet/test | `cd server && go build ./... && go vet ./... && go test ./internal/...` | clean |
-| Migrations | dry-run + apply on dev DB | 049/050 apply; backfills report non-zero row counts; re-run is a no-op |
-| Client build | `cd client && dotnet build` | 0 warnings / 0 errors |
-| Client schema | boot on an existing DB | `machine_id` columns present; no "duplicate column" crash |
-| Web | `cd web && npx tsc --noEmit && npm run build` | clean; routes registered |
-| E2E remove-device (R6) | admin remove → device token syncs | batch persisted **then** `{"action":"wipe_local"}`; client wipes; relogin = new machine id |
-| E2E remove-account (R4/R5) | `client.exe --remove-account` (installed build) | drain delivered, `untracked` + `old` + `last_track_at`, local DB + `.machine-id` gone |
-| Relogin (R7) | re-login after either wipe | new `machineId`; new `employee_machines` row `active`; old row stays `old` |
-| Web dropdown (R8) | 2-machine employee | both machines listed with status; `?deviceId=` scoping correct |
-| Installer parity | build + install + run the flows | behavior identical to `dotnet run` |
+| Check                      | Command / method                                                          | Expected                                                                                           |
+| -------------------------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Server build/vet/test      | `cd server && go build ./... && go vet ./... && go test ./internal/...` | clean                                                                                              |
+| Migrations                 | dry-run + apply on dev DB                                                 | 049/050 apply; backfills report non-zero row counts; re-run is a no-op                             |
+| Client build               | `cd client && dotnet build`                                             | 0 warnings / 0 errors                                                                              |
+| Client schema              | boot on an existing DB                                                    | `machine_id` columns present; no "duplicate column" crash                                        |
+| Web                        | `cd web && npx tsc --noEmit && npm run build`                           | clean; routes registered                                                                           |
+| E2E remove-device (R6)     | admin remove → device token syncs                                        | batch persisted **then** `{"action":"wipe_local"}`; client wipes; relogin = new machine id |
+| E2E remove-account (R4/R5) | `client.exe --remove-account` (installed build)                         | drain delivered, `untracked` + `old` + `last_track_at`, local DB + `.machine-id` gone      |
+| Relogin (R7)               | re-login after either wipe                                                | new `machineId`; new `employee_machines` row `active`; old row stays `old`                 |
+| Web dropdown (R8)          | 2-machine employee                                                        | both machines listed with status; `?deviceId=` scoping correct                                   |
+| Installer parity           | build + install + run the flows                                           | behavior identical to `dotnet run`                                                               |
 
 ---
 
 ## 8. Risks, invariants, open questions
 
 **Invariants to preserve**
+
 - `machine_id` is **server-stamped from the authenticated device**, never trusted from the request
   body (Machine-Scoped Data Rule).
 - Removal is **non-destructive on the server** — history is preserved; only statuses change
@@ -313,6 +321,7 @@ Rule) and the truthful empty state; selecting a live machine hides its uninstall
 - No unrelated refactoring; keep `app_sessions.machine_id` client-supplied as today.
 
 **Risks**
+
 - **R-Token:** accepting revoked tokens (D2) means a removed machine can keep syncing until it
   wipes. Mitigation: it is the only way to satisfy "persist then instruct"; optionally bound the
   window (Q3).
@@ -325,6 +334,7 @@ Rule) and the truthful empty state; selecting a live machine hides its uninstall
   they stay `''` (honest "unknown machine"), same rule as 047.
 
 **Open questions (decide before Phase 0)**
+
 - **Q1 — `employee_machines` vs extending `employee_devices`.** Plan assumes a new table (R3). Confirm.
 - **Q2 — `terms_consent.machine_id`.** Consent is arguably per-employee, not per-machine. Include or
   skip? (Plan: skip unless you want literal "every table".)
@@ -338,6 +348,7 @@ Rule) and the truthful empty state; selecting a live machine hides its uninstall
 ## 9. File-level change index
 
 **Server**
+
 - `migrations/049_employee_machines.sql` *(new)*, `050_machine_id_coverage.sql` *(new)*
 - `internal/models/device.go`
 - `internal/repository/device_repo.go`, `new_schema_repo.go`
@@ -349,6 +360,7 @@ Rule) and the truthful empty state; selecting a live machine hides its uninstall
 - `ARCHITECTURE.md`
 
 **Client**
+
 - `Storage/DatabaseSchema.cs`, `Storage/SqliteLogStore.cs`
 - `Configuration/AppConfig.cs`
 - `Services/SyncService.cs`, `Services/AccountRemovalService.cs` *(new)*
@@ -360,6 +372,7 @@ Rule) and the truthful empty state; selecting a live machine hides its uninstall
 - `ARCHITECTURE.md`
 
 **Web**
+
 - `src/lib/api.ts`
 - `src/components/employees/EmployeePage.tsx`
 - `src/app/(app)/device-specs/page.tsx` (+ `software/`, `peripherals/`, `permissions/`)

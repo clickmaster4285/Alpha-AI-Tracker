@@ -74,6 +74,7 @@ type InstalledPackage struct {
 type SessionEvent struct {
 	ID         string     `json:"id" db:"id"`
 	EmployeeID string     `json:"employeeId" db:"employee_id"`
+	MachineID  string     `json:"machineId" db:"machine_id"`
 	EventType  string     `json:"eventType" db:"event_type"`
 	OsUsername string     `json:"osUsername" db:"os_username"`
 	EventAt    time.Time  `json:"eventAt" db:"event_at"`
