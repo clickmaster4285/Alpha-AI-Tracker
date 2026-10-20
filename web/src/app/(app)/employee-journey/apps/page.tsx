@@ -296,7 +296,11 @@ function ExpandedSessions({
                   <td className="px-3 py-2.5 text-sm text-muted-foreground whitespace-nowrap">
                     {s.endedAt
                       ? formatDateTime(s.endedAt)
-                      : (s.status === 'STALE' || s.status === 'OFFLINE') && s.lastSyncAt
+                      : s.lastSyncAt && (
+                          s.status === 'STALE' ||
+                          s.status === 'OFFLINE' ||
+                          Date.now() - new Date(s.lastSyncAt).getTime() > 10 * 60 * 1000
+                        )
                       ? formatDateTime(s.lastSyncAt)
                       : <span className="text-warning font-medium">Running</span>}
                   </td>
@@ -339,16 +343,20 @@ function ExpandedSessions({
 /**
  * 3-state-aware duration end (matches sessionDurationSeconds from the
  * Session Timeline page). CLOSED → endedAt, STALE/OFFLINE → lastSyncAt,
- * ACTIVE → now.
+ * ACTIVE → now only while lastSyncAt is fresh (≤10 min); otherwise lastSyncAt
+ * so a historical "Running" row cannot stretch to wall-clock now.
  */
 function sessionDurationSeconds(s: AppSession): number {
   const start = new Date(s.startedAt).getTime();
   const status = s.status ?? (s.endedAt ? 'CLOSED' : 'ACTIVE');
+  const lastSync = s.lastSyncAt ? new Date(s.lastSyncAt).getTime() : NaN;
   let end: number;
   if (s.endedAt) {
     end = new Date(s.endedAt).getTime();
-  } else if ((status === 'STALE' || status === 'OFFLINE') && s.lastSyncAt) {
-    end = new Date(s.lastSyncAt).getTime();
+  } else if (status === 'STALE' || status === 'OFFLINE') {
+    end = Number.isFinite(lastSync) ? lastSync : Date.now();
+  } else if (Number.isFinite(lastSync) && Date.now() - lastSync > 10 * 60 * 1000) {
+    end = lastSync;
   } else {
     end = Date.now();
   }

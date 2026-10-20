@@ -3,6 +3,19 @@
 > **Last audited:** 2026-10-20
 > **Changelog:**
 >
+> - 2026-10-20: **App Usage duration inflated to ~18h on day filters (server + web).**
+>   On `/employee-journey/apps?preset=yesterday` for IS-16, chrome/OneDrive/Grammarly/client all
+>   showed **18h 34m** while the expanded session list's first open was ~09:28 and last seen ~18:30
+>   (~9h). Root cause: `AggregateAppSessionsUsage` used an **overlap** date filter (session open
+>   anytime during the day) while `ListAppSessionsForApp` (chevron expand) used
+>   `started_at >= dateFrom`. Multi-day zombie rows that all started `2026-10-17 18:44:29` and closed
+>   `2026-10-19 18:34:27` were clipped into `[dateFrom, dateTo]` and island-merged across the whole
+>   day — exactly 18h 34m — but hidden from the expand list. Fix: usage aggregate date filter now
+>   matches the expand list (`started_at >= dateFrom AND started_at <= dateTo`); `has_open_session` /
+>   open-session count / ACTIVE→NOW() duration require `last_sync_at` within 10 minutes so historical
+>   days don't show Running; expanded-row Closed cell + `sessionDurationSeconds` use the same
+>   freshness rule. Verified against live DB: chrome → ~9.02h (09:28→18:30). `go build`/`go vet` clean.
+>
 > - 2026-10-20: **Live stream Linux — capture + VP8 encode (Wayland ScreenCast + GStreamer).**
 >   `ScreenCaptureService` was Windows-only (`StreamAvailable=false` parked the loop on Linux), so
 >   WebRTC publish never produced frames on this fleet's GNOME Wayland machines. New
