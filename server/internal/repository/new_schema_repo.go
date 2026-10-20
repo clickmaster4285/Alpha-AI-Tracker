@@ -713,19 +713,15 @@ func (r *NewSchemaRepo) ListAppSessions(ctx context.Context, params AppSessionLi
 		args = append(args, params.Platform)
 		argIdx++
 	}
+	// Match /app-sessions/usage and the App Usage expand list: sessions that
+	// started inside the selected range (not "open anytime during the range").
 	if !params.DateFrom.IsZero() {
-		conditions = append(conditions, fmt.Sprintf(
-			`COALESCE(
-				CASE WHEN status = 'ACTIVE' AND ended_at IS NULL THEN NOW() END,
-				ended_at, last_sync_at, last_activity_at, started_at
-			) > $%d`,
-			argIdx,
-		))
+		conditions = append(conditions, fmt.Sprintf("started_at >= $%d", argIdx))
 		args = append(args, params.DateFrom)
 		argIdx++
 	}
 	if !params.DateTo.IsZero() {
-		conditions = append(conditions, fmt.Sprintf("started_at < $%d", argIdx))
+		conditions = append(conditions, fmt.Sprintf("started_at <= $%d", argIdx))
 		args = append(args, params.DateTo)
 		argIdx++
 	}
@@ -858,19 +854,19 @@ func (r *NewSchemaRepo) AggregateAppSessionsUsage(ctx context.Context, params Ap
 		args = append(args, params.Platform)
 		argIdx++
 	}
+	// Date filter MUST match ListAppSessionsForApp (the chevron expand list):
+	// only sessions whose started_at falls inside the selected range. An
+	// overlap filter (session open anytime during the day) pulled in multi-day
+	// zombie rows that started days earlier; clipping those to [dateFrom,dateTo]
+	// filled the entire day (e.g. 18h 34m) while the expand list hid them
+	// behind started_at >= dateFrom — so Duration disagreed with First/Last.
 	if !params.DateFrom.IsZero() {
-		conditions = append(conditions, fmt.Sprintf(
-			`COALESCE(
-				CASE WHEN status = 'ACTIVE' AND ended_at IS NULL THEN NOW() END,
-				ended_at, last_sync_at, last_activity_at, started_at
-			) > $%d`,
-			argIdx,
-		))
+		conditions = append(conditions, fmt.Sprintf("started_at >= $%d", argIdx))
 		args = append(args, params.DateFrom)
 		argIdx++
 	}
 	if !params.DateTo.IsZero() {
-		conditions = append(conditions, fmt.Sprintf("started_at < $%d", argIdx))
+		conditions = append(conditions, fmt.Sprintf("started_at <= $%d", argIdx))
 		args = append(args, params.DateTo)
 		argIdx++
 	}
@@ -905,22 +901,27 @@ func (r *NewSchemaRepo) AggregateAppSessionsUsage(ctx context.Context, params Ap
 	}
 	durationToIdx := argIdx
 	durationFromIdx := argIdx + 1
-	queryArgs := append(append([]interface{}{}, args...), rangeTo, rangeFrom)
 	argIdx += 2
+
+	// Freshness window for "still Running": matches the per-session ACTIVE
+	// end-at-NOW() rule below. A row stuck ACTIVE with a stale last_sync_at
+	// must not light the Running badge on a historical day filter.
+	const openFreshInterval = "10 minutes"
 
 	// Per-app aggregate:
 	//   - sessionCount        = COUNT(*)
 	//   - firstOpenedAt       = MIN(started_at)
-	//   - lastClosedAt        = MAX(COALESCE(ended_at, last_sync_at, started_at))
+	//   - lastClosedAt        = MAX(effective end clipped to the range)
 	//     (2026-09-02 3-state lifecycle: for ACTIVE/STALE sessions the real
 	//      "end" we know about is last_sync_at; for CLOSED rows ended_at
 	//      is final. Using COALESCE picks the most-recent truthful moment
 	//      regardless of status — same shape the web page uses for the
 	//      STALE/CLOSED case in sessionDurationSeconds.)
-	//   - totalDurationSeconds = SUM(each session's effective duration) per
-	//     group. Separate sessions must not include the idle gap between them:
+	//   - totalDurationSeconds = SUM of merged overlap-islands per group.
+	//     Separate sessions must not include the idle gap between them:
 	//     09:00-11:00 plus 16:00-18:00 is 4 hours, not 9 hours.
-	//     The date range is clipped server-side and ACTIVE sessions end at NOW().
+	//     Ends are clipped to the selected range; only freshly-synced ACTIVE
+	//     rows extend to NOW().
 	query := fmt.Sprintf(`
 		WITH effective_sessions AS (
 			SELECT app_display_name, COALESCE(process_name, '') AS process_name,
@@ -929,7 +930,7 @@ func (r *NewSchemaRepo) AggregateAppSessionsUsage(ctx context.Context, params Ap
 			       LEAST(
 			           CASE
 			               WHEN status = 'ACTIVE' AND ended_at IS NULL
-			               	AND last_sync_at > NOW() - INTERVAL '10 minutes' THEN NOW()
+			               	AND last_sync_at > NOW() - INTERVAL '%s' THEN NOW()
 			               ELSE COALESCE(ended_at, last_sync_at, last_activity_at, started_at)
 			           END,
 			           $%d
@@ -943,7 +944,10 @@ func (r *NewSchemaRepo) AggregateAppSessionsUsage(ctx context.Context, params Ap
 			SELECT app_display_name, process_name, COUNT(*) AS session_count,
 			       MIN(started_at) AS first_opened_at,
 			       MAX(eff_end) AS last_closed_at,
-			       BOOL_OR(status = 'ACTIVE' AND ended_at IS NULL) AS has_open_session,
+			       BOOL_OR(
+			           status = 'ACTIVE' AND ended_at IS NULL
+			           AND last_sync_at > NOW() - INTERVAL '%s'
+			       ) AS has_open_session,
 			       MAX(COALESCE(last_activity_at, last_sync_at, ended_at, started_at)) AS last_active_at
 			FROM valid_sessions
 			GROUP BY app_display_name, process_name
@@ -988,8 +992,8 @@ func (r *NewSchemaRepo) AggregateAppSessionsUsage(ctx context.Context, params Ap
 		         sm.first_opened_at, sm.last_closed_at, sm.has_open_session, sm.last_active_at
 		ORDER BY total_duration_seconds DESC
 		LIMIT $%d OFFSET $%d
-	`, durationFromIdx, durationToIdx, whereClause, argIdx, argIdx+1)
-	queryArgs = append(append([]interface{}{}, args...), rangeTo, rangeFrom, params.PerPage, offset)
+	`, durationFromIdx, openFreshInterval, durationToIdx, whereClause, openFreshInterval, argIdx, argIdx+1)
+	queryArgs := append(append([]interface{}{}, args...), rangeTo, rangeFrom, params.PerPage, offset)
 
 	rows, err := r.pool.Query(ctx, query, queryArgs...)
 	if err != nil {
@@ -1015,18 +1019,23 @@ func (r *NewSchemaRepo) AggregateAppSessionsUsage(ctx context.Context, params Ap
 		usage = append(usage, u)
 	}
 
-	// Global total duration across ALL matching sessions is the sum of each
-	// session's effective duration. This deliberately excludes idle gaps and
-	// keeps the header metric consistent with every application row.
+	// Global total duration across ALL matching sessions is the wall-clock
+	// union of every app's intervals (no double-count when chrome+OneDrive
+	// overlap). Same started_at filter + freshness rules as the per-app rows.
 	totalArgs := append(append([]interface{}{}, args...), rangeTo, rangeFrom)
 	var globalTotalDuration float64
 	totalQuery := fmt.Sprintf(`
 		WITH effective_sessions AS (
 			SELECT app_display_name, status, ended_at, last_sync_at, last_activity_at, started_at,
 			       GREATEST(started_at, $%d) AS eff_start,
-			       LEAST(CASE WHEN status = 'ACTIVE' AND ended_at IS NULL THEN NOW()
-			                 ELSE COALESCE(ended_at, last_sync_at, last_activity_at, started_at)
-			           END, $%d) AS eff_end
+			       LEAST(
+			           CASE
+			               WHEN status = 'ACTIVE' AND ended_at IS NULL
+			                AND last_sync_at > NOW() - INTERVAL '%s' THEN NOW()
+			               ELSE COALESCE(ended_at, last_sync_at, last_activity_at, started_at)
+			           END,
+			           $%d
+			       ) AS eff_end
 			FROM app_sessions %s
 		),
 		valid_sessions AS (
@@ -1057,9 +1066,11 @@ func (r *NewSchemaRepo) AggregateAppSessionsUsage(ctx context.Context, params Ap
 		)
 		SELECT COALESCE(SUM(EXTRACT(EPOCH FROM (eff_end - eff_start))), 0),
 		       (SELECT COUNT(*) FROM valid_sessions),
-		       (SELECT COUNT(*) FROM valid_sessions WHERE status = 'ACTIVE' AND ended_at IS NULL)
+		       (SELECT COUNT(*) FROM valid_sessions
+		         WHERE status = 'ACTIVE' AND ended_at IS NULL
+		           AND last_sync_at > NOW() - INTERVAL '%s')
 		FROM merged
-	`, durationFromIdx, durationToIdx, whereClause)
+	`, durationFromIdx, openFreshInterval, durationToIdx, whereClause, openFreshInterval)
 	var totalSessionCount, openSessionCount int
 	if err := r.pool.QueryRow(ctx, totalQuery, totalArgs...).Scan(
 		&globalTotalDuration,
@@ -2502,6 +2513,9 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 		LEFT JOIN departments d ON d.id = e.department_id AND d.deleted_at IS NULL
 		WHERE e.employee_id = (SELECT emp_id FROM params) AND e.deleted_at IS NULL
 	),
+	-- Date filter matches /app-sessions/usage: only sessions that STARTED in
+	-- range. Overlap clipping of multi-day zombie rows (open for 48h+) was
+	-- filling the whole day (e.g. 18h 34m per always-on app).
 	raw_app_usage AS (
 		SELECT
 			s.app_display_name,
@@ -2520,17 +2534,12 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 		FROM app_sessions s
 		WHERE s.employee_id = (SELECT emp_id FROM params)
 			AND s.deleted_at IS NULL
-			AND s.started_at < (SELECT to_ts FROM params)
+			AND s.started_at >= (SELECT from_ts FROM params)
+			AND s.started_at <= (SELECT to_ts FROM params)
 			AND (
 				CASE
 					WHEN s.status = 'ACTIVE' AND s.ended_at IS NULL
 						AND s.last_sync_at > NOW() - INTERVAL '10 minutes' THEN NOW()
-					ELSE COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at)
-				END
-			) > (SELECT from_ts FROM params)
-			AND (
-				CASE
-					WHEN s.status = 'ACTIVE' AND s.ended_at IS NULL THEN NOW()
 					ELSE COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at)
 				END
 			) > s.started_at
@@ -2576,7 +2585,10 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 		SELECT
 			ai.domain,
 			GREATEST(ai.opened_at, (SELECT from_ts FROM params)) AS eff_start,
-			CASE WHEN ai.closed_at IS NOT NULL THEN ai.closed_at ELSE ai.opened_at END AS eff_end
+			LEAST(
+				COALESCE(ai.closed_at, s.ended_at, s.last_sync_at, s.last_activity_at, ai.opened_at),
+				(SELECT to_ts FROM params)
+			) AS eff_end
 		FROM app_items ai
 		LEFT JOIN app_sessions s ON s.id = ai.app_session_id
 		WHERE ai.employee_id = (SELECT emp_id FROM params)
@@ -2584,8 +2596,8 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 			AND ai.item_type = 'browser_tab'
 			AND ai.domain IS NOT NULL
 			AND ai.domain <> ''
-			AND ai.opened_at < (SELECT to_ts FROM params)
-			AND COALESCE(ai.closed_at, s.ended_at, s.last_sync_at, s.last_activity_at, ai.opened_at) > (SELECT from_ts FROM params)
+			AND ai.opened_at >= (SELECT from_ts FROM params)
+			AND ai.opened_at <= (SELECT to_ts FROM params)
 			AND COALESCE(ai.closed_at, s.ended_at, s.last_sync_at, s.last_activity_at, ai.opened_at) > ai.opened_at
 	),
 	app_cat AS (
@@ -2613,17 +2625,61 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 		LEFT JOIN monitoring_categories mc ON mc.id = ms.category_id AND mc.deleted_at IS NULL
 		WHERE ms.domain IN (SELECT DISTINCT domain FROM site_usage) AND ms.deleted_at IS NULL
 	),
-	app_summary AS (
+	-- Wall-clock union across apps so "Total time" cannot exceed the day
+	-- when chrome+OneDrive+Edge run concurrently (same shape as /app-sessions/usage).
+	wall_ordered AS (
+		SELECT au.*,
+		       MAX(eff_end) OVER (
+		           ORDER BY eff_start, eff_end
+		           ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+		       ) AS prior_max_end
+		FROM app_usage au
+	),
+	wall_marked AS (
+		SELECT o.*,
+		       CASE WHEN prior_max_end IS NULL OR eff_start > prior_max_end
+		            THEN 1 ELSE 0 END AS new_island
+		FROM wall_ordered o
+	),
+	wall_islands AS (
+		SELECT m.*,
+		       SUM(new_island) OVER (
+		           ORDER BY eff_start, eff_end
+		           ROWS UNBOUNDED PRECEDING
+		       ) AS wall_island_id
+		FROM wall_marked m
+	),
+	wall_merged AS (
+		SELECT MIN(eff_start) AS eff_start, MAX(eff_end) AS eff_end
+		FROM wall_islands
+		GROUP BY wall_island_id
+	),
+	classified AS (
 		SELECT
-			COALESCE(SUM(GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start)))), 0) AS total_sec,
+			COALESCE(SUM(GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start)))), 0) AS classified_sec,
 			COALESCE(SUM(CASE WHEN ac.type_name = 'Productive' THEN GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start))) ELSE 0 END), 0) AS productive_sec,
 			COALESCE(SUM(CASE WHEN ac.type_name = 'Unproductive' THEN GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start))) ELSE 0 END), 0) AS unproductive_sec,
 			COALESCE(SUM(CASE WHEN ac.type_name = 'Neutral' OR ac.type_name IS NULL THEN GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start))) ELSE 0 END), 0) AS neutral_sec,
-			COUNT(DISTINCT app_display_name) AS app_count,
-			COALESCE((SELECT SUM(foreground_seconds) FROM raw_app_usage), 0) AS fg_sec,
-			COALESCE((SELECT SUM(background_seconds) FROM raw_app_usage), 0) AS bg_sec
+			COUNT(DISTINCT app_display_name) AS app_count
 		FROM app_usage au
 		LEFT JOIN app_cat ac ON ac.app_key = lower(au.app_display_name)
+	),
+	app_summary AS (
+		SELECT
+			COALESCE((SELECT SUM(GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start)))) FROM wall_merged), 0) AS total_sec,
+			CASE WHEN c.classified_sec > 0 THEN c.productive_sec *
+				COALESCE((SELECT SUM(GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start)))) FROM wall_merged), 0) / c.classified_sec
+			ELSE 0 END AS productive_sec,
+			CASE WHEN c.classified_sec > 0 THEN c.unproductive_sec *
+				COALESCE((SELECT SUM(GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start)))) FROM wall_merged), 0) / c.classified_sec
+			ELSE 0 END AS unproductive_sec,
+			CASE WHEN c.classified_sec > 0 THEN c.neutral_sec *
+				COALESCE((SELECT SUM(GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start)))) FROM wall_merged), 0) / c.classified_sec
+			ELSE 0 END AS neutral_sec,
+			c.app_count,
+			COALESCE((SELECT SUM(foreground_seconds) FROM raw_app_usage), 0) AS fg_sec,
+			COALESCE((SELECT SUM(background_seconds) FROM raw_app_usage), 0) AS bg_sec
+		FROM classified c
 	),
 	site_summary AS (
 		SELECT
@@ -2803,8 +2859,8 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 		FROM app_sessions s
 		WHERE s.employee_id = (SELECT emp_id FROM params)
 			AND s.deleted_at IS NULL
-			AND s.started_at < (SELECT to_ts FROM params)
-			AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > (SELECT from_ts FROM params)
+			AND s.started_at >= (SELECT from_ts FROM params)
+			AND s.started_at <= (SELECT to_ts FROM params)
 			AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > s.started_at
 	),
 	app_cat AS (
@@ -2885,8 +2941,8 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 		FROM app_sessions s
 		WHERE s.employee_id = (SELECT emp_id FROM params)
 			AND s.deleted_at IS NULL
-			AND s.started_at < (SELECT to_ts FROM params)
-			AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > (SELECT from_ts FROM params)
+			AND s.started_at >= (SELECT from_ts FROM params)
+			AND s.started_at <= (SELECT to_ts FROM params)
 			AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > s.started_at
 	),
 	ordered AS (

@@ -112,8 +112,16 @@ func (r *LogGraphicalRepo) scanBucketCounts(ctx context.Context, q string, p Log
 	return out, rows.Err()
 }
 
-// ProductivitySeries groups classified session duration by started_at bucket.
+// ProductivitySeries groups classified session duration by time bucket.
+// Sessions must START in range (same rule as /app-sessions/usage). Each
+// session's interval is split across the hour/day buckets it overlaps; within
+// a bucket, concurrent apps are scaled so productive+unproductive+neutral
+// never exceeds the bucket length (matches hours-insights chart capping).
 func (r *LogGraphicalRepo) ProductivitySeries(ctx context.Context, p LogGraphicalParams) ([]LogGraphicalProdBucketRow, error) {
+	bucketInterval := "1 day"
+	if p.Trunc == "hour" {
+		bucketInterval = "1 hour"
+	}
 	q := fmt.Sprintf(`
 		WITH app_cat AS (
 			SELECT DISTINCT ON (lower(ia.app_name)) lower(ia.app_name) AS app_key,
@@ -125,38 +133,68 @@ func (r *LogGraphicalRepo) ProductivitySeries(ctx context.Context, p LogGraphica
 		),
 		raw AS (
 			SELECT
-				date_trunc('%s', s.started_at AT TIME ZONE 'UTC') AS bucket,
+				s.employee_id,
 				COALESCE(NULLIF(s.app_display_name, ''), s.process_name, '') AS app_display_name,
-				GREATEST(0, EXTRACT(EPOCH FROM (
-					LEAST(
-						CASE
-							WHEN s.status = 'ACTIVE' AND s.ended_at IS NULL
-								AND s.last_sync_at > NOW() - INTERVAL '10 minutes' THEN NOW()
-							ELSE COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at)
-						END,
-						$2::timestamptz
-					) - GREATEST(s.started_at, $1::timestamptz)
-				)))::bigint AS dur
+				GREATEST(s.started_at, $1::timestamptz) AS eff_start,
+				LEAST(
+					CASE
+						WHEN s.status = 'ACTIVE' AND s.ended_at IS NULL
+							AND s.last_sync_at > NOW() - INTERVAL '10 minutes' THEN NOW()
+						ELSE COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at)
+					END,
+					$2::timestamptz
+				) AS eff_end
 			FROM app_sessions s
 			WHERE s.deleted_at IS NULL
-			  AND s.started_at < $2
-			  AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > $1
+			  AND s.started_at >= $1 AND s.started_at < $2
 			  AND ($3::text = '' OR s.employee_id = $3)
 			  AND ($4::int IS NULL OR EXISTS (
 			      SELECT 1 FROM employees e
 			      WHERE e.employee_id = s.employee_id AND e.deleted_at IS NULL AND e.department_id = $4
 			  ))
+		),
+		valid AS (
+			SELECT * FROM raw WHERE eff_end > eff_start
+		),
+		buckets AS (
+			SELECT generate_series(
+				date_trunc('%s', $1::timestamptz AT TIME ZONE 'UTC') AT TIME ZONE 'UTC',
+				date_trunc('%s', ($2::timestamptz - INTERVAL '1 microsecond') AT TIME ZONE 'UTC') AT TIME ZONE 'UTC',
+				'%s'::interval
+			) AS bucket_start
+		),
+		raw_buckets AS (
+			SELECT
+				b.bucket_start AS bucket,
+				COALESCE(SUM(CASE WHEN ac.type_name = 'Productive'
+					THEN GREATEST(0, EXTRACT(EPOCH FROM (
+						LEAST(v.eff_end, b.bucket_start + '%s'::interval) -
+						GREATEST(v.eff_start, b.bucket_start)
+					))) ELSE 0 END), 0) AS productive,
+				COALESCE(SUM(CASE WHEN ac.type_name = 'Unproductive'
+					THEN GREATEST(0, EXTRACT(EPOCH FROM (
+						LEAST(v.eff_end, b.bucket_start + '%s'::interval) -
+						GREATEST(v.eff_start, b.bucket_start)
+					))) ELSE 0 END), 0) AS unproductive,
+				COALESCE(SUM(CASE WHEN ac.type_name IS NULL OR ac.type_name NOT IN ('Productive', 'Unproductive')
+					THEN GREATEST(0, EXTRACT(EPOCH FROM (
+						LEAST(v.eff_end, b.bucket_start + '%s'::interval) -
+						GREATEST(v.eff_start, b.bucket_start)
+					))) ELSE 0 END), 0) AS neutral
+			FROM buckets b
+			JOIN valid v ON v.eff_start < b.bucket_start + '%s'::interval AND v.eff_end > b.bucket_start
+			LEFT JOIN app_cat ac ON ac.app_key = lower(v.app_display_name)
+			GROUP BY b.bucket_start
 		)
 		SELECT
-			raw.bucket,
-			COALESCE(SUM(CASE WHEN ac.type_name = 'Productive' THEN dur ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN ac.type_name = 'Unproductive' THEN dur ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN ac.type_name IS NULL OR ac.type_name NOT IN ('Productive', 'Unproductive') THEN dur ELSE 0 END), 0)
-		FROM raw
-		LEFT JOIN app_cat ac ON ac.app_key = lower(raw.app_display_name)
-		GROUP BY raw.bucket
-		ORDER BY raw.bucket
-	`, p.Trunc)
+			bucket,
+			(productive * LEAST(1.0, EXTRACT(EPOCH FROM '%s'::interval) / NULLIF(productive + unproductive + neutral, 0)))::bigint,
+			(unproductive * LEAST(1.0, EXTRACT(EPOCH FROM '%s'::interval) / NULLIF(productive + unproductive + neutral, 0)))::bigint,
+			(neutral * LEAST(1.0, EXTRACT(EPOCH FROM '%s'::interval) / NULLIF(productive + unproductive + neutral, 0)))::bigint
+		FROM raw_buckets
+		WHERE productive + unproductive + neutral > 0
+		ORDER BY bucket
+	`, p.Trunc, p.Trunc, bucketInterval, bucketInterval, bucketInterval, bucketInterval, bucketInterval, bucketInterval, bucketInterval, bucketInterval)
 
 	rows, err := r.pool.Query(ctx, q, p.From, p.To, p.EmployeeID, p.DepartmentID)
 	if err != nil {

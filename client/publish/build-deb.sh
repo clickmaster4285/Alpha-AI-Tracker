@@ -67,9 +67,12 @@ Section: utils
 Priority: optional
 Architecture: $ARCH
 Maintainer: $PUBLISHER <support@example.com>
+Depends: gstreamer1.0-plugins-good, gstreamer1.0-pipewire, python3-gi, python3-dbus, gir1.2-gstreamer-1.0
 Description: $DISPLAY_NAME
  Employee Monitoring & Productivity Dashboard.
  Installed to /usr/share/$PACKAGE_NAME with a desktop entry and PATH symlink.
+ Live stream on Linux: ScreenCast portal + PipeWire capture, GStreamer vp8enc
+ (SIPSorceryMedia.Encoders only ships Windows vpxmd.dll).
 EOF
 
 # postinst script
