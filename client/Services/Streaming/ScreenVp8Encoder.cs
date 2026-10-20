@@ -6,10 +6,10 @@ namespace client.Services.Streaming;
 
 /// <summary>
 /// Screen-share VP8 encoder that actually honors TargetKbps.
-/// SIPSorceryMedia.Encoders' <c>Vp8Codec.InitialiseEncoder</c> sets
-/// <c>RcTargetBitrate</c> THEN calls <c>VpxCodecEncConfigDefault</c>, which
-/// wipes it — so every stream ran at libvpx's ~256 kbps default and looked
-/// blocky no matter what ALPHA_STREAM_MAX_BITRATE_KBPS said.
+/// Windows: SIPSorceryMedia.Encoders native <c>vpxmd.dll</c> (with ConfigDefault-then-bitrate
+/// order — stock Vp8Codec wiped TargetKbps).
+/// Linux: GStreamer <c>vp8enc</c> via <see cref="LinuxGstVp8Encoder"/> — the NuGet package
+/// only ships Windows natives; linking system libvpx as libvpxmd.so segfaults on ABI mismatch.
 /// </summary>
 public sealed class ScreenVp8Encoder : IDisposable
 {
@@ -19,6 +19,7 @@ public sealed class ScreenVp8Encoder : IDisposable
     private const int VpxEflagForceKf = 1;
 
     private readonly object _gate = new();
+    private readonly LinuxGstVp8Encoder? _linux;
     private VpxCodecCtx? _ctx;
     private VpxImage? _img;
     private uint _width;
@@ -31,6 +32,12 @@ public sealed class ScreenVp8Encoder : IDisposable
     private bool _forceKeyFrame = true;
     private bool _disposed;
 
+    public ScreenVp8Encoder()
+    {
+        if (OperatingSystem.IsLinux())
+            _linux = new LinuxGstVp8Encoder();
+    }
+
     public uint TargetKbps
     {
         get => _targetKbps;
@@ -40,7 +47,12 @@ public sealed class ScreenVp8Encoder : IDisposable
             {
                 if (_targetKbps == value) return;
                 _targetKbps = value;
-                DisposeEncoderUnlocked();
+                if (_linux is not null)
+                {
+                    _linux.TargetKbps = value;
+                    return;
+                }
+                DisposeNativeUnlocked();
                 _forceKeyFrame = true;
             }
         }
@@ -57,7 +69,12 @@ public sealed class ScreenVp8Encoder : IDisposable
                 var next = Math.Clamp(value, 1, 30);
                 if (_fps == next) return;
                 _fps = next;
-                DisposeEncoderUnlocked();
+                if (_linux is not null)
+                {
+                    _linux.Fps = next;
+                    return;
+                }
+                DisposeNativeUnlocked();
                 _forceKeyFrame = true;
             }
         }
@@ -67,10 +84,15 @@ public sealed class ScreenVp8Encoder : IDisposable
     public uint KeyframeMaxDistance
     {
         get => _kfMaxDist;
-        set => _kfMaxDist = Math.Max(1, value);
+        set
+        {
+            _kfMaxDist = Math.Max(1, value);
+            if (_linux is not null)
+                _linux.KeyframeMaxDistance = _kfMaxDist;
+        }
     }
 
-    /// <summary>libvpx GLagInFrames (altref). Changing rebuilds the encoder.</summary>
+    /// <summary>libvpx GLagInFrames (altref). Changing rebuilds the encoder. Linux GStreamer path ignores lag.</summary>
     public uint LagInFrames
     {
         get => _lagFrames;
@@ -81,18 +103,27 @@ public sealed class ScreenVp8Encoder : IDisposable
                 var next = Math.Min(5, value);
                 if (_lagFrames == next) return;
                 _lagFrames = next;
-                DisposeEncoderUnlocked();
+                if (_linux is not null)
+                    return;
+                DisposeNativeUnlocked();
                 _forceKeyFrame = true;
             }
         }
     }
 
-    public void ForceKeyFrame() => _forceKeyFrame = true;
+    public void ForceKeyFrame()
+    {
+        _forceKeyFrame = true;
+        _linux?.ForceKeyFrame();
+    }
 
     public byte[]? EncodeBgra(int width, int height, byte[] bgra)
     {
         if (width < 2 || height < 2 || bgra.Length < width * height * 4)
             return null;
+
+        if (_linux is not null)
+            return _linux.EncodeBgra(width, height, bgra);
 
         lock (_gate)
         {
@@ -108,7 +139,7 @@ public sealed class ScreenVp8Encoder : IDisposable
 
     private void InitEncoderUnlocked(uint width, uint height)
     {
-        DisposeEncoderUnlocked();
+        DisposeNativeUnlocked();
 
         _width = width;
         _height = height;
@@ -193,7 +224,7 @@ public sealed class ScreenVp8Encoder : IDisposable
         }
     }
 
-    private void DisposeEncoderUnlocked()
+    private void DisposeNativeUnlocked()
     {
         if (_img is not null)
         {
@@ -218,7 +249,8 @@ public sealed class ScreenVp8Encoder : IDisposable
         {
             if (_disposed) return;
             _disposed = true;
-            DisposeEncoderUnlocked();
+            DisposeNativeUnlocked();
+            _linux?.Dispose();
         }
     }
 }

@@ -82,6 +82,52 @@ if (args.Contains("--print-config"))
     return;
 }
 
+// Headless Linux capture smoke: portal ScreenCast → framed BGRA. Exits 0 after
+// N frames (default 15) or 1 on timeout/error. Wayland may show a Share dialog
+// once; restore token is persisted under ~/.local/share/alpha-ai-tracker/.
+if (args.Contains("--smoke-linux-capture"))
+{
+    if (!OperatingSystem.IsLinux())
+    {
+        Console.Error.WriteLine("smoke-linux-capture: Linux only");
+        Environment.Exit(2);
+    }
+    EnvLoader.Load();
+    var cfg = AppConfig.FromEnv();
+    using var loggerFactory = LoggerFactory.Create(b => b.AddConsole().SetMinimumLevel(LogLevel.Information));
+    var logger = loggerFactory.CreateLogger("smoke-linux-capture");
+    var monitors = client.Services.Streaming.LinuxScreenCapturer.EnumerateMonitors(logger);
+    Console.WriteLine($"monitors={monitors.Count}");
+    foreach (var m in monitors)
+        Console.WriteLine($"  [{m.Index}] {m.Name} {m.Width}x{m.Height} primary={m.IsPrimary}");
+
+    using var capturer = new client.Services.Streaming.LinuxScreenCapturer(cfg, logger);
+    capturer.SetSelectedMonitor(0);
+    capturer.SetMaxWidth(Math.Min(640, cfg.StreamMaxWidth));
+    capturer.Start();
+    var want = 15;
+    var got = 0;
+    var deadline = DateTime.UtcNow.AddSeconds(45);
+    while (got < want && DateTime.UtcNow < deadline)
+    {
+        if (capturer.TryDequeueLatest(out var frame) && frame is not null)
+        {
+            got++;
+            Console.WriteLine($"frame#{got} {frame.Width}x{frame.Height} bytes={frame.Bgra.Length}");
+        }
+        else
+            Thread.Sleep(50);
+    }
+    capturer.Stop();
+    if (got < want)
+    {
+        Console.Error.WriteLine($"FAIL frames={got}/{want} err={capturer.LastError}");
+        Environment.Exit(1);
+    }
+    Console.WriteLine($"OK frames={got}");
+    Environment.Exit(0);
+}
+
 // Headless: verify uplink bitrate ladder math (no GUI / no network required).
 if (args.Contains("--self-test-stream-ladder"))
 {

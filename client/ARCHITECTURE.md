@@ -63,6 +63,15 @@
 >   stops the host; the running-instance branch still signals the live process, which runs the same
 >   routine in place; `MainViewModel.RemoveAccountAsync` delegates too. Verified: `dotnet build` 0
 >   warnings / 0 errors.
+> - 2026-10-20: **Live stream Linux — capture + GStreamer VP8.**
+>   `ScreenCaptureService` treats Linux as available: monitors via Mutter DisplayConfig;
+>   `SetStreamActive(true)` starts `LinuxScreenCapturer` (embedded python3 ScreenCast → PipeWire
+>   → GStreamer `pipewiresrc` → framed BGRA; no `videorate`). Restore token at
+>   `~/.local/share/alpha-ai-tracker/stream-restore-token` (`persist_mode=2`). ABR downscale in
+>   `CaptureFrameLinux`. CLI `--smoke-linux-capture`. **Encode:** Linux uses `LinuxGstVp8Encoder`
+>   (`vp8enc`) — never link system libvpx as `vpxmd` (ABI segfault). Windows keeps `vpxmd`.
+>   Verified: `dotnet build` 0/0; SFU `withTrack=true` for `LIN-1`. Next Linux installer.
+
 > - 2026-10-15: **Live stream publisher — ICE buffered until the answer is applied (`LiveStreamClient`).**
 >   The publisher applied each server `ice` message immediately, but the SFU trickles candidates from a
 >   separate goroutine, so a candidate could arrive before the `answer`. `addIceCandidate` with a null
@@ -102,7 +111,7 @@
 >   never mixed with the media socket. Env (re-bake `config.enc`): `ALPHA_STREAM_ENABLED` (default off),
 >   `ALPHA_STREAM_FPS`, `ALPHA_STREAM_MAX_WIDTH`, `ALPHA_STREAM_MAX_BITRATE_KBPS` (cap 15000),
 >   `ALPHA_STREAM_KEYFRAME_INTERVAL_SEC`, `ALPHA_WS_ENABLED`, `ALPHA_WS_PING_SEC`, `ALPHA_WS_RECONNECT_BASE_SEC`.
->   NuGet: `SIPSorcery` + `SIPSorceryMedia.Encoders` (native `vpxmd`). Linux capture still deferred.
+>   NuGet: `SIPSorcery` + `SIPSorceryMedia.Encoders` (native `vpxmd`). Linux capture landed 2026-10-20.
 > - 2026-09-05: **Core: Windows `power_off` event now fires on shutdown/restart — `SystemEventWatcher` subscribes to `SystemEvents.SessionEnding`.**
 >   The Windows half of `SystemEventWatcher` was missing `SystemEvents.SessionEnding`, so shutdown/restart never emitted `power_off` (sleep/resume via `PowerModeChanged` worked; lock/unlock via `SessionSwitch` worked; power_on worked via `LogCollectorService` on boot). `SessionEnding` with `SessionEndReasons.SystemShutdown` is now subscribed in `SubscribeWindows()` (fire-and-forget, mirrors Linux's synchronous `PrepareForShutdown` handler), with matching unsubscription in `UnsubscribeWindows()`. `Logoff` is intentionally skipped to avoid duplicating the existing `SessionSwitch` → `os_logout` path. `ShutdownSentinel` remains as fallback. This makes Windows match Linux's two-layer power-off detection pattern. Verified: `dotnet build` 0/0, 0 warnings. Real-world test requires a Windows shutdown/restart cycle against an installed build.
 >   The accessibility reader returns a fresh `WindowKey` per tab; the old title-only collapse rule let
@@ -372,11 +381,14 @@ client/
 │   ├── AppUpdateService.cs         # ⭐ self-updater (2026-08-12): GitHub latest-release check → platform asset → download to user data dir → pkexec dpkg / silent Inno / dmg; ObservableObject state bound by the GUI; 24h auto-check loop
 │   ├── LiveStreamClient.cs         # ⭐ WebRTC VP8 publisher → GET /live-stream/push; ABR; send after PC connected
 │   ├── NetProbeService.cs          # Uplink probe → POST /live-stream/uplink-probe; SelectBitrateKbps ladder
-│   ├── ScreenCaptureService.cs     # Windows multi-path GDI BitBlt → BGRA (DropOldest; Win11 hardened)
+│   ├── ScreenCaptureService.cs     # Win GDI BitBlt + Linux portal/PipeWire → BGRA (DropOldest)
 │   ├── ClientIdentityHeaders.cs    # X-Client-Version / X-Client-Platform on DeviceAuth HTTP+WS
 │   ├── WsClient.cs                 # Presence / keep-alive WS → GET /api/v1/ws (independent of LiveStreamClient)
 │   ├── Streaming/
-│   │   └── ScreenVp8Encoder.cs     # libvpx wrapper that honors TargetKbps (fixes SIPSorcery ConfigDefault wipe)
+│   │   ├── ScreenVp8Encoder.cs     # Windows: vpxmd (ConfigDefault-then-bitrate); Linux: LinuxGstVp8Encoder
+│   │   ├── LinuxGstVp8Encoder.cs   # Linux VP8 via GStreamer vp8enc (python3 helper)
+│   │   └── LinuxScreenCapturer.cs  # Wayland ScreenCast portal → PipeWire/GStreamer → framed BGRA
+
 │   ├── DesktopEventService.cs      # ⭐ orchestrates file-explorer watchers → coordinator → JourneyEngine
 │   ├── BackgroundGuardService.cs   # watchdog: re-installs auto-start/systemd unit if removed (60s)
 │   ├── AutoStartService.cs         # Run key / ~/.config/autostart .desktop / launchd plist
@@ -1103,8 +1115,9 @@ the grouping; `DrainSessionEventsAsync` marks every source row `is_synced` after
 
 | Piece | Role |
 |---|---|
-| `ScreenCaptureService` | Windows multi-path GDI BitBlt → BGRA (`DropOldest(1)`); EnumDisplayMonitors + `select_monitor`; Win11 fallbacks |
-| `ScreenVp8Encoder` | libvpx via `vpxmd`; **ConfigDefault then** `RcTargetBitrate` / VBR / timebase `1/fps` / `KfMaxDist`; wrap-only image lifecycle |
+| `ScreenCaptureService` | Win GDI BitBlt / Linux portal+PipeWire → BGRA (`DropOldest(1)`); `select_monitor`; Win11 fallbacks |
+| `ScreenVp8Encoder` | Windows: `vpxmd` (**ConfigDefault then** bitrate / VBR / `1/fps` / `KfMaxDist`); Linux: `LinuxGstVp8Encoder` (`vp8enc`) |
+
 | `NetProbeService` | Timed POST to `/live-stream/uplink-probe`; `SelectBitrateKbps` ladder under max bitrate |
 | `LiveStreamClient` | DeviceAuth WS push; VP8 after `start` + PC `connected`; ABR; `force_keyframe`; stream_* app_status telemetry |
 | `ClientIdentityHeaders` | `X-Client-Version` / `X-Client-Platform` on DeviceAuth HTTP + WS |

@@ -5,6 +5,7 @@ using System.Threading.Channels;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using client.Configuration;
+using client.Services.Streaming;
 
 namespace client.Services;
 
@@ -28,9 +29,11 @@ public sealed class ScreenFrame
 }
 
 /// <summary>
-/// Captures a selected monitor to BGRA while streaming is active (Windows).
+/// Captures a selected monitor to BGRA while streaming is active.
+/// Windows: multi-path GDI BitBlt. Linux: xdg-desktop-portal ScreenCast + PipeWire
+/// (Wayland) via an embedded python3/GStreamer probe.
 /// Frames are latest-wins via a capacity-1 channel — never blocks tracker loops.
-/// Encoding to VP8/H264 is done by <see cref="LiveStreamClient"/> for WebRTC.
+/// Encoding to VP8 is done by <see cref="LiveStreamClient"/> for WebRTC.
 /// </summary>
 public sealed class ScreenCaptureService : BackgroundService
 {
@@ -61,13 +64,14 @@ public sealed class ScreenCaptureService : BackgroundService
     private long _framesProduced;
     private int _consecutiveCaptureFails;
     private string? _lastCaptureError;
+    private LinuxScreenCapturer? _linuxCapturer;
 
     public ScreenCaptureService(AppConfig config, ILogger<ScreenCaptureService> logger)
     {
         _config = config;
         _logger = logger;
-        StreamAvailable = OperatingSystem.IsWindows();
-        if (OperatingSystem.IsWindows())
+        StreamAvailable = OperatingSystem.IsWindows() || OperatingSystem.IsLinux();
+        if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
             RefreshMonitors();
     }
 
@@ -77,7 +81,10 @@ public sealed class ScreenCaptureService : BackgroundService
     public long FramesProduced => Interlocked.Read(ref _framesProduced);
 
     /// <summary>Last capture failure message (empty when healthy).</summary>
-    public string LastCaptureError => _lastCaptureError ?? "";
+    public string LastCaptureError =>
+        !string.IsNullOrEmpty(_lastCaptureError)
+            ? _lastCaptureError
+            : (_linuxCapturer?.LastError ?? "");
 
     public ChannelReader<ScreenFrame> Frames => _frames.Reader;
 
@@ -97,10 +104,27 @@ public sealed class ScreenCaptureService : BackgroundService
 
     public void SetStreamActive(bool active)
     {
-        if (active && OperatingSystem.IsWindows())
+        if (active && (OperatingSystem.IsWindows() || OperatingSystem.IsLinux()))
             RefreshMonitors();
         if (!active)
             _maxWidthOverride = 0;
+
+        if (OperatingSystem.IsLinux())
+        {
+            if (active)
+            {
+                _linuxCapturer ??= new LinuxScreenCapturer(_config, _logger);
+                _linuxCapturer.SetSelectedMonitor(_selectedIndex);
+                _linuxCapturer.SetMaxWidth(EffectiveMaxWidth);
+                _linuxCapturer.Start();
+                StreamAvailable = true;
+            }
+            else
+            {
+                _linuxCapturer?.Stop();
+            }
+        }
+
         _streamActive = active;
     }
 
@@ -116,6 +140,8 @@ public sealed class ScreenCaptureService : BackgroundService
             return;
         }
         _maxWidthOverride = Math.Clamp(maxWidth, 320, Math.Max(320, _config.StreamMaxWidth));
+        // Linux: do not restart the portal session for ABR — CaptureFrameLinux
+        // downscales the latest BGRA frame when EffectiveMaxWidth shrinks.
     }
 
     public int EffectiveMaxWidth =>
@@ -123,7 +149,7 @@ public sealed class ScreenCaptureService : BackgroundService
 
     public int SetSelectedMonitor(int index)
     {
-        if (!OperatingSystem.IsWindows())
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
             return 0;
 
         lock (_monitorGate)
@@ -135,10 +161,24 @@ public sealed class ScreenCaptureService : BackgroundService
                 return _selectedIndex;
             _selectedIndex = index;
             ApplySelectedBoundsUnlocked();
+            _linuxCapturer?.SetSelectedMonitor(_selectedIndex);
+            // Wayland portal sessions bind the PipeWire node at Start — restart capture
+            // so the newly selected monitor is the one published.
+            if (OperatingSystem.IsLinux() && _streamActive && _linuxCapturer is not null)
+            {
+                _linuxCapturer.Stop();
+                _linuxCapturer.SetMaxWidth(EffectiveMaxWidth);
+                _linuxCapturer.Start();
+            }
+            var w = OperatingSystem.IsLinux() && _monitors.Count > 0
+                ? _monitors[_selectedIndex].Width
+                : _captureBounds.Width;
+            var h = OperatingSystem.IsLinux() && _monitors.Count > 0
+                ? _monitors[_selectedIndex].Height
+                : _captureBounds.Height;
             _logger.LogInformation(
                 "Screen capture target → monitor {Index} ({Name}) {W}x{H}",
-                _selectedIndex, _monitors[_selectedIndex].Name,
-                _captureBounds.Width, _captureBounds.Height);
+                _selectedIndex, _monitors[_selectedIndex].Name, w, h);
             return _selectedIndex;
         }
     }
@@ -153,13 +193,13 @@ public sealed class ScreenCaptureService : BackgroundService
             return;
         }
 
-        if (!OperatingSystem.IsWindows())
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
         {
             StreamAvailable = false;
             if (!_loggedUnavailable)
             {
                 _loggedUnavailable = true;
-                _logger.LogInformation("Screen capture parked — Windows-only for WebRTC live stream");
+                _logger.LogInformation("Screen capture parked — unsupported OS for WebRTC live stream");
             }
             try { await Task.Delay(Timeout.Infinite, stoppingToken); }
             catch (OperationCanceledException) { }
@@ -169,15 +209,24 @@ public sealed class ScreenCaptureService : BackgroundService
         StreamAvailable = true;
         RefreshMonitors();
         _logger.LogInformation(
-            "Screen capture ready (fps={Fps}, maxWidth={MaxWidth}, monitors={Count})",
+            "Screen capture ready (os={Os}, fps={Fps}, maxWidth={MaxWidth}, monitors={Count})",
+            OperatingSystem.IsWindows() ? "windows" : "linux",
             _config.StreamFps, _config.StreamMaxWidth, GetMonitors().Count);
 
-        // Dedicated thread — GDI CopyFromScreen must not block the thread pool (F12/D8).
+        // Dedicated thread — GDI / portal capture must not block the thread pool (F12/D8).
         await Task.Factory.StartNew(
             () => CaptureLoop(stoppingToken),
             stoppingToken,
             TaskCreationOptions.LongRunning,
             TaskScheduler.Default).ConfigureAwait(false);
+    }
+
+    public override void Dispose()
+    {
+        _linuxCapturer?.Dispose();
+        _linuxCapturer = null;
+        DisposeCaptureBitmaps();
+        base.Dispose();
     }
 
     private void CaptureLoop(CancellationToken stoppingToken)
@@ -200,7 +249,7 @@ public sealed class ScreenCaptureService : BackgroundService
             var sw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
-                var frame = CaptureFrame();
+                var frame = OperatingSystem.IsLinux() ? CaptureFrameLinux() : CaptureFrame();
                 if (frame is not null)
                 {
                     _frames.Writer.TryWrite(frame);
@@ -213,7 +262,10 @@ public sealed class ScreenCaptureService : BackgroundService
                     _consecutiveCaptureFails++;
                     if (_consecutiveCaptureFails == 1 || _consecutiveCaptureFails % 30 == 0)
                     {
-                        _lastCaptureError = $"null_frame bounds={_captureBounds.Width}x{_captureBounds.Height} fails={_consecutiveCaptureFails}";
+                        var linuxErr = _linuxCapturer?.LastError;
+                        _lastCaptureError = OperatingSystem.IsLinux()
+                            ? $"null_frame linux fails={_consecutiveCaptureFails} err={linuxErr}"
+                            : $"null_frame bounds={_captureBounds.Width}x{_captureBounds.Height} fails={_consecutiveCaptureFails}";
                         _logger.LogWarning("Screen capture returned no frame ({Error})", _lastCaptureError);
                     }
                 }
@@ -226,14 +278,19 @@ public sealed class ScreenCaptureService : BackgroundService
                 // WebRTC media pump (PC stays "connected", SFU answers withTrack=false).
                 _consecutiveCaptureFails++;
                 _lastCaptureError = $"{ex.GetType().Name}: {ex.Message}";
-                _logger.LogWarning(ex, "Screen capture failed — recreating GDI surfaces and retrying");
+                _logger.LogWarning(ex, "Screen capture failed — recreating surfaces and retrying");
                 DisposeCaptureBitmaps();
                 StreamAvailable = false;
                 try { Task.Delay(1000, stoppingToken).GetAwaiter().GetResult(); }
                 catch (OperationCanceledException) { break; }
-                if (OperatingSystem.IsWindows())
+                if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
                 {
                     RefreshMonitors();
+                    if (OperatingSystem.IsLinux() && _streamActive && _linuxCapturer is not null)
+                    {
+                        _linuxCapturer.Stop();
+                        _linuxCapturer.Start();
+                    }
                     StreamAvailable = true;
                 }
                 continue;
@@ -273,6 +330,21 @@ public sealed class ScreenCaptureService : BackgroundService
 
     private void RefreshMonitorsUnlocked()
     {
+        if (OperatingSystem.IsLinux())
+        {
+            _monitors = LinuxScreenCapturer.EnumerateMonitors(_logger);
+            _boundsByIndex = _monitors
+                .Select(m => new Rectangle(0, 0, m.Width, m.Height))
+                .ToList();
+            if (_selectedIndex < 0 || _selectedIndex >= _monitors.Count)
+                _selectedIndex = 0;
+            ApplySelectedBoundsUnlocked();
+            return;
+        }
+
+        if (!OperatingSystem.IsWindows())
+            return;
+
 #pragma warning disable CA1416
         var list = new List<(Rectangle Bounds, string Name, bool Primary)>();
         _enumProc = (IntPtr hMonitor, IntPtr hdc, ref RECT lprc, IntPtr __) =>
@@ -342,6 +414,50 @@ public sealed class ScreenCaptureService : BackgroundService
             _selectedIndex = 0;
         ApplySelectedBoundsUnlocked();
 #pragma warning restore CA1416
+    }
+
+    private ScreenFrame? CaptureFrameLinux()
+    {
+        if (_linuxCapturer is null)
+            return null;
+        if (!_linuxCapturer.TryDequeueLatest(out var frame) || frame is null)
+            return null;
+
+        var maxW = EffectiveMaxWidth;
+        if (frame.Width <= maxW)
+            return frame;
+
+        var newW = maxW & ~1;
+        var newH = Math.Max(2, ((int)Math.Round(frame.Height * (newW / (double)frame.Width))) & ~1);
+        return DownscaleBgraNearest(frame, newW, newH);
+    }
+
+    private static ScreenFrame DownscaleBgraNearest(ScreenFrame src, int newW, int newH)
+    {
+        var dst = new byte[newW * newH * 4];
+        for (var y = 0; y < newH; y++)
+        {
+            var sy = Math.Min(src.Height - 1, y * src.Height / newH);
+            var srcRow = sy * src.Width * 4;
+            var dstRow = y * newW * 4;
+            for (var x = 0; x < newW; x++)
+            {
+                var sx = Math.Min(src.Width - 1, x * src.Width / newW);
+                var si = srcRow + sx * 4;
+                var di = dstRow + x * 4;
+                dst[di] = src.Bgra[si];
+                dst[di + 1] = src.Bgra[si + 1];
+                dst[di + 2] = src.Bgra[si + 2];
+                dst[di + 3] = src.Bgra[si + 3];
+            }
+        }
+        return new ScreenFrame
+        {
+            Bgra = dst,
+            Width = newW,
+            Height = newH,
+            TimestampMs = src.TimestampMs,
+        };
     }
 
     private static string FriendlyMonitorName(string raw, int index)

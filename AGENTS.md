@@ -1,8 +1,27 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-10-19
+> **Last audited:** 2026-10-20
 > **Changelog:**
 >
+> - 2026-10-20: **Live stream Linux — capture + VP8 encode (Wayland ScreenCast + GStreamer).**
+>   `ScreenCaptureService` was Windows-only (`StreamAvailable=false` parked the loop on Linux), so
+>   WebRTC publish never produced frames on this fleet's GNOME Wayland machines. New
+>   `Services/Streaming/LinuxScreenCapturer` drives an embedded python3 probe: xdg-desktop-portal
+>   `ScreenCast` (MONITOR, `persist_mode=2`) → `OpenPipeWireRemote` → GStreamer
+>   `pipewiresrc ! videoconvert ! BGRx ! appsink` (no `videorate` — it starved appsink on Mutter;
+>   FPS is bounded by appsink DropOldest + the C# capture interval), framed BGRA on stdout; restore
+>   token at `~/.local/share/alpha-ai-tracker/stream-restore-token` so the Share dialog is once per
+>   grant. Max-width scales in the probe (nearest-neighbor; GStreamer `videoscale` hit Mutter
+>   negotiate overflow). ABR overrides also downscale in `CaptureFrameLinux`. Monitors via Mutter
+>   `DisplayConfig.GetCurrentState`. CLI `--smoke-linux-capture`. **VP8:** SIPSorceryMedia.Encoders
+>   only ships Windows `vpxmd.dll`; linking system libvpx as `libvpxmd.so` segfaults on ABI mismatch.
+>   `ScreenVp8Encoder` now routes Linux through `LinuxGstVp8Encoder` (python3 + `vp8enc` appsrc/appsink
+>   framed protocol). `.deb` Depends: `gstreamer1.0-plugins-good` (+ pipewire/gi). Windows GDI +
+>   `vpxmd` path unchanged. Verified on this Ubuntu GNOME Wayland VM: `dotnet build` 0/0; smoke
+>   capture OK; live `LIN-1` → SFU `publisher track ready … codec=video/VP8` +
+>   `subscriber answer … withTrack=true`; client encode stats ~2 Mbps at 1680×1050. Ships in the
+>   next Linux installer; no `config.enc` re-bake. Server/web unchanged.
+
 > - 2026-10-19 (late): **Three fixes — post-wipe re-login re-collects hardware/network/software (client), the setup wizard can pass step 2 on Linux (client), "All devices" removed from the Device Specs dropdown (web).**
 >   **1. "No hardware snapshot synced yet / No installed applications synced yet" on a device that re-logged in after a removal** — root-caused on the live dev DB (employee `MU-90`: the relogged-in machine had `app_items` / `app_sessions` / `app_status` rows but **zero** `device_hardware_info` / `network_info` / `employee_installed_applications`). The removal wipe runs inside the already-`running process: it deletes every SQLite row, but the collector's IN-MEMORY dedup fingerprints (`_lastHardwareFingerprint`, `_lastNetworkPublicIp`/`_lastNetworkPrivateIp`) survive it, and the installed-software scan only runs at STARTUP (inventory is event-driven — there is deliberately no periodic scan). The machine therefore still "looks unchanged": every periodic collect takes the same-process fast path and the startup scan never runs again, so the machine id minted for the re-login never receives a snapshot, a network row or an inventory. Fix: new `LogCollectorService.RecollectAfterLoginAsync()` drops those fingerprints (dedup then falls back to the wiped, i.e. empty, DB) and re-runs hardware + network + `RescanInventoryAsync`; `MainViewModel.LoginAsync` fires it after `StartTracking()` and wakes `SyncService` again once it finishes. Login also now wipes a leftover local DB that belongs to a DIFFERENT employee **before** the login request (with `ResetMachineId()` + `EncryptedConfigService.ResetCache()`), so the rotated machine id and the server-side device registration always agree. Restarting the client alone also heals an already-stuck machine — the startup collects run regardless of login.
 >   **2. Setup wizard stuck on "SETUP STEP 2 OF 4" (Linux):** step 2's gate `IsBackgroundGuardConfigured()` requires the systemd USER unit `~/.config/systemd/user/alpha-ai-tracker.service`, but `GrantBackgroundRunningAsync` only called `EnableAutoStartForced()` — which writes the `.desktop` autostart entry and runs `systemctl --user enable` against a unit file that does not exist yet. The step printed "Background guard enabled successfully." and then re-evaluated to ITSELF forever (no forward navigation). New `AutoStartService.EnsureBackgroundGuardAsync()` writes the unit, daemon-reloads and enables it — deliberately without starting it (the wizard runs inside the live process; starting the unit would spawn a mutex-fighting `Restart=always` twin) — and the step now throws honestly if that fails. The macOS gate checks the launchd plist instead of unconditionally returning `false` (same stuck-step class).
@@ -1345,7 +1364,7 @@ flowchart LR
 - **No accessibility testing** — many interactive elements lack aria attributes
 - **No unit tests** — 0 test files
 - **GitHub release download** fetches from `clickmaster4285/Alpha-AI-Tracker`, not the org repo
-- **Live stream Linux capture** — still deferred (Windows GDI multi-path BitBlt; Win11 24H2 hardened in 1.2.34)
+- **Live stream Linux — first Share dialog** — Wayland capture uses xdg-desktop-portal ScreenCast; the employee must click Share once (restore token then silences later starts until Privacy revoke). X11 sessions are not a separate silent path yet (portal still used when available).
 
 ---
 
