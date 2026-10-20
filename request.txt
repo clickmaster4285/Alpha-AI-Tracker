@@ -1,7 +1,0 @@
-currently the livestream work only for windows 
-but now i want also linux 
-
-current machine is linux 
-so start chnages with testing on yourself 
-
-currently on windows side livestreaming is perfectly running
