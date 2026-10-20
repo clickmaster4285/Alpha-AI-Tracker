@@ -64,13 +64,16 @@ function groupKeyOf(item: AppItem): { key: string; isSearch: boolean; engine?: s
   return { key: domainOf(item), isSearch: false };
 }
 
-function visitDurationSeconds(item: AppItem): number {
-  // Tab still open: use now so it contributes real time to its group's duration,
-  // consistent with the 3-state sessionDurationSeconds logic on the apps/timeline pages.
-  if (!item.closedAt) {
-    return Math.max(0, (Date.now() - new Date(item.openedAt).getTime()) / 1000);
+function visitDurationSeconds(item: AppItem, rangeToMs?: number): number {
+  // Tab still open: stretch to now only while viewing a live window. On a
+  // historical day filter (rangeTo in the past), cap at rangeTo so yesterday's
+  // unclosed tabs cannot grow to "opened → now" (multi-day inflation).
+  const opened = new Date(item.openedAt).getTime();
+  if (item.closedAt) {
+    return Math.max(0, (new Date(item.closedAt).getTime() - opened) / 1000);
   }
-  return Math.max(0, (new Date(item.closedAt).getTime() - new Date(item.openedAt).getTime()) / 1000);
+  const end = rangeToMs != null && rangeToMs < Date.now() ? rangeToMs : Date.now();
+  return Math.max(0, (end - opened) / 1000);
 }
 
 /** Browser/source of a journey row, read from metadata_json.processName (e.g. "chrome"). */
@@ -168,6 +171,7 @@ function WebBody({
   const items = useMemo(() => data?.pages.flatMap(p => p.data) ?? [], [data]);
   const total = data?.pages[0]?.total ?? 0;
   const searchActive = filter.search.trim() !== '';
+  const rangeToMs = filter.dateTo ? new Date(filter.dateTo).getTime() : undefined;
 
   const groups = useMemo(() => {
     const map = new Map<string, WebGroup>();
@@ -185,12 +189,12 @@ function WebBody({
       };
       group.items.push(item);
       group.count += 1;
-      group.totalDuration += visitDurationSeconds(item);
+      group.totalDuration += visitDurationSeconds(item, rangeToMs);
       if (item.openedAt > group.lastVisitedAt) group.lastVisitedAt = item.openedAt;
       map.set(key, group);
     }
     return [...map.values()].sort((a, b) => b.lastVisitedAt.localeCompare(a.lastVisitedAt));
-  }, [items]);
+  }, [items, rangeToMs]);
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -247,7 +251,7 @@ function WebBody({
                 </div>
                 <span className="text-xs text-muted-foreground">{total.toLocaleString()} page{total === 1 ? '' : 's'}</span>
               </div>
-              <SearchGroups items={items} expanded={expanded} toggle={toggle} isFetchingNextPage={isFetchingNextPage} />
+              <SearchGroups items={items} expanded={expanded} toggle={toggle} isFetchingNextPage={isFetchingNextPage} rangeToMs={rangeToMs} />
             </>
           ) : (
             <>
@@ -416,7 +420,9 @@ function PageRow({ item, withDomain = false }: { item: AppItem; withDomain?: boo
   );
 }
 
-function SearchGroups({ items, expanded, toggle, isFetchingNextPage }: { items: AppItem[]; expanded: Set<string>; toggle: (key: string) => void; isFetchingNextPage: boolean }) {
+function SearchGroups({ items, expanded, toggle, isFetchingNextPage, rangeToMs }: {
+  items: AppItem[]; expanded: Set<string>; toggle: (key: string) => void; isFetchingNextPage: boolean; rangeToMs?: number;
+}) {
   const groups = useMemo(() => {
     const map = new Map<string, WebGroup>();
     for (const item of items) {
@@ -433,12 +439,12 @@ function SearchGroups({ items, expanded, toggle, isFetchingNextPage }: { items: 
       };
       group.items.push(item);
       group.count += 1;
-      group.totalDuration += visitDurationSeconds(item);
+      group.totalDuration += visitDurationSeconds(item, rangeToMs);
       if (item.openedAt > group.lastVisitedAt) group.lastVisitedAt = item.openedAt;
       map.set(key, group);
     }
     return [...map.values()].sort((a, b) => b.lastVisitedAt.localeCompare(a.lastVisitedAt));
-  }, [items]);
+  }, [items, rangeToMs]);
 
   return (
     <table className="w-full min-w-[820px]">

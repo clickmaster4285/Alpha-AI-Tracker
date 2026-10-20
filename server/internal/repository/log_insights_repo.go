@@ -71,6 +71,8 @@ func (r *LogInsightsRepo) ActiveEmployees(ctx context.Context, p LogInsightsPara
 
 // ProductivityTotals sums clamped session durations classified via monitoring_types.
 // Classification matches hours-insights: DISTINCT ON lower(app_name) preferring typed rows.
+// Only sessions that STARTED in range are included; overlapping sessions are
+// island-merged per employee (wall-clock) and classified shares are scaled.
 func (r *LogInsightsRepo) ProductivityTotals(ctx context.Context, p LogInsightsParams) (LogInsightsProductivityRow, error) {
 	q := `
 		WITH app_cat AS (
@@ -83,34 +85,86 @@ func (r *LogInsightsRepo) ProductivityTotals(ctx context.Context, p LogInsightsP
 		),
 		raw AS (
 			SELECT
+				s.employee_id,
 				COALESCE(NULLIF(s.app_display_name, ''), s.process_name, '') AS app_display_name,
-				GREATEST(0, EXTRACT(EPOCH FROM (
-					LEAST(
-						CASE
-							WHEN s.status = 'ACTIVE' AND s.ended_at IS NULL
-								AND s.last_sync_at > NOW() - INTERVAL '10 minutes' THEN NOW()
-							ELSE COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at)
-						END,
-						$2::timestamptz
-					) - GREATEST(s.started_at, $1::timestamptz)
-				)))::bigint AS dur
+				GREATEST(s.started_at, $1::timestamptz) AS eff_start,
+				LEAST(
+					CASE
+						WHEN s.status = 'ACTIVE' AND s.ended_at IS NULL
+							AND s.last_sync_at > NOW() - INTERVAL '10 minutes' THEN NOW()
+						ELSE COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at)
+					END,
+					$2::timestamptz
+				) AS eff_end
 			FROM app_sessions s
 			WHERE s.deleted_at IS NULL
-			  AND s.started_at < $2
-			  AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > $1
+			  AND s.started_at >= $1 AND s.started_at < $2
 			  AND ($3::text = '' OR s.employee_id = $3)
 			  AND ($4::int IS NULL OR EXISTS (
 			      SELECT 1 FROM employees e
 			      WHERE e.employee_id = s.employee_id AND e.deleted_at IS NULL AND e.department_id = $4
 			  ))
+		),
+		valid AS (
+			SELECT * FROM raw WHERE eff_end > eff_start
+		),
+		ordered AS (
+			SELECT v.*,
+			       MAX(eff_end) OVER (
+			           PARTITION BY employee_id
+			           ORDER BY eff_start, eff_end
+			           ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+			       ) AS prior_max_end
+			FROM valid v
+		),
+		marked AS (
+			SELECT o.*,
+			       CASE WHEN prior_max_end IS NULL OR eff_start > prior_max_end
+			            THEN 1 ELSE 0 END AS new_island
+			FROM ordered o
+		),
+		islands AS (
+			SELECT m.*,
+			       SUM(new_island) OVER (
+			           PARTITION BY employee_id
+			           ORDER BY eff_start, eff_end
+			           ROWS UNBOUNDED PRECEDING
+			       ) AS island_id
+			FROM marked m
+		),
+		merged AS (
+			SELECT employee_id, island_id,
+			       MIN(eff_start) AS eff_start, MAX(eff_end) AS eff_end
+			FROM islands
+			GROUP BY employee_id, island_id
+		),
+		wall AS (
+			SELECT COALESCE(SUM(GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start)))), 0)::bigint AS wall_sec
+			FROM merged
+		),
+		classified AS (
+			SELECT
+				COALESCE(SUM(CASE WHEN ac.type_name = 'Productive'
+					THEN GREATEST(0, EXTRACT(EPOCH FROM (v.eff_end - v.eff_start))) ELSE 0 END), 0)::bigint AS productive_sec,
+				COALESCE(SUM(CASE WHEN ac.type_name = 'Unproductive'
+					THEN GREATEST(0, EXTRACT(EPOCH FROM (v.eff_end - v.eff_start))) ELSE 0 END), 0)::bigint AS unproductive_sec,
+				COALESCE(SUM(CASE WHEN ac.type_name IS NULL OR ac.type_name NOT IN ('Productive', 'Unproductive')
+					THEN GREATEST(0, EXTRACT(EPOCH FROM (v.eff_end - v.eff_start))) ELSE 0 END), 0)::bigint AS neutral_sec
+			FROM valid v
+			LEFT JOIN app_cat ac ON ac.app_key = lower(v.app_display_name)
 		)
 		SELECT
-			COALESCE(SUM(dur), 0),
-			COALESCE(SUM(CASE WHEN ac.type_name = 'Productive' THEN dur ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN ac.type_name = 'Unproductive' THEN dur ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN ac.type_name IS NULL OR ac.type_name NOT IN ('Productive', 'Unproductive') THEN dur ELSE 0 END), 0)
-		FROM raw
-		LEFT JOIN app_cat ac ON ac.app_key = lower(raw.app_display_name)
+			w.wall_sec,
+			CASE WHEN (c.productive_sec + c.unproductive_sec + c.neutral_sec) > 0
+				THEN (c.productive_sec * w.wall_sec / (c.productive_sec + c.unproductive_sec + c.neutral_sec))
+				ELSE 0 END,
+			CASE WHEN (c.productive_sec + c.unproductive_sec + c.neutral_sec) > 0
+				THEN (c.unproductive_sec * w.wall_sec / (c.productive_sec + c.unproductive_sec + c.neutral_sec))
+				ELSE 0 END,
+			CASE WHEN (c.productive_sec + c.unproductive_sec + c.neutral_sec) > 0
+				THEN (c.neutral_sec * w.wall_sec / (c.productive_sec + c.unproductive_sec + c.neutral_sec))
+				ELSE 0 END
+		FROM wall w, classified c
 	`
 	var out LogInsightsProductivityRow
 	err := r.pool.QueryRow(ctx, q, p.From, p.To, p.EmployeeID, p.DepartmentID).Scan(

@@ -713,19 +713,15 @@ func (r *NewSchemaRepo) ListAppSessions(ctx context.Context, params AppSessionLi
 		args = append(args, params.Platform)
 		argIdx++
 	}
+	// Match /app-sessions/usage and the App Usage expand list: sessions that
+	// started inside the selected range (not "open anytime during the range").
 	if !params.DateFrom.IsZero() {
-		conditions = append(conditions, fmt.Sprintf(
-			`COALESCE(
-				CASE WHEN status = 'ACTIVE' AND ended_at IS NULL THEN NOW() END,
-				ended_at, last_sync_at, last_activity_at, started_at
-			) > $%d`,
-			argIdx,
-		))
+		conditions = append(conditions, fmt.Sprintf("started_at >= $%d", argIdx))
 		args = append(args, params.DateFrom)
 		argIdx++
 	}
 	if !params.DateTo.IsZero() {
-		conditions = append(conditions, fmt.Sprintf("started_at < $%d", argIdx))
+		conditions = append(conditions, fmt.Sprintf("started_at <= $%d", argIdx))
 		args = append(args, params.DateTo)
 		argIdx++
 	}
@@ -2517,6 +2513,9 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 		LEFT JOIN departments d ON d.id = e.department_id AND d.deleted_at IS NULL
 		WHERE e.employee_id = (SELECT emp_id FROM params) AND e.deleted_at IS NULL
 	),
+	-- Date filter matches /app-sessions/usage: only sessions that STARTED in
+	-- range. Overlap clipping of multi-day zombie rows (open for 48h+) was
+	-- filling the whole day (e.g. 18h 34m per always-on app).
 	raw_app_usage AS (
 		SELECT
 			s.app_display_name,
@@ -2535,17 +2534,12 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 		FROM app_sessions s
 		WHERE s.employee_id = (SELECT emp_id FROM params)
 			AND s.deleted_at IS NULL
-			AND s.started_at < (SELECT to_ts FROM params)
+			AND s.started_at >= (SELECT from_ts FROM params)
+			AND s.started_at <= (SELECT to_ts FROM params)
 			AND (
 				CASE
 					WHEN s.status = 'ACTIVE' AND s.ended_at IS NULL
 						AND s.last_sync_at > NOW() - INTERVAL '10 minutes' THEN NOW()
-					ELSE COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at)
-				END
-			) > (SELECT from_ts FROM params)
-			AND (
-				CASE
-					WHEN s.status = 'ACTIVE' AND s.ended_at IS NULL THEN NOW()
 					ELSE COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at)
 				END
 			) > s.started_at
@@ -2591,7 +2585,10 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 		SELECT
 			ai.domain,
 			GREATEST(ai.opened_at, (SELECT from_ts FROM params)) AS eff_start,
-			CASE WHEN ai.closed_at IS NOT NULL THEN ai.closed_at ELSE ai.opened_at END AS eff_end
+			LEAST(
+				COALESCE(ai.closed_at, s.ended_at, s.last_sync_at, s.last_activity_at, ai.opened_at),
+				(SELECT to_ts FROM params)
+			) AS eff_end
 		FROM app_items ai
 		LEFT JOIN app_sessions s ON s.id = ai.app_session_id
 		WHERE ai.employee_id = (SELECT emp_id FROM params)
@@ -2599,8 +2596,8 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 			AND ai.item_type = 'browser_tab'
 			AND ai.domain IS NOT NULL
 			AND ai.domain <> ''
-			AND ai.opened_at < (SELECT to_ts FROM params)
-			AND COALESCE(ai.closed_at, s.ended_at, s.last_sync_at, s.last_activity_at, ai.opened_at) > (SELECT from_ts FROM params)
+			AND ai.opened_at >= (SELECT from_ts FROM params)
+			AND ai.opened_at <= (SELECT to_ts FROM params)
 			AND COALESCE(ai.closed_at, s.ended_at, s.last_sync_at, s.last_activity_at, ai.opened_at) > ai.opened_at
 	),
 	app_cat AS (
@@ -2628,17 +2625,61 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 		LEFT JOIN monitoring_categories mc ON mc.id = ms.category_id AND mc.deleted_at IS NULL
 		WHERE ms.domain IN (SELECT DISTINCT domain FROM site_usage) AND ms.deleted_at IS NULL
 	),
-	app_summary AS (
+	-- Wall-clock union across apps so "Total time" cannot exceed the day
+	-- when chrome+OneDrive+Edge run concurrently (same shape as /app-sessions/usage).
+	wall_ordered AS (
+		SELECT au.*,
+		       MAX(eff_end) OVER (
+		           ORDER BY eff_start, eff_end
+		           ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+		       ) AS prior_max_end
+		FROM app_usage au
+	),
+	wall_marked AS (
+		SELECT o.*,
+		       CASE WHEN prior_max_end IS NULL OR eff_start > prior_max_end
+		            THEN 1 ELSE 0 END AS new_island
+		FROM wall_ordered o
+	),
+	wall_islands AS (
+		SELECT m.*,
+		       SUM(new_island) OVER (
+		           ORDER BY eff_start, eff_end
+		           ROWS UNBOUNDED PRECEDING
+		       ) AS wall_island_id
+		FROM wall_marked m
+	),
+	wall_merged AS (
+		SELECT MIN(eff_start) AS eff_start, MAX(eff_end) AS eff_end
+		FROM wall_islands
+		GROUP BY wall_island_id
+	),
+	classified AS (
 		SELECT
-			COALESCE(SUM(GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start)))), 0) AS total_sec,
+			COALESCE(SUM(GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start)))), 0) AS classified_sec,
 			COALESCE(SUM(CASE WHEN ac.type_name = 'Productive' THEN GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start))) ELSE 0 END), 0) AS productive_sec,
 			COALESCE(SUM(CASE WHEN ac.type_name = 'Unproductive' THEN GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start))) ELSE 0 END), 0) AS unproductive_sec,
 			COALESCE(SUM(CASE WHEN ac.type_name = 'Neutral' OR ac.type_name IS NULL THEN GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start))) ELSE 0 END), 0) AS neutral_sec,
-			COUNT(DISTINCT app_display_name) AS app_count,
-			COALESCE((SELECT SUM(foreground_seconds) FROM raw_app_usage), 0) AS fg_sec,
-			COALESCE((SELECT SUM(background_seconds) FROM raw_app_usage), 0) AS bg_sec
+			COUNT(DISTINCT app_display_name) AS app_count
 		FROM app_usage au
 		LEFT JOIN app_cat ac ON ac.app_key = lower(au.app_display_name)
+	),
+	app_summary AS (
+		SELECT
+			COALESCE((SELECT SUM(GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start)))) FROM wall_merged), 0) AS total_sec,
+			CASE WHEN c.classified_sec > 0 THEN c.productive_sec *
+				COALESCE((SELECT SUM(GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start)))) FROM wall_merged), 0) / c.classified_sec
+			ELSE 0 END AS productive_sec,
+			CASE WHEN c.classified_sec > 0 THEN c.unproductive_sec *
+				COALESCE((SELECT SUM(GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start)))) FROM wall_merged), 0) / c.classified_sec
+			ELSE 0 END AS unproductive_sec,
+			CASE WHEN c.classified_sec > 0 THEN c.neutral_sec *
+				COALESCE((SELECT SUM(GREATEST(0, EXTRACT(EPOCH FROM (eff_end - eff_start)))) FROM wall_merged), 0) / c.classified_sec
+			ELSE 0 END AS neutral_sec,
+			c.app_count,
+			COALESCE((SELECT SUM(foreground_seconds) FROM raw_app_usage), 0) AS fg_sec,
+			COALESCE((SELECT SUM(background_seconds) FROM raw_app_usage), 0) AS bg_sec
+		FROM classified c
 	),
 	site_summary AS (
 		SELECT
@@ -2818,8 +2859,8 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 		FROM app_sessions s
 		WHERE s.employee_id = (SELECT emp_id FROM params)
 			AND s.deleted_at IS NULL
-			AND s.started_at < (SELECT to_ts FROM params)
-			AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > (SELECT from_ts FROM params)
+			AND s.started_at >= (SELECT from_ts FROM params)
+			AND s.started_at <= (SELECT to_ts FROM params)
 			AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > s.started_at
 	),
 	app_cat AS (
@@ -2900,8 +2941,8 @@ func (r *NewSchemaRepo) GetHoursInsights(ctx context.Context, params HoursInsigh
 		FROM app_sessions s
 		WHERE s.employee_id = (SELECT emp_id FROM params)
 			AND s.deleted_at IS NULL
-			AND s.started_at < (SELECT to_ts FROM params)
-			AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > (SELECT from_ts FROM params)
+			AND s.started_at >= (SELECT from_ts FROM params)
+			AND s.started_at <= (SELECT to_ts FROM params)
 			AND COALESCE(s.ended_at, s.last_sync_at, s.last_activity_at, s.started_at) > s.started_at
 	),
 	ordered AS (
