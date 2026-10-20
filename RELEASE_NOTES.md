@@ -1,3 +1,314 @@
+# Release Notes — v1.2.36
+
+## Overview
+
+v1.2.36 is a **dashboard + device-lifecycle + live-stream reliability** release on top of **1.2.35**.
+Branch: `enhance-livestreamV4` (merged to `main` as PR #28). Client version: **1.2.36**.
+Installer: `AlphaAITracker-Setup-1.2.36.exe`.
+
+**Range `v1.2.35..8f55701`** (2026-10-05 → 2026-10-19): **38 commits, 108 files changed,
++13,926 / −2,013**, migrations **042–050** (044 intentionally skipped — no such file).
+
+Four headline themes:
+
+1. **WebRTC ICE trickle race fixed** — the "**LIVE / `--- FPS` / zero frames**" black-tile bug is
+   root-caused and buffered on all three tiers (server + web + client).
+2. **Device lifecycle** — new `employee_machines` registry (one row per physical PC), machine-scoped
+   data everywhere (`machine_id`), and a complete **Remove Current Device / `--remove-account`**
+   wipe handshake that persists server-side first, then instructs the client to wipe
+   (migrations 046–050).
+3. **Dashboard + logs redesign** — single-request `GET /dashboard/summary` home, **Attendance card**
+   replacing Fleet Health, and `/logs/graphical` + `/logs/insights` rebuilt on real APIs.
+4. **Account hardening** — suspended web users can no longer sign in **or** keep an existing
+   session alive; the Terms & Conditions RBAC nav leak is closed.
+
+---
+
+## 1. Server
+
+### New endpoints
+
+| Method | Route | Auth | Purpose |
+| ------ | ----- | ---- | ------- |
+| GET | `/api/v1/dashboard/summary` | JWT | One-shot home payload: employees/activity/monitoring/devices/live counts + bounded `topApps` / `topDomains` / `recentSessions` (errgroup SQL, no list-API fan-out; unit-tested) |
+| GET | `/api/v1/logs/insights` | JWT | Rule-based (no LLM) digest: metrics, productivity split, top apps/domains, outliers, highlights — server-bounded arrays |
+| GET | `/api/v1/logs/graphical` | JWT | Chart payload bucketed `hour`/`day`: activity + productivity time series, summary, top apps/domains |
+| GET | `/api/v1/attendance/events` | JWT | Day events for the new Timesheets **Day events** dialog |
+| POST | `/api/v1/employees/:id/devices/remove` | JWT | **Remove Current Device** — revokes device tokens, closes open sessions/items, sets `tracking_status='untracked'`, marks the machine `old` + `wipe_requested_at` (returns counts; nothing is deleted) |
+| POST | `/api/v1/devices/self-remove` | DeviceAuth | **Remove the account** (R4/R5) — called by the client AFTER its final drain; marks the CALLING machine `old`, advances `last_track_at`, revokes its device rows, flips the employee to `untracked` |
+
+### Auth / RBAC hardening
+
+- **Migration 045 `users.status`** (`active` | `suspended`, all rows backfilled `active`):
+  `AuthService.Login` refuses to mint tokens (**403**), `RefreshSession` refuses to rotate the
+  refresh cookie (an issued 30-day session cannot outlive a suspension), `CheckAuth` reports
+  `authenticated=false` and clears cookies.
+- **`JWTAuth` middleware** now loads the user on every request and — if `status != active` —
+  clears the cookie and denies access. Web user-management gained per-row **Suspend / Reactivate**
+  actions (badge shows `Suspended` / `Active`).
+- **T&C RBAC leak closed:** `rbac_service.go` seeds the `settings/terms-and-conditions` submodule
+  and the sidebar entry now carries the matching `module` key, so nav visibility and the route
+  guard resolve to the same permission (was: visible to every role, gated by the unrelated
+  General Settings permission). `company_admin` keeps access via `GrantAllPermissions` (40 grants);
+  no other role is auto-granted — tick it per role on `/roles`.
+- `golang.org/x/sync` promoted to a direct dependency (dashboard errgroup).
+
+### Device lifecycle — migrations 046–050
+
+| Migration | What it does |
+| --------- | ------------ |
+| **046** `device_machine_scope` | `machine_id` on every device-scoped table; device-wide natural keys (`permission_status` PK, `app_status` PK, junction uniques include `machine_id`); single-machine backfill |
+| **047** `attribute_legacy_machine_rows` | Attributes leftover `machine_id=''` rows from the device registry's own `[created_at, last_seen_at]` activity window — only when exactly ONE window contains the row's sync time (idempotent, never guesses; `app_sessions` retention made the 046 approach unreliable) |
+| **048** `add_device_activation_columns` | `employee_devices.is_active_device` + `remove_at` for removal tracking / audit |
+| **049** `employee_machines` | Canonical one-row-per-physical-machine registry (`status active\|old`, `first_track_at`, `last_track_at`, `wipe_requested_at`), backfilled from `employee_devices` — `employee_devices` rotates a row per login and can no longer serve as the machine list |
+| **050** `machine_id_coverage` | `machine_id` + indexes on `session_events`, `app_items`, `location_samples` (047-style attribution; `app_items` attributes exactly from its parent session) |
+
+- **Persist-first wipe handshake:** `DeviceAuth` now also resolves **revoked** device tokens
+  (`GetByTokenHashIncludingRevoked`), sets `device_removed` and skips `TouchLastSeen`; every sync
+  handler persists the incoming batch **first** and only then answers `{"action":"wipe_local"}` —
+  data a removed device just sent is never lost.
+- `GET /employees/:id/detail` sources `devices[]` from `employee_machines` (one row per machine)
+  with `status` / `firstTrackAt` / `lastTrackAt` / `wipeRequestedAt` and a corrected
+  `isActiveDevice`; `DeviceAuth` keeps `last_track_at` current on every request.
+- **Fix (`8f55701`):** Remove Current Device's `UPDATE employee_machines … WHERE employee_id=$1`
+  had **no status filter** — it clobbered `last_track_at=NOW()` on already-`old` rows, making
+  previously-removed machines look freshly tracked. Now filtered to `status='active'`.
+
+### Attendance / holidays / dashboard support
+
+- **Migration 042** — dashboard-support indexes proven needed by `EXPLAIN` on the live DB
+  (`idx_app_items_type_opened`, partial `idx_employee_devices_last_seen`).
+- **Migration 043** — `company_holidays.status` approval workflow (`pending | approved | rejected`;
+  existing rows stay `approved`; only `approved` holidays mirror to clients via `GET /schedules/me`).
+- **Attendance "All time"** now maps to the last **366 days** on both page and API (the API
+  rejects empty / `>366`-day ranges; an empty preset used to 400).
+- ⚠️ `server/.env.example` bootstrap-admin defaults were changed to dev values
+  (`admin@gmail.com` / `123456`) — real deployments must override both before first boot.
+
+---
+
+## 2. Web
+
+### Dashboard redesign — summary-first home
+
+- `/dashboard` consumes the new `GET /dashboard/summary` in **one** request (URL-synced filters via
+  `use-dashboard-filters`, capped presence poll — no list-API fan-out).
+- New building blocks: `DashboardStatGrid`, `ActivityWidgets`, `OnlineNowPanel`
+  (`components/dashboard/*`), restyled header, dismissible download strip.
+- **Attendance card replaces Fleet Health** — today's attendance breakdown (Present / Late /
+  Absent / Off shift, plus Half day / Not recorded when non-zero) for the department-filtered set,
+  with a "View attendance →" link; the `devices` stats stay in the payload (attention strip still
+  uses `devices.stale7d`).
+
+### Logs pages on real APIs
+
+- **`/logs/graphical`** rebuilt — hour/day activity + productivity charts, summary tiles, top
+  apps/domains over `GET /logs/graphical`.
+- **`/logs/insights`** (User Insights) rebuilt — metrics, productivity %, outliers and rule-based
+  highlights over `GET /logs/insights`.
+- **`/logs/comprehensive`** employee filter switched to the same searchable picker used by
+  Timesheets / Employee Journey (shared `EmployeeSelector` search props).
+
+### Holidays & timesheets
+
+- **`/holidays`** made dynamic with the approval workflow — status filter chips
+  (Pending / Approved / Rejected), `pending` as the create default, status badges.
+- **Timesheets** gains a **Day events dialog** (`DayEventsDialog` → `GET /attendance/events`).
+
+### Device Specs / employees
+
+- **`?deviceId=` machine selector** on every Device Specs page (shown for 2+ machines), scoped
+  through `GET /employees/:id/detail?deviceId=`; **"All devices" removed** from the dropdown —
+  single-machine employees keep the employee-wide view; the URL is the source of truth and the
+  selected machine mirrors back into `?deviceId=`.
+- **Fix:** that removal briefly caused an infinite `?deviceId=` ⇄ React Query re-key ping-pong
+  ("Maximum update depth exceeded") — resolved by scoping the URL-synced state to registered
+  machines only.
+- Removed-device empty states are truthful ("No hardware snapshot was recorded for this device
+  before it was removed" instead of "will upload one after login").
+- **Peripherals history:** older rows in a replugged group now show **Disconnected** via
+  `effectiveDisconnected()` (a row with `unplugged_at=NULL` under a newer row is a replug, not
+  still-connected).
+- **Employee page header** made responsive — the fixed 280px device trigger next to the 384px
+  employee picker overflowed the content area and clipped the dropdown on all but wide screens.
+- Removed dead pages: **`/employee-portal`** and **`/employees/activity`**.
+
+### Live stream (web)
+
+- **ICE candidate queueing** (`useLiveStreamSocket`): per-PC `PcEntry { pc, remoteReady, queue }` —
+  candidates arriving before `setRemoteDescription` completes are queued and flushed in order after
+  the answer is applied; renegotiated PCs get fresh state so stale candidates can never hit a dead
+  connection (web half of the ICE race fix below).
+- Watch tile gains **full-screen open** on the preview (`LiveStreamWatchTile`).
+
+### Tooling
+
+- **`react-scan`** added as a dev dependency — `<ReactScan/>` mounts in the root layout and
+  `npm run scan` launches it (render-performance overlay; dev only, no prod data path).
+
+---
+
+## 3. Desktop Client — 1.2.36
+
+### Remove the account — `client --remove-account`
+
+New `Services/AccountRemovalService.cs` owns the single removal routine; three entry paths:
+
+1. **Cold-start** (`--remove-account` without `--background`) — wipes local SQLite before the host
+   starts, kills sibling `client`/`AlphaAI` processes, app boots to the sign-in page.
+2. **Background** (`--remove-account --background`) — **sync first**: wakes `SyncService` to drain
+   every unsent table (`device_hardware_info`, `installed_apps`, `installed_packages`,
+   `network_info`, `session_events`, `app_sessions`, `app_items`, `app_status`,
+   `permission_status`, `storage_devices`), bounded by the new
+   **`ALPHA_REMOVE_ACCOUNT_SYNC_TIMEOUT_SEC`** (default **120 s**); the local wipe always proceeds
+   even if the server is unreachable; then kills the processes.
+3. **Running instance** — a second invocation signals the live process over the single-instance
+   channel (`SingleInstanceService` removal command); the RUNNING instance performs the removal (it
+   owns the SQLite connection and GUI), so no restart races auto-start / systemd `Restart=always`
+   for the mutex.
+
+The wipe deletes **every local row, `.machine-id` and `device_id`** and calls
+`AppConfig.ResetMachineId()` so the next login mints a fresh machine id.
+Web shows copy-paste commands per OS (`lib/client-commands.ts`):
+Linux `alpha-ai-tracker --remove-account`, Windows
+`& "C:\Program Files (x86)\Alpha AI Tracker\client.exe" --remove-account`.
+
+### Machine identity + wipe-aware sync
+
+- New single-row **`machine_identity`** SQLite table (schema + store migration); **every telemetry
+  INSERT stamps `machine_id`** from the lazy `AppConfig.ClientId` provider — a wipe + re-login in
+  the same process stores the NEW id; `JourneyEngine` no longer uses the hostname as the machine id.
+- **`SyncService`** parses the sync response `action` and raises **`OnServerRequestedWipe`**
+  (once per process) → local DB + machine id wiped, UI returns to sign-in. The cold-start
+  `--remove-account` path now starts the host first (the old code signalled a host that had not
+  started, so the drain never ran and the server was never told).
+- **Login hygiene:** a leftover local DB belonging to a DIFFERENT employee is wiped (with
+  `ResetMachineId()` + `EncryptedConfigService.ResetCache()`) **before** the login request, so the
+  rotated machine id and the server-side device registration always agree.
+
+### Re-login re-collection fix
+
+After a removal-wipe inside an already-running process, the collector's in-memory dedup
+fingerprints (`_lastHardwareFingerprint`, `_lastNetwork*Ip`) survived and the inventory scan only
+runs at startup — so a re-logged-in machine never re-uploaded hardware/network/software and the
+web showed **"No hardware snapshot synced yet / No installed applications synced yet"** (reproduced
+live on employee `MU-90`). New `LogCollectorService.RecollectAfterLoginAsync()` drops those
+fingerprints (dedup then falls back to the wiped DB) and re-runs hardware + network +
+`RescanInventoryAsync`; `MainViewModel.LoginAsync` fires it after `StartTracking()` and wakes
+`SyncService` once it finishes. Restarting the client also heals an already-stuck machine.
+
+### Setup wizard fix (Linux/macOS)
+
+Step 2's gate `IsBackgroundGuardConfigured()` required the systemd user unit, but
+`GrantBackgroundRunningAsync` only wrote the `.desktop` autostart entry — the step re-evaluated to
+itself forever ("SETUP STEP 2 OF 4", no forward navigation). New
+`AutoStartService.EnsureBackgroundGuardAsync()` writes
+`~/.config/systemd/user/alpha-ai-tracker.service`, daemon-reloads and enables it — deliberately
+**without** starting it (the wizard runs inside the live process; starting the unit would spawn a
+mutex-fighting `Restart=always` twin) — and the step now throws honestly on failure. The macOS
+gate checks the launchd plist instead of unconditionally returning `false` (same stuck-step class).
+
+### Live stream client
+
+- **`pendingIce` buffering:** trickled candidates are held until `setRemoteDescription` returns
+  `OK`, then flushed in order; reset when the peer connection is recreated on `start`/`stop`
+  (publisher half of the ICE race fix).
+
+### Config (re-bake `config.enc`)
+
+| Knob | Change |
+| ---- | ------ |
+| `ALPHA_REMOVE_ACCOUNT_SYNC_TIMEOUT_SEC` | **new**, default 120 (floor 5 s) |
+| `ALPHA_IDLE_THRESHOLD_SEC` | default **120 → 300** |
+
+---
+
+## 4. WebRTC ICE trickle race — "LIVE / `--- FPS` / black tiles" (server + web + client)
+
+**Root cause (signaling ORDER, not per-PC hardware):** the Pion SFU starts ICE gathering inside
+`SetLocalDescription` during `AcceptPublisherOffer` / `AcceptSubscriberOffer`, and Pion fires the
+candidate callback on its own goroutine — so `{"type":"ice"}` could be written **before**
+`{"type":"answer"}`. A peer calling `addIceCandidate` while `remoteDescription` is still `null`
+throws `InvalidStateError`; that candidate was silently dropped, the ICE/DTLS handshake never
+completed, yet `ontrack` had already fired (the answer carried the media section) — the UI showed
+LIVE with zero frames and the 5s renegotiation loop spun forever. Which employees broke was pure
+timing luck (connections where the answer landed before the first candidate worked).
+
+**Fix — buffer trickled candidates on all three peer roles until the remote description exists:**
+
+| Tier | File | Change |
+| ---- | ---- | ------ |
+| Server | `internal/handlers/stream_handler.go` | New `iceTrickle` buffer (`sync.Mutex` + `answered` flag + `pending`) shared by the Push and Watch paths; pre-answer candidates are held and flushed **only after** the answer message is written |
+| Web | `lib/useLiveStreamSocket.ts` | Per-PC `PcEntry { pc, remoteReady, queue }`; the `answer` branch awaits `setRemoteDescription` then flushes; the `ice` branch queues while `!remoteReady`; `cleanupPc` nulls the entry on renegotiation |
+| Client | `Services/LiveStreamClient.cs` | `pendingIce` + `remoteIceReady` flushed after `setRemoteDescription` returns `OK`; reset on PC recreate |
+
+No route, contract, env or migration change; the client half ships in this installer build.
+
+## Bug Fixes Summary
+
+| # | Issue | Root cause | Fix |
+| - | ----- | ---------- | --- |
+| 1 | Watched tiles read **LIVE / `--- FPS`** with zero frames (intermittent, any employee) | ICE candidate written before the answer → `addIceCandidate` dropped → DTLS never completes | Candidate buffering on server (answer-marked flush), web (`remoteReady` queue) and client (`pendingIce`) |
+| 2 | Re-login after a removal showed **"No hardware snapshot synced yet / No installed applications synced yet"** | Removal wipe runs in-process; collector dedup fingerprints survive and the inventory scan only runs at startup | `RecollectAfterLoginAsync()` drops fingerprints + re-runs hardware/network/inventory; SyncService wake-up |
+| 3 | Setup wizard stuck at **step 2** on Linux (macOS gate always false) | Gate required a systemd user unit that `GrantBackgroundRunningAsync` never wrote; macOS returned `false` unconditionally | `EnsureBackgroundGuardAsync()` writes + enables the unit (no start); macOS checks the plist |
+| 4 | **"Maximum update depth exceeded"** crash after removing "All devices" from the dropdown | Infinite `?deviceId=` ⇄ React Query re-key ping-pong | URL-synced `deviceId` only set for registered machines; single-source selection |
+| 5 | **Remove Current Device** made previously-removed machines look freshly tracked | `UPDATE employee_machines … WHERE employee_id=$1` with **no `status='active'` filter** clobbered old rows' `last_track_at` | Status filter added; only active machines are stamped |
+| 6 | **Terms & Conditions** visible to every role, gated by the wrong permission | Sidebar entry had no `module` key; catalog had no T&C submodule | Seeded `settings/terms-and-conditions` + matching `module` key (RBAC Nav → Catalog Parity Rule) |
+| 7 | A **suspended** user could still sign in / keep an existing 30-day session | No `users.status` concept; JWTAuth never re-checked the user | Migration 045 + login/refresh/CheckAuth/JWTAuth status checks + Suspend/Reactivate UI |
+| 8 | Device dropdown **clipped** in the Device Specs header | Non-wrapping header row (384px picker + 280px trigger) overflowed the content area | Responsive header layout |
+| 9 | Peripherals **history** showed replugged devices as still Connected | Row status read from its own `unplugged_at` only | `effectiveDisconnected()` — older rows under a newer one are Disconnected |
+| 10 | Attendance **All time** filter failed (400) | Preset sends empty `from`/`to`; API requires `YYYY-MM-DD`, ≤366 days | Page and API both map All time → last 366 days |
+| 11 | Retired devices showed **wrong empty states** and unattributed (`machine_id=''`) legacy rows | Migration 046 attributed only from `app_sessions` (purged by 30-day retention) | Migration 047 attributes from the device registry activity window; truthful empty states |
+| 12 | Live preview tile had **no full-screen affordance** | Missing control on `LiveStreamWatchTile` | Full-screen open added on the watch tile |
+
+## Verification
+
+| Check | Result |
+| ----- | ------ |
+| `go build ./...` / `go vet ./...` | clean |
+| `go test ./internal/services -run Dashboard` (+ stream/redis/scale packages) | pass |
+| `npx tsc --noEmit` | clean |
+| `next build` | passes (dashboard, logs, holidays, device-specs routes registered) |
+| `dotnet build` | 0 warnings / 0 errors |
+| Migration 047 on the dev DB | dry-run (rolled back) then applied — rows attributed per table **10/3/6/21/8/37/242/4354**, 0 left unattributed; per-device reads verified for `default-EMP-10003` (retired 99 / current 73 / aggregate 73) |
+| Device remove handshake (live) | admin remove → machine `old` + `wipe_requested_at`; the revoked token's next batch was **persisted and** answered `{"action":"wipe_local"}`; `self-remove` → `{removed:true, machineId, status:"old", trackingStatus:"untracked"}` |
+| The three 2026-10-19 fixes | verified **end-to-end on the installed build** (re-login re-collection on MU-90, wizard step 2 on Linux, Device Specs dropdown) |
+| Machine-id stamping (live) | hardware / session-event / location syncs stamped the device's `machine_id`; detail `devices[]` returned one row per machine with status |
+
+---
+
+## Deploy sequence
+
+1. **Server first** — applies migrations **042–050** on startup; the boot seeder re-ensures the RBAC
+   catalog (grant `settings/terms-and-conditions` per role). Set bootstrap admin credentials —
+   `.env.example` now carries dev defaults.
+2. **Web** — `npm ci` (new dev dependency `react-scan`) and rebuild/deploy.
+3. **Client** — rebuild installer **1.2.36** with a **re-baked `config.enc`**
+   (`ALPHA_REMOVE_ACCOUNT_SYNC_TIMEOUT_SEC`, `ALPHA_IDLE_THRESHOLD_SEC=300`), install, restart the
+   tracker. Per the **Installer-Parity Rule** the client half (remove-account, machine identity,
+   re-login re-collection, wizard fix, ICE buffering) is only done when verified from the installed
+   build — the 2026-10-19 fixes were verified that way.
+
+---
+
+## Known gaps / follow-ups
+
+- **Migration 044 does not exist** (number intentionally skipped) — ops should not hunt for it.
+- Server-side **RBAC permission enforcement** in API middleware is still not implemented (grants
+  are enforced in the web client only; the JWTAuth *status* check is new, but permission checks
+  remain frontend-only).
+- **No rate limiting** on login or sync endpoints.
+- Linux **screen capture** for the live stream is still deferred (publisher is Windows-only).
+- ⚠️ `server/.env.example` bootstrap admin defaults (`admin@gmail.com` / `123456`) are dev values —
+  production installs must override them.
+- `employee_devices.is_active_device` / `remove_at` (048) and `employee_machines` (049) both
+  express device state now; `employee_devices` keeps rotating rows on login — never drive a machine
+  list or status badge off it (Device Lifecycle Rule, AGENTS.md §6).
+
+---
+
+---
+
 # Release Notes — v1.2.35
 
 ## Overview
