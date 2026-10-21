@@ -34,6 +34,7 @@ func Setup(
 	dashboardHandler *handlers.DashboardHandler,
 	logInsightsHandler *handlers.LogInsightsHandler,
 	logGraphicalHandler *handlers.LogGraphicalHandler,
+	dlpHandler *handlers.DlpHandler,
 ) {
 	// ─────────────────────────────
 	// Global Middleware
@@ -106,6 +107,14 @@ func Setup(
 	// token (not a web-admin session) identifies the machine.
 	syncGroup.POST("/devices/self-remove", newSchemaHandler.SelfRemoveAccount)
 	syncGroup.GET("/schedules/me", timeAttendanceHandler.GetMySchedule)
+
+	// Security & DLP — device surface (policy pull, alert sync, health, removal verify)
+	if dlpHandler != nil {
+		syncGroup.GET("/dlp/policy", dlpHandler.GetPolicy)
+		syncGroup.POST("/dlp/alerts/sync", dlpHandler.SyncAlerts)
+		syncGroup.POST("/dlp/health", dlpHandler.PostHealth)
+		syncGroup.POST("/devices/removal-verify", dlpHandler.VerifyRemovalCode)
+	}
 
 	// ─── Terms & Conditions (CLIENT surface — DeviceAuth) ───
 	// The desktop client's acceptance flow lives here, NOT under the web-admin
@@ -225,6 +234,21 @@ func Setup(
 	monitoring.GET("/websites", monitoringHandler.ListWebsites)
 	monitoring.POST("/websites", monitoringHandler.CreateWebsite)
 	monitoring.PATCH("/websites/:id", monitoringHandler.UpdateSiteClassification)
+
+	// Security & DLP — admin surface
+	if dlpHandler != nil {
+		dlp := protected.Group("/dlp")
+		dlp.GET("/rules", dlpHandler.ListRules)
+		dlp.POST("/rules", dlpHandler.CreateRule)
+		dlp.PATCH("/rules/:id", dlpHandler.UpdateRule)
+		dlp.DELETE("/rules/:id", dlpHandler.DeleteRule)
+		dlp.POST("/rules/publish", dlpHandler.Publish)
+		dlp.GET("/alerts", dlpHandler.ListAlerts)
+		dlp.PATCH("/alerts/:id", dlpHandler.UpdateAlert)
+		protected.GET("/shadow-it/apps", dlpHandler.ListShadowIt)
+		protected.PATCH("/shadow-it/apps/:id", dlpHandler.UpdateShadowIt)
+		protected.POST("/devices/removal-code", dlpHandler.IssueRemovalCode)
+	}
 
 	// RBAC: module catalog + roles with per-submodule permissions
 	protected.GET("/modules", rbacHandler.ListModules)

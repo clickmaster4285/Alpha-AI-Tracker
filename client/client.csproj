@@ -66,4 +66,14 @@
     <None Include="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
     <None Remove="Platform/Linux/alpha_atspi.py" />
   </ItemGroup>
+
+  <!-- AlphaAITracker.Service is its own project under DlpService/. Without this
+       exclude, SDK glob picks up DlpService/**/*.cs into client.dll → CS8802
+       (two top-level Program.cs) and missing DlpService package refs. -->
+  <ItemGroup>
+    <Compile Remove="DlpService/**" />
+    <None Remove="DlpService/**" />
+    <EmbeddedResource Remove="DlpService/**" />
+    <Content Remove="DlpService/**" />
+  </ItemGroup>
 </Project>

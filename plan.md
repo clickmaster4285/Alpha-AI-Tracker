@@ -1,6 +1,6 @@
 # Plan — Security & DLP (Windows Production)
 
-> **Status:** Design approved for implementation planning  
+> **Status:** P0 complete · P1 USBSTOR enforce + USB alerts in progress (needs LocalSystem for registry write)  
 > **Scope:** Windows-only endpoint DLP + Shadow IT + hardened agent lifecycle  
 > **Out of scope (v1–v3):** Linux/macOS enforcement, kernel minifilter (deferred to P6), TLS inspection / ChatGPT surgical upload block (deferred to P7)  
 > **Related UI mocks:** `/dlp-rules`, `/dlp-alerts`, `/shadow-it` (static today)  
@@ -353,22 +353,23 @@ Server: no special env beyond normal DB; optional `DLP_REMOVAL_CODE_TTL_MIN=60`.
 
 ### P0 — Spine (no user-visible blocks yet)
 
-- [ ] Migrations: rules, policy_versions, alerts, shadow_it, removal_challenges  
-- [ ] RBAC catalog seed for three modules  
-- [ ] Device `GET /dlp/policy`, `POST /dlp/alerts/sync`, `POST /dlp/health`  
-- [ ] Windows Service project skeleton + named pipe + PolicyStore  
-- [ ] AlertWorker queue schema + sync drain  
-- [ ] Installer registers service (flag off = park workers)  
-- [ ] `go build` / `dotnet build` / `tsc` clean  
+- [x] Migrations: rules, policy_versions, alerts, shadow_it, removal_challenges (`051_dlp_security.sql`)  
+- [x] RBAC catalog seed for three modules (already in `rbacCatalog` → `security-dlp`)  
+- [x] Device `GET /dlp/policy`, `POST /dlp/alerts/sync`, `POST /dlp/health` (+ admin CRUD/publish/alerts/shadow-it + removal-code)  
+- [x] Windows Service project skeleton + named pipe + PolicyStore (`client/DlpService`)  
+- [x] AlertWorker queue schema + sync drain  
+- [ ] Installer registers service (flag off = park workers) — deferred to installer pass with P1  
+- [x] `go build` / `dotnet build` (DlpService) / `tsc` clean  
+- [x] Web: live DLP Rules / Alerts / Shadow IT pages (API-backed; enforce still P1+)  
 
 ### P1 — USB coarse + protected lifecycle
 
-- [ ] EnforceWorker: USBSTOR disable when any active `usb_*` block rule in applied bundle  
-- [ ] Alerts on USB plug + blocked storage  
+- [x] EnforceWorker: USBSTOR disable when any active `usb_*` block rule in applied bundle (`UsbStorEnforcer`)  
+- [x] Alerts on USB plug + blocked storage (`RemovableDriveMonitor` + enforce apply alerts)  
 - [ ] Service ACL + gated uninstall stub  
 - [ ] Removal code issue + verify + extend `AccountRemovalService`  
-- [ ] Web: live DLP Alerts (read) + Rules publish MVP  
-- [ ] Installed-build proof on a lab Windows VM  
+- [x] Web: live DLP Alerts (read) + Rules publish MVP  
+- [ ] Installed-build proof on a lab Windows VM (needs elevated/LocalSystem for USBSTOR write)  
 
 ### P2 — Web domain block
 

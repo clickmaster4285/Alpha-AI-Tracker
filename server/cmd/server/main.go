@@ -74,6 +74,7 @@ func main() {
 	departmentRepo := repository.NewDepartmentRepo(pool)
 	newSchemaRepo := repository.NewNewSchemaRepo(pool)
 	monitoringRepo := repository.NewMonitoringRepo(pool)
+	dlpRepo := repository.NewDlpRepo(pool)
 	rbacRepo := repository.NewRBACRepo(pool)
 	refreshTokenRepo := repository.NewRefreshTokenRepo(pool)
 	shiftRepo := repository.NewShiftRepo(pool)
@@ -95,6 +96,7 @@ func main() {
 	geofenceService := services.NewGeofenceService(geofenceRepo)
 	newSchemaService := services.NewNewSchemaService(newSchemaRepo, employeeRepo, geofenceService)
 	monitoringService := services.NewMonitoringService(monitoringRepo)
+	dlpService := services.NewDlpService(dlpRepo, cfg.DlpRemovalCodeTTLMin)
 	rbacService := services.NewRBACService(rbacRepo)
 	shiftService := services.NewShiftService(shiftRepo, cfg.DefaultShiftTimezone)
 	timeAttendanceService := services.NewTimeAttendanceService(timeAttendanceRepo)
@@ -111,6 +113,7 @@ func main() {
 	departmentHandler := handlers.NewDepartmentHandler(departmentService)
 	newSchemaHandler := handlers.NewNewSchemaHandler(newSchemaService, authService)
 	monitoringHandler := handlers.NewMonitoringHandler(monitoringService)
+	dlpHandler := handlers.NewDlpHandler(dlpService)
 	rbacHandler := handlers.NewRBACHandler(rbacService)
 	shiftHandler := handlers.NewShiftHandler(shiftService)
 	timeAttendanceHandler := handlers.NewTimeAttendanceHandler(timeAttendanceService)
@@ -241,7 +244,7 @@ func main() {
 	e.HideBanner = true
 	e.HidePort = true
 
-	router.Setup(e, cfg, authService, deviceRepo, userRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler, rbacHandler, shiftHandler, timeAttendanceHandler, geofenceHandler, termsConsentHandler, termsContentHandler, streamHandler, wsHandler, dashboardHandler, logInsightsHandler, logGraphicalHandler)
+	router.Setup(e, cfg, authService, deviceRepo, userRepo, authHandler, userHandler, employeeHandler, departmentHandler, newSchemaHandler, monitoringHandler, rbacHandler, shiftHandler, timeAttendanceHandler, geofenceHandler, termsConsentHandler, termsContentHandler, streamHandler, wsHandler, dashboardHandler, logInsightsHandler, logGraphicalHandler, dlpHandler)
 
 	// ────────────────
 	// Graceful Shutdown
