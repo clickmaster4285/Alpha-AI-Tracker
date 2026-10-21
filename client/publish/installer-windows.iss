@@ -79,6 +79,27 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: no
 // itself before the installer runs, so this is only a safety net for manual
 // installs over a running instance. Kill by image name ONLY.
 // ────────────────────────────────────────────────
+// Service DACL is locked to LocalSystem (admins cannot sc stop/delete).
+// Installer must stop/delete via a one-shot SYSTEM scheduled task BEFORE file copy,
+// otherwise DeleteFile on Service\*.dll fails with Access Denied (error 5).
+procedure StopDeleteDlpServiceAsSystem;
+var
+  ResultCode: Integer;
+begin
+  // Clear failure actions so SCM does not immediately restart after stop/kill.
+  Exec('sc.exe', 'failure {#WINDOWS_SERVICE_NAME} reset= 0 actions= //', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('schtasks.exe',
+    '/Create /TN "{#WINDOWS_SERVICE_MAINT_TASK}" /TR "cmd.exe /c sc.exe stop {#WINDOWS_SERVICE_NAME} & sc.exe delete {#WINDOWS_SERVICE_NAME} & taskkill /F /IM {#WINDOWS_SERVICE_EXE_NAME}" /SC ONCE /ST 00:00 /RU SYSTEM /F',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('schtasks.exe', '/Run /TN "{#WINDOWS_SERVICE_MAINT_TASK}"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // Wait for SCM + process handles to release (Service\*.dll).
+  Exec('ping', '127.0.0.1 -n 6 -w 1000', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('schtasks.exe', '/Delete /TN "{#WINDOWS_SERVICE_MAINT_TASK}" /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // Belt-and-suspenders: admin may still be able to terminate the process image.
+  Exec('taskkill', '/F /IM {#WINDOWS_SERVICE_EXE_NAME}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('ping', '127.0.0.1 -n 2 -w 1000', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
 function KillRunningInstance: Boolean;
 var
   ResultCode: Integer;
@@ -92,28 +113,13 @@ begin
   if Exec('taskkill', '/F /IM {#MyAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
     if ResultCode = 0 then KillCount := KillCount + 1;
 
-  // Also stop the DLP Windows Service before replacing its binary (names from APP_IDENTIFIERS).
-  Exec('sc.exe', 'stop {#WINDOWS_SERVICE_NAME}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // Locked service ACL: plain "sc stop" fails for Administrators — use SYSTEM task.
+  StopDeleteDlpServiceAsSystem;
   if Exec('taskkill', '/F /IM {#WINDOWS_SERVICE_EXE_NAME}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
     if ResultCode = 0 then KillCount := KillCount + 1;
 
   // Small pause to let OS release file handles
-  if KillCount > 0 then
-    Exec('ping', '127.0.0.1 -n 2 -w 1000', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-end;
-
-// Service DACL is locked to LocalSystem (admins cannot sc stop/delete).
-// Installer/uninstaller must stop/delete via a one-shot SYSTEM scheduled task.
-procedure StopDeleteDlpServiceAsSystem;
-var
-  ResultCode: Integer;
-begin
-  Exec('schtasks.exe',
-    '/Create /TN "{#WINDOWS_SERVICE_MAINT_TASK}" /TR "cmd.exe /c sc.exe stop {#WINDOWS_SERVICE_NAME} & sc.exe delete {#WINDOWS_SERVICE_NAME} & taskkill /F /IM {#WINDOWS_SERVICE_EXE_NAME}" /SC ONCE /ST 00:00 /RU SYSTEM /F',
-    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec('schtasks.exe', '/Run /TN "{#WINDOWS_SERVICE_MAINT_TASK}"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec('ping', '127.0.0.1 -n 4 -w 1000', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec('schtasks.exe', '/Delete /TN "{#WINDOWS_SERVICE_MAINT_TASK}" /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('ping', '127.0.0.1 -n 3 -w 1000', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
 procedure LockDlpServiceAcl;
@@ -151,7 +157,7 @@ begin
       'ALPHA_DLP_ALERT_SYNC_SEC=30' + #13#10 +
       'ALPHA_DLP_PIPE_NAME={#WINDOWS_DLP_PIPE_NAME}' + #13#10, False);
 
-  StopDeleteDlpServiceAsSystem;
+  // Service was already removed in PrepareToInstall / InitializeSetup; recreate.
   Exec('sc.exe',
     'create {#WINDOWS_SERVICE_NAME} binPath= "' + ExePath + '" start= auto DisplayName= "{#WINDOWS_SERVICE_DISPLAY_NAME}" obj= LocalSystem',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -179,6 +185,14 @@ function InitializeSetup: Boolean;
 begin
   Result := True;
   KillRunningInstance;
+end;
+
+// Runs immediately before files are installed — ensure Service\*.dll is unlocked.
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  NeedsRestart := False;
+  KillRunningInstance;
+  Result := '';
 end;
 
 // ────────────────────────────────────────────────

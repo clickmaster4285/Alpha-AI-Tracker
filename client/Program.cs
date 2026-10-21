@@ -229,17 +229,47 @@ if (!mutexCreated)
     // instance that races us for the mutex. Signal and exit.
     if (isProtectedUninstall)
     {
+        // WinExe normally has no console — attach so PowerShell shows status.
+        client.Services.ProtectedUninstallService.EnsureCliConsole();
         if (string.IsNullOrWhiteSpace(protectedUninstallCode))
         {
             Console.Error.WriteLine("Usage: client --protected-uninstall --code <removal-code>");
+            Environment.ExitCode = 1;
             return;
         }
-        // Hand the code to the running instance (it owns SQLite + DeviceAuth).
-        var delivered = SingleInstanceService.SignalExistingInstance(
-            SingleInstanceService.CommandProtectedUninstall + ":" + protectedUninstallCode.Trim());
-        Console.WriteLine(delivered
-            ? "Protected uninstall requested — the running app will verify the code, wipe the account, and stop the DLP service."
-            : "Could not reach the running app. Start the tracker once, or run --protected-uninstall when no other instance holds the mutex.");
+
+        // Do NOT only signal-and-exit: the uninstall gate needs teardown.ok written
+        // by THIS process (DLP pipe / device.auth). The running tracker is then asked
+        // to wipe the local account (it owns SQLite).
+        Console.WriteLine("Tracker is already running — authorizing uninstall gate from this CLI...");
+        var gateOk = client.Services.ProtectedUninstallService
+            .AuthorizeGateAsync(protectedUninstallCode.Trim(), "both")
+            .GetAwaiter().GetResult();
+        if (!gateOk)
+        {
+            Console.Error.WriteLine(
+                "Protected uninstall FAILED — issue a fresh removal code on the web and retry.");
+            Environment.ExitCode = 1;
+            return;
+        }
+
+        var wipeSignaled = SingleInstanceService.SignalExistingInstance(
+            SingleInstanceService.CommandRemoveAccount);
+        Console.WriteLine(wipeSignaled
+            ? "Asked the running tracker to wipe the local account."
+            : "Could not signal the running tracker — gate is set; you can uninstall, then sign in is cleared on next launch.");
+
+        if (client.Services.ProtectedUninstallService.WaitForTeardownOk(TimeSpan.FromSeconds(5)))
+        {
+            Console.WriteLine("OK — teardown.ok is present. Uninstall from Apps & features now.");
+            Environment.ExitCode = 0;
+        }
+        else
+        {
+            Console.Error.WriteLine(
+                $"teardown.ok missing at {client.Services.ProtectedUninstallService.TeardownOkPath}");
+            Environment.ExitCode = 1;
+        }
         return;
     }
 
@@ -626,11 +656,13 @@ try
     {
         if (isProtectedUninstall)
         {
+            ProtectedUninstallService.EnsureCliConsole();
             if (string.IsNullOrWhiteSpace(protectedUninstallCode))
             {
                 Console.Error.WriteLine("Usage: client --protected-uninstall --code <removal-code>");
                 await host.StopAsync(CancellationToken.None);
                 host.Dispose();
+                Environment.ExitCode = 1;
                 return;
             }
             Console.WriteLine("Protected uninstall: verifying removal code...");
@@ -644,7 +676,9 @@ try
                 Environment.ExitCode = 1;
                 return;
             }
-            Console.WriteLine("Protected uninstall complete. You can now uninstall Alpha AI Tracker from Apps & features.");
+            Console.WriteLine(
+                $"Protected uninstall complete. Gate: {ProtectedUninstallService.TeardownOkPath}");
+            Console.WriteLine("You can now uninstall from Apps & features.");
         }
         else
         {

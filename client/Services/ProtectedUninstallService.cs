@@ -1,4 +1,5 @@
 using System.Net.Http.Headers;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
@@ -31,50 +32,63 @@ public sealed class ProtectedUninstallService
         _logger = logger;
     }
 
+    public static string TeardownOkPath =>
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            AppInfo.DataFolderName, "dlp", "teardown.ok");
+
     /// <summary>
-    /// Returns true when the removal code was accepted and local teardown finished.
+    /// Verify the removal code and write teardown.ok. Does not need SQLite — uses the
+    /// DLP named pipe and/or %ProgramData%\…\device.auth. Safe to call from a second
+    /// CLI process while the tracker still holds the mutex.
     /// </summary>
-    public async Task<bool> RunAsync(string rawCode, string purpose = "both", CancellationToken ct = default)
+    public static async Task<bool> AuthorizeGateAsync(
+        string rawCode,
+        string purpose = "both",
+        CancellationToken ct = default)
     {
         var code = (rawCode ?? "").Trim();
         if (string.IsNullOrEmpty(code))
         {
-            _logger.LogError("Protected uninstall: empty removal code");
+            Console.Error.WriteLine("Protected uninstall: empty removal code.");
             return false;
         }
 
-        // Prefer service-side verify (LocalSystem + device.auth) so the code is
-        // consumed once and the service unlocks/stops in the same step.
-        var serviceOk = false;
         if (OperatingSystem.IsWindows())
         {
             Console.WriteLine("Authorizing DLP service teardown with removal code...");
-            serviceOk = await DlpPipeClient.AuthorizeTeardownAsync(code, purpose, ct);
-            if (serviceOk)
+            if (await DlpPipeClient.AuthorizeTeardownAsync(code, purpose, ct))
             {
-                Console.WriteLine("DLP service accepted the code and is stopping.");
-            }
-            else
-            {
-                Console.WriteLine(
-                    "DLP service did not accept the code (not running, or invalid). " +
-                    "Trying DeviceAuth verify from this process...");
-                if (!await VerifyViaHttpAsync(code, purpose, ct))
-                {
-                    Console.Error.WriteLine("Removal code invalid or expired.");
-                    return false;
-                }
+                // Service also writes teardown.ok; write again so the Inno gate is
+                // reliable even if the service path differs or exits mid-write.
                 WriteTeardownOkLocal(purpose);
+                Console.WriteLine($"DLP service accepted the code. Gate: {TeardownOkPath}");
+                return true;
             }
+
+            Console.WriteLine(
+                "DLP service did not accept the code (pipe down or reject). " +
+                "Trying DeviceAuth verify via device.auth...");
         }
-        else
+
+        if (!await VerifyViaDeviceAuthFileAsync(code, purpose, ct))
         {
-            if (!await VerifyViaHttpAsync(code, purpose, ct))
-            {
-                Console.Error.WriteLine("Removal code invalid or expired.");
-                return false;
-            }
+            Console.Error.WriteLine("Removal code invalid, expired, or already used.");
+            return false;
         }
+
+        WriteTeardownOkLocal(purpose);
+        Console.WriteLine($"Removal code verified. Gate: {TeardownOkPath}");
+        return true;
+    }
+
+    /// <summary>
+    /// Full path: authorize gate → drain/self-remove/wipe (needs live store).
+    /// </summary>
+    public async Task<bool> RunAsync(string rawCode, string purpose = "both", CancellationToken ct = default)
+    {
+        if (!await AuthorizeGateAsync(rawCode, purpose, ct))
+            return false;
 
         Console.WriteLine("Draining pending data and notifying the server...");
         var notified = await _accountRemoval.RunAsync(ct);
@@ -85,20 +99,80 @@ public sealed class ProtectedUninstallService
         return true;
     }
 
+    /// <summary>Attach a console so WinExe CLI flags print visible output in PowerShell.</summary>
+    public static void EnsureCliConsole()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        try
+        {
+            if (GetConsoleWindow() == IntPtr.Zero)
+            {
+                if (!AttachConsole(ATTACH_PARENT_PROCESS))
+                    AllocConsole();
+            }
+        }
+        catch { /* ignore */ }
+    }
+
+    public static bool WaitForTeardownOk(TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (File.Exists(TeardownOkPath)) return true;
+            Thread.Sleep(250);
+        }
+        return File.Exists(TeardownOkPath);
+    }
+
+    private static async Task<bool> VerifyViaDeviceAuthFileAsync(
+        string code, string purpose, CancellationToken ct)
+    {
+        if (!TryReadDeviceAuth(out var serverUrl, out var token) || string.IsNullOrEmpty(token))
+        {
+            Console.Error.WriteLine(
+                "No device.auth under ProgramData — login the tracker once, then retry.");
+            return false;
+        }
+
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+            using var req = new HttpRequestMessage(
+                HttpMethod.Post, $"{serverUrl}/api/v1/devices/removal-verify")
+            {
+                Content = new StringContent(
+                    JsonSerializer.Serialize(new { code, purpose }),
+                    Encoding.UTF8,
+                    "application/json"),
+            };
+            req.Headers.Authorization = new AuthenticationHeaderValue("Device", token!);
+            ClientIdentityHeaders.Apply(req);
+
+            using var resp = await http.SendAsync(req, ct);
+            var body = await resp.Content.ReadAsStringAsync(ct);
+            if (!resp.IsSuccessStatusCode)
+            {
+                Console.Error.WriteLine($"removal-verify HTTP {(int)resp.StatusCode}: {body}");
+                return false;
+            }
+            using var doc = JsonDocument.Parse(body);
+            return doc.RootElement.TryGetProperty("valid", out var v) && v.GetBoolean();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"removal-verify failed: {ex.Message}");
+            return false;
+        }
+    }
+
     private async Task<bool> VerifyViaHttpAsync(string code, string purpose, CancellationToken ct)
     {
         var emp = await _store.GetEmployeeInfoAsync(ct);
         var token = emp?.DeviceToken;
         var serverUrl = (_config.ServerUrl ?? "").TrimEnd('/');
         if (string.IsNullOrEmpty(token) || string.IsNullOrEmpty(serverUrl))
-        {
-            // Fall back to device.auth written for the DLP service.
-            if (!TryReadDeviceAuth(out serverUrl, out token) || string.IsNullOrEmpty(token))
-            {
-                _logger.LogError("No device token available to verify removal code");
-                return false;
-            }
-        }
+            return await VerifyViaDeviceAuthFileAsync(code, purpose, ct);
 
         try
         {
@@ -158,14 +232,26 @@ public sealed class ProtectedUninstallService
     {
         try
         {
-            var dir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                AppInfo.DataFolderName, "dlp");
+            var dir = Path.GetDirectoryName(TeardownOkPath)!;
             Directory.CreateDirectory(dir);
             File.WriteAllText(
-                Path.Combine(dir, "teardown.ok"),
+                TeardownOkPath,
                 $"authorizedAt={DateTime.UtcNow:o}\npurpose={purpose}\n");
         }
-        catch { /* best-effort */ }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Failed to write teardown.ok: {ex.Message}");
+        }
     }
+
+    private const uint ATTACH_PARENT_PROCESS = 0xFFFFFFFF;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AllocConsole();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AttachConsole(uint dwProcessId);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetConsoleWindow();
 }
