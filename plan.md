@@ -1,6 +1,6 @@
 # Plan — Security & DLP (Windows Production)
 
-> **Status:** P0 complete · P1 USBSTOR + LocalSystem service install done · remaining P1 = protected removal / ACLs  
+> **Status:** P0 complete · P1 USB + service install + protected removal (code / ACL / uninstall gate) shipped  
 > **Scope:** Windows-only endpoint DLP + Shadow IT + hardened agent lifecycle  
 > **Out of scope (v1–v3):** Linux/macOS enforcement, kernel minifilter (deferred to P6), TLS inspection / ChatGPT surgical upload block (deferred to P7)  
 > **Related UI mocks:** `/dlp-rules`, `/dlp-alerts`, `/shadow-it` (static today)  
@@ -368,8 +368,8 @@ Server: no special env beyond normal DB; optional `DLP_REMOVAL_CODE_TTL_MIN=60`.
 - [x] Alerts on USB plug + blocked storage (`RemovableDriveMonitor` + enforce apply alerts)  
 - [x] Lab proof: elevated `AlphaAITracker.Service.exe` pulls policy + blocks USB (token from `aat_verify.db`)  
 - [x] `sc create` / installer registers service as LocalSystem + failure recovery; tracker writes `device.auth` for SYSTEM  
-- [ ] Service ACL + gated uninstall stub  
-- [ ] Removal code issue + verify + extend `AccountRemovalService`  
+- [x] Service ACL locked (SY full / BA query-only) + Inno hard uninstall gate on `teardown.ok` (no break-glass; Alpha AI Tracker only)  
+- [x] Removal code: web Issue + `--protected-uninstall --code` + service `AuthorizeTeardown` pipe  
 - [x] Web: live DLP Alerts (read) + Rules publish MVP  
 
 ### P2 — Web domain block

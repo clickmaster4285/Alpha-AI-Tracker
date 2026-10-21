@@ -30,6 +30,7 @@ builder.Services.AddHttpClient("dlp", c =>
     c.Timeout = TimeSpan.FromSeconds(60);
 });
 
+builder.Services.AddHostedService<ServiceAclWorker>();
 builder.Services.AddHostedService<PolicyPullWorker>();
 builder.Services.AddHostedService<AlertSyncWorker>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<RemovableDriveMonitor>());

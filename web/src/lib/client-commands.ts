@@ -43,3 +43,9 @@ export const REMOVE_ACCOUNT_COMMANDS: RemoveAccountCommand[] = [
     command: '& "C:\\Program Files (x86)\\Alpha AI Tracker\\client.exe" --remove-account',
   },
 ];
+
+/** Windows DLP-protected uninstall (requires a one-time server-issued removal code). */
+export function protectedUninstallCommand(code: string): string {
+  const safe = code.replace(/'/g, "''");
+  return `& "C:\\Program Files (x86)\\Alpha AI Tracker\\client.exe" --protected-uninstall --code '${safe}'`;
+}

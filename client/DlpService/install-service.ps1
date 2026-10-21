@@ -29,16 +29,16 @@ $ExeName = "AlphaAITracker.Service.exe"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 function Stop-IfRunning {
-    Get-Process -Name "AlphaAITracker.Service" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    # Locked DACL blocks admin sc stop/delete — use a one-shot SYSTEM task.
     $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if ($svc) {
-        if ($svc.Status -ne "Stopped") {
-            Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 2
-        }
-        sc.exe delete $ServiceName | Out-Null
-        Start-Sleep -Seconds 1
+        $tr = 'cmd.exe /c sc.exe stop AlphaAITracker.Service & sc.exe delete AlphaAITracker.Service & taskkill /F /IM AlphaAITracker.Service.exe'
+        schtasks.exe /Create /TN "AlphaAITrackerSvcMaint" /TR $tr /SC ONCE /ST 00:00 /RU SYSTEM /F | Out-Null
+        schtasks.exe /Run /TN "AlphaAITrackerSvcMaint" | Out-Null
+        Start-Sleep -Seconds 3
+        schtasks.exe /Delete /TN "AlphaAITrackerSvcMaint" /F | Out-Null
     }
+    Get-Process -Name "AlphaAITracker.Service" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
 if (-not $Source) {
@@ -119,6 +119,13 @@ sc.exe failureflag $ServiceName 1 | Out-Null
 
 Start-Service -Name $ServiceName
 Start-Sleep -Seconds 2
+
+# Lock ACL: LocalSystem full; Administrators query-only (cannot sc stop / services.msc Stop).
+# Authorized teardown (--protected-uninstall) unlocks from inside the service (SYSTEM).
+$lockedSddl = 'D:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCLCSWLOCRRC;;;BA)'
+sc.exe sdset $ServiceName $lockedSddl | Out-Null
+Write-Host "Applied locked service DACL (SY full, BA query-only)"
+
 $svc = Get-Service -Name $ServiceName
 Write-Host "Service status: $($svc.Status)"
 Write-Host ""
@@ -127,4 +134,5 @@ Write-Host "then check Event Viewer → Application / service logs, or:"
 Write-Host "  Get-Content `"$DataDir\service.env`""
 Write-Host "  sc.exe qc $ServiceName"
 Write-Host ""
-Write-Host "Uninstall: powershell -ExecutionPolicy Bypass -File `"$ScriptDir\uninstall-service.ps1`""
+Write-Host "Protected uninstall: client.exe --protected-uninstall --code <code>"
+Write-Host "Lab force-remove service: uninstall-service.ps1 -Force"

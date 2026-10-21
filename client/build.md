@@ -219,6 +219,18 @@ powershell -ExecutionPolicy Bypass -File .\uninstall-service.ps1
 
 The Windows Inno installer also publishes `Service\` and runs the same `sc create` / start on post-install.
 
+### Protected uninstall (removal code)
+
+1. Web **Employees → Issue Removal Code** (pick machine) — code shown once.
+2. On the PC:
+   ```powershell
+   & "C:\Program Files (x86)\Alpha AI Tracker\client.exe" --protected-uninstall --code '<paste>'
+   ```
+3. That verifies the code (DLP service unlocks its ACL and stops), drains/self-removes, wipes the local account, and writes `%ProgramData%\AlphaAITracker\dlp\teardown.ok`.
+4. Then uninstall via Apps & features — **without** `teardown.ok` the uninstaller exits with an error (no “continue anyway”). Only Alpha AI Tracker is gated; other apps are unchanged.
+
+While running, `AlphaAITracker.Service` uses a locked DACL (LocalSystem full / Administrators query-only), so Services.msc **Stop** fails for admins until a removal code unlocks it.
+
 ---
 
 ## Sending to a Friend

@@ -102,6 +102,30 @@ begin
     Exec('ping', '127.0.0.1 -n 2 -w 1000', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
+// Service DACL is locked to LocalSystem (admins cannot sc stop/delete).
+// Installer/uninstaller must stop/delete via a one-shot SYSTEM scheduled task.
+procedure StopDeleteDlpServiceAsSystem;
+var
+  ResultCode: Integer;
+begin
+  Exec('schtasks.exe',
+    '/Create /TN "AlphaAITrackerSvcMaint" /TR "cmd.exe /c sc.exe stop AlphaAITracker.Service & sc.exe delete AlphaAITracker.Service & taskkill /F /IM AlphaAITracker.Service.exe" /SC ONCE /ST 00:00 /RU SYSTEM /F',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('schtasks.exe', '/Run /TN "AlphaAITrackerSvcMaint"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('ping', '127.0.0.1 -n 4 -w 1000', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('schtasks.exe', '/Delete /TN "AlphaAITrackerSvcMaint" /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+procedure LockDlpServiceAcl;
+var
+  ResultCode: Integer;
+begin
+  // SY=full; BA=query only — AlphaAITracker.Service cannot be stopped from services.msc.
+  Exec('sc.exe',
+    'sdset AlphaAITracker.Service D:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCLCSWLOCRRC;;;BA)',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
 procedure InstallDlpService;
 var
   ResultCode: Integer;
@@ -126,8 +150,7 @@ begin
       'ALPHA_DLP_POLICY_POLL_SEC=60' + #13#10 +
       'ALPHA_DLP_ALERT_SYNC_SEC=30' + #13#10, False);
 
-  Exec('sc.exe', 'stop AlphaAITracker.Service', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec('sc.exe', 'delete AlphaAITracker.Service', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  StopDeleteDlpServiceAsSystem;
   Exec('sc.exe',
     'create AlphaAITracker.Service binPath= "' + ExePath + '" start= auto DisplayName= "Alpha AI Tracker DLP" obj= LocalSystem',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -138,15 +161,13 @@ begin
     'failure AlphaAITracker.Service reset= 86400 actions= restart/5000/restart/10000/restart/30000',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('sc.exe', 'start AlphaAITracker.Service', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  LockDlpServiceAcl;
 end;
 
 procedure RemoveDlpService;
-var
-  ResultCode: Integer;
 begin
-  Exec('sc.exe', 'stop AlphaAITracker.Service', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec('sc.exe', 'delete AlphaAITracker.Service', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec('taskkill', '/F /IM AlphaAITracker.Service.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // Only reached after teardown.ok (removal code). Prefer SYSTEM maintenance task.
+  StopDeleteDlpServiceAsSystem;
 end;
 
 // ────────────────────────────────────────────────
@@ -160,11 +181,31 @@ begin
 end;
 
 // ────────────────────────────────────────────────
-// InitializeUninstall — Called when uninstall starts.
-// Also kills running instances before removing files.
+// InitializeUninstall — Alpha AI Tracker ONLY.
+// Hard gate: Apps & features uninstall is refused unless
+// teardown.ok exists (written after a verified removal code
+// via client.exe --protected-uninstall --code …).
+// No break-glass Yes — other installed software is unaffected.
 // ────────────────────────────────────────────────
 function InitializeUninstall: Boolean;
+var
+  Gate: string;
 begin
+  Gate := ExpandConstant('{commonappdata}\AlphaAITracker\dlp\teardown.ok');
+  if not FileExists(Gate) then
+  begin
+    MsgBox(
+      'Alpha AI Tracker cannot be uninstalled without an authorized removal code.'#13#10#13#10 +
+      '1. On the web: Employees → Issue Removal Code'#13#10 +
+      '2. On this PC run:'#13#10 +
+      '   client.exe --protected-uninstall --code <code>'#13#10 +
+      '3. Then uninstall again from Apps & features.'#13#10#13#10 +
+      'This restriction applies only to Alpha AI Tracker.',
+      mbError, MB_OK);
+    Result := False;
+    Exit;
+  end;
+
   Result := True;
   RemoveDlpService;
   KillRunningInstance;

@@ -3,6 +3,7 @@ using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
 using Avalonia.Threading;
 using client.Core;
+using client.Services;
 using client.ViewModels;
 using client.Views;
 using Microsoft.Extensions.DependencyInjection;
@@ -242,6 +243,28 @@ public partial class App : Application
             SingleInstanceService.OnRemoveAccountRequested = () => Dispatcher.UIThread.Post(async () =>
             {
                 await RemoveLocalAccountAsync();
+                ShowWindow();
+            });
+
+            SingleInstanceService.OnProtectedUninstallRequested = code => Dispatcher.UIThread.Post(async () =>
+            {
+                try
+                {
+                    var svc = ServiceProvider?.GetService<ProtectedUninstallService>();
+                    if (svc is null)
+                    {
+                        Console.Error.WriteLine("[client] ProtectedUninstallService not registered");
+                        return;
+                    }
+                    var ok = await svc.RunAsync(code, "both", CancellationToken.None);
+                    Console.WriteLine(ok
+                        ? "Protected uninstall complete."
+                        : "Protected uninstall failed — check the removal code.");
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[client] Protected uninstall failed: {ex.Message}");
+                }
                 ShowWindow();
             });
 

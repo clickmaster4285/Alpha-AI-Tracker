@@ -1734,7 +1734,25 @@ export interface PublishDlpPolicyResponse {
   ruleCount: number;
 }
 
+export interface IssueRemovalCodeResponse {
+  code: string;
+  expiresAt: string;
+  purpose: string;
+  machineId: string;
+}
+
 export const dlpApi = {
+  issueRemovalCode: (data: {
+    machineId: string;
+    employeeId: string;
+    purpose?: 'stop' | 'uninstall' | 'both';
+    ttlMinutes?: number;
+  }) =>
+    request<IssueRemovalCodeResponse>('/devices/removal-code', {
+      method: 'POST',
+      body: data,
+    }),
+
   rules: {
     list: () => request<{ rules: DlpRule[]; total: number }>('/dlp/rules'),
     create: (data: {

@@ -194,6 +194,28 @@ var isUserLaunch = !isBackground && !isMinimized;
 // Current Device" modal shows for Linux and Windows.
 var isRemoveAccount = args.Contains("--remove-account");
 
+// ─── Protected uninstall (--protected-uninstall --code <raw>) ───
+// Requires a one-time server-issued removal code. Verifies via the DLP service
+// (or DeviceAuth), drains/self-removes/wipes, and stops AlphaAITracker.Service.
+var isProtectedUninstall = args.Contains("--protected-uninstall");
+string? protectedUninstallCode = null;
+if (isProtectedUninstall)
+{
+    for (var i = 0; i < args.Length; i++)
+    {
+        if (string.Equals(args[i], "--code", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+        {
+            protectedUninstallCode = args[i + 1];
+            break;
+        }
+        if (args[i].StartsWith("--code=", StringComparison.OrdinalIgnoreCase))
+        {
+            protectedUninstallCode = args[i]["--code=".Length..];
+            break;
+        }
+    }
+}
+
 var appMutex = new Mutex(true, SingleInstanceService.MutexName, out var mutexCreated);
 if (!mutexCreated)
 {
@@ -204,6 +226,22 @@ if (!mutexCreated)
     // the database file is in use, and stopping the tracker here would have
     // auto-start / systemd Restart=always immediately start a second, still-logged-in
     // instance that races us for the mutex. Signal and exit.
+    if (isProtectedUninstall)
+    {
+        if (string.IsNullOrWhiteSpace(protectedUninstallCode))
+        {
+            Console.Error.WriteLine("Usage: client --protected-uninstall --code <removal-code>");
+            return;
+        }
+        // Hand the code to the running instance (it owns SQLite + DeviceAuth).
+        var delivered = SingleInstanceService.SignalExistingInstance(
+            SingleInstanceService.CommandProtectedUninstall + ":" + protectedUninstallCode.Trim());
+        Console.WriteLine(delivered
+            ? "Protected uninstall requested — the running app will verify the code, wipe the account, and stop the DLP service."
+            : "Could not reach the running app. Start the tracker once, or run --protected-uninstall when no other instance holds the mutex.");
+        return;
+    }
+
     if (isRemoveAccount)
     {
         // The RUNNING instance owns both the SQLite connection and the server
@@ -435,6 +473,7 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<SyncService>());
 // CLI flow, the running-instance signal handler and the server-initiated wipe
 // ({"action":"wipe_local"}). It drains, calls /devices/self-remove, then wipes.
 builder.Services.AddSingleton<AccountRemovalService>();
+builder.Services.AddSingleton<ProtectedUninstallService>();
 
 // Control WebSocket (presence / keep-alive). Parked when ALPHA_WS_ENABLED=false.
 // Connects only after SyncService proves a 2xx (idle timeout fallback + reconnect).
@@ -582,13 +621,38 @@ try
     // never ran and the server was never told). AccountRemovalService stops
     // collection, waits for the drain, POSTs /devices/self-remove, then wipes the
     // local DB + machine id. Killed siblings and a clean shutdown follow.
-    if (isRemoveAccount)
+    if (isProtectedUninstall || isRemoveAccount)
     {
-        Console.WriteLine("Removing this machine's account: draining pending data, notifying the server...");
-        var notified = await accountRemoval.RunAsync(CancellationToken.None);
-        Console.WriteLine(notified
-            ? "Server notified — this machine is marked old and the employee is untracked."
-            : "Server could not be reached — local account removed locally (pending rows may be lost).");
+        if (isProtectedUninstall)
+        {
+            if (string.IsNullOrWhiteSpace(protectedUninstallCode))
+            {
+                Console.Error.WriteLine("Usage: client --protected-uninstall --code <removal-code>");
+                await host.StopAsync(CancellationToken.None);
+                host.Dispose();
+                return;
+            }
+            Console.WriteLine("Protected uninstall: verifying removal code...");
+            var protectedSvc = host.Services.GetRequiredService<ProtectedUninstallService>();
+            var ok = await protectedSvc.RunAsync(protectedUninstallCode!, "both", CancellationToken.None);
+            if (!ok)
+            {
+                Console.Error.WriteLine("Protected uninstall failed — removal code rejected or credentials missing.");
+                await host.StopAsync(CancellationToken.None);
+                host.Dispose();
+                Environment.ExitCode = 1;
+                return;
+            }
+            Console.WriteLine("Protected uninstall complete. You can now uninstall Alpha AI Tracker from Apps & features.");
+        }
+        else
+        {
+            Console.WriteLine("Removing this machine's account: draining pending data, notifying the server...");
+            var notified = await accountRemoval.RunAsync(CancellationToken.None);
+            Console.WriteLine(notified
+                ? "Server notified — this machine is marked old and the employee is untracked."
+                : "Server could not be reached — local account removed locally (pending rows may be lost).");
+        }
 
         // Cold start must not leave a sibling tracker behind (the mutex branch above
         // handles the already-running case by signalling instead).
@@ -691,6 +755,26 @@ try
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"[client] Account removal failed: {ex.Message}");
+            }
+
+            App.PendingRemoveAccount = true;
+            StartLazyGui();
+        };
+
+        var protectedUninstall = host.Services.GetRequiredService<ProtectedUninstallService>();
+        SingleInstanceService.OnProtectedUninstallRequested = code =>
+        {
+            try
+            {
+                var ok = protectedUninstall.RunAsync(code, "both", CancellationToken.None)
+                    .GetAwaiter().GetResult();
+                Console.WriteLine(ok
+                    ? "Protected uninstall complete — opening the sign-in page."
+                    : "Protected uninstall failed — check the removal code.");
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[client] Protected uninstall failed: {ex.Message}");
             }
 
             App.PendingRemoveAccount = true;
