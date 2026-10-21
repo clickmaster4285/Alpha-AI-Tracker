@@ -13,6 +13,8 @@ public sealed class EnforceWorker : BackgroundService
     private readonly ILogger<EnforceWorker> _logger;
     private long _lastVersion = -1;
     private bool? _lastUsbBlock;
+    private DateTimeOffset _lastAccessDeniedLog = DateTimeOffset.MinValue;
+    private bool _accessDeniedAlertQueued;
 
     public EnforceWorker(
         DlpConfig cfg,
@@ -74,18 +76,29 @@ public sealed class EnforceWorker : BackgroundService
         if (version != _lastVersion)
         {
             _lastVersion = version;
+            _accessDeniedAlertQueued = false;
             await _store.AuditAsync("enforce_reload", $"version={version} hash={hash}", ct);
             _logger.LogInformation("EnforceWorker loaded policy version {Version}", version);
+            if (wantUsbBlock)
+                _logger.LogInformation("Policy requests USB mass-storage BLOCK");
+            else if (version == 0)
+                _logger.LogInformation(
+                    "No published DLP policy yet (version 0). Create a USB rule, Publish on web, and ensure DeviceAuth token is valid.");
         }
 
-        if (_lastUsbBlock == wantUsbBlock)
+        _drives.SetUsbBlocked(wantUsbBlock);
+
+        // Do not touch the registry just to "confirm allow" on cold start with no block rules.
+        if (!wantUsbBlock && _lastUsbBlock != true)
         {
-            _drives.SetUsbBlocked(wantUsbBlock);
+            _lastUsbBlock = false;
             return;
         }
 
+        if (_lastUsbBlock == wantUsbBlock)
+            return;
+
         var result = UsbStorEnforcer.Apply(wantUsbBlock);
-        _drives.SetUsbBlocked(wantUsbBlock);
         await _store.AuditAsync(
             "usbstor_apply",
             $"block={wantUsbBlock} changed={result.Changed} detail={result.Detail} prev={result.PreviousStart}",
@@ -93,25 +106,35 @@ public sealed class EnforceWorker : BackgroundService
 
         if (result.Detail == "access_denied_need_admin")
         {
-            _logger.LogWarning(
-                "USBSTOR enforce needs Administrator / LocalSystem (detail={Detail}). " +
-                "Run elevated or install as Windows Service.", result.Detail);
-            var rule = PolicyBundleParser.FirstUsbBlockRule(bundle);
-            await _store.EnqueueAlertAsync(
-                Guid.NewGuid().ToString(),
-                string.IsNullOrEmpty(rule?.Id) ? null : rule.Id,
-                version,
-                "usb_storage",
-                rule?.Severity ?? "critical",
-                "blocked_failed",
-                DateTimeOffset.UtcNow,
-                JsonSerializer.Serialize(new { reason = result.Detail, desiredBlock = wantUsbBlock }),
-                ct);
-            // Do not flip _lastUsbBlock so we retry after elevation.
+            // Throttle spam — still retry so elevation mid-run can succeed.
+            if (DateTimeOffset.UtcNow - _lastAccessDeniedLog > TimeSpan.FromMinutes(2))
+            {
+                _lastAccessDeniedLog = DateTimeOffset.UtcNow;
+                _logger.LogWarning(
+                    "USBSTOR enforce needs Administrator / LocalSystem. " +
+                    "Right-click AlphaAITracker.Service.exe → Run as administrator, or install as a Windows Service.");
+            }
+
+            if (!_accessDeniedAlertQueued && wantUsbBlock)
+            {
+                _accessDeniedAlertQueued = true;
+                var rule = PolicyBundleParser.FirstUsbBlockRule(bundle);
+                await _store.EnqueueAlertAsync(
+                    Guid.NewGuid().ToString(),
+                    string.IsNullOrEmpty(rule?.Id) ? null : rule.Id,
+                    version,
+                    "usb_storage",
+                    rule?.Severity ?? "critical",
+                    "blocked_failed",
+                    DateTimeOffset.UtcNow,
+                    JsonSerializer.Serialize(new { reason = result.Detail, desiredBlock = wantUsbBlock }),
+                    ct);
+            }
             return;
         }
 
         _lastUsbBlock = wantUsbBlock;
+        _accessDeniedAlertQueued = false;
         _logger.LogInformation(
             "USBSTOR {State} (changed={Changed}, detail={Detail})",
             wantUsbBlock ? "BLOCK" : "ALLOW", result.Changed, result.Detail);

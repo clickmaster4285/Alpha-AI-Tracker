@@ -35,7 +35,11 @@ public sealed class AlertSyncWorker : BackgroundService
         }
         if (string.IsNullOrWhiteSpace(_cfg.ServerUrl) || string.IsNullOrWhiteSpace(_cfg.DeviceToken))
         {
-            _logger.LogWarning("AlertSyncWorker parked — credentials missing");
+            _logger.LogWarning(
+                "AlertSyncWorker parked — missing {Missing}",
+                string.IsNullOrWhiteSpace(_cfg.ServerUrl) && string.IsNullOrWhiteSpace(_cfg.DeviceToken)
+                    ? "ALPHA_SERVER_URL and ALPHA_DEVICE_TOKEN"
+                    : string.IsNullOrWhiteSpace(_cfg.DeviceToken) ? "ALPHA_DEVICE_TOKEN" : "ALPHA_SERVER_URL");
             return;
         }
 
@@ -102,7 +106,15 @@ public sealed class AlertSyncWorker : BackgroundService
         var body = await resp.Content.ReadAsStringAsync(ct);
         if (!resp.IsSuccessStatusCode)
         {
-            _logger.LogWarning("DLP alert sync HTTP {Status}: {Body}", (int)resp.StatusCode, body);
+            if ((int)resp.StatusCode == 401)
+            {
+                _logger.LogWarning(
+                    "DLP alert sync HTTP 401 — device token invalid/revoked. Re-login the tracker or set ALPHA_DEVICE_TOKEN.");
+            }
+            else
+            {
+                _logger.LogWarning("DLP alert sync HTTP {Status}: {Body}", (int)resp.StatusCode, body);
+            }
             return;
         }
 

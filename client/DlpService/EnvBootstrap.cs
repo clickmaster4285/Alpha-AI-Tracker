@@ -5,7 +5,7 @@ namespace AlphaAITracker.Service;
 /// <summary>
 /// Dev/lab bootstrap: load nearby .env into process env (does not overwrite
 /// already-set variables), and if ALPHA_DEVICE_TOKEN is still empty, read it
-/// from the Windows tracker SQLite under %LocalAppData%\AlphaAITracker.
+/// from the Windows tracker SQLite (aat_verify.db / alpha_tracker.db / ALPHA_DB_PATH).
 /// </summary>
 internal static class EnvBootstrap
 {
@@ -50,7 +50,6 @@ internal static class EnvBootstrap
             var val = line[(eq + 1)..].Trim();
             if (val.Length >= 2 && ((val[0] == '"' && val[^1] == '"') || (val[0] == '\'' && val[^1] == '\'')))
                 val = val[1..^1];
-            // Do not clobber process/Machine env already set by the operator.
             if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable(key)))
                 Environment.SetEnvironmentVariable(key, val);
         }
@@ -61,26 +60,54 @@ internal static class EnvBootstrap
         if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ALPHA_DEVICE_TOKEN")))
             return;
 
-        var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        var dbPath = Path.Combine(local, "AlphaAITracker", "data", "alpha_tracker.db");
-        if (!File.Exists(dbPath)) return;
-
-        try
+        foreach (var dbPath in CandidateTrackerDbPaths())
         {
-            using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
-            conn.Open();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT device_token FROM employee_info WHERE device_token IS NOT NULL AND length(device_token) > 0 LIMIT 1";
-            var tok = cmd.ExecuteScalar() as string;
-            if (!string.IsNullOrWhiteSpace(tok))
+            if (!File.Exists(dbPath)) continue;
+            try
             {
+                using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText =
+                    "SELECT device_token FROM employee_info WHERE device_token IS NOT NULL AND length(device_token) > 0 LIMIT 1";
+                var tok = cmd.ExecuteScalar() as string;
+                if (string.IsNullOrWhiteSpace(tok)) continue;
+
                 Environment.SetEnvironmentVariable("ALPHA_DEVICE_TOKEN", tok.Trim());
-                Console.WriteLine("[DlpService] ALPHA_DEVICE_TOKEN filled from tracker SQLite");
+                Console.WriteLine(
+                    $"[DlpService] ALPHA_DEVICE_TOKEN filled from {dbPath} (len={tok.Trim().Length}). " +
+                    "If policy pull returns 401, re-login the tracker.");
+                return;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[DlpService] Warning: could not read {dbPath}: {ex.Message}");
             }
         }
-        catch (Exception ex)
+
+        Console.WriteLine(
+            "[DlpService] No device_token found in tracker SQLite. " +
+            "Login the Alpha AI Tracker client or set ALPHA_DEVICE_TOKEN in .env.");
+    }
+
+    private static IEnumerable<string> CandidateTrackerDbPaths()
+    {
+        var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var dataDir = Path.Combine(local, "AlphaAITracker", "data");
+
+        // Prefer ALPHA_DB_PATH from .env (e.g. data/aat_verify.db → LocalAppData\...\aat_verify.db)
+        var configured = Environment.GetEnvironmentVariable("ALPHA_DB_PATH");
+        if (!string.IsNullOrWhiteSpace(configured))
         {
-            Console.Error.WriteLine($"[DlpService] Warning: could not read tracker device_token: {ex.Message}");
+            var name = Path.GetFileName(configured.Trim().Replace('/', Path.DirectorySeparatorChar));
+            if (!string.IsNullOrEmpty(name))
+                yield return Path.Combine(dataDir, name);
+            if (Path.IsPathRooted(configured) && File.Exists(configured))
+                yield return configured;
         }
+
+        // Common installed / lab filenames (client/.env uses aat_verify.db today).
+        yield return Path.Combine(dataDir, "aat_verify.db");
+        yield return Path.Combine(dataDir, "alpha_tracker.db");
     }
 }

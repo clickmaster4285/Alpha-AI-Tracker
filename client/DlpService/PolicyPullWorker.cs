@@ -33,9 +33,16 @@ public sealed class PolicyPullWorker : BackgroundService
             _logger.LogInformation("PolicyPullWorker parked (ALPHA_DLP_ENABLED=false)");
             return;
         }
-        if (string.IsNullOrWhiteSpace(_cfg.ServerUrl) || string.IsNullOrWhiteSpace(_cfg.DeviceToken))
+        if (string.IsNullOrWhiteSpace(_cfg.ServerUrl))
         {
-            _logger.LogWarning("PolicyPullWorker parked — ALPHA_SERVER_URL / ALPHA_DEVICE_TOKEN not set");
+            _logger.LogWarning("PolicyPullWorker parked — ALPHA_SERVER_URL not set");
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(_cfg.DeviceToken))
+        {
+            _logger.LogWarning(
+                "PolicyPullWorker parked — ALPHA_DEVICE_TOKEN not set " +
+                "(login tracker so SQLite has device_token, or set it in .env)");
             return;
         }
 
@@ -80,7 +87,16 @@ public sealed class PolicyPullWorker : BackgroundService
         using var resp = await client.SendAsync(req, ct);
         if (!resp.IsSuccessStatusCode)
         {
-            _logger.LogWarning("DLP policy pull HTTP {Status}", (int)resp.StatusCode);
+            if ((int)resp.StatusCode == 401)
+            {
+                _logger.LogWarning(
+                    "DLP policy pull HTTP 401 — device token invalid/revoked. " +
+                    "Re-login the Alpha AI Tracker client (fresh device_token), or set ALPHA_DEVICE_TOKEN in .env and restart the service.");
+            }
+            else
+            {
+                _logger.LogWarning("DLP policy pull HTTP {Status}", (int)resp.StatusCode);
+            }
             return;
         }
 
