@@ -6,6 +6,7 @@ namespace AlphaAITracker.Service;
 
 /// <summary>
 /// Drains unsynced local DLP alerts to POST /api/v1/dlp/alerts/sync.
+/// Waits for credentials instead of parking forever (late tracker login).
 /// </summary>
 public sealed class AlertSyncWorker : BackgroundService
 {
@@ -13,6 +14,7 @@ public sealed class AlertSyncWorker : BackgroundService
     private readonly PolicyStore _store;
     private readonly IHttpClientFactory _httpFactory;
     private readonly ILogger<AlertSyncWorker> _logger;
+    private bool _loggedWaiting;
 
     public AlertSyncWorker(
         DlpConfig cfg,
@@ -33,21 +35,34 @@ public sealed class AlertSyncWorker : BackgroundService
             _logger.LogInformation("AlertSyncWorker parked (ALPHA_DLP_ENABLED=false)");
             return;
         }
-        if (string.IsNullOrWhiteSpace(_cfg.ServerUrl) || string.IsNullOrWhiteSpace(_cfg.DeviceToken))
-        {
-            _logger.LogWarning(
-                "AlertSyncWorker parked — missing {Missing}",
-                string.IsNullOrWhiteSpace(_cfg.ServerUrl) && string.IsNullOrWhiteSpace(_cfg.DeviceToken)
-                    ? "ALPHA_SERVER_URL and ALPHA_DEVICE_TOKEN"
-                    : string.IsNullOrWhiteSpace(_cfg.DeviceToken) ? "ALPHA_DEVICE_TOKEN" : "ALPHA_SERVER_URL");
-            return;
-        }
 
         await _store.InitializeAsync(stoppingToken);
         var interval = TimeSpan.FromSeconds(Math.Max(15, _cfg.AlertSyncSec));
+        var waitInterval = TimeSpan.FromSeconds(15);
 
         while (!stoppingToken.IsCancellationRequested)
         {
+            _cfg.RefreshCredentials();
+            if (string.IsNullOrWhiteSpace(_cfg.ServerUrl) || string.IsNullOrWhiteSpace(_cfg.DeviceToken))
+            {
+                if (!_loggedWaiting)
+                {
+                    _logger.LogWarning(
+                        "AlertSyncWorker waiting for credentials " +
+                        "(login Alpha AI Tracker so device.auth is written)");
+                    _loggedWaiting = true;
+                }
+                try { await Task.Delay(waitInterval, stoppingToken); }
+                catch (OperationCanceledException) { break; }
+                continue;
+            }
+
+            if (_loggedWaiting)
+            {
+                _logger.LogInformation("AlertSyncWorker credentials ready — draining alerts");
+                _loggedWaiting = false;
+            }
+
             try
             {
                 await DrainOnceAsync(stoppingToken);
@@ -61,14 +76,8 @@ public sealed class AlertSyncWorker : BackgroundService
                 _logger.LogWarning(ex, "DLP alert sync failed");
             }
 
-            try
-            {
-                await Task.Delay(interval, stoppingToken);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
+            try { await Task.Delay(interval, stoppingToken); }
+            catch (OperationCanceledException) { break; }
         }
     }
 

@@ -4,6 +4,7 @@ using client.Core;
 using client.Core.Abstractions;
 using client.Core.Models;
 using client.Configuration;
+using client.Services;
 
 namespace client.Storage;
 
@@ -3259,6 +3260,9 @@ public class SqliteLogStore : ILogStore, IDisposable
             await SetStatusCoreAsync("employee_id", employee.EmployeeId, ct);
             await SetStatusCoreAsync("employee_name", employee.Name, ct);
             await SetStatusCoreAsync("is_logged_in", "true", ct);
+
+            // Bridge DeviceAuth to LocalSystem DLP service (ProgramData device.auth).
+            DlpDeviceCredentialBridge.Publish(employee.DeviceToken, employee.EmployeeId);
         }
         finally
         {
@@ -3294,6 +3298,8 @@ public class SqliteLogStore : ILogStore, IDisposable
             await SetStatusCoreAsync("is_logged_in", "false", ct);
             await SetStatusCoreAsync("employee_id", "", ct);
             await SetStatusCoreAsync("employee_name", "", ct);
+
+            DlpDeviceCredentialBridge.Clear();
         }
         finally
         {
@@ -3370,6 +3376,8 @@ public class SqliteLogStore : ILogStore, IDisposable
             {
                 // Data is already gone; a failed compaction must not fail the removal.
             }
+
+            DlpDeviceCredentialBridge.Clear();
         }
         finally
         {

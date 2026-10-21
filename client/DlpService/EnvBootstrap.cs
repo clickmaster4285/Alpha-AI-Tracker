@@ -3,16 +3,26 @@ using Microsoft.Data.Sqlite;
 namespace AlphaAITracker.Service;
 
 /// <summary>
-/// Dev/lab bootstrap: load nearby .env into process env (does not overwrite
-/// already-set variables), and if ALPHA_DEVICE_TOKEN is still empty, read it
-/// from the Windows tracker SQLite (aat_verify.db / alpha_tracker.db / ALPHA_DB_PATH).
+/// Bootstrap: load service.env / nearby .env (does not overwrite already-set vars),
+/// then fill ALPHA_DEVICE_TOKEN from device.auth or tracker SQLite (all user profiles
+/// when running as LocalSystem).
 /// </summary>
 internal static class EnvBootstrap
 {
     public static void Apply()
     {
+        LoadServiceEnv();
         LoadDotEnvNearBinary();
+        TryFillFromDeviceAuthFile();
         TryFillDeviceTokenFromTrackerDb();
+    }
+
+    private static void LoadServiceEnv()
+    {
+        var path = Path.Combine(DeviceCredentialStore.DefaultDir, "service.env");
+        if (!File.Exists(path)) return;
+        ParseAndSet(File.ReadAllText(path));
+        Console.WriteLine($"[DlpService] Loaded env from {path}");
     }
 
     private static void LoadDotEnvNearBinary()
@@ -29,10 +39,11 @@ internal static class EnvBootstrap
     private static IEnumerable<string> CandidateEnvPaths()
     {
         var baseDir = AppContext.BaseDirectory;
-        // bin/Release/net10.0 → DlpService → client
+        // Installed: {app}\Service\.env (optional)
+        yield return Path.Combine(baseDir, ".env");
+        // Lab: bin/Release/net10.0 → DlpService → client
         yield return Path.GetFullPath(Path.Combine(baseDir, "..", "..", "..", "..", ".env"));
         yield return Path.GetFullPath(Path.Combine(baseDir, "..", "..", "..", ".env"));
-        yield return Path.Combine(baseDir, ".env");
         var cwd = Directory.GetCurrentDirectory();
         yield return Path.Combine(cwd, ".env");
         yield return Path.GetFullPath(Path.Combine(cwd, "..", ".env"));
@@ -52,6 +63,23 @@ internal static class EnvBootstrap
                 val = val[1..^1];
             if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable(key)))
                 Environment.SetEnvironmentVariable(key, val);
+        }
+    }
+
+    private static void TryFillFromDeviceAuthFile()
+    {
+        if (!DeviceCredentialStore.TryLoad(out var url, out var tok)) return;
+
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ALPHA_SERVER_URL")) &&
+            !string.IsNullOrWhiteSpace(url))
+            Environment.SetEnvironmentVariable("ALPHA_SERVER_URL", url);
+
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ALPHA_DEVICE_TOKEN")) &&
+            !string.IsNullOrWhiteSpace(tok))
+        {
+            Environment.SetEnvironmentVariable("ALPHA_DEVICE_TOKEN", tok);
+            Console.WriteLine(
+                $"[DlpService] ALPHA_DEVICE_TOKEN filled from {DeviceCredentialStore.DefaultPath} (len={tok.Length}).");
         }
     }
 
@@ -86,28 +114,48 @@ internal static class EnvBootstrap
         }
 
         Console.WriteLine(
-            "[DlpService] No device_token found in tracker SQLite. " +
-            "Login the Alpha AI Tracker client or set ALPHA_DEVICE_TOKEN in .env.");
+            "[DlpService] No device_token yet (device.auth / tracker SQLite). " +
+            "Workers will wait until the tracker logs in.");
     }
 
     private static IEnumerable<string> CandidateTrackerDbPaths()
     {
-        var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        var dataDir = Path.Combine(local, "AlphaAITracker", "data");
-
-        // Prefer ALPHA_DB_PATH from .env (e.g. data/aat_verify.db → LocalAppData\...\aat_verify.db)
         var configured = Environment.GetEnvironmentVariable("ALPHA_DB_PATH");
+        var dbNames = new List<string> { "aat_verify.db", "alpha_tracker.db" };
         if (!string.IsNullOrWhiteSpace(configured))
         {
             var name = Path.GetFileName(configured.Trim().Replace('/', Path.DirectorySeparatorChar));
-            if (!string.IsNullOrEmpty(name))
-                yield return Path.Combine(dataDir, name);
+            if (!string.IsNullOrEmpty(name) && !dbNames.Contains(name, StringComparer.OrdinalIgnoreCase))
+                dbNames.Insert(0, name);
             if (Path.IsPathRooted(configured) && File.Exists(configured))
                 yield return configured;
         }
 
-        // Common installed / lab filenames (client/.env uses aat_verify.db today).
-        yield return Path.Combine(dataDir, "aat_verify.db");
-        yield return Path.Combine(dataDir, "alpha_tracker.db");
+        // Interactive user (dotnet run / double-click as admin).
+        var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        foreach (var name in dbNames)
+            yield return Path.Combine(local, "AlphaAITracker", "data", name);
+
+        // LocalSystem: scan every profile under C:\Users\*\AppData\Local\...
+        string usersRoot;
+        try
+        {
+            usersRoot = Path.GetFullPath(Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".."));
+        }
+        catch
+        {
+            usersRoot = Path.Combine(Path.GetPathRoot(Environment.SystemDirectory) ?? @"C:\", "Users");
+        }
+
+        if (!Directory.Exists(usersRoot)) yield break;
+
+        foreach (var profile in Directory.EnumerateDirectories(usersRoot))
+        {
+            var leaf = Path.GetFileName(profile);
+            if (leaf is "Public" or "Default" or "Default User" or "All Users") continue;
+            foreach (var name in dbNames)
+                yield return Path.Combine(profile, "AppData", "Local", "AlphaAITracker", "data", name);
+        }
     }
 }

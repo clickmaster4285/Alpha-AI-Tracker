@@ -1,10 +1,10 @@
 # Plan — Security & DLP (Windows Production)
 
-> **Status:** P0 complete · P1 USBSTOR enforce + USB alerts in progress (needs LocalSystem for registry write)  
+> **Status:** P0 complete · P1 USBSTOR + LocalSystem service install done · remaining P1 = protected removal / ACLs  
 > **Scope:** Windows-only endpoint DLP + Shadow IT + hardened agent lifecycle  
 > **Out of scope (v1–v3):** Linux/macOS enforcement, kernel minifilter (deferred to P6), TLS inspection / ChatGPT surgical upload block (deferred to P7)  
 > **Related UI mocks:** `/dlp-rules`, `/dlp-alerts`, `/shadow-it` (static today)  
-> **Last updated:** 2026-10-20
+> **Last updated:** 2026-10-21
 
 ---
 
@@ -358,7 +358,7 @@ Server: no special env beyond normal DB; optional `DLP_REMOVAL_CODE_TTL_MIN=60`.
 - [x] Device `GET /dlp/policy`, `POST /dlp/alerts/sync`, `POST /dlp/health` (+ admin CRUD/publish/alerts/shadow-it + removal-code)  
 - [x] Windows Service project skeleton + named pipe + PolicyStore (`client/DlpService`)  
 - [x] AlertWorker queue schema + sync drain  
-- [ ] Installer registers service (flag off = park workers) — deferred to installer pass with P1  
+- [x] Installer registers service (Inno + `install-service.ps1`; `service.env` enables workers)  
 - [x] `go build` / `dotnet build` (DlpService) / `tsc` clean  
 - [x] Web: live DLP Rules / Alerts / Shadow IT pages (API-backed; enforce still P1+)  
 
@@ -366,10 +366,11 @@ Server: no special env beyond normal DB; optional `DLP_REMOVAL_CODE_TTL_MIN=60`.
 
 - [x] EnforceWorker: USBSTOR disable when any active `usb_*` block rule in applied bundle (`UsbStorEnforcer`)  
 - [x] Alerts on USB plug + blocked storage (`RemovableDriveMonitor` + enforce apply alerts)  
+- [x] Lab proof: elevated `AlphaAITracker.Service.exe` pulls policy + blocks USB (token from `aat_verify.db`)  
+- [x] `sc create` / installer registers service as LocalSystem + failure recovery; tracker writes `device.auth` for SYSTEM  
 - [ ] Service ACL + gated uninstall stub  
 - [ ] Removal code issue + verify + extend `AccountRemovalService`  
 - [x] Web: live DLP Alerts (read) + Rules publish MVP  
-- [ ] Installed-build proof on a lab Windows VM (needs elevated/LocalSystem for USBSTOR write)  
 
 ### P2 — Web domain block
 

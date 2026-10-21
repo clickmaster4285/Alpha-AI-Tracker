@@ -197,6 +197,30 @@ bash publish/build-installer.sh
 
 ---
 
+## Windows DLP service (AlphaAITracker.Service)
+
+Lab install without rebuilding the full Inno installer (run **elevated** PowerShell):
+
+```powershell
+cd client\DlpService
+dotnet build -c Release
+powershell -ExecutionPolicy Bypass -File .\install-service.ps1
+```
+
+- Installs to `C:\Program Files\AlphaAITracker\Service\`
+- Registers **LocalSystem** auto-start service `AlphaAITracker.Service` with SCM failure recovery
+- Writes `%ProgramData%\AlphaAITracker\dlp\service.env` (`ALPHA_DLP_ENABLED=true`)
+- Tracker login writes `%ProgramData%\AlphaAITracker\dlp\device.auth` so the service can DeviceAuth (SYSTEM cannot read the user SQLite DB)
+
+```powershell
+# Uninstall service (optional -RemoveFiles)
+powershell -ExecutionPolicy Bypass -File .\uninstall-service.ps1
+```
+
+The Windows Inno installer also publishes `Service\` and runs the same `sc create` / start on post-install.
+
+---
+
 ## Sending to a Friend
 
 ### Windows

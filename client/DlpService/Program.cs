@@ -1,7 +1,7 @@
 using AlphaAITracker.Service;
 using Microsoft.Extensions.Hosting.WindowsServices;
 
-// AlphaAITracker.Service — Windows SYSTEM DLP spine (plan.md P0).
+// AlphaAITracker.Service — Windows SYSTEM DLP spine (plan.md P0/P1).
 // Parked unless ALPHA_DLP_ENABLED=true. Does not host Avalonia UI.
 
 EnvBootstrap.Apply();
@@ -12,6 +12,14 @@ builder.Services.AddWindowsService(options =>
 {
     options.ServiceName = "AlphaAITracker.Service";
 });
+
+if (WindowsServiceHelpers.IsWindowsService())
+{
+    // SCM starts us with System32 as cwd — pin to the exe folder so relative
+    // assets and logs stay next to the binary under Program Files.
+    Directory.SetCurrentDirectory(AppContext.BaseDirectory);
+    builder.Environment.ContentRootPath = AppContext.BaseDirectory;
+}
 
 var cfg = DlpConfig.FromEnvironment();
 builder.Services.AddSingleton(cfg);
@@ -31,7 +39,7 @@ builder.Services.AddHostedService<NamedPipeHost>();
 var host = builder.Build();
 var logger = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("DlpService");
 logger.LogInformation(
-    "AlphaAITracker.Service starting (enabled={Enabled}, dataDir={DataDir})",
-    cfg.Enabled, cfg.DataDir);
+    "AlphaAITracker.Service starting (enabled={Enabled}, dataDir={DataDir}, asService={AsService})",
+    cfg.Enabled, cfg.DataDir, WindowsServiceHelpers.IsWindowsService());
 
 await host.RunAsync();

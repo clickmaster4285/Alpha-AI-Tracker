@@ -46,7 +46,8 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: checkedonce
 
 [Files]
-Source: "windows\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "Platform\Linux\*"
+Source: "windows\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "Platform\Linux\*;Service\*"
+Source: "windows\Service\*"; DestDir: "{app}\Service"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: DirExists(ExpandConstant('{src}\windows\Service'))
 Source: "windows\config.enc"; DestDir: "{app}"; Flags: ignoreversion onlyifdoesntexist; Check: FileExists(ExpandConstant('{src}\windows\config.enc'))
 Source: "..\appsettings.json"; DestDir: "{app}"; Flags: ignoreversion
 
@@ -91,9 +92,61 @@ begin
   if Exec('taskkill', '/F /IM {#MyAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
     if ResultCode = 0 then KillCount := KillCount + 1;
 
+  // Also stop the DLP Windows Service before replacing its binary.
+  Exec('sc.exe', 'stop AlphaAITracker.Service', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if Exec('taskkill', '/F /IM AlphaAITracker.Service.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    if ResultCode = 0 then KillCount := KillCount + 1;
+
   // Small pause to let OS release file handles
   if KillCount > 0 then
     Exec('ping', '127.0.0.1 -n 2 -w 1000', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+procedure InstallDlpService;
+var
+  ResultCode: Integer;
+  ExePath: string;
+  DataDir: string;
+  EnvPath: string;
+begin
+  ExePath := ExpandConstant('{app}\Service\AlphaAITracker.Service.exe');
+  if not FileExists(ExePath) then
+    Exit;
+
+  DataDir := ExpandConstant('{commonappdata}\AlphaAITracker\dlp');
+  ForceDirectories(DataDir);
+  EnvPath := DataDir + '\service.env';
+  // Lab/ship default: enable DLP when the service is installed. Server URL comes
+  // from device.auth (tracker login) or an admin-edited service.env.
+  if not FileExists(EnvPath) then
+    SaveStringToFile(EnvPath,
+      'ALPHA_DLP_ENABLED=true' + #13#10 +
+      'ALPHA_DLP_USB_BLOCK=true' + #13#10 +
+      'ALPHA_DLP_WEB_BLOCK=true' + #13#10 +
+      'ALPHA_DLP_POLICY_POLL_SEC=60' + #13#10 +
+      'ALPHA_DLP_ALERT_SYNC_SEC=30' + #13#10, False);
+
+  Exec('sc.exe', 'stop AlphaAITracker.Service', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('sc.exe', 'delete AlphaAITracker.Service', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('sc.exe',
+    'create AlphaAITracker.Service binPath= "' + ExePath + '" start= auto DisplayName= "Alpha AI Tracker DLP" obj= LocalSystem',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('sc.exe',
+    'description AlphaAITracker.Service "Alpha AI Tracker Security & DLP enforcement (USB / policy / alerts)."',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('sc.exe',
+    'failure AlphaAITracker.Service reset= 86400 actions= restart/5000/restart/10000/restart/30000',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('sc.exe', 'start AlphaAITracker.Service', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+procedure RemoveDlpService;
+var
+  ResultCode: Integer;
+begin
+  Exec('sc.exe', 'stop AlphaAITracker.Service', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('sc.exe', 'delete AlphaAITracker.Service', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('taskkill', '/F /IM AlphaAITracker.Service.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
 // ────────────────────────────────────────────────
@@ -113,7 +166,14 @@ end;
 function InitializeUninstall: Boolean;
 begin
   Result := True;
+  RemoveDlpService;
   KillRunningInstance;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    InstallDlpService;
 end;
 
 procedure InitializeWizard;

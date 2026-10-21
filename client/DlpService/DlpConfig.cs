@@ -3,12 +3,13 @@ namespace AlphaAITracker.Service;
 /// <summary>
 /// Env-driven config for the SYSTEM DLP service (plan.md §10).
 /// Defaults keep workers parked until ALPHA_DLP_ENABLED=true.
+/// DeviceToken/ServerUrl can refresh from device.auth after a late tracker login.
 /// </summary>
 public sealed class DlpConfig
 {
     public bool Enabled { get; init; }
-    public string ServerUrl { get; init; } = "";
-    public string DeviceToken { get; init; } = "";
+    public string ServerUrl { get; private set; } = "";
+    public string DeviceToken { get; private set; } = "";
     public string DataDir { get; init; } = "";
     public int PolicyPollSec { get; init; } = 300;
     public int AlertSyncSec { get; init; } = 60;
@@ -26,7 +27,7 @@ public sealed class DlpConfig
         var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
         var defaultDir = Path.Combine(programData, "AlphaAITracker", "dlp");
 
-        return new DlpConfig
+        var cfg = new DlpConfig
         {
             Enabled = GetBool("ALPHA_DLP_ENABLED", false),
             ServerUrl = (Environment.GetEnvironmentVariable("ALPHA_SERVER_URL") ?? "").TrimEnd('/'),
@@ -44,6 +45,30 @@ public sealed class DlpConfig
                 ? p
                 : "AlphaAITracker.Dlp",
         };
+        cfg.RefreshCredentials();
+        return cfg;
+    }
+
+    /// <summary>
+    /// Re-read device.auth / env so workers can start after a post-boot tracker login.
+    /// Never clears a non-empty value already held unless the file has a newer token.
+    /// </summary>
+    public void RefreshCredentials()
+    {
+        if (DeviceCredentialStore.TryLoad(out var fileUrl, out var fileTok))
+        {
+            if (!string.IsNullOrWhiteSpace(fileUrl))
+                ServerUrl = fileUrl;
+            if (!string.IsNullOrWhiteSpace(fileTok))
+                DeviceToken = fileTok;
+        }
+
+        var envUrl = (Environment.GetEnvironmentVariable("ALPHA_SERVER_URL") ?? "").TrimEnd('/');
+        var envTok = Environment.GetEnvironmentVariable("ALPHA_DEVICE_TOKEN") ?? "";
+        if (string.IsNullOrWhiteSpace(ServerUrl) && !string.IsNullOrWhiteSpace(envUrl))
+            ServerUrl = envUrl;
+        if (string.IsNullOrWhiteSpace(DeviceToken) && !string.IsNullOrWhiteSpace(envTok))
+            DeviceToken = envTok;
     }
 
     private static bool GetBool(string key, bool fallback)

@@ -220,6 +220,23 @@ bundle_into_publish() {
 [ "$BUILD_LIN" = true ] && bundle_into_publish "$PUBLISH_LIN"
 [ "$BUILD_MAC" = true ] && bundle_into_publish "$PUBLISH_MAC"
 
+# ─── Windows DLP service (LocalSystem) — publish beside the user helper ───
+if [ "$BUILD_WIN" = true ]; then
+  echo ""
+  echo "[Publish] Publishing AlphaAITracker.Service (win-x64) → $PUBLISH_WIN/Service ..."
+  SERVICE_PROJ="$PROJECT_DIR/DlpService/AlphaAITracker.Service.csproj"
+  SERVICE_OUT="$PUBLISH_WIN/Service"
+  rm -rf "$SERVICE_OUT"
+  if dotnet publish "$SERVICE_PROJ" -c Release -r win-x64 --self-contained -o "$SERVICE_OUT" --nologo; then
+    cp "$PROJECT_DIR/DlpService/install-service.ps1" "$SERVICE_OUT/" 2>/dev/null || true
+    cp "$PROJECT_DIR/DlpService/uninstall-service.ps1" "$SERVICE_OUT/" 2>/dev/null || true
+    echo "  ✓ DLP service → $SERVICE_OUT"
+  else
+    echo "ERROR: DlpService publish failed."
+    exit 1
+  fi
+fi
+
 # ─── Step: Encrypt .env to config.enc and distribute to publish outputs ───
 echo ""
 echo "[Config] Encrypting .env → config.enc..."
