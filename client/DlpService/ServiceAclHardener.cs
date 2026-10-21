@@ -4,16 +4,12 @@ using System.Runtime.Versioning;
 namespace AlphaAITracker.Service;
 
 /// <summary>
-/// Locks the Windows service DACL for AlphaAITracker.Service only.
-/// While locked, even Builtin Administrators cannot stop/delete the service from
-/// services.msc / sc stop — only LocalSystem (the service itself after a verified
-/// removal code) unlocks and stops. Other products on the machine are untouched.
+/// Locks the Windows service DACL for this product's DLP service only
+/// (<see cref="ServiceIdentity.ServiceName"/>). Other installed software is untouched.
 /// </summary>
 [SupportedOSPlatform("windows")]
 internal static class ServiceAclHardener
 {
-    public const string ServiceName = "AlphaAITracker.Service";
-
     /// <summary>
     /// SY: full control (incl. stop/delete/change DACL).
     /// BA: query/enumerate/read only — no SERVICE_STOP, DELETE, or CHANGE_CONFIG.
@@ -40,12 +36,13 @@ internal static class ServiceAclHardener
 
     private static bool TrySdSet(string sddl, ILogger? logger)
     {
+        var serviceName = ServiceIdentity.ServiceName;
         try
         {
             using var p = Process.Start(new ProcessStartInfo
             {
                 FileName = "sc.exe",
-                Arguments = $"sdset {ServiceName} \"{sddl}\"",
+                Arguments = $"sdset {serviceName} \"{sddl}\"",
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
@@ -59,12 +56,12 @@ internal static class ServiceAclHardener
                 logger?.LogWarning("sc sdset exit {Code}: {Err}", p.ExitCode, err.Trim());
                 return false;
             }
-            logger?.LogInformation("Service DACL updated for {Service}", ServiceName);
+            logger?.LogInformation("Service DACL updated for {Service}", serviceName);
             return true;
         }
         catch (Exception ex)
         {
-            logger?.LogWarning(ex, "Failed to set service DACL (not installed as a service yet?)");
+            logger?.LogWarning(ex, "Failed to set service DACL for {Service}", serviceName);
             return false;
         }
     }

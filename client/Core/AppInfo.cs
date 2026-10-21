@@ -42,6 +42,28 @@ public static class AppInfo
     /// <summary>Single-instance mutex name — APP_IDENTIFIERS APP_MUTEX.</summary>
     public static string AppMutex => Get("APP_MUTEX", "AlphaAITracker");
 
+    /// <summary>
+    /// ProgramData / LocalAppData product folder stem — same as <see cref="AppMutex"/>.
+    /// e.g. %ProgramData%\&lt;AppMutex&gt;\dlp
+    /// </summary>
+    public static string DataFolderName => AppMutex;
+
+    /// <summary>Windows DLP SCM service name — APP_IDENTIFIERS WINDOWS_SERVICE_NAME.</summary>
+    public static string WindowsServiceName =>
+        Get("WINDOWS_SERVICE_NAME", $"{AppMutex}.Service");
+
+    /// <summary>Services.msc display name — APP_IDENTIFIERS WINDOWS_SERVICE_DISPLAY_NAME.</summary>
+    public static string WindowsServiceDisplayName =>
+        Get("WINDOWS_SERVICE_DISPLAY_NAME", $"{DisplayName} DLP");
+
+    /// <summary>DLP named pipe — APP_IDENTIFIERS WINDOWS_DLP_PIPE_NAME.</summary>
+    public static string WindowsDlpPipeName =>
+        Get("WINDOWS_DLP_PIPE_NAME", $"{AppMutex}.Dlp");
+
+    /// <summary>Installer schtasks maintenance task — APP_IDENTIFIERS WINDOWS_SERVICE_MAINT_TASK.</summary>
+    public static string WindowsServiceMaintTask =>
+        Get("WINDOWS_SERVICE_MAINT_TASK", $"{AppMutex}SvcMaint");
+
     /// <summary>Linux StartupWMClass — APP_IDENTIFIERS WM_CLASS.</summary>
     public static string WmClass => Get("WM_CLASS", "AlphaAITracker");
 

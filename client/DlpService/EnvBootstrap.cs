@@ -133,8 +133,9 @@ internal static class EnvBootstrap
 
         // Interactive user (dotnet run / double-click as admin).
         var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var folder = ServiceIdentity.DataFolderName;
         foreach (var name in dbNames)
-            yield return Path.Combine(local, "AlphaAITracker", "data", name);
+            yield return Path.Combine(local, folder, "data", name);
 
         // LocalSystem: scan every profile under C:\Users\*\AppData\Local\...
         string usersRoot;
@@ -155,7 +156,7 @@ internal static class EnvBootstrap
             var leaf = Path.GetFileName(profile);
             if (leaf is "Public" or "Default" or "Default User" or "All Users") continue;
             foreach (var name in dbNames)
-                yield return Path.Combine(profile, "AppData", "Local", "AlphaAITracker", "data", name);
+                yield return Path.Combine(profile, "AppData", "Local", folder, "data", name);
         }
     }
 }

@@ -197,20 +197,24 @@ bash publish/build-installer.sh
 
 ---
 
-## Windows DLP service (AlphaAITracker.Service)
+## Windows DLP service
+
+Names come from `client/APP_IDENTIFIERS` (`WINDOWS_SERVICE_NAME`, `APP_MUTEX`, `WINDOWS_DLP_PIPE_NAME`) — do not hardcode them in scripts.
 
 Lab install without rebuilding the full Inno installer (run **elevated** PowerShell):
 
 ```powershell
 cd client\DlpService
+# refreshes GeneratedIdentity.props from APP_IDENTIFIERS
+bash ../publish/generate-windows-vars.sh
 dotnet build -c Release
 powershell -ExecutionPolicy Bypass -File .\install-service.ps1
 ```
 
-- Installs to `C:\Program Files\AlphaAITracker\Service\`
-- Registers **LocalSystem** auto-start service `AlphaAITracker.Service` with SCM failure recovery
-- Writes `%ProgramData%\AlphaAITracker\dlp\service.env` (`ALPHA_DLP_ENABLED=true`)
-- Tracker login writes `%ProgramData%\AlphaAITracker\dlp\device.auth` so the service can DeviceAuth (SYSTEM cannot read the user SQLite DB)
+- Installs to `C:\Program Files\<APP_MUTEX>\Service\`
+- Registers **LocalSystem** auto-start service `<WINDOWS_SERVICE_NAME>` with SCM failure recovery
+- Writes `%ProgramData%\<APP_MUTEX>\dlp\service.env` (`ALPHA_DLP_ENABLED=true`)
+- Tracker login writes `%ProgramData%\<APP_MUTEX>\dlp\device.auth` so the service can DeviceAuth
 
 ```powershell
 # Uninstall service (optional -RemoveFiles)
@@ -226,10 +230,10 @@ The Windows Inno installer also publishes `Service\` and runs the same `sc creat
    ```powershell
    & "C:\Program Files (x86)\Alpha AI Tracker\client.exe" --protected-uninstall --code '<paste>'
    ```
-3. That verifies the code (DLP service unlocks its ACL and stops), drains/self-removes, wipes the local account, and writes `%ProgramData%\AlphaAITracker\dlp\teardown.ok`.
-4. Then uninstall via Apps & features — **without** `teardown.ok` the uninstaller exits with an error (no “continue anyway”). Only Alpha AI Tracker is gated; other apps are unchanged.
+3. That verifies the code (DLP service unlocks its ACL and stops), drains/self-removes, wipes the local account, and writes `%ProgramData%\<APP_MUTEX>\dlp\teardown.ok`.
+4. Then uninstall via Apps & features — **without** `teardown.ok` the uninstaller exits with an error (no “continue anyway”). Only this product is gated; other apps are unchanged.
 
-While running, `AlphaAITracker.Service` uses a locked DACL (LocalSystem full / Administrators query-only), so Services.msc **Stop** fails for admins until a removal code unlocks it.
+While running, the DLP service uses a locked DACL (LocalSystem full / Administrators query-only), so Services.msc **Stop** fails for admins until a removal code unlocks it.
 
 ---
 

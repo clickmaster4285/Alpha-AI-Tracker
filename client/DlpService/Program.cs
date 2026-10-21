@@ -10,7 +10,7 @@ var builder = Host.CreateApplicationBuilder(args);
 
 builder.Services.AddWindowsService(options =>
 {
-    options.ServiceName = "AlphaAITracker.Service";
+    options.ServiceName = ServiceIdentity.ServiceName;
 });
 
 if (WindowsServiceHelpers.IsWindowsService())
@@ -40,7 +40,7 @@ builder.Services.AddHostedService<NamedPipeHost>();
 var host = builder.Build();
 var logger = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("DlpService");
 logger.LogInformation(
-    "AlphaAITracker.Service starting (enabled={Enabled}, dataDir={DataDir}, asService={AsService})",
-    cfg.Enabled, cfg.DataDir, WindowsServiceHelpers.IsWindowsService());
+    "{Service} starting (enabled={Enabled}, dataDir={DataDir}, asService={AsService})",
+    ServiceIdentity.ServiceName, cfg.Enabled, cfg.DataDir, WindowsServiceHelpers.IsWindowsService());
 
 await host.RunAsync();

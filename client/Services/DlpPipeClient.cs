@@ -1,15 +1,16 @@
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
+using client.Core;
 
 namespace client.Services;
 
 /// <summary>
-/// Client for \\.\pipe\AlphaAITracker.Dlp (LocalSystem DLP service).
+/// Client for the LocalSystem DLP service named pipe (APP_IDENTIFIERS WINDOWS_DLP_PIPE_NAME).
 /// </summary>
 public static class DlpPipeClient
 {
-    public const string DefaultPipeName = "AlphaAITracker.Dlp";
+    public static string DefaultPipeName => AppInfo.WindowsDlpPipeName;
 
     public static async Task<(bool Ok, string Body)> SendAsync(
         object request,

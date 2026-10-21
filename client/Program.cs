@@ -196,7 +196,8 @@ var isRemoveAccount = args.Contains("--remove-account");
 
 // ─── Protected uninstall (--protected-uninstall --code <raw>) ───
 // Requires a one-time server-issued removal code. Verifies via the DLP service
-// (or DeviceAuth), drains/self-removes/wipes, and stops AlphaAITracker.Service.
+// (or DeviceAuth), drains/self-removes/wipes, and stops the Windows DLP service
+// (APP_IDENTIFIERS WINDOWS_SERVICE_NAME).
 var isProtectedUninstall = args.Contains("--protected-uninstall");
 string? protectedUninstallCode = null;
 if (isProtectedUninstall)

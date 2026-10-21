@@ -1,12 +1,13 @@
 using System.Text;
 using System.Text.Json;
+using client.Core;
 
 namespace client.Services;
 
 /// <summary>
-/// Publishes DeviceAuth credentials for AlphaAITracker.Service (LocalSystem).
+/// Publishes DeviceAuth credentials for the LocalSystem DLP service.
 /// SYSTEM cannot read the interactive user's LocalAppData SQLite, so login writes
-/// %ProgramData%\AlphaAITracker\dlp\device.auth and wipe deletes it.
+/// %ProgramData%\&lt;APP_MUTEX&gt;\dlp\device.auth and wipe deletes it.
 /// </summary>
 public static class DlpDeviceCredentialBridge
 {
@@ -17,7 +18,7 @@ public static class DlpDeviceCredentialBridge
         get
         {
             var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-            return Path.Combine(programData, "AlphaAITracker", "dlp");
+            return Path.Combine(programData, AppInfo.DataFolderName, "dlp");
         }
     }
 

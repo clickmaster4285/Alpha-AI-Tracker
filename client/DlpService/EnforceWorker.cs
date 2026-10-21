@@ -112,7 +112,7 @@ public sealed class EnforceWorker : BackgroundService
                 _lastAccessDeniedLog = DateTimeOffset.UtcNow;
                 _logger.LogWarning(
                     "USBSTOR enforce needs Administrator / LocalSystem. " +
-                    "Right-click AlphaAITracker.Service.exe → Run as administrator, or install as a Windows Service.");
+                    $"Right-click {ServiceIdentity.ServiceName}.exe → Run as administrator, or install as a Windows Service.");
             }
 
             if (!_accessDeniedAlertQueued && wantUsbBlock)

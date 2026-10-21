@@ -223,7 +223,12 @@ bundle_into_publish() {
 # ─── Windows DLP service (LocalSystem) — publish beside the user helper ───
 if [ "$BUILD_WIN" = true ]; then
   echo ""
-  echo "[Publish] Publishing AlphaAITracker.Service (win-x64) → $PUBLISH_WIN/Service ..."
+  # Refresh AssemblyName / Inno defines from APP_IDENTIFIERS before publishing.
+  bash "$SCRIPT_DIR/generate-windows-vars.sh"
+  # shellcheck disable=SC1090
+  source "$PROJECT_DIR/APP_IDENTIFIERS"
+  : "${WINDOWS_SERVICE_NAME:=${APP_MUTEX}.Service}"
+  echo "[Publish] Publishing ${WINDOWS_SERVICE_NAME} (win-x64) → $PUBLISH_WIN/Service ..."
   SERVICE_PROJ="$PROJECT_DIR/DlpService/AlphaAITracker.Service.csproj"
   SERVICE_OUT="$PUBLISH_WIN/Service"
   rm -rf "$SERVICE_OUT"

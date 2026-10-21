@@ -17,7 +17,7 @@ public sealed class DlpConfig
     public bool WebBlock { get; init; } = true;
     public int MaxLocalAlerts { get; init; } = 50_000;
     public int DedupSec { get; init; } = 300;
-    public string PipeName { get; init; } = "AlphaAITracker.Dlp";
+    public string PipeName { get; init; } = "";
 
     public string DbPath => Path.Combine(DataDir, "dlp.db");
     public string PolicyDir => Path.Combine(DataDir, "policy");
@@ -25,7 +25,8 @@ public sealed class DlpConfig
     public static DlpConfig FromEnvironment()
     {
         var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-        var defaultDir = Path.Combine(programData, "AlphaAITracker", "dlp");
+        var defaultDir = Path.Combine(programData, ServiceIdentity.DataFolderName, "dlp");
+        var defaultPipe = ServiceIdentity.DlpPipeName;
 
         var cfg = new DlpConfig
         {
@@ -43,7 +44,7 @@ public sealed class DlpConfig
             DedupSec = GetInt("ALPHA_DLP_DEDUP_SEC", 300),
             PipeName = Environment.GetEnvironmentVariable("ALPHA_DLP_PIPE_NAME") is { Length: > 0 } p
                 ? p
-                : "AlphaAITracker.Dlp",
+                : defaultPipe,
         };
         cfg.RefreshCredentials();
         return cfg;

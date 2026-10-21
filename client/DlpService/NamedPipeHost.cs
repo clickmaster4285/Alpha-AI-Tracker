@@ -6,7 +6,7 @@ using System.Text.Json;
 namespace AlphaAITracker.Service;
 
 /// <summary>
-/// Named-pipe IPC (\\.\pipe\AlphaAITracker.Dlp).
+/// Named-pipe IPC (\\.\pipe\&lt;WINDOWS_DLP_PIPE_NAME from APP_IDENTIFIERS&gt;).
 /// Ops: GetPolicyVersion, Health, AuthorizeTeardown (removal-code → unlock ACL + stop).
 /// </summary>
 public sealed class NamedPipeHost : BackgroundService

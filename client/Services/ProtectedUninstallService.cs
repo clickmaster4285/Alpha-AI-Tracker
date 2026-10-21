@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using client.Configuration;
+using client.Core;
 using client.Core.Abstractions;
 
 namespace client.Services;
@@ -138,7 +139,7 @@ public sealed class ProtectedUninstallService
         {
             var path = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                "AlphaAITracker", "dlp", "device.auth");
+                AppInfo.DataFolderName, "dlp", "device.auth");
             if (!File.Exists(path)) return false;
             using var doc = JsonDocument.Parse(File.ReadAllText(path));
             if (doc.RootElement.TryGetProperty("serverUrl", out var su))
@@ -159,7 +160,7 @@ public sealed class ProtectedUninstallService
         {
             var dir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                "AlphaAITracker", "dlp");
+                AppInfo.DataFolderName, "dlp");
             Directory.CreateDirectory(dir);
             File.WriteAllText(
                 Path.Combine(dir, "teardown.ok"),

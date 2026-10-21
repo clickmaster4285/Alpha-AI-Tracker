@@ -92,9 +92,9 @@ begin
   if Exec('taskkill', '/F /IM {#MyAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
     if ResultCode = 0 then KillCount := KillCount + 1;
 
-  // Also stop the DLP Windows Service before replacing its binary.
-  Exec('sc.exe', 'stop AlphaAITracker.Service', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  if Exec('taskkill', '/F /IM AlphaAITracker.Service.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  // Also stop the DLP Windows Service before replacing its binary (names from APP_IDENTIFIERS).
+  Exec('sc.exe', 'stop {#WINDOWS_SERVICE_NAME}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if Exec('taskkill', '/F /IM {#WINDOWS_SERVICE_EXE_NAME}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
     if ResultCode = 0 then KillCount := KillCount + 1;
 
   // Small pause to let OS release file handles
@@ -109,20 +109,20 @@ var
   ResultCode: Integer;
 begin
   Exec('schtasks.exe',
-    '/Create /TN "AlphaAITrackerSvcMaint" /TR "cmd.exe /c sc.exe stop AlphaAITracker.Service & sc.exe delete AlphaAITracker.Service & taskkill /F /IM AlphaAITracker.Service.exe" /SC ONCE /ST 00:00 /RU SYSTEM /F',
+    '/Create /TN "{#WINDOWS_SERVICE_MAINT_TASK}" /TR "cmd.exe /c sc.exe stop {#WINDOWS_SERVICE_NAME} & sc.exe delete {#WINDOWS_SERVICE_NAME} & taskkill /F /IM {#WINDOWS_SERVICE_EXE_NAME}" /SC ONCE /ST 00:00 /RU SYSTEM /F',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec('schtasks.exe', '/Run /TN "AlphaAITrackerSvcMaint"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('schtasks.exe', '/Run /TN "{#WINDOWS_SERVICE_MAINT_TASK}"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('ping', '127.0.0.1 -n 4 -w 1000', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec('schtasks.exe', '/Delete /TN "AlphaAITrackerSvcMaint" /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('schtasks.exe', '/Delete /TN "{#WINDOWS_SERVICE_MAINT_TASK}" /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
 procedure LockDlpServiceAcl;
 var
   ResultCode: Integer;
 begin
-  // SY=full; BA=query only — AlphaAITracker.Service cannot be stopped from services.msc.
+  // SY=full; BA=query only — DLP service cannot be stopped from services.msc.
   Exec('sc.exe',
-    'sdset AlphaAITracker.Service D:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCLCSWLOCRRC;;;BA)',
+    'sdset {#WINDOWS_SERVICE_NAME} D:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCLCSWLOCRRC;;;BA)',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
@@ -133,11 +133,11 @@ var
   DataDir: string;
   EnvPath: string;
 begin
-  ExePath := ExpandConstant('{app}\Service\AlphaAITracker.Service.exe');
+  ExePath := ExpandConstant('{app}\Service\{#WINDOWS_SERVICE_EXE_NAME}');
   if not FileExists(ExePath) then
     Exit;
 
-  DataDir := ExpandConstant('{commonappdata}\AlphaAITracker\dlp');
+  DataDir := ExpandConstant('{commonappdata}\{#APP_MUTEX}\dlp');
   ForceDirectories(DataDir);
   EnvPath := DataDir + '\service.env';
   // Lab/ship default: enable DLP when the service is installed. Server URL comes
@@ -148,19 +148,20 @@ begin
       'ALPHA_DLP_USB_BLOCK=true' + #13#10 +
       'ALPHA_DLP_WEB_BLOCK=true' + #13#10 +
       'ALPHA_DLP_POLICY_POLL_SEC=60' + #13#10 +
-      'ALPHA_DLP_ALERT_SYNC_SEC=30' + #13#10, False);
+      'ALPHA_DLP_ALERT_SYNC_SEC=30' + #13#10 +
+      'ALPHA_DLP_PIPE_NAME={#WINDOWS_DLP_PIPE_NAME}' + #13#10, False);
 
   StopDeleteDlpServiceAsSystem;
   Exec('sc.exe',
-    'create AlphaAITracker.Service binPath= "' + ExePath + '" start= auto DisplayName= "Alpha AI Tracker DLP" obj= LocalSystem',
+    'create {#WINDOWS_SERVICE_NAME} binPath= "' + ExePath + '" start= auto DisplayName= "{#WINDOWS_SERVICE_DISPLAY_NAME}" obj= LocalSystem',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('sc.exe',
-    'description AlphaAITracker.Service "Alpha AI Tracker Security & DLP enforcement (USB / policy / alerts)."',
+    'description {#WINDOWS_SERVICE_NAME} "{#MyAppName} Security & DLP enforcement (USB / policy / alerts)."',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('sc.exe',
-    'failure AlphaAITracker.Service reset= 86400 actions= restart/5000/restart/10000/restart/30000',
+    'failure {#WINDOWS_SERVICE_NAME} reset= 86400 actions= restart/5000/restart/10000/restart/30000',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec('sc.exe', 'start AlphaAITracker.Service', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('sc.exe', 'start {#WINDOWS_SERVICE_NAME}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   LockDlpServiceAcl;
 end;
 
@@ -191,16 +192,16 @@ function InitializeUninstall: Boolean;
 var
   Gate: string;
 begin
-  Gate := ExpandConstant('{commonappdata}\AlphaAITracker\dlp\teardown.ok');
+  Gate := ExpandConstant('{commonappdata}\{#APP_MUTEX}\dlp\teardown.ok');
   if not FileExists(Gate) then
   begin
     MsgBox(
-      'Alpha AI Tracker cannot be uninstalled without an authorized removal code.'#13#10#13#10 +
+      '{#MyAppName} cannot be uninstalled without an authorized removal code.'#13#10#13#10 +
       '1. On the web: Employees → Issue Removal Code'#13#10 +
       '2. On this PC run:'#13#10 +
-      '   client.exe --protected-uninstall --code <code>'#13#10 +
+      '   {#MyAppExeName} --protected-uninstall --code <code>'#13#10 +
       '3. Then uninstall again from Apps & features.'#13#10#13#10 +
-      'This restriction applies only to Alpha AI Tracker.',
+      'This restriction applies only to {#MyAppName}.',
       mbError, MB_OK);
     Result := False;
     Exit;

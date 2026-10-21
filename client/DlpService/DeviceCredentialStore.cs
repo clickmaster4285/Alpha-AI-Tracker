@@ -4,7 +4,7 @@ namespace AlphaAITracker.Service;
 
 /// <summary>
 /// Reads the machine-wide DLP credential file written by the user-session tracker
-/// on login (%ProgramData%\AlphaAITracker\dlp\device.auth). LocalSystem cannot see
+/// on login (%ProgramData%\&lt;APP_MUTEX&gt;\dlp\device.auth). LocalSystem cannot see
 /// the interactive user's LocalAppData SQLite, so this file is the production bridge.
 /// </summary>
 internal static class DeviceCredentialStore
@@ -16,7 +16,7 @@ internal static class DeviceCredentialStore
         get
         {
             var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-            return Path.Combine(programData, "AlphaAITracker", "dlp");
+            return Path.Combine(programData, ServiceIdentity.DataFolderName, "dlp");
         }
     }
 

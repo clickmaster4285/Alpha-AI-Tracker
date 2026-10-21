@@ -5,7 +5,7 @@ namespace AlphaAITracker.Service;
 
 /// <summary>
 /// Single-writer local store for the applied policy bundle and unsynced alerts.
-/// Lives under %ProgramData%\AlphaAITracker\dlp\ (SYSTEM ACL in production).
+/// Lives under %ProgramData%\&lt;APP_MUTEX&gt;\dlp\ (SYSTEM ACL in production).
 /// </summary>
 public sealed class PolicyStore : IAsyncDisposable
 {
