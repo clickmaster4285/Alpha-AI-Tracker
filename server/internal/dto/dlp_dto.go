@@ -103,6 +103,12 @@ type DlpAlertListResponse struct {
 	Open       int   `json:"open"`
 	Investigating int `json:"investigating"`
 	Resolved   int   `json:"resolved"`
+	// FalsePositive counts alerts dismissed as a false positive.
+	FalsePositive int `json:"falsePositive"`
+	// Types lists the distinct alert types present under the current
+	// filters, so the web page can offer a type filter without hardcoding
+	// the vocabulary client-side.
+	Types []string `json:"types"`
 }
 
 // ── Shadow IT ───────────────────────────────────────────────────────────────

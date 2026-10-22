@@ -161,7 +161,10 @@ func (h *DlpHandler) ListAlerts(c echo.Context) error {
 		Search:     strings.TrimSpace(c.QueryParam("q")),
 		Status:     strings.TrimSpace(c.QueryParam("status")),
 		Severity:   strings.TrimSpace(c.QueryParam("severity")),
+		Type:       strings.TrimSpace(c.QueryParam("type")),
 		EmployeeID: strings.TrimSpace(c.QueryParam("employeeId")),
+		DateFrom:   parseTimeParam(c.QueryParam("dateFrom")),
+		DateTo:     parseTimeParam(c.QueryParam("dateTo")),
 		Page:       page,
 		PerPage:    perPage,
 	}

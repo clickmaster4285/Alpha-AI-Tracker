@@ -1701,6 +1701,10 @@ export interface DlpAlertListResponse {
   open: number;
   investigating: number;
   resolved: number;
+  /** Alerts dismissed as a false positive. */
+  falsePositive: number;
+  /** Distinct alert types present under the current filters. */
+  types: string[];
 }
 
 export interface ShadowItApp {
@@ -1777,7 +1781,8 @@ export const dlpApi = {
 
   alerts: {
     list: (params?: {
-      q?: string; status?: string; severity?: string; employeeId?: string;
+      q?: string; status?: string; severity?: string; type?: string; employeeId?: string;
+      dateFrom?: string; dateTo?: string;
       page?: number; perPage?: number;
     }) =>
       request<DlpAlertListResponse>('/dlp/alerts', {

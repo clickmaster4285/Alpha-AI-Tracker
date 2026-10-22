@@ -242,18 +242,32 @@ type DlpAlertListFilter struct {
 	Search     string
 	Status     string
 	Severity   string
+	Type       string
 	EmployeeID string
+	DateFrom   time.Time
+	DateTo     time.Time
 	Page       int
 	PerPage    int
 }
 
-func (r *DlpRepo) ListAlerts(ctx context.Context, f DlpAlertListFilter) ([]models.DlpAlert, int, error) {
-	if f.Page < 1 {
-		f.Page = 1
-	}
-	if f.PerPage < 1 || f.PerPage > 100 {
-		f.PerPage = 30
-	}
+// alertWhereOpts controls which of the "self-referential" filters are
+// applied to a given query.
+type alertWhereOpts struct {
+	// Exclude the status filter. Used by the status counts so the status
+	// chips keep showing the FULL distribution across the other active
+	// filters (search / severity / type / employee / date) even while one
+	// status is selected — otherwise picking "Open" would zero out every
+	// other chip and the user could not see what else is waiting.
+	ExcludeStatus bool
+	// Exclude the type filter. Used by the type list so the type dropdown
+	// keeps offering every type available under the other filters, even
+	// while one type is selected.
+	ExcludeType bool
+}
+
+// buildAlertWhere builds the shared WHERE clause (plus its args) for the alert
+// list, the status counts and the type list.
+func buildAlertWhere(f DlpAlertListFilter, opts alertWhereOpts) (string, []any) {
 	where := []string{"1=1"}
 	args := []any{}
 	n := 1
@@ -265,7 +279,7 @@ func (r *DlpRepo) ListAlerts(ctx context.Context, f DlpAlertListFilter) ([]model
 		args = append(args, "%"+f.Search+"%")
 		n++
 	}
-	if f.Status != "" {
+	if !opts.ExcludeStatus && f.Status != "" {
 		where = append(where, fmt.Sprintf("a.status = $%d", n))
 		args = append(args, f.Status)
 		n++
@@ -275,12 +289,41 @@ func (r *DlpRepo) ListAlerts(ctx context.Context, f DlpAlertListFilter) ([]model
 		args = append(args, f.Severity)
 		n++
 	}
+	if !opts.ExcludeType && f.Type != "" {
+		where = append(where, fmt.Sprintf("a.type = $%d", n))
+		args = append(args, f.Type)
+		n++
+	}
 	if f.EmployeeID != "" {
-		where = append(where, fmt.Sprintf("a.employee_id = $%d", n))
+		// The alert's `employee_id` column holds the human code (EMP-XXXXX),
+		// but callers may pass the employees-table UUID (the web's employee
+		// picker URL key). Accept either so a deep link from another page
+		// resolves to the same employee.
+		where = append(where, fmt.Sprintf("(a.employee_id = $%d OR a.employee_id = COALESCE((SELECT e.employee_id FROM employees e WHERE e.id::text = $%d AND e.deleted_at IS NULL), ''))", n, n))
 		args = append(args, f.EmployeeID)
 		n++
 	}
-	wsql := strings.Join(where, " AND ")
+	if !f.DateFrom.IsZero() {
+		where = append(where, fmt.Sprintf("a.occurred_at >= $%d", n))
+		args = append(args, f.DateFrom)
+		n++
+	}
+	if !f.DateTo.IsZero() {
+		where = append(where, fmt.Sprintf("a.occurred_at <= $%d", n))
+		args = append(args, f.DateTo)
+		n++
+	}
+	return strings.Join(where, " AND "), args
+}
+
+func (r *DlpRepo) ListAlerts(ctx context.Context, f DlpAlertListFilter) ([]models.DlpAlert, int, error) {
+	if f.Page < 1 {
+		f.Page = 1
+	}
+	if f.PerPage < 1 || f.PerPage > 100 {
+		f.PerPage = 30
+	}
+	wsql, args := buildAlertWhere(f, alertWhereOpts{})
 
 	var total int
 	countSQL := `SELECT COUNT(*) FROM dlp_alerts a LEFT JOIN employees e ON e.employee_id = a.employee_id AND e.deleted_at IS NULL WHERE ` + wsql
@@ -289,6 +332,8 @@ func (r *DlpRepo) ListAlerts(ctx context.Context, f DlpAlertListFilter) ([]model
 	}
 
 	offset := (f.Page - 1) * f.PerPage
+	limitArg := len(args) + 1
+	offsetArg := len(args) + 2
 	args = append(args, f.PerPage, offset)
 	listSQL := fmt.Sprintf(`
 		SELECT a.id::text, a.rule_id::text, a.policy_version, a.employee_id, a.machine_id,
@@ -299,7 +344,7 @@ func (r *DlpRepo) ListAlerts(ctx context.Context, f DlpAlertListFilter) ([]model
 		LEFT JOIN employees e ON e.employee_id = a.employee_id AND e.deleted_at IS NULL
 		WHERE %s
 		ORDER BY a.occurred_at DESC
-		LIMIT $%d OFFSET $%d`, wsql, n, n+1)
+		LIMIT $%d OFFSET $%d`, wsql, limitArg, offsetArg)
 
 	rows, err := r.pool.Query(ctx, listSQL, args...)
 	if err != nil {
@@ -325,14 +370,53 @@ func (r *DlpRepo) ListAlerts(ctx context.Context, f DlpAlertListFilter) ([]model
 	return out, total, rows.Err()
 }
 
-func (r *DlpRepo) AlertStatusCounts(ctx context.Context) (open, investigating, resolved int, err error) {
-	err = r.pool.QueryRow(ctx, `
+// AlertStatusCounts returns the open / investigating / resolved /
+// false-positive distribution for the CURRENTLY ACTIVE FILTERS — except the
+// status filter itself, so the status chips keep showing the full
+// distribution across the other active filters (search / severity / type /
+// employee / date) even while one status is selected.
+func (r *DlpRepo) AlertStatusCounts(ctx context.Context, f DlpAlertListFilter) (open, investigating, resolved, falsePositive int, err error) {
+	wsql, args := buildAlertWhere(f, alertWhereOpts{ExcludeStatus: true})
+	countSQL := `
 		SELECT
-			COUNT(*) FILTER (WHERE status = 'open'),
-			COUNT(*) FILTER (WHERE status = 'investigating'),
-			COUNT(*) FILTER (WHERE status IN ('resolved', 'false_positive'))
-		FROM dlp_alerts`).Scan(&open, &investigating, &resolved)
+			COUNT(*) FILTER (WHERE a.status = 'open'),
+			COUNT(*) FILTER (WHERE a.status = 'investigating'),
+			COUNT(*) FILTER (WHERE a.status = 'resolved'),
+			COUNT(*) FILTER (WHERE a.status = 'false_positive')
+		FROM dlp_alerts a
+		LEFT JOIN employees e ON e.employee_id = a.employee_id AND e.deleted_at IS NULL
+		WHERE ` + wsql
+	if err = r.pool.QueryRow(ctx, countSQL, args...).Scan(&open, &investigating, &resolved, &falsePositive); err != nil {
+		return 0, 0, 0, 0, err
+	}
 	return
+}
+
+// AlertTypeCounts returns the distinct alert types present under the current
+// filters — except the type filter itself (and the status filter), so the type
+// dropdown keeps offering every available type even while one is selected.
+func (r *DlpRepo) AlertTypeCounts(ctx context.Context, f DlpAlertListFilter) ([]string, error) {
+	wsql, args := buildAlertWhere(f, alertWhereOpts{ExcludeStatus: true, ExcludeType: true})
+	rows, err := r.pool.Query(ctx, `
+		SELECT DISTINCT a.type
+		FROM dlp_alerts a
+		LEFT JOIN employees e ON e.employee_id = a.employee_id AND e.deleted_at IS NULL
+		WHERE `+wsql+` AND a.type <> ''
+		ORDER BY a.type`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []string{}
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
 
 func (r *DlpRepo) UpdateAlert(ctx context.Context, id string, status, assignedTo, notes *string) (*models.DlpAlert, error) {

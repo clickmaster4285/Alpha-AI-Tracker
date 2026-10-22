@@ -275,7 +275,13 @@ func (s *DlpService) ListAlerts(ctx context.Context, f repository.DlpAlertListFi
 	if err != nil {
 		return nil, err
 	}
-	open, inv, res, err := s.repo.AlertStatusCounts(ctx)
+	// Counts follow the same filters (minus the status filter) so the status
+	// chips on the web page stay meaningful while a status is selected.
+	open, inv, res, fp, err := s.repo.AlertStatusCounts(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	types, err := s.repo.AlertTypeCounts(ctx, f)
 	if err != nil {
 		return nil, err
 	}
@@ -286,6 +292,7 @@ func (s *DlpService) ListAlerts(ctx context.Context, f repository.DlpAlertListFi
 	return &dto.DlpAlertListResponse{
 		Alerts: out, Total: total, Page: f.Page, PerPage: f.PerPage,
 		Open: open, Investigating: inv, Resolved: res,
+		FalsePositive: fp, Types: types,
 	}, nil
 }
 
