@@ -296,11 +296,21 @@ func (s *DlpService) ListAlerts(ctx context.Context, f repository.DlpAlertListFi
 	}, nil
 }
 
-func (s *DlpService) UpdateAlert(ctx context.Context, id string, req dto.UpdateDlpAlertRequest) (*models.DlpAlert, error) {
+func (s *DlpService) UpdateAlert(ctx context.Context, id string, req dto.UpdateDlpAlertRequest, changedByUserID string) (*models.DlpAlert, error) {
 	if req.Status != nil && !allowedAlertStatuses[*req.Status] {
 		return nil, fmt.Errorf("invalid status")
 	}
-	a, err := s.repo.UpdateAlert(ctx, id, req.Status, req.AssignedTo, req.Notes)
+	patch := repository.UpdateAlertPatch{
+		Status:        req.Status,
+		AssignedTo:    req.AssignedTo,
+		Notes:         req.Notes,
+		ChangedBy:     changedByUserID,
+		ChangedByName: s.repo.UserDisplayName(ctx, changedByUserID),
+	}
+	if patch.ChangedByName == "" && changedByUserID != "" {
+		patch.ChangedByName = "Unknown user"
+	}
+	a, err := s.repo.UpdateAlert(ctx, id, patch)
 	if err != nil {
 		return nil, err
 	}
@@ -308,6 +318,22 @@ func (s *DlpService) UpdateAlert(ctx context.Context, id string, req dto.UpdateD
 		return nil, fmt.Errorf("dlp alert not found")
 	}
 	return a, nil
+}
+
+func (s *DlpService) ListAlertHistory(ctx context.Context, alertID string) (*dto.DlpAlertHistoryResponse, error) {
+	events, err := s.repo.ListAlertEvents(ctx, alertID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]dto.DlpAlertHistoryEvent, len(events))
+	for i, e := range events {
+		out[i] = dto.DlpAlertHistoryEvent{
+			ID: e.ID, AlertID: e.AlertID, ChangedBy: e.ChangedBy,
+			ChangedByName: e.ChangedByName, Field: e.Field,
+			OldValue: e.OldValue, NewValue: e.NewValue, CreatedAt: e.CreatedAt,
+		}
+	}
+	return &dto.DlpAlertHistoryResponse{Events: out}, nil
 }
 
 // ── Shadow IT ───────────────────────────────────────────────────────────────

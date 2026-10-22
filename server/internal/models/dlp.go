@@ -51,6 +51,18 @@ type DlpAlert struct {
 	EmployeeName   string          `json:"employeeName,omitempty"`
 }
 
+// DlpAlertEvent is one field change in the triage audit trail.
+type DlpAlertEvent struct {
+	ID             int64     `json:"id"`
+	AlertID        string    `json:"alertId"`
+	ChangedBy      *string   `json:"changedBy,omitempty"`
+	ChangedByName  string    `json:"changedByName"`
+	Field          string    `json:"field"` // status | assigned_to | notes
+	OldValue       string    `json:"oldValue"`
+	NewValue       string    `json:"newValue"`
+	CreatedAt      time.Time `json:"createdAt"`
+}
+
 // ShadowItApp is a Shadow IT catalog row.
 type ShadowItApp struct {
 	ID              int64     `json:"id"`

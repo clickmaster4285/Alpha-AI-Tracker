@@ -180,7 +180,11 @@ func (h *DlpHandler) UpdateAlert(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return errorResponse(c, http.StatusBadRequest, "Invalid request body", err)
 	}
-	alert, err := h.svc.UpdateAlert(c.Request().Context(), c.Param("id"), req)
+	var changedBy string
+	if uid, ok := c.Get("user_id").(string); ok {
+		changedBy = uid
+	}
+	alert, err := h.svc.UpdateAlert(c.Request().Context(), c.Param("id"), req, changedBy)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			return errorResponse(c, http.StatusNotFound, "Failed to update DLP alert", err)
@@ -188,6 +192,14 @@ func (h *DlpHandler) UpdateAlert(c echo.Context) error {
 		return errorResponse(c, http.StatusBadRequest, "Failed to update DLP alert", err)
 	}
 	return c.JSON(http.StatusOK, alert)
+}
+
+func (h *DlpHandler) ListAlertHistory(c echo.Context) error {
+	resp, err := h.svc.ListAlertHistory(c.Request().Context(), c.Param("id"))
+	if err != nil {
+		return errorResponse(c, http.StatusInternalServerError, "Failed to list DLP alert history", err)
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 func (h *DlpHandler) ListShadowIt(c echo.Context) error {

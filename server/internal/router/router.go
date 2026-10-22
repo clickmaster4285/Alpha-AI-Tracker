@@ -244,6 +244,7 @@ func Setup(
 		dlp.DELETE("/rules/:id", dlpHandler.DeleteRule)
 		dlp.POST("/rules/publish", dlpHandler.Publish)
 		dlp.GET("/alerts", dlpHandler.ListAlerts)
+		dlp.GET("/alerts/:id/history", dlpHandler.ListAlertHistory)
 		dlp.PATCH("/alerts/:id", dlpHandler.UpdateAlert)
 		protected.GET("/shadow-it/apps", dlpHandler.ListShadowIt)
 		protected.PATCH("/shadow-it/apps/:id", dlpHandler.UpdateShadowIt)

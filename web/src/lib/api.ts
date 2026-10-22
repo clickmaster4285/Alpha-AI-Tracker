@@ -1693,6 +1693,22 @@ export interface DlpAlert {
   updatedAt: string;
 }
 
+/** One triage field change (status / assigned_to / notes). */
+export interface DlpAlertHistoryEvent {
+  id: number;
+  alertId: string;
+  changedBy?: string;
+  changedByName: string;
+  field: 'status' | 'assigned_to' | 'notes' | string;
+  oldValue: string;
+  newValue: string;
+  createdAt: string;
+}
+
+export interface DlpAlertHistoryResponse {
+  events: DlpAlertHistoryEvent[];
+}
+
 export interface DlpAlertListResponse {
   alerts: DlpAlert[];
   total: number;
@@ -1790,6 +1806,8 @@ export const dlpApi = {
       }),
     update: (id: string, data: { status?: DlpAlertStatus; assignedTo?: string; notes?: string }) =>
       request<DlpAlert>(`/dlp/alerts/${id}`, { method: 'PATCH', body: data }),
+    history: (id: string) =>
+      request<DlpAlertHistoryResponse>(`/dlp/alerts/${id}/history`),
   },
 };
 

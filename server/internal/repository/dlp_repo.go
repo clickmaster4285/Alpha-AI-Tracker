@@ -419,23 +419,36 @@ func (r *DlpRepo) AlertTypeCounts(ctx context.Context, f DlpAlertListFilter) ([]
 	return out, rows.Err()
 }
 
-func (r *DlpRepo) UpdateAlert(ctx context.Context, id string, status, assignedTo, notes *string) (*models.DlpAlert, error) {
-	row := r.pool.QueryRow(ctx, `
-		UPDATE dlp_alerts SET
-			status = COALESCE($2, status),
-			assigned_to = COALESCE($3, assigned_to),
-			notes = COALESCE($4, notes)
-		WHERE id = $1::uuid
-		RETURNING id::text, rule_id::text, policy_version, employee_id, machine_id,
-		          type, severity, action_taken, occurred_at, evidence_json,
-		          status, assigned_to, notes, synced_at, created_at, updated_at`,
-		id, status, assignedTo, notes)
-	var a models.DlpAlert
+// UpdateAlertPatch carries the optional triage fields for a single save.
+type UpdateAlertPatch struct {
+	Status     *string
+	AssignedTo *string
+	Notes      *string
+	// ChangedBy is the admin users.id (UUID string); may be empty.
+	ChangedBy     string
+	ChangedByName string
+}
+
+// UpdateAlert applies triage fields and appends one dlp_alert_events row per
+// field that actually changed. Open status always clears assigned_to.
+func (r *DlpRepo) UpdateAlert(ctx context.Context, id string, patch UpdateAlertPatch) (*models.DlpAlert, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	var cur models.DlpAlert
 	var ruleID *string
-	err := row.Scan(
-		&a.ID, &ruleID, &a.PolicyVersion, &a.EmployeeID, &a.MachineID,
-		&a.Type, &a.Severity, &a.ActionTaken, &a.OccurredAt, &a.EvidenceJSON,
-		&a.Status, &a.AssignedTo, &a.Notes, &a.SyncedAt, &a.CreatedAt, &a.UpdatedAt,
+	err = tx.QueryRow(ctx, `
+		SELECT id::text, rule_id::text, policy_version, employee_id, machine_id,
+		       type, severity, action_taken, occurred_at, evidence_json,
+		       status, assigned_to, notes, synced_at, created_at, updated_at
+		FROM dlp_alerts WHERE id = $1::uuid
+		FOR UPDATE`, id).Scan(
+		&cur.ID, &ruleID, &cur.PolicyVersion, &cur.EmployeeID, &cur.MachineID,
+		&cur.Type, &cur.Severity, &cur.ActionTaken, &cur.OccurredAt, &cur.EvidenceJSON,
+		&cur.Status, &cur.AssignedTo, &cur.Notes, &cur.SyncedAt, &cur.CreatedAt, &cur.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -443,8 +456,121 @@ func (r *DlpRepo) UpdateAlert(ctx context.Context, id string, status, assignedTo
 	if err != nil {
 		return nil, err
 	}
+	cur.RuleID = ruleID
+
+	nextStatus := cur.Status
+	if patch.Status != nil {
+		nextStatus = *patch.Status
+	}
+	nextAssigned := cur.AssignedTo
+	if patch.AssignedTo != nil {
+		nextAssigned = *patch.AssignedTo
+	}
+	// Open has no assignee — always clear on that status.
+	if nextStatus == "open" {
+		nextAssigned = ""
+	}
+	nextNotes := cur.Notes
+	if patch.Notes != nil {
+		nextNotes = *patch.Notes
+	}
+
+	type change struct{ field, oldV, newV string }
+	var changes []change
+	if nextStatus != cur.Status {
+		changes = append(changes, change{"status", cur.Status, nextStatus})
+	}
+	if nextAssigned != cur.AssignedTo {
+		changes = append(changes, change{"assigned_to", cur.AssignedTo, nextAssigned})
+	}
+	if nextNotes != cur.Notes {
+		changes = append(changes, change{"notes", cur.Notes, nextNotes})
+	}
+
+	row := tx.QueryRow(ctx, `
+		UPDATE dlp_alerts SET
+			status = $2,
+			assigned_to = $3,
+			notes = $4
+		WHERE id = $1::uuid
+		RETURNING id::text, rule_id::text, policy_version, employee_id, machine_id,
+		          type, severity, action_taken, occurred_at, evidence_json,
+		          status, assigned_to, notes, synced_at, created_at, updated_at`,
+		id, nextStatus, nextAssigned, nextNotes)
+	var a models.DlpAlert
+	err = row.Scan(
+		&a.ID, &ruleID, &a.PolicyVersion, &a.EmployeeID, &a.MachineID,
+		&a.Type, &a.Severity, &a.ActionTaken, &a.OccurredAt, &a.EvidenceJSON,
+		&a.Status, &a.AssignedTo, &a.Notes, &a.SyncedAt, &a.CreatedAt, &a.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
 	a.RuleID = ruleID
+
+	if len(changes) > 0 {
+		now := time.Now().UTC()
+		for _, ch := range changes {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO dlp_alert_events
+					(alert_id, changed_by, changed_by_name, field, old_value, new_value, created_at)
+				VALUES ($1::uuid, NULLIF($2, '')::uuid, $3, $4, $5, $6, $7)`,
+				id, patch.ChangedBy, patch.ChangedByName, ch.field, ch.oldV, ch.newV, now,
+			); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
 	return &a, nil
+}
+
+// ListAlertEvents returns the triage audit trail newest-first.
+func (r *DlpRepo) ListAlertEvents(ctx context.Context, alertID string) ([]models.DlpAlertEvent, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, alert_id::text, changed_by::text, changed_by_name,
+		       field, old_value, new_value, created_at
+		FROM dlp_alert_events
+		WHERE alert_id = $1::uuid
+		ORDER BY created_at DESC, id DESC`, alertID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]models.DlpAlertEvent, 0)
+	for rows.Next() {
+		var e models.DlpAlertEvent
+		var changedBy *string
+		if err := rows.Scan(
+			&e.ID, &e.AlertID, &changedBy, &e.ChangedByName,
+			&e.Field, &e.OldValue, &e.NewValue, &e.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		e.ChangedBy = changedBy
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// UserDisplayName resolves an admin user's display name (empty if missing).
+func (r *DlpRepo) UserDisplayName(ctx context.Context, userID string) string {
+	if userID == "" {
+		return ""
+	}
+	var name string
+	err := r.pool.QueryRow(ctx,
+		`SELECT COALESCE(name, '') FROM users WHERE id = $1::uuid AND deleted_at IS NULL`,
+		userID,
+	).Scan(&name)
+	if err != nil {
+		return ""
+	}
+	return name
 }
 
 // ── Shadow IT ───────────────────────────────────────────────────────────────

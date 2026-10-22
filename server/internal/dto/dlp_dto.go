@@ -95,6 +95,23 @@ type UpdateDlpAlertRequest struct {
 	Notes      *string `json:"notes,omitempty"`
 }
 
+// DlpAlertHistoryEvent is one field change in the triage audit trail.
+type DlpAlertHistoryEvent struct {
+	ID            int64     `json:"id"`
+	AlertID       string    `json:"alertId"`
+	ChangedBy     *string   `json:"changedBy,omitempty"`
+	ChangedByName string    `json:"changedByName"`
+	Field         string    `json:"field"` // status | assigned_to | notes
+	OldValue      string    `json:"oldValue"`
+	NewValue      string    `json:"newValue"`
+	CreatedAt     time.Time `json:"createdAt"`
+}
+
+// DlpAlertHistoryResponse is the triage audit trail for one alert.
+type DlpAlertHistoryResponse struct {
+	Events []DlpAlertHistoryEvent `json:"events"`
+}
+
 type DlpAlertListResponse struct {
 	Alerts     []any `json:"alerts"`
 	Total      int   `json:"total"`
