@@ -180,12 +180,12 @@ export default function DLPRulesPage() {
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="usb_storage">USB Storage</SelectItem>
-                <SelectItem value="usb_file">USB File</SelectItem>
+                {/* <SelectItem value="usb_file">USB File</SelectItem>
                 <SelectItem value="web_navigate">Web Navigate</SelectItem>
                 <SelectItem value="cloud_sync_folder">Cloud Sync Folder</SelectItem>
                 <SelectItem value="software_install">Software Install</SelectItem>
                 <SelectItem value="file_transfer">File Transfer</SelectItem>
-                <SelectItem value="email">Email</SelectItem>
+                <SelectItem value="email">Email</SelectItem> */}
               </SelectContent>
             </Select>
             <Input
