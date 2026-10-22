@@ -1,5 +1,7 @@
 using System.IO.Pipes;
 using System.Net.Http.Headers;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 
@@ -7,10 +9,14 @@ namespace AlphaAITracker.Service;
 
 /// <summary>
 /// Named-pipe IPC (\\.\pipe\&lt;WINDOWS_DLP_PIPE_NAME from APP_IDENTIFIERS&gt;).
-/// Ops: GetPolicyVersion, Health, AuthorizeTeardown (removal-code → unlock ACL + stop).
+/// Ops: GetPolicyVersion, Health, AuthorizeTeardown (verify code), ApplyTeardownGate
+/// (unlock from existing teardown.ok — no second code consume).
 /// </summary>
 public sealed class NamedPipeHost : BackgroundService
 {
+    /// <summary>Hard cap for service→server removal-verify (never inherit the 60s dlp client).</summary>
+    private static readonly TimeSpan VerifyHttpBudget = TimeSpan.FromSeconds(10);
+
     private readonly DlpConfig _cfg;
     private readonly PolicyStore _store;
     private readonly IHttpClientFactory _httpFactory;
@@ -51,13 +57,9 @@ public sealed class NamedPipeHost : BackgroundService
         {
             try
             {
-                await using var server = new NamedPipeServerStream(
-                    _cfg.PipeName,
-                    PipeDirection.InOut,
-                    1,
-                    PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous);
-
+                // LocalSystem default pipe ACL denies interactive users — CLI
+                // AuthorizeTeardown / ApplyTeardownGate would get Access Denied.
+                await using var server = CreatePipeServer(_cfg.PipeName);
                 await server.WaitForConnectionAsync(stoppingToken);
                 await HandleClientAsync(server, stoppingToken);
             }
@@ -71,6 +73,41 @@ public sealed class NamedPipeHost : BackgroundService
                 try { await Task.Delay(500, stoppingToken); } catch { /* ignore */ }
             }
         }
+    }
+
+    private static NamedPipeServerStream CreatePipeServer(string pipeName)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return new NamedPipeServerStream(
+                pipeName, PipeDirection.InOut, 1,
+                PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        }
+
+        var security = new PipeSecurity();
+        // SYSTEM (service) + Administrators + interactive users (tracker CLI).
+        security.AddAccessRule(new PipeAccessRule(
+            new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+            PipeAccessRights.FullControl,
+            AccessControlType.Allow));
+        security.AddAccessRule(new PipeAccessRule(
+            new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+            PipeAccessRights.FullControl,
+            AccessControlType.Allow));
+        security.AddAccessRule(new PipeAccessRule(
+            new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null),
+            PipeAccessRights.ReadWrite | PipeAccessRights.CreateNewInstance,
+            AccessControlType.Allow));
+
+        return NamedPipeServerStreamAcl.Create(
+            pipeName,
+            PipeDirection.InOut,
+            maxNumberOfServerInstances: 2,
+            PipeTransmissionMode.Byte,
+            PipeOptions.Asynchronous,
+            inBufferSize: 0,
+            outBufferSize: 0,
+            security);
     }
 
     private async Task HandleClientAsync(NamedPipeServerStream server, CancellationToken ct)
@@ -91,6 +128,7 @@ public sealed class NamedPipeHost : BackgroundService
                 "GetPolicyVersion" => await GetPolicyVersionJson(ct),
                 "Health" => await HealthJson(ct),
                 "AuthorizeTeardown" => await AuthorizeTeardownJson(doc.RootElement, ct),
+                "ApplyTeardownGate" => ApplyTeardownGateJson(doc.RootElement),
                 _ => JsonSerializer.Serialize(new { ok = false, error = "unknown_op" }),
             };
         }
@@ -132,48 +170,90 @@ public sealed class NamedPipeHost : BackgroundService
         if (string.IsNullOrWhiteSpace(_cfg.ServerUrl) || string.IsNullOrWhiteSpace(_cfg.DeviceToken))
             return JsonSerializer.Serialize(new { ok = false, error = "credentials_missing" });
 
-        var client = _httpFactory.CreateClient("dlp");
-        using var req = new HttpRequestMessage(
-            HttpMethod.Post, $"{_cfg.ServerUrl}/api/v1/devices/removal-verify")
-        {
-            Content = new StringContent(
-                JsonSerializer.Serialize(new { code, purpose }),
-                Encoding.UTF8,
-                "application/json"),
-        };
-        req.Headers.Authorization = new AuthenticationHeaderValue("Device", _cfg.DeviceToken);
-        req.Headers.TryAddWithoutValidation("X-Client-Platform", "windows");
+        using var verifyCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        verifyCts.CancelAfter(VerifyHttpBudget);
 
-        using var resp = await client.SendAsync(req, ct);
-        var body = await resp.Content.ReadAsStringAsync(ct);
-        if (!resp.IsSuccessStatusCode)
-        {
-            _logger.LogWarning("AuthorizeTeardown verify failed HTTP {Status}: {Body}",
-                (int)resp.StatusCode, body);
-            return JsonSerializer.Serialize(new { ok = false, error = "invalid_code", status = (int)resp.StatusCode });
-        }
-
-        var valid = false;
-        var storedPurpose = purpose;
         try
         {
-            using var doc = JsonDocument.Parse(body);
-            valid = doc.RootElement.TryGetProperty("valid", out var v) && v.GetBoolean();
-            if (doc.RootElement.TryGetProperty("purpose", out var sp))
-                storedPurpose = sp.GetString() ?? storedPurpose;
+            var client = _httpFactory.CreateClient("dlp");
+            using var req = new HttpRequestMessage(
+                HttpMethod.Post, $"{_cfg.ServerUrl}/api/v1/devices/removal-verify")
+            {
+                Content = new StringContent(
+                    JsonSerializer.Serialize(new { code, purpose }),
+                    Encoding.UTF8,
+                    "application/json"),
+            };
+            req.Headers.Authorization = new AuthenticationHeaderValue("Device", _cfg.DeviceToken);
+            req.Headers.TryAddWithoutValidation("X-Client-Platform", "windows");
+
+            using var resp = await client.SendAsync(req, verifyCts.Token);
+            var body = await resp.Content.ReadAsStringAsync(verifyCts.Token);
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("AuthorizeTeardown verify failed HTTP {Status}: {Body}",
+                    (int)resp.StatusCode, body);
+                return JsonSerializer.Serialize(new { ok = false, error = "invalid_code", status = (int)resp.StatusCode });
+            }
+
+            var valid = false;
+            var storedPurpose = purpose;
+            try
+            {
+                using var doc = JsonDocument.Parse(body);
+                valid = doc.RootElement.TryGetProperty("valid", out var v) && v.GetBoolean();
+                if (doc.RootElement.TryGetProperty("purpose", out var sp))
+                    storedPurpose = sp.GetString() ?? storedPurpose;
+            }
+            catch { /* treat as invalid */ }
+
+            if (!valid)
+                return JsonSerializer.Serialize(new { ok = false, error = "invalid_code" });
+
+            return CompleteTeardown(storedPurpose);
         }
-        catch { /* treat as invalid */ }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogWarning("AuthorizeTeardown removal-verify timed out after {Sec}s",
+                VerifyHttpBudget.TotalSeconds);
+            return JsonSerializer.Serialize(new { ok = false, error = "verify_timeout" });
+        }
+    }
 
-        if (!valid)
-            return JsonSerializer.Serialize(new { ok = false, error = "invalid_code" });
+    /// <summary>
+    /// CLI already verified via DeviceAuth and wrote teardown.ok — unlock ACL + stop
+    /// without consuming another removal code.
+    /// </summary>
+    private string ApplyTeardownGateJson(JsonElement root)
+    {
+        var purpose = root.TryGetProperty("purpose", out var p) ? (p.GetString() ?? "both").Trim() : "both";
+        var gate = TeardownGate.PathIn(_cfg.DataDir);
+        if (!File.Exists(gate))
+            return JsonSerializer.Serialize(new { ok = false, error = "teardown_ok_missing" });
 
-        TeardownGate.MarkAuthorized(_cfg.DataDir, storedPurpose);
+        try
+        {
+            var text = File.ReadAllText(gate);
+            foreach (var line in text.Split('\n'))
+            {
+                if (line.StartsWith("purpose=", StringComparison.OrdinalIgnoreCase))
+                    purpose = line["purpose=".Length..].Trim();
+            }
+        }
+        catch { /* keep request purpose */ }
+
+        return CompleteTeardown(purpose);
+    }
+
+    private string CompleteTeardown(string purpose)
+    {
+        TeardownGate.MarkAuthorized(_cfg.DataDir, purpose);
         if (OperatingSystem.IsWindows())
             ServiceAclHardener.TryApplyOpen(_logger);
 
         _logger.LogWarning(
             "Authorized DLP service teardown (purpose={Purpose}) — stopping service",
-            storedPurpose);
+            purpose);
 
         // Reply first, then stop so the client gets ok=true.
         _ = Task.Run(async () =>
@@ -182,6 +262,6 @@ public sealed class NamedPipeHost : BackgroundService
             _lifetime.StopApplication();
         });
 
-        return JsonSerializer.Serialize(new { ok = true, purpose = storedPurpose, stopping = true });
+        return JsonSerializer.Serialize(new { ok = true, purpose, stopping = true });
     }
 }

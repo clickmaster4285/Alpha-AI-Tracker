@@ -36,6 +36,7 @@ builder.Services.AddHostedService<AlertSyncWorker>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<RemovableDriveMonitor>());
 builder.Services.AddHostedService<EnforceWorker>();
 builder.Services.AddHostedService<NamedPipeHost>();
+builder.Services.AddHostedService<TrackerWatchdogWorker>();
 
 var host = builder.Build();
 var logger = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("DlpService");

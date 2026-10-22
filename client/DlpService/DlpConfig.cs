@@ -18,6 +18,9 @@ public sealed class DlpConfig
     public int MaxLocalAlerts { get; init; } = 50_000;
     public int DedupSec { get; init; } = 300;
     public string PipeName { get; init; } = "";
+    /// <summary>Relaunch user-session tracker if Task Manager End Task kills it.</summary>
+    public bool WatchdogEnabled { get; init; } = true;
+    public int WatchdogPollSec { get; init; } = 8;
 
     public string DbPath => Path.Combine(DataDir, "dlp.db");
     public string PolicyDir => Path.Combine(DataDir, "policy");
@@ -45,6 +48,8 @@ public sealed class DlpConfig
             PipeName = Environment.GetEnvironmentVariable("ALPHA_DLP_PIPE_NAME") is { Length: > 0 } p
                 ? p
                 : defaultPipe,
+            WatchdogEnabled = GetBool("ALPHA_DLP_WATCHDOG", true),
+            WatchdogPollSec = GetInt("ALPHA_DLP_WATCHDOG_POLL_SEC", 8),
         };
         cfg.RefreshCredentials();
         return cfg;

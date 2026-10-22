@@ -17,6 +17,7 @@ internal static class ServiceIdentity
     public static string DisplayName => Get("DISPLAY_NAME", "Alpha AI Tracker");
     public static string AppMutex => Get("APP_MUTEX", "AlphaAITracker");
     public static string DataFolderName => AppMutex;
+    public static string ExecutableName => Get("EXECUTABLE_NAME", "client");
 
     public static string ServiceName =>
         Get("WINDOWS_SERVICE_NAME", $"{AppMutex}.Service");

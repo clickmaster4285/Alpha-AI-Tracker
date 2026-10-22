@@ -69,9 +69,16 @@ public static class SingleInstanceService
 
     /// <summary>
     /// Protected uninstall with a server-issued removal code. Payload on the wire is
-    /// <c>PROTECTED_UNINSTALL:&lt;raw-code&gt;</c>.
+    /// <c>PROTECTED_UNINSTALL:&lt;raw-code&gt;</c>. Prefer <see cref="CommandProtectedUninstallGo"/>
+    /// after the CLI has already verified (avoids double-consume → 401).
     /// </summary>
     public const string CommandProtectedUninstall = "PROTECTED_UNINSTALL";
+
+    /// <summary>
+    /// CLI already approved the removal code — running instance runs
+    /// stop→sync→status→wipe→DLP teardown without verifying again.
+    /// </summary>
+    public const string CommandProtectedUninstallGo = "PROTECTED_UNINSTALL_GO";
 
     /// <summary>
     /// Invoked on the pipe-listener thread when a second launch asks to remove the
@@ -85,7 +92,8 @@ public static class SingleInstanceService
 
     /// <summary>
     /// Invoked with the raw removal code when a second launch sends
-    /// <see cref="CommandProtectedUninstall"/>.
+    /// <see cref="CommandProtectedUninstall"/>. Empty string means
+    /// <see cref="CommandProtectedUninstallGo"/> (already approved).
     /// </summary>
     public static Action<string>? OnProtectedUninstallRequested;
 
@@ -128,6 +136,12 @@ public static class SingleInstanceService
                 else if (string.Equals(line, CommandRemoveAccount, StringComparison.Ordinal))
                 {
                     try { OnRemoveAccountRequested?.Invoke(); }
+                    catch { /* never let a UI callback error kill the listener */ }
+                }
+                else if (string.Equals(line, CommandProtectedUninstallGo, StringComparison.Ordinal))
+                {
+                    // CLI already verified — empty code ⇒ codeAlreadyVerified path.
+                    try { OnProtectedUninstallRequested?.Invoke(""); }
                     catch { /* never let a UI callback error kill the listener */ }
                 }
                 else if (line is not null &&

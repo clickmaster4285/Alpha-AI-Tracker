@@ -40,12 +40,17 @@ export const REMOVE_ACCOUNT_COMMANDS: RemoveAccountCommand[] = [
   {
     os: 'Windows',
     shell: 'PowerShell',
-    command: '& "C:\\Program Files (x86)\\Alpha AI Tracker\\client.exe" --remove-account',
+    // client.exe is a console subsystem binary so `& …` waits for completion
+    // (spinner + success/fail). Add --no-pause to skip the final Enter prompt.
+    command:
+      '& "C:\\Program Files (x86)\\Alpha AI Tracker\\client.exe" --remove-account --no-pause',
   },
 ];
 
 /** Windows DLP-protected uninstall (requires a one-time server-issued removal code). */
 export function protectedUninstallCommand(code: string): string {
-  const safe = code.replace(/'/g, "''");
-  return `& "C:\\Program Files (x86)\\Alpha AI Tracker\\client.exe" --protected-uninstall --code '${safe}'`;
+  // Double quotes work in both cmd.exe and PowerShell. Single quotes are LITERAL
+  // in cmd (`--code 'XYZ'` sends the quote characters and verify returns 401).
+  const safe = code.replace(/"/g, '');
+  return `"C:\\Program Files (x86)\\Alpha AI Tracker\\client.exe" --protected-uninstall --code "${safe}" --no-pause`;
 }

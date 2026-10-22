@@ -165,6 +165,40 @@ if (args.Contains("--self-test-stream-ladder"))
     return;
 }
 
+// ─── CLI vs GUI console ownership (must be before EnvLoader noise) ───
+// OutputType=Exe so PowerShell waits on `--protected-uninstall` / `--remove-account`.
+// Every other launch frees the console so tracking/GUI has no black flash window.
+var isRemoveAccount = args.Contains("--remove-account");
+var isProtectedUninstall = args.Contains("--protected-uninstall");
+string? protectedUninstallCode = null;
+if (isProtectedUninstall)
+{
+    for (var i = 0; i < args.Length; i++)
+    {
+        if (string.Equals(args[i], "--code", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+        {
+            protectedUninstallCode = ProtectedUninstallService.NormalizeCode(args[i + 1]);
+            break;
+        }
+        if (args[i].StartsWith("--code=", StringComparison.OrdinalIgnoreCase))
+        {
+            protectedUninstallCode = ProtectedUninstallService.NormalizeCode(args[i]["--code=".Length..]);
+            break;
+        }
+    }
+}
+
+var isCliConsoleMode = isProtectedUninstall || isRemoveAccount
+    || args.Contains("--print-config")
+    || args.Contains("--encrypt-config");
+if (OperatingSystem.IsWindows())
+{
+    if (isCliConsoleMode || isProtectedUninstall || isRemoveAccount)
+        client.Services.CliConsole.Ensure();
+    else
+        client.Services.CliConsole.DetachForGui();
+}
+
 EnvLoader.Load();
 
 // ─── Terms agent mode (instance 3, 2026-09-16) ───
@@ -188,149 +222,171 @@ var isMinimized = args.Contains("--minimized");
 // Restart=always racing) must exit quietly so they never disturb the user.
 var isUserLaunch = !isBackground && !isMinimized;
 
-// ─── Account removal (--remove-account) ───
-// `client --remove-account` completely removes this machine's login account and
-// puts the tool back on the sign-in page. It is the command the web "Remove
-// Current Device" modal shows for Linux and Windows.
-var isRemoveAccount = args.Contains("--remove-account");
-
-// ─── Protected uninstall (--protected-uninstall --code <raw>) ───
-// Requires a one-time server-issued removal code. Verifies via the DLP service
-// (or DeviceAuth), drains/self-removes/wipes, and stops the Windows DLP service
-// (APP_IDENTIFIERS WINDOWS_SERVICE_NAME).
-var isProtectedUninstall = args.Contains("--protected-uninstall");
-string? protectedUninstallCode = null;
-if (isProtectedUninstall)
-{
-    for (var i = 0; i < args.Length; i++)
-    {
-        if (string.Equals(args[i], "--code", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
-        {
-            protectedUninstallCode = args[i + 1];
-            break;
-        }
-        if (args[i].StartsWith("--code=", StringComparison.OrdinalIgnoreCase))
-        {
-            protectedUninstallCode = args[i]["--code=".Length..];
-            break;
-        }
-    }
-}
-
 var appMutex = new Mutex(true, SingleInstanceService.MutexName, out var mutexCreated);
+// When the CLI kills a stuck tracker and takes over, skip re-approve (code already used).
+var coldCodeAlreadyApproved = false;
 if (!mutexCreated)
 {
-    // ── --remove-account while a tracker is already running ──
-    // The RUNNING instance owns the SQLite connection and the GUI, so it performs
-    // the removal in place (empty the tables, stop collecting, re-render the
-    // sign-in page — see App.axaml.cs). This process must NOT do the wipe itself:
-    // the database file is in use, and stopping the tracker here would have
-    // auto-start / systemd Restart=always immediately start a second, still-logged-in
-    // instance that races us for the mutex. Signal and exit.
+    // ── --protected-uninstall while a tracker is already running ──
+    // CLI verifies FIRST (instant 401). Then hands off stop→sync→wipe→DLP to the
+    // running instance. If it does not heartbeat within 5s, kill it and take over.
     if (isProtectedUninstall)
     {
-        // WinExe normally has no console — attach so PowerShell shows status.
-        client.Services.ProtectedUninstallService.EnsureCliConsole();
         if (string.IsNullOrWhiteSpace(protectedUninstallCode))
         {
             Console.Error.WriteLine("Usage: client --protected-uninstall --code <removal-code>");
+            Console.Error.WriteLine("protected-uninstall failed");
             Environment.ExitCode = 1;
+            client.Services.CliConsole.PauseBeforeExit(args);
             return;
         }
 
-        // Do NOT only signal-and-exit: the uninstall gate needs teardown.ok written
-        // by THIS process (DLP pipe / device.auth). The running tracker is then asked
-        // to wipe the local account (it owns SQLite).
-        Console.WriteLine("Tracker is already running — authorizing uninstall gate from this CLI...");
-        var gateOk = client.Services.ProtectedUninstallService
-            .AuthorizeGateAsync(protectedUninstallCode.Trim(), "both")
+        ProtectedUninstallService.HandoffResult handoff = ProtectedUninstallService.HandoffResult.Failed;
+        var ok = client.Services.CliConsole.RunWithSpinnerAsync(
+                "Protected uninstall",
+                async (setPhase, ct) =>
+                {
+                    handoff = await ProtectedUninstallService.ApproveAndHandoffAsync(
+                        protectedUninstallCode.Trim(), setPhase, ct);
+                    return handoff == ProtectedUninstallService.HandoffResult.Completed;
+                },
+                successMessage: "protected-uninstall successfully",
+                failureMessage: "protected-uninstall failed")
             .GetAwaiter().GetResult();
-        if (!gateOk)
-        {
-            Console.Error.WriteLine(
-                "Protected uninstall FAILED — issue a fresh removal code on the web and retry.");
-            Environment.ExitCode = 1;
-            return;
-        }
 
-        var wipeSignaled = SingleInstanceService.SignalExistingInstance(
-            SingleInstanceService.CommandRemoveAccount);
-        Console.WriteLine(wipeSignaled
-            ? "Asked the running tracker to wipe the local account."
-            : "Could not signal the running tracker — gate is set; you can uninstall, then sign in is cleared on next launch.");
-
-        if (client.Services.ProtectedUninstallService.WaitForTeardownOk(TimeSpan.FromSeconds(5)))
+        if (handoff == ProtectedUninstallService.HandoffResult.Completed)
         {
-            Console.WriteLine("OK — teardown.ok is present. Uninstall from Apps & features now.");
+            Console.WriteLine($"Gate: {ProtectedUninstallService.TeardownOkPath}");
+            Console.WriteLine("Uninstall from Apps & features now.");
             Environment.ExitCode = 0;
-        }
-        else
-        {
-            Console.Error.WriteLine(
-                $"teardown.ok missing at {client.Services.ProtectedUninstallService.TeardownOkPath}");
-            Environment.ExitCode = 1;
-        }
-        return;
-    }
-
-    if (isRemoveAccount)
-    {
-        // The RUNNING instance owns both the SQLite connection and the server
-        // credentials, so IT performs the whole routine — stop collecting, bounded
-        // drain, POST /devices/self-remove, wipe, sign-in page — via
-        // AccountRemovalService (R4/R5, 2026-10-19). This process must not delete
-        // identifiers or touch the DB: if the signal is not delivered we would leave a
-        // half-removed machine, and a concurrent writer would race the wipe.
-        var delivered = SingleInstanceService.SignalExistingInstance(
-            SingleInstanceService.CommandRemoveAccount);
-        Console.WriteLine(delivered
-            ? "Account removal requested — the running app is draining pending data, notifying the server, and wiping this machine's local account."
-            : "Could not reach the running app — showing it instead. Verify the account was removed on that machine.");
-        if (!delivered)
-        {
-            // Pipe dead (the instance is starting up or wedged) — at least surface it
-            // so the operator can see what state the machine is in.
-            SingleInstanceService.SignalExistingInstance();
-        }
-        return;
-    }
-
-    // ── --restart (post-update relaunch) ──
-    // The updater launches us with --restart and then shuts the OLD process down
-    // so the newly-installed binary can take over. The old process may still own
-    // the mutex for a moment, so instead of treating this like a normal second
-    // launch (signal-and-exit), wait up to 8s for it to release ownership.
-    if (args.Contains("--restart"))
-    {
-        if (appMutex.WaitOne(TimeSpan.FromSeconds(8)))
-        {
-            mutexCreated = true;
-        }
-        else
-        {
+            client.Services.CliConsole.PauseBeforeExit(args);
             return;
         }
+
+        if (handoff == ProtectedUninstallService.HandoffResult.Failed)
+        {
+            Environment.ExitCode = 1;
+            client.Services.CliConsole.PauseBeforeExit(args);
+            return;
+        }
+
+        // TakeOver: siblings killed — acquire the mutex and finish as cold-start.
+        Console.WriteLine("Taking over — finishing sync / wipe in this process...");
+        coldCodeAlreadyApproved = true;
+        if (appMutex.WaitOne(TimeSpan.FromSeconds(8)))
+            mutexCreated = true;
+        else
+        {
+            Console.Error.WriteLine("protected-uninstall failed — could not acquire tracker lock after stop");
+            Environment.ExitCode = 1;
+            client.Services.CliConsole.PauseBeforeExit(args);
+            return;
+        }
+        // fall through to host start + pipeline with codeAlreadyVerified
+    }
+    else if (isRemoveAccount)
+    {
+        var finished = false;
+        var ok = client.Services.CliConsole.RunWithSpinnerAsync(
+                "Removing account",
+                async (setPhase, ct) =>
+                {
+                    finished = await ProtectedUninstallService.WaitForRemoveAccountAsync(setPhase, ct);
+                    return finished;
+                },
+                successMessage: "remove-account successfully",
+                failureMessage: "remove-account — taking over locally")
+            .GetAwaiter().GetResult();
+
+        if (finished && ok)
+        {
+            Environment.ExitCode = 0;
+            client.Services.CliConsole.PauseBeforeExit(args);
+            return;
+        }
+
+        // Take over after kill (WaitForRemoveAccountAsync kills on stuck).
+        if (appMutex.WaitOne(TimeSpan.FromSeconds(8)))
+            mutexCreated = true;
+        else
+        {
+            Console.Error.WriteLine("remove-account failed — could not acquire tracker lock");
+            Environment.ExitCode = 1;
+            client.Services.CliConsole.PauseBeforeExit(args);
+            return;
+        }
+        // fall through — isRemoveAccount cold path
     }
     else
     {
-        // Another instance already owns the mutex — the persistent background
-        // instance launched by auto-start / systemd, or a previously-opened GUI
-        // that is hidden in the tray. Instead of exiting silently (which was
-        // making the GUI "open and instantly close"), ask that instance to show
-        // its window, then exit. This lets the user open the GUI as many times
-        // as they want without ever stopping the running background tracker.
-        Console.Error.WriteLine("Another instance is already running.");
-        if (isUserLaunch)
+        // ── --restart (post-update relaunch) ──
+        // The updater launches us with --restart and then shuts the OLD process down
+        // so the newly-installed binary can take over. The old process may still own
+        // the mutex for a moment, so instead of treating this like a normal second
+        // launch (signal-and-exit), wait up to 8s for it to release ownership.
+        if (args.Contains("--restart"))
         {
-            SingleInstanceService.SignalExistingInstance();
+            if (appMutex.WaitOne(TimeSpan.FromSeconds(8)))
+            {
+                mutexCreated = true;
+            }
+            else
+            {
+                return;
+            }
         }
-        return;
+        else
+        {
+            // Another instance already owns the mutex — the persistent background
+            // instance launched by auto-start / systemd, or a previously-opened GUI
+            // that is hidden in the tray. Instead of exiting silently (which was
+            // making the GUI "open and instantly close"), ask that instance to show
+            // its window, then exit. This lets the user open the GUI as many times
+            // as they want without ever stopping the running background tracker.
+            Console.Error.WriteLine("Another instance is already running.");
+            if (isUserLaunch)
+            {
+                SingleInstanceService.SignalExistingInstance();
+            }
+            return;
+        }
     }
 }
 
 // We are the primary (mutex-owning) instance: start listening for SHOW
 // requests from any future second launch so it can bring our window forward.
 SingleInstanceService.StartServer();
+
+// Cold-start protected-uninstall: APPROVE only before DI host (instant fail),
+// unless we already approved during handoff takeover (code is one-time).
+if (isProtectedUninstall && !coldCodeAlreadyApproved)
+{
+    CliConsole.Ensure();
+    if (string.IsNullOrWhiteSpace(protectedUninstallCode))
+    {
+        Console.Error.WriteLine("Usage: client --protected-uninstall --code <removal-code>");
+        Console.Error.WriteLine("protected-uninstall failed");
+        Environment.ExitCode = 1;
+        CliConsole.PauseBeforeExit(args);
+        return;
+    }
+
+    var approved = CliConsole.RunWithSpinnerAsync(
+            "Approving with server",
+            (setPhase, ct) => ProtectedUninstallService.ApproveAsync(
+                protectedUninstallCode.Trim(), "both", ct, setPhase),
+            successMessage: "Approved.",
+            failureMessage: "protected-uninstall failed — issue a fresh removal code on the web and retry.")
+        .GetAwaiter().GetResult();
+    if (!approved)
+    {
+        Environment.ExitCode = 1;
+        CliConsole.PauseBeforeExit(args);
+        return;
+    }
+
+    coldCodeAlreadyApproved = true;
+}
 
 var config = AppConfig.FromEnv();
 
@@ -654,39 +710,54 @@ try
     // local DB + machine id. Killed siblings and a clean shutdown follow.
     if (isProtectedUninstall || isRemoveAccount)
     {
+        CliConsole.Ensure();
         if (isProtectedUninstall)
         {
-            ProtectedUninstallService.EnsureCliConsole();
-            if (string.IsNullOrWhiteSpace(protectedUninstallCode))
-            {
-                Console.Error.WriteLine("Usage: client --protected-uninstall --code <removal-code>");
-                await host.StopAsync(CancellationToken.None);
-                host.Dispose();
-                Environment.ExitCode = 1;
-                return;
-            }
-            Console.WriteLine("Protected uninstall: verifying removal code...");
             var protectedSvc = host.Services.GetRequiredService<ProtectedUninstallService>();
-            var ok = await protectedSvc.RunAsync(protectedUninstallCode!, "both", CancellationToken.None);
-            if (!ok)
+            var ok = await CliConsole.RunWithSpinnerAsync(
+                "Protected uninstall",
+                (setPhase, ct) => protectedSvc.RunPipelineAsync(
+                    protectedUninstallCode!,
+                    "both",
+                    ct,
+                    setPhase,
+                    codeAlreadyVerified: coldCodeAlreadyApproved),
+                successMessage: "protected-uninstall successfully",
+                failureMessage: "protected-uninstall failed");
+            if (ok)
             {
-                Console.Error.WriteLine("Protected uninstall failed — removal code rejected or credentials missing.");
-                await host.StopAsync(CancellationToken.None);
-                host.Dispose();
-                Environment.ExitCode = 1;
-                return;
+                Console.WriteLine($"Gate: {ProtectedUninstallService.TeardownOkPath}");
+                Console.WriteLine("You can now uninstall from Apps & features.");
+                Environment.ExitCode = 0;
             }
-            Console.WriteLine(
-                $"Protected uninstall complete. Gate: {ProtectedUninstallService.TeardownOkPath}");
-            Console.WriteLine("You can now uninstall from Apps & features.");
+            else
+            {
+                Environment.ExitCode = 1;
+            }
         }
         else
         {
-            Console.WriteLine("Removing this machine's account: draining pending data, notifying the server...");
-            var notified = await accountRemoval.RunAsync(CancellationToken.None);
-            Console.WriteLine(notified
-                ? "Server notified — this machine is marked old and the employee is untracked."
-                : "Server could not be reached — local account removed locally (pending rows may be lost).");
+            var notified = false;
+            var ok = await CliConsole.RunWithSpinnerAsync(
+                "Removing account (drain + notify server + wipe)",
+                async ct =>
+                {
+                    notified = await accountRemoval.RunAsync(ct);
+                    return true;
+                },
+                successMessage: "remove-account successfully",
+                failureMessage: "remove-account failed");
+            if (ok)
+            {
+                Console.WriteLine(notified
+                    ? "Server notified — this machine is marked old and the employee is untracked."
+                    : "Server could not be reached — local account removed (pending rows may be lost).");
+                Environment.ExitCode = 0;
+            }
+            else
+            {
+                Environment.ExitCode = 1;
+            }
         }
 
         // Cold start must not leave a sibling tracker behind (the mutex branch above
@@ -717,6 +788,7 @@ try
         await host.StopAsync(CancellationToken.None);
         shutdownSentinel.PowerOffWritten.Wait(TimeSpan.FromSeconds(3));
         host.Dispose();
+        CliConsole.PauseBeforeExit(args);
         return;
     }
 
@@ -782,38 +854,52 @@ try
         // this handler with its own, which resets the shell.
         SingleInstanceService.OnRemoveAccountRequested = () =>
         {
-            try
+            _ = Task.Run(() =>
             {
-                accountRemoval.RunAsync(CancellationToken.None).GetAwaiter().GetResult();
-                Console.WriteLine("Local account removed — opening the sign-in page.");
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"[client] Account removal failed: {ex.Message}");
-            }
+                try
+                {
+                    accountRemoval.RunAsync(CancellationToken.None).GetAwaiter().GetResult();
+                    RemovalProgress.Write("done", "remove-account successfully");
+                    Console.WriteLine("remove-account successfully");
+                }
+                catch (Exception ex)
+                {
+                    RemovalProgress.Write("failed", ex.Message);
+                    Console.Error.WriteLine($"remove-account failed — {ex.Message}");
+                }
 
-            App.PendingRemoveAccount = true;
-            StartLazyGui();
+                App.PendingRemoveAccount = true;
+                StartLazyGui();
+            });
         };
 
         var protectedUninstall = host.Services.GetRequiredService<ProtectedUninstallService>();
         SingleInstanceService.OnProtectedUninstallRequested = code =>
         {
-            try
+            // Background thread — must not block the pipe listener; CLI polls RemovalProgress.
+            _ = Task.Run(async () =>
             {
-                var ok = protectedUninstall.RunAsync(code, "both", CancellationToken.None)
-                    .GetAwaiter().GetResult();
-                Console.WriteLine(ok
-                    ? "Protected uninstall complete — opening the sign-in page."
-                    : "Protected uninstall failed — check the removal code.");
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"[client] Protected uninstall failed: {ex.Message}");
-            }
+                try
+                {
+                    // Empty code / approved marker ⇒ CLI already verified (GO command).
+                    var already = string.IsNullOrEmpty(code) ||
+                                  ProtectedUninstallService.HasApprovedMarker();
+                    var ok = await protectedUninstall.RunPipelineAsync(
+                        code ?? "", "both", CancellationToken.None,
+                        codeAlreadyVerified: already);
+                    Console.WriteLine(ok
+                        ? "protected-uninstall successfully"
+                        : "protected-uninstall failed — check the removal code.");
+                }
+                catch (Exception ex)
+                {
+                    RemovalProgress.Write("failed", ex.Message);
+                    Console.Error.WriteLine($"protected-uninstall failed — {ex.Message}");
+                }
 
-            App.PendingRemoveAccount = true;
-            StartLazyGui();
+                App.PendingRemoveAccount = true;
+                StartLazyGui();
+            });
         };
         // WaitForShutdownAsync is tied to IHostApplicationLifetime. The previous
         // uncancellable Task.Delay kept the process alive after SIGTERM even though

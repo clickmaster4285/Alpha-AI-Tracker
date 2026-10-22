@@ -118,6 +118,8 @@ $envLines = @(
     "ALPHA_DLP_WEB_BLOCK=true"
     "ALPHA_DLP_POLICY_POLL_SEC=60"
     "ALPHA_DLP_ALERT_SYNC_SEC=30"
+    "ALPHA_DLP_WATCHDOG=true"
+    "ALPHA_DLP_WATCHDOG_POLL_SEC=8"
     "ALPHA_DLP_PIPE_NAME=$PipeName"
 )
 if ($ServerUrl) {
