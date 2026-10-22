@@ -1,7 +1,30 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-10-20
+> **Last audited:** 2026-10-22
 > **Changelog:**
+>
+> - 2026-10-22: **Security & DLP P0+P1 shipped (server + Windows service + web) — USBSTOR block, policy publish, alert inbox + triage history, protected uninstall.**
+>   Windows-only enforcement lives in a **LocalSystem** process (`client/DlpService` →
+>   `AlphaAITracker.Service.exe`), not inside the Avalonia user helper. **Server:** migrations
+>   **051** (`dlp_rules`, `dlp_policy_versions`, `dlp_alerts`, `shadow_it_apps`,
+>   `removal_challenges`) + **052** (`dlp_alert_events` triage audit). DeviceAuth:
+>   `GET /dlp/policy`, `POST /dlp/alerts/sync`, `POST /dlp/health`, `POST /devices/removal-verify`.
+>   JWT: rules CRUD + `POST /dlp/rules/publish`, alerts list/PATCH + `GET /dlp/alerts/:id/history`,
+>   Shadow IT list/PATCH, `POST /devices/removal-code`. Env `DLP_REMOVAL_CODE_TTL_MIN` (default 60).
+>   RBAC module `security-dlp` with submodules `dlp-rules` / `dlp-alerts` / `shadow-it` (already in
+>   `rbacCatalog`). **Client service:** PolicyPull / Enforce (`UsbStorEnforcer`) / RemovableDriveMonitor
+>   / AlertSync / NamedPipe / ServiceAclHardener / TrackerWatchdog; store under
+>   `%ProgramData%\<APP_MUTEX>\dlp\` (separate from user SQLite). Tracker bridges DeviceAuth via
+>   `device.auth`, CLI `--protected-uninstall --code` → `ProtectedUninstallService` → pipe
+>   `AuthorizeTeardown` → drain/self-remove → `teardown.ok`; Inno uninstall refuses without that
+>   gate. Service/pipe/mutex names from `APP_IDENTIFIERS` (`WINDOWS_SERVICE_NAME`,
+>   `WINDOWS_DLP_PIPE_NAME`). Knobs `ALPHA_DLP_*` (re-bake `config.enc`). **Web:** live
+>   `/dlp-rules` (CRUD + Publish), `/dlp-alerts` (infinite scroll + URL filters + detail dialog with
+>   Save-only triage + history), `/shadow-it` (catalog + Approve/Block/Flag), employees menu
+>   **Issue Removal Code**. P2+ (WFP domains, Shadow IT rollup→`shadowDeny`, AppLocker, minifilter)
+>   still open — see `plan.md`. Rules codified: **DLP Policy Version Rule**, **Protected Removal
+>   Rule** (§6). Verified: `go build`/`go vet`; `dotnet build` (client + DlpService); `npx tsc
+>   --noEmit`. Lab playbook: `TESTING.md` §DLP.
 >
 > - 2026-10-20: **App Usage / Hours Insights / Graphical Logs duration inflation (server + web).**
 >   On `/employee-journey/apps?preset=yesterday` for IS-16, chrome/OneDrive/Grammarly/client all
@@ -1164,7 +1187,7 @@ Alpha AI Tracker is an employee monitoring and productivity analytics system con
 
 1. **Desktop Client** (`client/`) — Installed on employee machines. Collects process activity, window titles, CPU/memory usage, and installed app/package information. Sends data to the central server via REST.
 2. **Server** (`server/`) — Go + Echo + PostgreSQL + Redis. Central API hub. Receives and stores client data, exposes admin-facing REST API for the web dashboard. Handles authentication for both web admins and employee desktop clients.
-3. **Web Dashboard** (`web/`) — Next.js 15 App Router. Admin-facing UI for viewing employee data, managing departments, generating login secrets, and analytics. Most pages currently render mock localStorage data rather than calling the real API; the employees list, departments, logs, and the Employee Journey + Device Specs modules (2026-08-18) call real APIs.
+3. **Web Dashboard** (`web/`) — Next.js 15 App Router. Admin-facing UI for viewing employee data, managing departments, generating login secrets, analytics, live stream, attendance, and Security & DLP. Real-API surfaces include employees, departments, logs, Employee Journey + Device Specs, live-stream, DLP Rules/Alerts/Shadow IT; remaining pages are scaffolding or Coming Soon (no localStorage mocks).
 
 ---
 
@@ -1172,18 +1195,20 @@ Alpha AI Tracker is an employee monitoring and productivity analytics system con
 
 ```mermaid
 flowchart LR
- EMP[Employee Machine\nDesktop Client\n.NET 10 / Avalonia UI] -->|REST / JSON\nPOST /api/v1/{device-hardware,\ninstalled-apps,\ninstalled-packages,network-info,\nsession-events,app-sessions,app-items}/sync| SRV[Go Server\nEcho v4 / PostgreSQL\nPort 8080]
+ EMP[Employee Machine\nUser helper Avalonia\n+ Windows DLP Service SYSTEM] -->|REST / JSON\nPOST /api/v1/{device-hardware,\ninstalled-apps,\ninstalled-packages,network-info,\nsession-events,app-sessions,app-items}/sync| SRV[Go Server\nEcho v4 / PostgreSQL\nPort 8080]
  EMP -->|POST /api/v1/auth/employee-login| SRV
  EMP -->|WS DeviceAuth\n/live-stream/push + WebRTC VP8| SRV
  EMP -->|WS DeviceAuth\n/ws presence| SRV
+ EMP -->|DeviceAuth\nGET /dlp/policy · POST /dlp/alerts/sync| SRV
 
  SRV -->|Query / Store| PG[(PostgreSQL)]
  SRV -->|Store/Validate\nOne-Time Secrets| RD[(Redis\n5-min TTL)]
 
  WEB[Web Dashboard\nNext.js 15 / React 18\nPort 3000] -->|REST / JSON\nhttpOnly Cookie Auth\nvia Next.js Rewrites proxy| SRV
  WEB -->|WS JWT watch-ticket\n/live-stream/watch + WebRTC| SRV
+ WEB -->|JWT /dlp/* · /shadow-it/* · removal-code| SRV
 
- note_ws[WebRTC SFU live preview\n+ presence WS (Online/Offline).\nMost other dashboards still poll.]
+ note_ws[WebRTC SFU + presence WS.\nDLP: policy publish → Windows service USBSTOR enforce → alert inbox.]
  
  style EMP fill:#2d2a4e,color:#fff
  style SRV fill:#1a3a4a,color:#fff
@@ -1193,7 +1218,7 @@ flowchart LR
  style note_ws fill:#3a4a5a,color:#fff
 ```
 
-> All 11 sync endpoints exist on the server (7 original + app-status/hardware-devices/permission-status/storage-devices, 2026-08-11). `activity-logs/sync` and `shell-commands/sync` were removed from the product entirely (client + server).
+> All 11 sync endpoints exist on the server (7 original + app-status/hardware-devices/permission-status/storage-devices, 2026-08-11). `activity-logs/sync` and `shell-commands/sync` were removed from the product entirely (client + server). Windows DLP adds DeviceAuth policy/alert/health + JWT admin surfaces (2026-10-22).
 
 ---
 
@@ -1202,6 +1227,7 @@ flowchart LR
 | Service           | Stack                                                                | Responsibility                       | Entry Point                                | Internal Doc                                      |
 | ----------------- | -------------------------------------------------------------------- | ------------------------------------ | ------------------------------------------ | ------------------------------------------------- |
 | **client/** | .NET 10, Avalonia 12.1, CommunityToolkit.Mvvm, Microsoft.Data.Sqlite | Employee-side data collection & sync | `Program.cs`, `App.axaml.cs`           | [client/ARCHITECTURE.md](./client/ARCHITECTURE.md) |
+| **client/DlpService/** | .NET 10 Windows Service (LocalSystem) | DLP policy pull, USBSTOR enforce, alert sync, protected teardown | `DlpService/Program.cs` | [client/ARCHITECTURE.md](./client/ARCHITECTURE.md) §DLP |
 | **server/** | Go 1.25, Echo v4.15, pgx v5.10, go-redis v9.21                       | Central API hub, data storage, auth  | `cmd/server/main.go`                     | [server/ARCHITECTURE.md](./server/ARCHITECTURE.md) |
 | **web/**    | Next.js 15.3.4, React 18, Redux Toolkit, TanStack Query              | Admin dashboard & analytics          | `next.config.ts`, `src/app/layout.tsx` | [web/ARCHITECTURE.md](./web/ARCHITECTURE.md)       |
 
@@ -1211,10 +1237,12 @@ flowchart LR
 |---|---|
 | [FILE_HIERARCHY.md](./FILE_HIERARCHY.md) | *Where does this file live and who owns it?* — annotated node tree of all three services |
 | [WORKFLOW.md](./WORKFLOW.md) | *How do I do X?* — dev loop, adding a GUI page, re-branding, version bump, adding a runtime asset, release |
+| [TESTING.md](./TESTING.md) | *How do I prove it live?* — curl / Windows lab playbooks (DLP USB + removal code, orphan app-items, …) |
+| [plan.md](./plan.md) | *What is Security & DLP building?* — phased roadmap (P0–P7); P0+P1 shipped |
 | [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md) | *How is the desktop UI built?* — design tokens, style classes, the 6 pages, router, binding patterns |
-| [client/APP_IDENTIFIERS_README.md](./client/APP_IDENTIFIERS_README.md) | *How do I re-brand?* — every consumer of `APP_IDENTIFIERS` |
+| [client/APP_IDENTIFIERS_README.md](./client/APP_IDENTIFIERS_README.md) | *How do I re-brand?* — every consumer of `APP_IDENTIFIERS` (incl. Windows service / DLP pipe names) |
 | [client/VERSION_README.md](./client/VERSION_README.md) | *How do I bump the version?* |
-| [client/build.md](./client/build.md) | *How do I build installers?* |
+| [client/build.md](./client/build.md) | *How do I build installers?* (+ Windows DLP service lab install) |
 
 ---
 
@@ -1241,6 +1269,10 @@ flowchart LR
 | Presence keep-alive (client → server)      | WS `GET /api/v1/ws`                         | `Authorization: Device <token>`       | Ping/pong; Online/`wsConnected` (Redis-mirrored when available) |
 | Remove the account (client → server)       | REST POST `/api/v1/devices/self-remove`     | `Authorization: Device <token>`       | Empty JSON body → `{removed, machineId, status, lastTrackAt, trackingStatus}`; called AFTER the final drain |
 | Server-requested wipe (server → client)    | inline in every `*/sync` response            | —                                     | `{"action":"wipe_local"}` appended only when the reporting device was removed; the batch in that response is already persisted |
+| DLP policy pull (service → server)         | REST GET `/api/v1/dlp/policy?sinceVersion=` | `Authorization: Device <token>`       | Immutable published bundle (`policyVersion`, `hash`, `rules`, `shadowDeny`); 304/empty when current |
+| DLP alerts sync (service → server)         | REST POST `/api/v1/dlp/alerts/sync`         | `Authorization: Device <token>`       | Batch upsert by client UUID; accepted ids returned |
+| DLP health (service → server)              | REST POST `/api/v1/dlp/health`              | `Authorization: Device <token>`       | Heartbeat: policyVersion, enforceOK, lastError |
+| Removal verify (service → server)          | REST POST `/api/v1/devices/removal-verify`  | `Authorization: Device <token>`       | One-time code → marks challenge used; unlocks protected teardown |
 
 ### Server ↔ Web
 
@@ -1249,6 +1281,10 @@ flowchart LR
 | Web admin login   | REST POST`/api/v1/auth/login`              | email + password → httpOnly cookie | JSON`{email, password}` → sets cookie |
 | All web API calls | REST via Next.js rewrites (`/api/*` proxy) | httpOnly cookie (auto-sent)         | JSON request/response                    |
 | Live stream watch (web → SFU) | WS `GET /api/v1/live-stream/watch` + WebRTC | Short-lived watch ticket (`watch-ticket`; may include `watchBaseUrl`) | Signaling + remote MediaStream on `<video>` |
+| DLP Rules / publish | REST `/api/v1/dlp/rules` (+ `POST …/publish`) | JWT cookie + RBAC `dlp-rules` | CRUD current rules; publish compiles immutable `dlp_policy_versions` row |
+| DLP Alerts triage | REST `/api/v1/dlp/alerts` (+ `/:id` PATCH, `/:id/history`) | JWT cookie + RBAC `dlp-alerts` | Infinite-scroll inbox; Save-only triage; `dlp_alert_events` history |
+| Shadow IT catalog | REST `/api/v1/shadow-it/apps` | JWT cookie + RBAC `shadow-it` | Approve / Block / Flag (Block feeds next publish `shadowDeny` when P3 lands) |
+| Issue removal code | REST POST `/api/v1/devices/removal-code` | JWT cookie | Raw code returned once; only SHA-256 hash stored (`removal_challenges`) |
 
 ### Contract Documentation
 
@@ -1270,8 +1306,9 @@ flowchart LR
 
 **What works:**
 
-- Migrations 001-025 run on startup (24 files; latest: 023 monitoring config tables, 024 catalog merge, 025 RBAC roles/modules/submodules + users.role_id)
-- **Dynamic RBAC** (2026-08-25): roles/modules/submodules catalog seeded idempotently at boot (`RBACService.SeedCatalog`); protected `GET /modules` + `/roles` CRUD endpoints; `users.role_id` is the sole role source of truth; every auth/user response carries the granted submodule permission keys
+- Migrations 001–052 run on startup (append-only; latest DLP: **051** security tables, **052** alert triage history)
+- **Dynamic RBAC** (2026-08-25): roles/modules/submodules catalog seeded idempotently at boot (`RBACService.SeedCatalog`); protected `GET /modules` + `/roles` CRUD endpoints; `users.role_id` is the sole role source of truth; every auth/user response carries the granted submodule permission keys — includes `security-dlp` → `dlp-rules` / `dlp-alerts` / `shadow-it`
+- **Security & DLP (P0+P1, 2026-10-22):** editable `dlp_rules` + immutable `dlp_policy_versions` publish; DeviceAuth policy/alerts/health; JWT admin CRUD + alert triage history; Shadow IT catalog API; one-time `removal_challenges` (hash-only)
 - Full CRUD for users, employees, departments
 - **`Employee.hasUserLogin` projection** (2026-08-28): every employee SELECT path projects an indexed `EXISTS()` against `users.employee_id` so the web can answer "does this employee have a login?" in O(1) per page row, with no client-side map (see *Server-Projected Flags Rule* in §6)
 - Web admin auth (email/password → httpOnly cookie with encrypted JWT)
@@ -1339,10 +1376,11 @@ flowchart LR
 - **Six-page GUI** (2026-08-10) — `MainWindow` is a router over four exclusive states; pages live in `Views/Pages/`: Splash (boot checklist), Login, PermissionSetup (stepper), and behind the nav rail Dashboard (identity + status tiles + pipeline health + attached devices), System Specs (machine/compute/network/storage/peripherals) and Installed Applications (searchable apps + packages inventory, virtualized). One VM per page, all Transient in DI. Details: [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md)
 - **Runtime branding from a single source** — `Core/AppInfo.cs` resolves the product name, tagline, initials, publisher, copyright and version from the embedded `APP_IDENTIFIERS` + `VERSION`; no XAML or C# literal names anywhere in the UI. Editing either file re-brands both the app and the installers (§6 → *Branding-Single-Source Rule*)
 - **Live stream WebRTC publisher (V3, Windows)** — `LiveStreamClient` + `NetProbeService` + multi-path GDI `ScreenCaptureService` + `ScreenVp8Encoder`; ABR / min uplink / `force_keyframe`; send gated on PC `connected`; `ClientIdentityHeaders` for Client Version; `ALPHA_STREAM_*` / `ALPHA_WS_*`. Installer **1.2.34**
+- **Windows DLP service (P0+P1, 2026-10-22)** — separate `client/DlpService` LocalSystem process: policy pull, USBSTOR coarse block, removable-drive alerts, alert sync, ACL-hardened stop, tracker watchdog, named-pipe IPC; user helper writes `device.auth` and runs `--protected-uninstall --code`. Linux/macOS: no DLP enforcement (detection/telemetry only)
 
 **What's missing:**
 
-- **No tests** (0 test files)
+- **Sparse client tests** — a few unit tests under `client/client.Tests` (DLP pipe timeout / teardown); most collectors still untested
 - ~~**No auto-update mechanism**~~ (resolved 2026-08-12 — GitHub Releases self-updater with GUI Check updates; see changelog)
 - **No crash reporting** — unhandled exceptions crash silently
 - **No offline queue analysis** — if server is unreachable, logs buffer locally with no back-pressure handling
@@ -1367,13 +1405,14 @@ flowchart LR
 - Shared building blocks: `EmployeePage` shell (header + picker + loading/error/no-selection states, optional `fetchDetail`), `hooks/use-employee-detail.ts`, `lib/format.ts`, `EmployeeSelector`, `EmptyState`/`InventoryTable`/`FocusTime`/`DeviceClassIcon`
 - **Web Infinite-Scroll Rule** + **URL-Synced Filters Rule** — see §6. `useUrlQueryState` must never call `router.push`/`replace` inside a `setState` updater (updates Next `LinkComponent` while another component is rendering).
 - **Live stream (WebRTC SFU, V3)** — `/live-stream` multi-tile preview (`?ids=`, max 4); per-tile **FPS**; **Open theater** → `/live-stream/theater`; shared `components/live-stream/*`; `useLiveStreamSocket` (+ optional ticket `watchBaseUrl`); consent `live_view`; Windows publisher only; server Redis presence/tickets (single API)
+- **Security & DLP (2026-10-22)** — `/dlp-rules` (CRUD + Publish), `/dlp-alerts` (infinite scroll + URL filters + detail/history dialog; Save applies triage), `/shadow-it` (catalog + Approve/Block/Flag); employees **Issue Removal Code**; `dlpApi` / `shadowItApi` in `lib/api.ts`
 - Departments page — real API calls (CRUD)
 - Logs/Comprehensive page — real API calls (now using new app_sessions API)
 - Dashboard — fully live-API stat tiles (employees total + tracked/untracked split, departments count, app sessions ·24h, web pages ·24h) since the 2026-08-25 mock purge; analytics cards link the journey modules until chart endpoints exist
 
 **What's missing (most pages):**
 
-- **~35 of ~50 pages are scaffolding** — no backend endpoint exists yet; the former localStorage mocks were removed 2026-08-25 and those pages now render honest empty states instead
+- **Many pages remain scaffolding** — no backend endpoint yet; the former localStorage mocks were removed 2026-08-25 and those pages now render honest empty states instead (DLP / Shadow IT are live)
 - **Server-side permission enforcement** — RBAC grants are enforced only in the web client (sidebar + RouteGuard); API middleware has no role checks
 - **No error boundaries** — uncaught React errors crash the page
 - **No real-time updates on most pages** — live-stream + presence WS are real-time; other dashboards still poll or are static
@@ -1411,6 +1450,8 @@ flowchart LR
 | **Machine-scoped data** | Every synced row that describes a specific machine carries `machine_id`, stamped server-side from `DeviceAuth` (never from the request body); device-level reads take `machineID` where `""` = all devices (see *Machine-Scoped Data Rule* below) |
 | **Retired-device history** | A removed device keeps showing its last-known data: legacy rows are attributed to it from the device registry's activity window (migration 047), and device-scoped software reads include the staleness-swept `is_active = false` links while the aggregate keeps the filter (see *Retired-Device History Rule* below) |
 | **Device lifecycle** | `employee_machines` is the canonical one-row-per-machine registry (`status` `active|old`, `first_track_at`, `last_track_at`, `wipe_requested_at`); `employee_devices` stays the rotating auth-token registry. Removal is a handshake: persist first, then instruct the client to wipe (see *Device Lifecycle Rule* below) |
+| **DLP policy versions** | Clients enforce only **published** immutable bundles (`dlp_policy_versions`); editing `dlp_rules` alone never changes the fleet until Publish (see *DLP Policy Version Rule* below) |
+| **Protected removal** | Windows stop/uninstall of the agent requires a server-issued one-time removal code (hash at rest); standard users cannot stop the SYSTEM service (see *Protected Removal Rule* below) |
 
 ### Web Infinite-Scroll Rule (mandatory)
 
@@ -1650,6 +1691,55 @@ stored the data that client just sent.**
    and the server-initiated wipe; a failed drain/server call never blocks the local wipe.
 6. **Never delete to remove.** Every removal path only changes statuses; history and last-known data
    stay readable (see *Retired-Device History Rule*).
+7. **Protected Windows uninstall extends this rule** — see *Protected Removal Rule*. A removal code
+   unlocks the SYSTEM service ACL and writes `teardown.ok`; the Inno uninstaller refuses without it.
+   `--remove-account` / `wipe_local` still drain + self-remove, but they do **not** bypass the
+   uninstall gate on a locked Windows install.
+
+### DLP Policy Version Rule (mandatory since 2026-10-22)
+
+**Endpoints never “chat” per-rule. The fleet pulls a versioned, immutable policy bundle; draft
+rules on the web are inert until Publish.**
+
+1. **Two tables.** `dlp_rules` is the admin-editable current set (soft-delete). `dlp_policy_versions`
+   is append-only: each Publish writes a new `version` (BIGSERIAL), `bundle_json`, `bundle_hash`,
+   `published_at`, `published_by`. Never UPDATE a published row.
+2. **Device pull.** `GET /api/v1/dlp/policy?sinceVersion=` (DeviceAuth) returns the newest bundle
+   newer than `sinceVersion`, or empty/304 when the service is already current. The Windows service
+   stores the applied blob under `%ProgramData%\<APP_MUTEX>\dlp\` and keeps enforcing the **last
+   good** bundle offline.
+3. **Compile on publish.** `POST /api/v1/dlp/rules/publish` (JWT, `dlp-rules`) snapshots enabled
+   rules (+ Shadow IT deny list when P3 lands) into `bundle_json`. Web CRUD alone must not be treated
+   as “live on the PC.”
+4. **Alerts carry the version.** Every synced alert includes `policyVersion` + optional `ruleId` so
+   triage can explain which published bundle was active.
+5. **Windows-only enforce.** Detection/telemetry may exist on Linux; USBSTOR / WFP / AppLocker /
+   service ACL are Windows-only. `ALPHA_DLP_ENABLED=false` parks all service workers — tracker
+   behaviour matches pre-DLP.
+6. **No second firewall product.** Domain blocks (P2+) use named WFP/`AlphaAI-DLP-*` filters or
+   optional DNS helpers configured by the service — not a custom userspace firewall.
+
+### Protected Removal Rule (mandatory since 2026-10-22)
+
+**Marketing-accurate language: protected uninstall for standard users — not “impossible for
+Administrators offline.” Safe Mode / offline disk remains the IT break-glass path.**
+
+1. **Issue once, store hash.** `POST /api/v1/devices/removal-code` (JWT) mints a raw code returned
+   **once**, stores only `sha256(raw)` in `removal_challenges` with `expires_at` / `used_at` /
+   `purpose` (`stop`|`uninstall`|`both`). TTL from `DLP_REMOVAL_CODE_TTL_MIN` (default 60).
+2. **Verify then teardown.** On the PC: `client.exe --protected-uninstall --code <raw>` → named
+   pipe `AuthorizeTeardown` → service calls `POST /devices/removal-verify` (DeviceAuth) → unlocks
+   service DACL → stops service → `AccountRemovalService` drain + `POST /devices/self-remove` →
+   wipe local identity → write `%ProgramData%\<APP_MUTEX>\dlp\teardown.ok`.
+3. **Uninstaller gate.** Windows Inno `InitializeUninstall` requires `teardown.ok` (no break-glass
+   checkbox). Service install uses a locked DACL (LocalSystem full / Administrators query-only) so
+   Services.msc Stop fails until a removal code unlocks it.
+4. **Identity names from `APP_IDENTIFIERS`.** `WINDOWS_SERVICE_NAME`, `WINDOWS_DLP_PIPE_NAME`,
+   `APP_MUTEX` — never hardcode service/pipe paths in scripts or C#.
+5. **Never store a forever plaintext uninstall password** in SQLite or on disk. Replay of a used or
+   expired code fails.
+6. **Honesty.** Never claim “Admin cannot uninstall offline.” Document Safe Mode / offline disk in
+   the support runbook (`TESTING.md` / ops notes).
 
 ### Cross-Platform Analyzer Safety Rule (mandatory)
 
@@ -1701,7 +1791,7 @@ call graph. .NET 10's `PlatformCompatibilityAnalyzer` can enter exponential glob
 | **No server permission model**| 🟠 Medium | Any authenticated user can access all protected endpoints; no role checks server-side.                                                                                           |
 | **Cross-account injection**   | 🟠 Medium | Sync handlers validate the JWT but don't verify the body `employeeId` matches the JWT subject.                                                                                   |
 | **Sync FK race — app-items vs app-sessions** | 🟢 Low (FK 500 fixed 2026-09-04; silent-loss component fixed 2026-09-09 via `rejectedIds`) | The client sends `app-sessions` and `app-items` in separate HTTP calls. A retry, second client process, or network blip could land the items batch BEFORE the parent session row arrived, causing Postgres `SQLSTATE 23503 (app_items_app_session_id_fkey)` to 500 the whole batch and silently drop every row. **Fix:** `server/internal/repository/new_schema_repo.BulkInsertAppItems` now preflights each 500-row batch with `SELECT id FROM app_sessions WHERE id = ANY($1)` over the **distinct** `appSessionID`s (one indexed round-trip, O(1) per id), drops rows whose `appSessionID` is empty or missing, logs a single WARN per batch with count + first 20 ids, and returns 200 with `accepted: <survivor count>`. Dropped rows stay `is_synced=0` in the client's local SQLite and re-send on the next sync — by then the parent session has landed. (⚠️ implemented 2026-09-09 — until then the client marked ALL sent ids synced and the dropped rows were lost; see top changelog entry.) **Why the other 11 sync endpoints are NOT at risk:** every other sync table's parent is `employees.employee_id`, which is created server-side via the web admin BEFORE any client can sync, so no client-side race exists. The only client-synced parent→child pair is `app_sessions → app_items`, and that's the one the preflight covers. Reproduce + verify in `TESTING.md` §"orphan `app-items` FK 23503 fix" (Steps A-D). No migration, no client change — server-only fix; ships with the next server deploy. |
-| **Scaffolding pages dominate** | 🟠 Medium | ~35 of ~50 web pages have no backend endpoint; since 2026-08-25 they render honest empty states (the localStorage mocks were deleted). Real-API: login, dashboard tiles, employees, user-management, roles, departments, logs/comprehensive, Employee Journey + Device Specs.                                                                          |
+| **Scaffolding pages dominate** | 🟠 Medium | Many web pages still have no backend endpoint; since 2026-08-25 they render honest empty states (the localStorage mocks were deleted). Real-API now also includes DLP Rules / Alerts / Shadow IT (2026-10-22), plus login, dashboard, employees, user-management, roles, departments, logs, Employee Journey, Device Specs, live-stream, attendance/shifts/timesheets. |
 | **Default passwords**         | 🟠 Medium | `AlphaAI@2024!` is the compiled-in default. Easy to forget to change.                                                                                                          |
 | **No offline/retry strategy** | 🟢 Low    | Client retries sync every cycle but has no exponential backoff or dedup.                                                                                                         |
 | **No data-pruning job**       | 🟢 Low    | Server's only background job (`staleness_sweep.go`) deactivates stale catalog links but never deletes old app_sessions/app_items data.                                            |

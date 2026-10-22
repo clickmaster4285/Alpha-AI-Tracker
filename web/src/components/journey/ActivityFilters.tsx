@@ -94,9 +94,15 @@ interface ActivityFiltersProps {
    * Show the search input.
    */
   searchShow?: boolean;
+  /**
+   * Placeholder text for the search input. Defaults to the generic
+   * "Search apps, pages, URLs…" copy — pages with a different domain
+   * (e.g. DLP alerts) pass their own.
+   */
+  searchPlaceholder?: string;
 }
 
-export default function ActivityFilters({ value, onChange, loading, availablePresets, singleDay, searchShow = true }: ActivityFiltersProps) {
+export default function ActivityFilters({ value, onChange, loading, availablePresets, singleDay, searchShow = true, searchPlaceholder = 'Search apps, pages, URLs…' }: ActivityFiltersProps) {
   const [searchInput, setSearchInput] = useState(value.search);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -165,7 +171,7 @@ export default function ActivityFilters({ value, onChange, loading, availablePre
         <input
           value={searchInput}
           onChange={e => setSearchInput(e.target.value)}
-          placeholder="Search apps, pages, URLs…"
+          placeholder={searchPlaceholder}
           className="bg-card border border-border rounded-lg pl-9 pr-9 py-2 text-sm outline-none focus:ring-2 focus:ring-primary/30 transition-shadow w-56 placeholder:text-muted-foreground"
         />
         {/* No clear button — see AGENTS.md URL-State Rule. The only signal is

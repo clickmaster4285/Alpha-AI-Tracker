@@ -68,6 +68,19 @@ public static class SingleInstanceService
     public const string CommandRemoveAccount = "REMOVE_ACCOUNT";
 
     /// <summary>
+    /// Protected uninstall with a server-issued removal code. Payload on the wire is
+    /// <c>PROTECTED_UNINSTALL:&lt;raw-code&gt;</c>. Prefer <see cref="CommandProtectedUninstallGo"/>
+    /// after the CLI has already verified (avoids double-consume → 401).
+    /// </summary>
+    public const string CommandProtectedUninstall = "PROTECTED_UNINSTALL";
+
+    /// <summary>
+    /// CLI already approved the removal code — running instance runs
+    /// stop→sync→status→wipe→DLP teardown without verifying again.
+    /// </summary>
+    public const string CommandProtectedUninstallGo = "PROTECTED_UNINSTALL_GO";
+
+    /// <summary>
     /// Invoked on the pipe-listener thread when a second launch asks to remove the
     /// local account. Two owners, mirroring the two GUI states: while the GUI is
     /// still headless this is handled in <c>Program.cs</c> (create the GUI, then let
@@ -76,6 +89,13 @@ public static class SingleInstanceService
     /// sign-in page). Implementations must marshal onto the UI thread.
     /// </summary>
     public static Action? OnRemoveAccountRequested;
+
+    /// <summary>
+    /// Invoked with the raw removal code when a second launch sends
+    /// <see cref="CommandProtectedUninstall"/>. Empty string means
+    /// <see cref="CommandProtectedUninstallGo"/> (already approved).
+    /// </summary>
+    public static Action<string>? OnProtectedUninstallRequested;
 
     /// <summary>
     /// Start the named-pipe server on the primary (mutex-owning) instance.
@@ -116,6 +136,19 @@ public static class SingleInstanceService
                 else if (string.Equals(line, CommandRemoveAccount, StringComparison.Ordinal))
                 {
                     try { OnRemoveAccountRequested?.Invoke(); }
+                    catch { /* never let a UI callback error kill the listener */ }
+                }
+                else if (string.Equals(line, CommandProtectedUninstallGo, StringComparison.Ordinal))
+                {
+                    // CLI already verified — empty code ⇒ codeAlreadyVerified path.
+                    try { OnProtectedUninstallRequested?.Invoke(""); }
+                    catch { /* never let a UI callback error kill the listener */ }
+                }
+                else if (line is not null &&
+                         line.StartsWith(CommandProtectedUninstall + ":", StringComparison.Ordinal))
+                {
+                    var code = line[(CommandProtectedUninstall.Length + 1)..].Trim();
+                    try { OnProtectedUninstallRequested?.Invoke(code); }
                     catch { /* never let a UI callback error kill the listener */ }
                 }
             }

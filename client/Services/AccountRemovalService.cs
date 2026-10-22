@@ -69,8 +69,12 @@ public class AccountRemovalService
     /// <summary>
     /// Runs the full removal routine. Returns true when the server acknowledged the
     /// self-remove; the local wipe happens regardless (the operator asked for it).
+    /// <paramref name="progress"/> receives phase keys: <c>stop</c>, <c>sync</c>, <c>status</c>, <c>wipe</c>.
+    /// Always mirrors phases to <see cref="RemovalProgress"/> so a CLI can poll.
     /// </summary>
-    public async Task<bool> RunAsync(CancellationToken ct = default)
+    public async Task<bool> RunAsync(
+        CancellationToken ct = default,
+        Action<string>? progress = null)
     {
         await _gate.WaitAsync(ct);
         try
@@ -78,23 +82,43 @@ public class AccountRemovalService
             if (_wiped)
                 return ServerNotified;
 
+            void Report(string phase)
+            {
+                var label = phase switch
+                {
+                    "stop" => "Stopping collectors",
+                    "sync" => "Syncing unsynced data",
+                    "status" => "Updating server status",
+                    "wipe" => "Wiping local account",
+                    _ => phase,
+                };
+                RemovalProgress.Write(phase, label);
+                progress?.Invoke(phase);
+            }
+
+            Report("stop");
             StopCollection();
 
-            // Bounded drain — the local wipe is what the operator asked for, so a slow
-            // or unreachable server must never prevent it. Timeout ⇒ proceed.
-            var timeout = TimeSpan.FromSeconds(Math.Max(5, _config.RemoveAccountSyncTimeoutSec));
+            // Bounded drain — local wipe must never hang forever on a dead server.
+            Report("sync");
+            // Cap at 45s for snappy uninstall/remove; env can still lower it.
+            var timeout = TimeSpan.FromSeconds(
+                Math.Clamp(_config.RemoveAccountSyncTimeoutSec, 5, 45));
             var drained = await _sync.WaitForDrainAsync(timeout, ct);
             _logger.LogInformation(
                 "Account removal: final sync drain {State} (timeout {Timeout}s)",
                 drained ? "completed" : "timed out — proceeding with local wipe",
                 timeout.TotalSeconds);
 
-            // R5: tell the server the machine is going away (idempotent).
+            Report("status");
             ServerNotified = await _sync.SelfRemoveAsync(ct);
 
+            Report("wipe");
             await WipeLocalAsync();
             _wiped = true;
 
+            // Do NOT write phase=done here — protected-uninstall still needs DLP teardown.
+            // Callers (--remove-account) write done after RunAsync returns.
             _logger.LogInformation("Account removal complete (serverNotified={Notified})", ServerNotified);
 
             try

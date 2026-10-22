@@ -51,6 +51,15 @@ export interface UseUrlActivityFilterResult<T extends Record<string, string>> {
 export function useUrlActivityFilter<T extends Record<string, string> = Record<string, never>>(
   extraSchema: Record<keyof T, { parse?: (raw: string) => T[keyof T] }> = {} as Record<keyof T, { parse?: (raw: string) => T[keyof T] }>,
   extraInitial: T = {} as T,
+  /**
+   * Date preset used when the URL carries no `preset`/`from`/`to`.
+   *
+   * Defaults to `today` (the activity-filter convention). Pages whose data
+   * is sparse and historical — e.g. the DLP alert log, where a single event
+   * can be weeks old — pass `all` so the first paint shows the real history
+   * instead of an empty "nothing today" list.
+   */
+  defaultPreset: DatePreset = 'today',
 ): UseUrlActivityFilterResult<T> {
   // Merge the activity filter schema with the extra schema into ONE
   // underlying `useUrlQueryState`. Same instance → same `lastSerialized` ref
@@ -65,7 +74,7 @@ export function useUrlActivityFilter<T extends Record<string, string> = Record<s
     } as Record<string, { parse?: (raw: string) => string }>,
     {
       q: '',
-      preset: 'today',
+      preset: defaultPreset,
       from: '',
       to: '',
       ...extraInitial,
@@ -95,7 +104,7 @@ export function useUrlActivityFilter<T extends Record<string, string> = Record<s
   // treat that as a `custom` range — otherwise the default `today` would
   // silently overwrite the caller's dates.
   const hasExplicitRange = Boolean(url.from && url.to);
-  const rawPreset = (url.preset || (hasExplicitRange ? 'custom' : 'today')) as DatePreset;
+  const rawPreset = (url.preset || (hasExplicitRange ? 'custom' : defaultPreset)) as DatePreset;
   const preset: DatePreset = rawPreset === 'custom' || hasExplicitRange ? 'custom' : rawPreset;
   const isCustom = preset === 'custom';
   const { dateFrom: presetFrom, dateTo: presetTo } = presetRange(preset);

@@ -23,6 +23,12 @@ namespace client.Services;
     private readonly ILogger<BackgroundGuardService> _logger;
     private readonly AutoStartService _autoStart;
 
+    /// <summary>
+    /// Set during protected-uninstall / account removal so the watchdog does not
+    /// reinstall the Run key or systemd unit while teardown is in progress.
+    /// </summary>
+    public static volatile bool SuppressWatchdog;
+
     // Track what's currently installed so we know what to watchdog
     private bool _autoStartWasEnabled;
     private bool _systemdWasInstalled;
@@ -69,6 +75,12 @@ namespace client.Services;
             try
             {
                 await Task.Delay(healthCheckInterval, stoppingToken);
+
+                if (SuppressWatchdog)
+                {
+                    _logger.LogInformation("Guard watchdog suppressed (uninstall/removal in progress)");
+                    continue;
+                }
 
                 _logger.LogTrace("Guard watchdog heartbeat OK");
 

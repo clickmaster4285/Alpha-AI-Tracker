@@ -16,8 +16,23 @@ EXECUTABLE_NAME="client"
 # Publisher/Author name
 PUBLISHER="Alpha AI"
 
-# App mutex/class identifier (Windows, single-instance detection)
+# App mutex/class identifier (Windows, single-instance detection).
+# Also the ProgramData folder name and the stem for the Windows DLP service /
+# named-pipe identifiers below (change this once when re-branding).
 APP_MUTEX="AlphaAITracker"
+
+# Windows SYSTEM DLP service — SCM name + published exe base name (no .exe).
+# Default convention: {APP_MUTEX}.Service — keep in sync when re-branding.
+WINDOWS_SERVICE_NAME="AlphaAITracker.Service"
+
+# Services.msc / sc display name for the DLP service.
+WINDOWS_SERVICE_DISPLAY_NAME="Alpha AI Tracker DLP"
+
+# Named pipe for tracker ↔ DLP service IPC (\\.\pipe\<name>).
+WINDOWS_DLP_PIPE_NAME="AlphaAITracker.Dlp"
+
+# One-shot schtasks name used by the installer to stop/delete the locked service.
+WINDOWS_SERVICE_MAINT_TASK="AlphaAITrackerSvcMaint"
 
 # Windows installer base filename (without version/extension)
 WINDOWS_INSTALLER_NAME="AlphaAITracker"

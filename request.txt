@@ -1,7 +1,11 @@
-currently the livestream work only for windows 
-but now i want also linux 
+now i uninstall the 
+"C:\Program Files (x86)\Alpha AI Tracker\client.exe" --protected-uninstall --code "YOUR_NEW_CODE" --no-pause
 
-current machine is linux 
-so start chnages with testing on yourself 
+and also uninstall the Alpha AI Tracker
 
-currently on windows side livestreaming is perfectly running
+but still the usbpendrive not deduct why,, why its still block 
+i restart my pc also but same problem 
+
+thats mean the dlp alpha-ai-tracker.servces is not fully removed
+
+i don't remove  

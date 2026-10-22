@@ -1,7 +1,18 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-10-19 (machine lifecycle + wipe handshake)
+> **Last audited:** 2026-10-22 (Security & DLP P0+P1)
 > **Changelog:**
+> - 2026-10-22: **Security & DLP spine + alert triage history (migrations 051/052).**
+>   Migration **051** adds `dlp_rules` (editable), `dlp_policy_versions` (immutable published
+>   bundles), `dlp_alerts` (device-synced inbox), `shadow_it_apps`, `removal_challenges`
+>   (SHA-256 of one-time codes only). Migration **052** adds `dlp_alert_events` (per-field triage
+>   audit on Save). New `DlpRepo` / `DlpService` / `DlpHandler` + DTOs/models. DeviceAuth:
+>   `GET /dlp/policy`, `POST /dlp/alerts/sync`, `POST /dlp/health`, `POST /devices/removal-verify`.
+>   JWT: rules CRUD + `POST /dlp/rules/publish`, `GET|PATCH /dlp/alerts`, `GET /dlp/alerts/:id/history`,
+>   `GET|PATCH /shadow-it/apps`, `POST /devices/removal-code`. Env `DLP_REMOVAL_CODE_TTL_MIN`
+>   (default 60). RBAC `security-dlp` submodules already seeded. Verified: `go build` / `go vet`;
+>   publish smoke test in `dlp_publish_smoke_test.go`. See *DLP Policy Version Rule* /
+>   *Protected Removal Rule* in AGENTS.md §6.
 > - 2026-10-19 (late): **Client E2E on the installed build — post-wipe re-login verified end-to-end.**
 >   Earlier in the day the new code shipped in `AlphaAITracker-Setup-1.2.36.exe` was smoke-tested on
 >   the very machine producing the report: `client.exe --remove-account` (admin UI tell, not web admin)
@@ -508,6 +519,10 @@ Employee token is carried in the request body (`{employeeId, token, entries: [..
 | POST | `/permission-status/sync` | `permission_status` | Bulk upsert by check_id |
 | POST | `/storage-devices/sync` | `storage_devices` | Bulk upsert |
 | POST | `/devices/self-remove` | `employee_machines`, `employee_devices` | **Remove the account** (DeviceAuth). Marks the CALLING machine `old` + advances `last_track_at`, revokes its device rows, closes open sessions/items and sets `tracking_status='untracked'`. Returns `{removed, machineId, status, lastTrackAt, trackingStatus}`. Called by the client AFTER its final drain. |
+| GET | `/dlp/policy` | `dlp_policy_versions` | Pull published bundle (`?sinceVersion=`). Empty/304 when current. *DLP Policy Version Rule*. |
+| POST | `/dlp/alerts/sync` | `dlp_alerts` | Batch upsert by client UUID; returns accepted ids |
+| POST | `/dlp/health` | — | Heartbeat: policyVersion, enforceOK, lastError |
+| POST | `/devices/removal-verify` | `removal_challenges` | Validate one-time code (marks `used_at`); unlocks protected Windows teardown |
 
 > **Server→client wipe instruction (`action`, 2026-10-19).** `SyncBatchResponse` gained
 > `action,omitempty`. When `DeviceAuth` authenticated a **revoked** device token (that machine was
@@ -515,6 +530,23 @@ Employee token is carried in the request body (`{employeeId, token, entries: [..
 > `{"action":"wipe_local"}` through `applyDeviceAction` — but **only after** the incoming batch has
 > been persisted, so no data is lost to the wipe. The key is absent from every other response, so an
 > older client ignores it and a new client never sees it from an older server.
+
+### Security & DLP (Protected — web admin)
+
+RBAC keys: `dlp-rules`, `dlp-alerts`, `shadow-it` under module `security-dlp`. Publish is the only
+path that moves draft rules onto endpoints (immutable `dlp_policy_versions`).
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET/POST | `/dlp/rules` | List / create editable rules |
+| PATCH/DELETE | `/dlp/rules/:id` | Update / soft-delete |
+| POST | `/dlp/rules/publish` | Compile enabled rules → new `dlp_policy_versions` row (`policyVersion`, `hash`, `ruleCount`) |
+| GET | `/dlp/alerts` | Infinite-scroll inbox (`q`, `status`, `severity`, `type`, `employeeId`, `dateFrom`, `dateTo`, `page`, `perPage`) + status counters |
+| PATCH | `/dlp/alerts/:id` | Triage: `status` / `assignedTo` / `notes` (writes `dlp_alert_events` per changed field) |
+| GET | `/dlp/alerts/:id/history` | Triage audit trail (newest first) |
+| GET | `/shadow-it/apps` | Catalog list (`q`, `authStatus`, pagination + counters) |
+| PATCH | `/shadow-it/apps/:id` | `authStatus` / `risk` / `action` (`approve`\|`block`\|`flag`) |
+| POST | `/devices/removal-code` | Issue one-time protected-uninstall code (raw returned once; hash stored) |
 
 ### App Sessions & App Items (Protected — web admin reads)
 
@@ -605,7 +637,7 @@ SFU: `internal/stream/sfu.go` (Pion) + `hub.go`. Cluster: `internal/redis/cluste
 
 ## 5. Database Schema
 
-### Tables (16 tracked tables + RBAC/monitoring/status tables + `schema_migrations`)
+### Tables (tracked tables + RBAC/monitoring/status/DLP tables + `schema_migrations`)
 
 > 2026-08-11: +4 sync tables — `app_status` (key/value per employee), `hardware_devices`
 > (USB/peripheral hotplug), `permission_status` (one row per permission method), and
@@ -614,6 +646,43 @@ SFU: `internal/stream/sfu.go` (Pion) + `hub.go`. Cluster: `internal/redis/cluste
 > 2026-08-25: migration 025 adds the RBAC cluster (`roles`, `modules`, `submodules`,
 > `role_submodule_permissions`) and drops the legacy `users.role` / `users.department` /
 > `users.is_company_admin` columns — **`users.role_id` is now the sole role source of truth**.
+>
+> 2026-10-22: migrations **051** / **052** add the Security & DLP cluster (rules, policy versions,
+> alerts, alert events, shadow IT, removal challenges).
+
+**`dlp_rules`** — Admin-editable current policy set (migration 051)
+```
+id UUID PK · name · enabled · trigger (usb_storage|usb_file|web_navigate|software_install|…)
+match_json · action (alert|block|alert_block) · severity · scope_json · soft-delete
+```
+
+**`dlp_policy_versions`** — Immutable published bundles (migration 051)
+```
+version BIGSERIAL PK · bundle_json · bundle_hash · published_at · published_by → users(id)
+```
+
+**`dlp_alerts`** — Device-synced incident inbox (migration 051)
+```
+id UUID PK (client-generated) · rule_id · policy_version · employee_id · machine_id
+type · severity · action_taken (alerted|blocked|blocked_failed) · occurred_at · evidence_json
+status (open|investigating|resolved|false_positive) · assigned_to · notes · synced_at
+```
+
+**`dlp_alert_events`** — Triage audit (migration 052)
+```
+id BIGSERIAL · alert_id FK · changed_by · changed_by_name · field (status|assigned_to|notes)
+old_value · new_value · created_at
+```
+
+**`shadow_it_apps`** — App/SaaS authorization catalog (migration 051)
+```
+id BIGSERIAL · name · name_normalized UNIQUE · kind · auth_status · risk · user_count · soft-delete
+```
+
+**`removal_challenges`** — One-time protected stop/uninstall codes (migration 051)
+```
+id UUID · machine_id · employee_id · token_hash UNIQUE · purpose · expires_at · used_at · issued_by
+```
 
 **`employee_machines`** — Canonical per-machine lifecycle registry (migration 049)
 ```

@@ -3,6 +3,7 @@ using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
 using Avalonia.Threading;
 using client.Core;
+using client.Services;
 using client.ViewModels;
 using client.Views;
 using Microsoft.Extensions.DependencyInjection;
@@ -124,9 +125,11 @@ public partial class App : Application
                 try
                 {
                     await viewModel.RemoveAccountAsync(CancellationToken.None);
+                    RemovalProgress.Write("done", "remove-account successfully");
                 }
                 catch (Exception ex)
                 {
+                    RemovalProgress.Write("failed", ex.Message);
                     Console.Error.WriteLine($"[client] Account removal failed: {ex.Message}");
                 }
             }
@@ -244,6 +247,43 @@ public partial class App : Application
                 await RemoveLocalAccountAsync();
                 ShowWindow();
             });
+
+            // stop→sync→status→teardown on a worker thread; CLI polls RemovalProgress.
+            SingleInstanceService.OnProtectedUninstallRequested = code =>
+            {
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        var svc = ServiceProvider?.GetService<ProtectedUninstallService>();
+                        if (svc is null)
+                        {
+                            RemovalProgress.Write("failed", "ProtectedUninstallService not registered");
+                            Console.Error.WriteLine("[client] ProtectedUninstallService not registered");
+                            return;
+                        }
+                        var already = string.IsNullOrEmpty(code) ||
+                                      ProtectedUninstallService.HasApprovedMarker();
+                        var ok = await svc.RunPipelineAsync(
+                            code ?? "", "both", CancellationToken.None,
+                            codeAlreadyVerified: already);
+                        Console.WriteLine(ok
+                            ? "protected-uninstall successfully"
+                            : "protected-uninstall failed — check the removal code.");
+                    }
+                    catch (Exception ex)
+                    {
+                        RemovalProgress.Write("failed", ex.Message);
+                        Console.Error.WriteLine($"[client] Protected uninstall failed: {ex.Message}");
+                    }
+
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        PendingRemoveAccount = true;
+                        ShowWindow();
+                    });
+                });
+            };
 
             // A removal request that arrived between the boot-time check above and the
             // handler installation just now would otherwise be dropped (the flag had not

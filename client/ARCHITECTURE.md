@@ -1,7 +1,20 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-10-19 (machine id coverage + account/device removal)
+> **Last audited:** 2026-10-22 (Windows DLP service P0+P1)
 > **Changelog:**
+> - 2026-10-22: **Windows Security & DLP — LocalSystem service + protected uninstall (P0+P1).**
+>   New project `client/DlpService` (`AlphaAITracker.Service.exe`, names from `APP_IDENTIFIERS`
+>   `WINDOWS_SERVICE_NAME` / `WINDOWS_DLP_PIPE_NAME` / `APP_MUTEX`): PolicyPullWorker,
+>   EnforceWorker + `UsbStorEnforcer`, RemovableDriveMonitor, AlertSyncWorker, NamedPipeHost,
+>   ServiceAclHardener, TrackerWatchdogWorker, ProgramData store under
+>   `%ProgramData%\<APP_MUTEX>\dlp\` (policy blob, local alerts, `service.env`, `device.auth`,
+>   `teardown.ok`) — **never** multi-writes the user helper's SQLite. User helper:
+>   `DlpDeviceCredentialBridge` after login, `DlpPipeClient`, `ProtectedUninstallService`
+>   (`--protected-uninstall --code`), `WindowsTeardownCleanup`, CliConsole progress.
+>   Installer: Inno publishes `Service\`, `sc create` + recovery, ACL lock, uninstall gated on
+>   `teardown.ok`; `install-service.ps1` for lab. Knobs `ALPHA_DLP_*` (re-bake `config.enc`).
+>   `ALPHA_DLP_ENABLED=false` parks all workers. Linux/macOS: no DLP service. See AGENTS.md
+>   *DLP Policy Version Rule* / *Protected Removal Rule*; lab: `TESTING.md` + `client/build.md`.
 > - 2026-10-19 (late): **Post-wipe re-login re-collects hardware / network / software; the Linux setup wizard can pass step 2.**
 >   *Defect 1 ("No hardware snapshot synced yet" on a device that re-logged in after a removal):* a
 >   removal wipe runs inside the ALREADY-RUNNING process — it deletes every SQLite row, but the
@@ -256,13 +269,15 @@
 - Storing everything locally in SQLite before batched sync to the central server
 - Managing the employee login lifecycle (JWT in request body) and the post-login **permission wizard**
 - Keeping the app alive (auto-start + background-guard watchdog), single-instance signalling, tray, headless systemd mode
+- **Windows DLP (separate process):** SYSTEM service pulls published policy, enforces USBSTOR, queues/syncs DLP alerts, ACL-hardens stop/uninstall; user helper bridges DeviceAuth credentials and runs protected-uninstall CLI
 
 **Does NOT own:**
 - Any business logic about "productive" vs "unproductive" activity
 - User/department/admin management (server + web)
-- Data persistence beyond local buffering (server is the source of truth)
+- Data persistence beyond local buffering (server is the source of truth) — except the DLP service's own ProgramData SQLite/files
 - Any web-facing display or analytics
 - Shell/terminal **command history** collection — removed; shells themselves are only tracked as *children* of terminals/IDEs
+- Linux/macOS DLP block / protected service (Windows-only for P0–P5)
 
 ---
 
@@ -286,7 +301,7 @@
 ### Notable Omissions
 
 - **No ORM** — raw parameterized SQL via `SqliteCommand`
-- **No test framework** — no test project at all
+- **Sparse tests** — `client/client.Tests` covers a few DLP/teardown helpers; collectors largely untested
 - **No structured logging beyond ILogger** — console (dev) + `FileLoggerProvider` → `dotnetrunlog.txt`
 - **No third-party auto-updater library** — the built-in `AppUpdateService` (2026-08-12, §16) self-updates from GitHub Releases; installers are still published via `release.sh`
 
@@ -485,8 +500,44 @@ log banners).
 - `--print-config` — prints the config an INSTALLED build would resolve (diagnostic)
 - `--background` — headless: hosts the services with **no Avalonia/X11 UI** (systemd unit). Skips GUI init so a stale `XAUTHORITY` can never crash startup.
 - `--minimized` — start hidden to tray (auto-start launches).
-- **Single instance:** global mutex `AlphaAITracker`. A second launch that cannot acquire the mutex sends `SHOW` over the named pipe (`alpha-ai-tracker-activation`) so the running instance raises its window — but only for *user* launches (not `--background`/`--minimized`).
+- `--remove-account` — drain sync → `POST /devices/self-remove` → wipe local DB/machine id (`AccountRemovalService`)
+- `--protected-uninstall --code <raw>` — Windows only: verify removal code via DLP service pipe → unlock ACLs → stop service → same drain/self-remove/wipe → write `teardown.ok` for Inno uninstall
+- **Single instance:** global mutex from `APP_IDENTIFIERS` `APP_MUTEX` (`Global\…`). A second launch that cannot acquire the mutex sends `SHOW` over the named pipe so the running instance raises its window — but only for *user* launches (not `--background`/`--minimized`).
+- **Two Windows processes when DLP is installed:**
+  | Process | Privilege | Mutex / pipe |
+  |---------|-----------|--------------|
+  | `AlphaAITracker.Service.exe` (`client/DlpService`) | LocalSystem | `Global\<WINDOWS_SERVICE_NAME>` + `\\.\pipe\<WINDOWS_DLP_PIPE_NAME>` |
+  | User helper (`client.exe`) | Logged-on user | Existing `Global\<APP_MUTEX>` |
 - Windows: `SetThreadExecutionState(ES_SYSTEM_REQUIRED)` while tracking prevents sleep.
+
+---
+
+## 4b. Windows DLP service (`client/DlpService`)
+
+Production blocking and protected lifecycle live here — **not** in the Avalonia process (Session 0 cannot host interactive a11y/UI; UAC prompts mid-flight are unacceptable).
+
+```
+AlphaAITracker.Service.exe (LocalSystem)
+  ├── PolicyPullWorker     GET /dlp/policy → PolicyStore
+  ├── EnforceWorker        UsbStorEnforcer when usb_* block rules present
+  ├── RemovableDriveMonitor  plug events → local alert queue
+  ├── AlertSyncWorker      POST /dlp/alerts/sync (≤60s cadence)
+  ├── NamedPipeHost        health / AuthorizeTeardown / GetPolicyVersion
+  ├── ServiceAclWorker     SY full / BA query-only until removal unlock
+  └── TrackerWatchdogWorker  relaunch user helper if End Task'd (ALPHA_DLP_WATCHDOG)
+         │ named pipe + ProgramData files
+         ▼
+client.exe (user session) — collectors, GUI, device.auth bridge, --protected-uninstall
+```
+
+| Path | Role |
+|------|------|
+| `%ProgramData%\<APP_MUTEX>\dlp\service.env` | `ALPHA_DLP_*` for the service process |
+| `%ProgramData%\<APP_MUTEX>\dlp\device.auth` | Device token written by tracker after login |
+| `%ProgramData%\<APP_MUTEX>\dlp\policy.vN.json` | Last applied bundle |
+| `%ProgramData%\<APP_MUTEX>\dlp\teardown.ok` | Uninstaller gate after successful protected uninstall |
+
+`ALPHA_DLP_ENABLED=false` parks every worker (tracker behaves as pre-DLP). P2+ (WFP domains, AppLocker, minifilter) not yet implemented — see `plan.md`.
 
 ---
 

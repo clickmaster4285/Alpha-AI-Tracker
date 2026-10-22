@@ -29,6 +29,10 @@ type Config struct {
 	// client omits timezone). Empty = leave UTC unchanged.
 	DefaultShiftTimezone string
 
+	// DlpRemovalCodeTTLMin is the default lifetime (minutes) for one-time
+	// protected stop/uninstall codes issued to Windows agents.
+	DlpRemovalCodeTTLMin int
+
 	// LiveStream configures the WebRTC SFU live preview hub.
 	LiveStream LiveStreamConfig
 
@@ -169,6 +173,8 @@ func Load() (*Config, error) {
 		LinkStaleDays: getEnvInt("LINK_STALE_DAYS", 7),
 
 		DefaultShiftTimezone: strings.TrimSpace(getEnv("DEFAULT_SHIFT_TIMEZONE", "")),
+
+		DlpRemovalCodeTTLMin: getEnvInt("DLP_REMOVAL_CODE_TTL_MIN", 60),
 
 		LiveStream: LiveStreamConfig{
 			Enabled:                getEnvBool("LIVE_STREAM_ENABLED", true),

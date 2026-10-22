@@ -1,10 +1,11 @@
 # APP_IDENTIFIERS — App Identity Management
 
 > **Single source of truth for all package/app identifiers across the project.**
+> Includes Windows DLP SCM service name, display name, named pipe, and maint task (2026-10-22).
 
 ## Overview
 
-`APP_IDENTIFIERS` centralizes every piece of app identity metadata that used to be scattered and hardcoded across build scripts, installer templates, and platform configs.
+`APP_IDENTIFIERS` centralizes every piece of app identity metadata that used to be scattered and hardcoded across build scripts, installer templates, platform configs, and the DLP Windows service (`DlpService` / Inno / `install-service.ps1`).
 
 **Build-time consumers** — these `source` the file as shell:
 
@@ -64,7 +65,11 @@ That’s it. Do **not** edit the individual build scripts or `.iss` file directl
 | `BUNDLE_ID` | `com.alphaai.tracker` | macOS `Info.plist` (`CFBundleIdentifier`) |
 | `EXECUTABLE_NAME` | `client` | Binary name, launch commands |
 | `PUBLISHER` | `Alpha AI` | `.deb` Maintainer, Windows installer publisher |
-| `APP_MUTEX` | `AlphaAITracker` | Windows single-instance mutex |
+| `APP_MUTEX` | `AlphaAITracker` | Windows single-instance mutex; ProgramData folder stem |
+| `WINDOWS_SERVICE_NAME` | `AlphaAITracker.Service` | Windows DLP SCM service + published exe base name |
+| `WINDOWS_SERVICE_DISPLAY_NAME` | `Alpha AI Tracker DLP` | Services.msc display name |
+| `WINDOWS_DLP_PIPE_NAME` | `AlphaAITracker.Dlp` | Named pipe tracker ↔ DLP service |
+| `WINDOWS_SERVICE_MAINT_TASK` | `AlphaAITrackerSvcMaint` | Installer schtasks name for locked-service stop/delete |
 | `WINDOWS_INSTALLER_NAME` | `AlphaAITracker` | Windows `.exe` installer filename |
 | `DEB_PACKAGE_NAME` | `alpha-ai-tracker` | Linux `.deb` package filename |
 | `MACOS_BUNDLE_NAME` | `Alpha AI Tracker` | macOS `.app` bundle and `.dmg` volume name |

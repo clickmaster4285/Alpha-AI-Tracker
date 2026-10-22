@@ -3,12 +3,12 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check, Eye, Monitor, MonitorOff, Upload, Download, Pencil, Trash2, AlertTriangle, UserPlus, Terminal } from 'lucide-react';
+import { Search, Plus, MoreVertical, Loader2, Key, Copy, Check, Eye, Monitor, MonitorOff, Upload, Download, Pencil, Trash2, AlertTriangle, UserPlus, Terminal, ShieldOff } from 'lucide-react';
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import * as XLSX from 'xlsx';
-import { employeesApi, departmentsApi, usersApi, shiftsApi, type Employee, type CreateEmployeePayload, type UpdateEmployeePayload, type ImportEmployeeRow, type ImportEmployeesResponse, type Shift, type RemoveEmployeeDeviceResponse } from '@/lib/api';
-import { REMOVE_ACCOUNT_COMMANDS } from '@/lib/client-commands';
+import { employeesApi, departmentsApi, usersApi, shiftsApi, dlpApi, type Employee, type CreateEmployeePayload, type UpdateEmployeePayload, type ImportEmployeeRow, type ImportEmployeesResponse, type Shift, type RemoveEmployeeDeviceResponse, type IssueRemovalCodeResponse, type EmployeeDevice } from '@/lib/api';
+import { REMOVE_ACCOUNT_COMMANDS, protectedUninstallCommand } from '@/lib/client-commands';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { useUrlQueryState } from '@/hooks/use-url-query-state';
 import {
@@ -90,6 +90,12 @@ function UsersListInner() {
   // `--remove-account` command to finish the handover on that machine.
   const [removeResult, setRemoveResult] = useState<RemoveEmployeeDeviceResponse | null>(null);
   const [importResult, setImportResult] = useState<ImportEmployeesResponse | null>(null);
+  const [showRemovalCode, setShowRemovalCode] = useState<Employee | null>(null);
+  const [removalDevices, setRemovalDevices] = useState<EmployeeDevice[]>([]);
+  const [removalMachineId, setRemovalMachineId] = useState('');
+  const [removalIssued, setRemovalIssued] = useState<IssueRemovalCodeResponse | null>(null);
+  const [removalLoading, setRemovalLoading] = useState(false);
+  const [copiedRemovalCmd, setCopiedRemovalCmd] = useState(false);
 
   // Form state
   const [newName, setNewName] = useState('');
@@ -694,10 +700,36 @@ function UsersListInner() {
                           </DropdownMenuItem>
                         )}
                         {emp.trackingStatus === 'tracked' ? (
-                          <DropdownMenuItem onSelect={() => { setRemoveResult(null); setCopiedCommand(null); setShowRemove(emp); }} className="cursor-pointer gap-2.5 px-2.5 py-2 text-warning focus:text-warning focus:bg-warning/10">
-                            <MonitorOff className="w-4 h-4" />
-                            Remove Current Device
-                          </DropdownMenuItem>
+                          <>
+                            <DropdownMenuItem onSelect={() => { setRemoveResult(null); setCopiedCommand(null); setShowRemove(emp); }} className="cursor-pointer gap-2.5 px-2.5 py-2 text-warning focus:text-warning focus:bg-warning/10">
+                              <MonitorOff className="w-4 h-4" />
+                              Remove Current Device
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onSelect={() => {
+                                setRemovalIssued(null);
+                                setCopiedRemovalCmd(false);
+                                setRemovalMachineId('');
+                                setRemovalDevices([]);
+                                setShowRemovalCode(emp);
+                                setRemovalLoading(true);
+                                employeesApi.detail(emp.id)
+                                  .then((d) => {
+                                    const devices = (d.devices ?? []).filter((x) => x.status === 'active' || !x.revokedAt);
+                                    const list = devices.length > 0 ? devices : (d.devices ?? []);
+                                    setRemovalDevices(list);
+                                    const preferred = list.find((x) => x.status === 'active') ?? list[0];
+                                    if (preferred?.machineId) setRemovalMachineId(preferred.machineId);
+                                  })
+                                  .catch(() => toast.error('Could not load devices for this employee'))
+                                  .finally(() => setRemovalLoading(false));
+                              }}
+                              className="cursor-pointer gap-2.5 px-2.5 py-2"
+                            >
+                              <ShieldOff className="w-4 h-4 text-muted-foreground" />
+                              Issue Removal Code
+                            </DropdownMenuItem>
+                          </>
                         ) : (
                           <DropdownMenuItem onSelect={() => handleGenerateSecret(emp)} className="cursor-pointer gap-2.5 px-2.5 py-2">
                             <Key className="w-4 h-4 text-muted-foreground" />
@@ -955,6 +987,152 @@ function UsersListInner() {
                   )}
                 </button>
               </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Issue Removal Code — one-time code for --protected-uninstall on Windows */}
+      <Dialog
+        open={showRemovalCode !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setShowRemovalCode(null);
+            setRemovalIssued(null);
+            setRemovalDevices([]);
+            setRemovalMachineId('');
+            setCopiedRemovalCmd(false);
+          }
+        }}
+      >
+        <DialogContent className="bg-card sm:max-w-[560px]">
+          <DialogHeader>
+            <DialogTitle className="font-display">
+              {removalIssued ? 'Removal Code Issued' : 'Issue Removal Code'}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 mt-2">
+            {showRemovalCode && (
+              <div className="flex items-center gap-3 bg-background border border-border rounded-xl p-3.5">
+                <div
+                  className="w-11 h-11 rounded-full flex items-center justify-center text-sm font-bold text-primary-foreground shrink-0"
+                  style={{ backgroundColor: showRemovalCode.avatarColor || '#7C3AED' }}
+                >
+                  {showRemovalCode.avatar || showRemovalCode.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-foreground truncate">{showRemovalCode.name}</p>
+                  <p className="text-xs text-muted-foreground truncate">{showRemovalCode.employeeId}</p>
+                </div>
+              </div>
+            )}
+
+            {removalIssued ? (
+              <>
+                <div className="flex items-start gap-2.5 bg-warning/10 border border-warning/30 rounded-xl p-3">
+                  <AlertTriangle className="w-4 h-4 text-warning mt-0.5 shrink-0" />
+                  <p className="text-xs text-foreground">
+                    This code is shown <span className="font-semibold">once</span>, expires{' '}
+                    <span className="font-mono">{new Date(removalIssued.expiresAt).toLocaleString()}</span>, and
+                    authorizes stop/uninstall of the DLP service on that PC.
+                  </p>
+                </div>
+                <div className="bg-background border border-border rounded-xl p-1.5 flex items-center gap-1.5">
+                  <code className="flex-1 text-sm font-mono font-bold text-foreground select-all px-2.5 py-2 break-all">
+                    {removalIssued.code}
+                  </code>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(removalIssued.code);
+                      toast.success('Code copied');
+                    }}
+                    className="px-3 py-2 rounded-lg text-xs font-semibold bg-primary text-primary-foreground shrink-0"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <p className="text-xs text-muted-foreground">Run on the employee PC (PowerShell as admin if needed):</p>
+                <div className="bg-background border border-border rounded-xl p-1.5 flex items-start gap-1.5">
+                  <code className="flex-1 text-[11px] font-mono text-foreground select-all px-2.5 py-2 break-all">
+                    {protectedUninstallCommand(removalIssued.code)}
+                  </code>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(protectedUninstallCommand(removalIssued.code));
+                      setCopiedRemovalCmd(true);
+                      toast.success('Command copied');
+                    }}
+                    className={`px-3 py-2 rounded-lg text-xs font-semibold shrink-0 ${
+                      copiedRemovalCmd ? 'bg-success/15 text-success' : 'bg-primary text-primary-foreground'
+                    }`}
+                  >
+                    {copiedRemovalCmd ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+                <button
+                  onClick={() => { setShowRemovalCode(null); setRemovalIssued(null); }}
+                  className="w-full border border-border text-foreground py-2.5 rounded-lg text-sm font-medium hover:bg-muted"
+                >
+                  Close
+                </button>
+              </>
+            ) : (
+              <>
+                <p className="text-xs text-muted-foreground">
+                  Issues a one-time code for Windows <span className="font-mono">--protected-uninstall</span>. The
+                  LocalSystem DLP service verifies it, unlocks its ACL, stops, and the tracker wipes the local account.
+                </p>
+                {removalLoading ? (
+                  <div className="flex justify-center py-6"><Loader2 className="w-6 h-6 animate-spin text-primary" /></div>
+                ) : removalDevices.length === 0 ? (
+                  <p className="text-sm text-destructive">No machines registered for this employee.</p>
+                ) : (
+                  <select
+                    value={removalMachineId}
+                    onChange={(e) => setRemovalMachineId(e.target.value)}
+                    className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground"
+                  >
+                    {removalDevices.map((d) => (
+                      <option key={d.machineId} value={d.machineId}>
+                        {(d.hostname || d.deviceName || d.machineId)} · {d.status}
+                        {d.machineId ? ` (${d.machineId.slice(0, 12)}…)` : ''}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setShowRemovalCode(null)}
+                    className="flex-1 border border-border text-foreground py-2.5 rounded-lg text-sm font-medium hover:bg-muted"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    disabled={!removalMachineId || !showRemovalCode || removalLoading}
+                    onClick={async () => {
+                      if (!showRemovalCode || !removalMachineId) return;
+                      setRemovalLoading(true);
+                      try {
+                        const resp = await dlpApi.issueRemovalCode({
+                          machineId: removalMachineId,
+                          employeeId: showRemovalCode.employeeId,
+                          purpose: 'both',
+                        });
+                        setRemovalIssued(resp);
+                        toast.success('Removal code issued');
+                      } catch (e) {
+                        toast.error(e instanceof Error ? e.message : 'Failed to issue code');
+                      } finally {
+                        setRemovalLoading(false);
+                      }
+                    }}
+                    className="flex-1 bg-primary text-primary-foreground py-2.5 rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-50 flex items-center justify-center gap-2"
+                  >
+                    {removalLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldOff className="w-4 h-4" />}
+                    Issue Code
+                  </button>
+                </div>
+              </>
             )}
           </div>
         </DialogContent>

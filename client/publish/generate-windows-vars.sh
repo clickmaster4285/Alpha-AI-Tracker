@@ -18,6 +18,12 @@ mkdir -p "$(dirname "$OUT")"
 # shellcheck disable=SC1090
 source "$PROJECT_DIR/APP_IDENTIFIERS"
 
+# Fallbacks if older APP_IDENTIFIERS omit the DLP keys.
+: "${WINDOWS_SERVICE_NAME:=${APP_MUTEX}.Service}"
+: "${WINDOWS_SERVICE_DISPLAY_NAME:=${DISPLAY_NAME} DLP}"
+: "${WINDOWS_DLP_PIPE_NAME:=${APP_MUTEX}.Dlp}"
+: "${WINDOWS_SERVICE_MAINT_TASK:=${APP_MUTEX}SvcMaint}"
+
 cat > "$OUT" <<EOF
 ; Auto-generated from APP_IDENTIFIERS — do not edit manually
 #define MyAppName "$DISPLAY_NAME"
@@ -26,6 +32,23 @@ cat > "$OUT" <<EOF
 #define MyAppExeName "$EXECUTABLE_NAME.exe"
 #define APP_MUTEX "$APP_MUTEX"
 #define WINDOWS_INSTALLER_NAME "$WINDOWS_INSTALLER_NAME"
+#define WINDOWS_SERVICE_NAME "$WINDOWS_SERVICE_NAME"
+#define WINDOWS_SERVICE_DISPLAY_NAME "$WINDOWS_SERVICE_DISPLAY_NAME"
+#define WINDOWS_DLP_PIPE_NAME "$WINDOWS_DLP_PIPE_NAME"
+#define WINDOWS_SERVICE_MAINT_TASK "$WINDOWS_SERVICE_MAINT_TASK"
+#define WINDOWS_SERVICE_EXE_NAME "$WINDOWS_SERVICE_NAME.exe"
 EOF
 
 echo "Generated $OUT"
+
+# MSBuild props so DlpService AssemblyName / exe match APP_IDENTIFIERS.
+PROPS="$PROJECT_DIR/DlpService/GeneratedIdentity.props"
+cat > "$PROPS" <<EOF
+<!-- Auto-generated from APP_IDENTIFIERS — do not edit manually -->
+<Project>
+  <PropertyGroup>
+    <AssemblyName>$WINDOWS_SERVICE_NAME</AssemblyName>
+  </PropertyGroup>
+</Project>
+EOF
+echo "Generated $PROPS"

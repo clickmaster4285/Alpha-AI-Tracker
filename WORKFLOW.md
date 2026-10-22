@@ -4,7 +4,7 @@ How work actually moves through this repo — the loops you run daily, and the g
 
 Rules live in [AGENTS.md](./AGENTS.md) §6; this file is the *procedure* for obeying them. File locations: [FILE_HIERARCHY.md](./FILE_HIERARCHY.md).
 
-*Last audited: 2026-09-29 — live stream WebRTC SFU V2 + theater popout (`ALPHA_STREAM_*` / `ALPHA_WS_*` / `LIVE_STREAM_*` / `WEBRTC_*` / `PRESENCE_WS_*`). Commands verified against `client/publish/*.sh`, `server/Makefile`, `web/package.json`.*
+*Last audited: 2026-10-22 — Security & DLP P0+P1 (`ALPHA_DLP_*`, Windows service + Inno gate, `DLP_REMOVAL_CODE_TTL_MIN`). Commands verified against `client/publish/*.sh`, `client/DlpService/install-service.ps1`, `server/Makefile`, `web/package.json`.*
 
 ---
 
@@ -26,6 +26,25 @@ When changing stream or presence knobs, update **both** `client/.env` (dev) **an
 Media encode bitrate is decided on the **client** (`ScreenVp8Encoder`). Server `WEBRTC_MAX_BITRATE_KBPS` is ops/advertise only.
 
 **Web theater:** `/live-stream` → **Open theater** opens `/live-stream/theater?ids=` in a new tab (full-bleed; no app chrome). Same max-4 tile selection. Browsers always show some address bar chrome.
+
+### Security & DLP config (Installer-Parity — Windows)
+
+DLP enforcement is a **separate LocalSystem service** (`client/DlpService`). Shipping a DLP change means:
+
+1. Add/change knobs in `client/.env` **and** `.env.example`, then re-bake `config.enc` (user helper).
+2. `install-service.ps1` / Inno writes `%ProgramData%\<APP_MUTEX>\dlp\service.env` with `ALPHA_DLP_*` for the service process — keep that list in sync.
+3. Service / pipe / ProgramData folder names come from `APP_IDENTIFIERS` (`WINDOWS_SERVICE_NAME`, `WINDOWS_DLP_PIPE_NAME`, `APP_MUTEX`) — never hardcode them.
+4. Lab without full Inno: elevated `client/DlpService/install-service.ps1` (see `client/build.md`).
+5. Server: `DLP_REMOVAL_CODE_TTL_MIN` (default 60) in `server/.env`.
+
+| Side | Keys |
+|---|---|
+| Client / service.env | `ALPHA_DLP_ENABLED`, `ALPHA_DLP_POLICY_POLL_SEC`, `ALPHA_DLP_ALERT_SYNC_SEC`, `ALPHA_DLP_USB_BLOCK`, `ALPHA_DLP_WEB_BLOCK`, `ALPHA_DLP_MAX_LOCAL_ALERTS`, `ALPHA_DLP_DEDUP_SEC`, `ALPHA_DLP_WATCHDOG`, `ALPHA_DLP_WATCHDOG_POLL_SEC`, optional `ALPHA_DLP_DATA_DIR` / `ALPHA_DLP_PIPE_NAME` |
+| Server | `DLP_REMOVAL_CODE_TTL_MIN` |
+
+**Publish → pull:** editing `/dlp-rules` alone does nothing on the PC until **Publish** (`POST /dlp/rules/publish`); the service polls `GET /dlp/policy`. Lab playbook: [TESTING.md](./TESTING.md) §DLP.
+
+**Protected uninstall:** web **Issue Removal Code** → `client.exe --protected-uninstall --code …` → `teardown.ok` → Apps & features uninstall. Without `teardown.ok`, Inno refuses.
 
 ---
 
@@ -217,4 +236,5 @@ Then the dashboard, if the data is meant to be visible: `web/src/lib/api.ts` fir
 - [ ] New env vars added to `.env` before `encrypt-config.sh`
 - [ ] No hardcoded product names in detection logic — classification comes from OS metadata ([AGENTS.md](./AGENTS.md) §6)
 - [ ] No new literal product name or version string — both come from `APP_IDENTIFIERS` / `VERSION`
-- [ ] Docs updated when the structure moved: [AGENTS.md](./AGENTS.md), [client/ARCHITECTURE.md](./client/ARCHITECTURE.md), [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md), [FILE_HIERARCHY.md](./FILE_HIERARCHY.md)
+- [ ] Docs updated when the structure moved: [AGENTS.md](./AGENTS.md), [client/ARCHITECTURE.md](./client/ARCHITECTURE.md), [server/ARCHITECTURE.md](./server/ARCHITECTURE.md), [web/ARCHITECTURE.md](./web/ARCHITECTURE.md), [FILE_HIERARCHY.md](./FILE_HIERARCHY.md), [TESTING.md](./TESTING.md) when a live playbook changed
+- [ ] For DLP/Windows service: installed service starts, USBSTOR toggles under a published block rule, removal-code uninstall works (`ALPHA_DLP_ENABLED=false` leaves tracker identical to pre-DLP)

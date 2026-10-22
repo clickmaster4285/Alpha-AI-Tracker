@@ -1644,4 +1644,184 @@ export const logGraphicalApi = {
     }),
 };
 
+// ─── Security & DLP ───────────────────────────────────────────────────────────
+
+export type DlpTrigger =
+  | 'usb_storage'
+  | 'usb_file'
+  | 'web_navigate'
+  | 'software_install'
+  | 'software_uninstall'
+  | 'cloud_sync_folder'
+  | 'file_transfer'
+  | 'email';
+
+export type DlpAction = 'alert' | 'block' | 'alert_block';
+export type DlpSeverity = 'critical' | 'high' | 'medium' | 'low';
+export type DlpAlertStatus = 'open' | 'investigating' | 'resolved' | 'false_positive';
+
+export interface DlpRule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  trigger: DlpTrigger;
+  match: Record<string, unknown>;
+  action: DlpAction;
+  severity: DlpSeverity;
+  scope: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DlpAlert {
+  id: string;
+  ruleId?: string;
+  policyVersion: number;
+  employeeId: string;
+  employeeName?: string;
+  machineId: string;
+  type: string;
+  severity: DlpSeverity;
+  actionTaken: string;
+  occurredAt: string;
+  evidence: Record<string, unknown>;
+  status: DlpAlertStatus;
+  assignedTo: string;
+  notes: string;
+  syncedAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One triage field change (status / assigned_to / notes). */
+export interface DlpAlertHistoryEvent {
+  id: number;
+  alertId: string;
+  changedBy?: string;
+  changedByName: string;
+  field: 'status' | 'assigned_to' | 'notes' | string;
+  oldValue: string;
+  newValue: string;
+  createdAt: string;
+}
+
+export interface DlpAlertHistoryResponse {
+  events: DlpAlertHistoryEvent[];
+}
+
+export interface DlpAlertListResponse {
+  alerts: DlpAlert[];
+  total: number;
+  page: number;
+  perPage: number;
+  open: number;
+  investigating: number;
+  resolved: number;
+  /** Alerts dismissed as a false positive. */
+  falsePositive: number;
+  /** Distinct alert types present under the current filters. */
+  types: string[];
+}
+
+export interface ShadowItApp {
+  id: number;
+  name: string;
+  nameNormalized: string;
+  kind: string;
+  authStatus: 'approved' | 'unauthorized' | 'under_review';
+  risk: 'high' | 'medium' | 'low';
+  firstDetectedAt: string;
+  userCount: number;
+  lastSeenAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ShadowItListResponse {
+  apps: ShadowItApp[];
+  total: number;
+  page: number;
+  perPage: number;
+  approved: number;
+  unauthorized: number;
+  underReview: number;
+}
+
+export interface PublishDlpPolicyResponse {
+  policyVersion: number;
+  hash: string;
+  publishedAt: string;
+  ruleCount: number;
+}
+
+export interface IssueRemovalCodeResponse {
+  code: string;
+  expiresAt: string;
+  purpose: string;
+  machineId: string;
+}
+
+export const dlpApi = {
+  issueRemovalCode: (data: {
+    machineId: string;
+    employeeId: string;
+    purpose?: 'stop' | 'uninstall' | 'both';
+    ttlMinutes?: number;
+  }) =>
+    request<IssueRemovalCodeResponse>('/devices/removal-code', {
+      method: 'POST',
+      body: data,
+    }),
+
+  rules: {
+    list: () => request<{ rules: DlpRule[]; total: number }>('/dlp/rules'),
+    create: (data: {
+      name: string;
+      trigger: string;
+      match?: Record<string, unknown>;
+      action?: string;
+      severity?: string;
+      scope?: Record<string, unknown>;
+      enabled?: boolean;
+    }) => request<DlpRule>('/dlp/rules', { method: 'POST', body: data }),
+    update: (id: string, data: Partial<{
+      name: string; enabled: boolean; trigger: string;
+      match: Record<string, unknown>; action: string; severity: string;
+      scope: Record<string, unknown>;
+    }>) => request<DlpRule>(`/dlp/rules/${id}`, { method: 'PATCH', body: data }),
+    delete: (id: string) =>
+      request<{ message: string }>(`/dlp/rules/${id}`, { method: 'DELETE' }),
+    publish: () =>
+      request<PublishDlpPolicyResponse>('/dlp/rules/publish', { method: 'POST' }),
+  },
+
+  alerts: {
+    list: (params?: {
+      q?: string; status?: string; severity?: string; type?: string; employeeId?: string;
+      dateFrom?: string; dateTo?: string;
+      page?: number; perPage?: number;
+    }) =>
+      request<DlpAlertListResponse>('/dlp/alerts', {
+        params: params as Record<string, string | number | undefined>,
+      }),
+    update: (id: string, data: { status?: DlpAlertStatus; assignedTo?: string; notes?: string }) =>
+      request<DlpAlert>(`/dlp/alerts/${id}`, { method: 'PATCH', body: data }),
+    history: (id: string) =>
+      request<DlpAlertHistoryResponse>(`/dlp/alerts/${id}/history`),
+  },
+};
+
+export const shadowItApi = {
+  list: (params?: {
+    q?: string; authStatus?: string; page?: number; perPage?: number;
+  }) =>
+    request<ShadowItListResponse>('/shadow-it/apps', {
+      params: params as Record<string, string | number | undefined>,
+    }),
+  update: (id: number, data: {
+    authStatus?: string; risk?: string; action?: 'approve' | 'block' | 'flag';
+  }) =>
+    request<ShadowItApp>(`/shadow-it/apps/${id}`, { method: 'PATCH', body: data }),
+};
+
 export { ApiError };
