@@ -7,15 +7,20 @@ namespace client.Services;
 
 /// <summary>
 /// Client for the LocalSystem DLP service named pipe (APP_IDENTIFIERS WINDOWS_DLP_PIPE_NAME).
-/// All calls are hard-bounded (connect + response) so a hung service never blocks the CLI.
+/// Hard-bounded: never await a hung Dispose (that deadlocked protected-uninstall when the
+/// service held the pipe while running sc.exe). Abandoned pipes are closed on a worker
+/// thread; the CLI continues teardown regardless.
 /// </summary>
 public static class DlpPipeClient
 {
     public static string DefaultPipeName => AppInfo.WindowsDlpPipeName;
 
-    /// <summary>Default: 2s connect + 12s response (covers service→server verify).</summary>
     public const int DefaultConnectTimeoutMs = 2_000;
     public const int DefaultResponseTimeoutMs = 12_000;
+    /// <summary>Hard ceiling for ApplyTeardownGate including any stuck dispose.</summary>
+    public const int ApplyTeardownOverallTimeoutMs = 8_000;
+
+    public sealed record PipeCallResult(bool Connected, bool TimedOut, string Body, string? Error);
 
     public static async Task<(bool Ok, string Body)> SendAsync(
         object request,
@@ -24,8 +29,21 @@ public static class DlpPipeClient
         int responseTimeoutMs = DefaultResponseTimeoutMs,
         CancellationToken ct = default)
     {
+        var r = await SendDetailedAsync(request, pipeName, connectTimeoutMs, responseTimeoutMs, ct)
+            .ConfigureAwait(false);
+        return (r.Connected && !r.TimedOut, r.Body);
+    }
+
+    public static async Task<PipeCallResult> SendDetailedAsync(
+        object request,
+        string? pipeName = null,
+        int connectTimeoutMs = DefaultConnectTimeoutMs,
+        int responseTimeoutMs = DefaultResponseTimeoutMs,
+        CancellationToken ct = default)
+    {
         if (!OperatingSystem.IsWindows())
-            return (false, "{\"ok\":false,\"error\":\"windows_only\"}");
+            return new PipeCallResult(false, false,
+                "{\"ok\":false,\"error\":\"windows_only\"}", "windows_only");
 
         var name = string.IsNullOrWhiteSpace(pipeName)
             ? Environment.GetEnvironmentVariable("ALPHA_DLP_PIPE_NAME")
@@ -33,39 +51,139 @@ public static class DlpPipeClient
         if (string.IsNullOrWhiteSpace(name))
             name = DefaultPipeName;
 
+        NamedPipeClientStream? client = null;
         try
         {
-            await using var client = new NamedPipeClientStream(
+            client = new NamedPipeClientStream(
                 ".", name, PipeDirection.InOut, PipeOptions.Asynchronous);
 
-            using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            connectCts.CancelAfter(Math.Clamp(connectTimeoutMs, 500, 10_000));
-            await client.ConnectAsync(connectCts.Token);
+            var connectMs = Math.Clamp(connectTimeoutMs, 500, 10_000);
+            var connectTask = client.ConnectAsync(CancellationToken.None);
+            var connectDone = await Task.WhenAny(connectTask, Task.Delay(connectMs, CancellationToken.None))
+                .ConfigureAwait(false);
+            if (connectDone != connectTask)
+            {
+                AbandonPipe(ref client);
+                return new PipeCallResult(false, true,
+                    "{\"ok\":false,\"error\":\"connect_timeout\"}", "connect_timeout");
+            }
 
-            await using var writer = new StreamWriter(client, Encoding.UTF8, leaveOpen: true) { AutoFlush = true };
-            using var reader = new StreamReader(client, Encoding.UTF8, leaveOpen: true);
+            try { await connectTask.ConfigureAwait(false); }
+            catch (Exception ex)
+            {
+                AbandonPipe(ref client);
+                return new PipeCallResult(false, false,
+                    JsonSerializer.Serialize(new { ok = false, error = ex.Message }),
+                    ex.Message);
+            }
 
-            using var responseCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            responseCts.CancelAfter(Math.Clamp(responseTimeoutMs, 1_000, 30_000));
+            var responseMs = Math.Clamp(responseTimeoutMs, 1_000, 30_000);
+            var payload = JsonSerializer.Serialize(request) + "\n";
+            var payloadBytes = Encoding.UTF8.GetBytes(payload);
 
-            await writer.WriteLineAsync(JsonSerializer.Serialize(request).AsMemory(), responseCts.Token);
-            var line = await reader.ReadLineAsync(responseCts.Token);
-            return (true, line ?? "{\"ok\":false,\"error\":\"empty_response\"}");
-        }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-        {
-            return (false, "{\"ok\":false,\"error\":\"timeout\"}");
+            // Write without StreamWriter (its Dispose can also hang on a stuck pipe).
+            var writeTask = client.WriteAsync(payloadBytes, 0, payloadBytes.Length, CancellationToken.None);
+            var writeDone = await Task.WhenAny(writeTask, Task.Delay(responseMs, CancellationToken.None))
+                .ConfigureAwait(false);
+            if (writeDone != writeTask)
+            {
+                AbandonPipe(ref client);
+                return new PipeCallResult(false, true,
+                    "{\"ok\":false,\"error\":\"write_timeout\"}", "write_timeout");
+            }
+
+            try { await writeTask.ConfigureAwait(false); }
+            catch (Exception ex)
+            {
+                AbandonPipe(ref client);
+                return new PipeCallResult(false, false,
+                    JsonSerializer.Serialize(new { ok = false, error = ex.Message }),
+                    ex.Message);
+            }
+
+            try { await client.FlushAsync(CancellationToken.None).ConfigureAwait(false); }
+            catch { /* ignore */ }
+
+            // Read one line with a hard deadline; do not use StreamReader.Dispose on timeout.
+            var line = await ReadLineWithDeadlineAsync(client, responseMs).ConfigureAwait(false);
+            if (line is null)
+            {
+                AbandonPipe(ref client);
+                return new PipeCallResult(false, true,
+                    "{\"ok\":false,\"error\":\"response_timeout\"}", "response_timeout");
+            }
+
+            var owned = client;
+            client = null; // transferred — close after success without blocking caller long
+            AbandonPipe(ref owned);
+
+            return new PipeCallResult(true, false,
+                string.IsNullOrWhiteSpace(line)
+                    ? "{\"ok\":false,\"error\":\"empty_response\"}"
+                    : line,
+                null);
         }
         catch (Exception ex)
         {
-            return (false, JsonSerializer.Serialize(new { ok = false, error = ex.Message }));
+            AbandonPipe(ref client);
+            return new PipeCallResult(false, false,
+                JsonSerializer.Serialize(new { ok = false, error = ex.Message }),
+                ex.Message);
+        }
+        finally
+        {
+            AbandonPipe(ref client);
         }
     }
 
     /// <summary>
-    /// Service verifies the one-time code with the server, writes teardown.ok, unlocks ACL.
-    /// Prefer <see cref="ApplyTeardownGateAsync"/> after the CLI has already verified via HTTP.
+    /// After the CLI wrote teardown.ok (HTTP verify already done), ask the service to
+    /// unlock SCM ACL and stop — no second code consume.
+    /// Overall wall-clock budget so a stuck Dispose/connect can never freeze the CLI.
     /// </summary>
+    public static async Task<(bool Ok, bool TimedOut, string Body, string? Error)> ApplyTeardownGateDetailedAsync(
+        string purpose = "both",
+        CancellationToken ct = default)
+    {
+        var sendTask = SendDetailedAsync(
+            new { op = "ApplyTeardownGate", purpose },
+            connectTimeoutMs: DefaultConnectTimeoutMs,
+            responseTimeoutMs: 4_000,
+            ct: CancellationToken.None);
+
+        var finished = await Task.WhenAny(
+                sendTask,
+                Task.Delay(ApplyTeardownOverallTimeoutMs, CancellationToken.None))
+            .ConfigureAwait(false);
+
+        if (finished != sendTask)
+        {
+            // Abandon sendTask — do not await (may be stuck in OS pipe close).
+            return (false, true,
+                "{\"ok\":false,\"error\":\"overall_timeout\"}", "overall_timeout");
+        }
+
+        try
+        {
+            var r = await sendTask.ConfigureAwait(false);
+            return (r.Connected && !r.TimedOut && IsOk(r.Body), r.TimedOut, r.Body, r.Error);
+        }
+        catch (Exception ex)
+        {
+            return (false, false,
+                JsonSerializer.Serialize(new { ok = false, error = ex.Message }),
+                ex.Message);
+        }
+    }
+
+    public static async Task<bool> ApplyTeardownGateAsync(
+        string purpose = "both",
+        CancellationToken ct = default)
+    {
+        var detailed = await ApplyTeardownGateDetailedAsync(purpose, ct).ConfigureAwait(false);
+        return detailed.Ok;
+    }
+
     public static async Task<bool> AuthorizeTeardownAsync(
         string code,
         string purpose = "both",
@@ -75,24 +193,66 @@ public static class DlpPipeClient
             new { op = "AuthorizeTeardown", code, purpose },
             connectTimeoutMs: DefaultConnectTimeoutMs,
             responseTimeoutMs: DefaultResponseTimeoutMs,
-            ct: ct);
+            ct: ct).ConfigureAwait(false);
         return connected && IsOk(body);
     }
 
     /// <summary>
-    /// After the CLI wrote teardown.ok (HTTP verify already done), ask the service to
-    /// unlock SCM ACL and stop — no second code consume.
+    /// Never await Dispose on a possibly-stuck pipe — that was the protected-uninstall hang.
     /// </summary>
-    public static async Task<bool> ApplyTeardownGateAsync(
-        string purpose = "both",
-        CancellationToken ct = default)
+    private static void AbandonPipe(ref NamedPipeClientStream? client)
     {
-        var (connected, body) = await SendAsync(
-            new { op = "ApplyTeardownGate", purpose },
-            connectTimeoutMs: DefaultConnectTimeoutMs,
-            responseTimeoutMs: 5_000,
-            ct: ct);
-        return connected && IsOk(body);
+        var c = client;
+        client = null;
+        if (c is null) return;
+        try
+        {
+            ThreadPool.QueueUserWorkItem(static state =>
+            {
+                try
+                {
+                    if (state is NamedPipeClientStream pipe)
+                        pipe.Dispose();
+                }
+                catch { /* ignore */ }
+            }, c);
+        }
+        catch { /* ignore */ }
+    }
+
+    private static async Task<string?> ReadLineWithDeadlineAsync(NamedPipeClientStream client, int timeoutMs)
+    {
+        var buffer = new byte[1];
+        var sb = new StringBuilder(256);
+        var deadline = Environment.TickCount64 + timeoutMs;
+
+        while (Environment.TickCount64 < deadline)
+        {
+            var remaining = (int)Math.Max(1, deadline - Environment.TickCount64);
+            var readTask = client.ReadAsync(buffer, 0, 1, CancellationToken.None);
+            var done = await Task.WhenAny(readTask, Task.Delay(remaining, CancellationToken.None))
+                .ConfigureAwait(false);
+            if (done != readTask)
+                return null;
+
+            int n;
+            try { n = await readTask.ConfigureAwait(false); }
+            catch { return null; }
+
+            if (n <= 0)
+                return sb.Length > 0 ? sb.ToString() : null;
+
+            var ch = (char)buffer[0];
+            if (ch == '\n')
+                return sb.ToString().TrimEnd('\r');
+            if (ch != '\r')
+                sb.Append(ch);
+
+            if (sb.Length > 64_000)
+                return sb.ToString();
+        }
+
+        return null;
     }
 
     private static bool IsOk(string body)

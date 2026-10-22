@@ -1,0 +1,11 @@
+now i uninstall the 
+"C:\Program Files (x86)\Alpha AI Tracker\client.exe" --protected-uninstall --code "YOUR_NEW_CODE" --no-pause
+
+and also uninstall the Alpha AI Tracker
+
+but still the usbpendrive not deduct why,, why its still block 
+i restart my pc also but same problem 
+
+thats mean the dlp alpha-ai-tracker.servces is not fully removed
+
+i don't remove  

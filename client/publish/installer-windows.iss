@@ -82,14 +82,27 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: no
 // Service DACL is locked to LocalSystem (admins cannot sc stop/delete).
 // Installer must stop/delete via a one-shot SYSTEM scheduled task BEFORE file copy,
 // otherwise DeleteFile on Service\*.dll fails with Access Denied (error 5).
+procedure RestoreUsbStorage;
+var
+  ResultCode: Integer;
+begin
+  // DLP sets USBSTOR Start=4 (disabled). Must restore Start=3 (manual) on uninstall
+  // or USB pendrives stay blocked after the service is gone.
+  Exec('reg.exe',
+    'add "HKLM\SYSTEM\CurrentControlSet\Services\USBSTOR" /v Start /t REG_DWORD /d 3 /f',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('sc.exe', 'config USBSTOR start= demand', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
 procedure StopDeleteDlpServiceAsSystem;
 var
   ResultCode: Integer;
 begin
   // Clear failure actions so SCM does not immediately restart after stop/kill.
+  RestoreUsbStorage;
   Exec('sc.exe', 'failure {#WINDOWS_SERVICE_NAME} reset= 0 actions= //', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('schtasks.exe',
-    '/Create /TN "{#WINDOWS_SERVICE_MAINT_TASK}" /TR "cmd.exe /c sc.exe stop {#WINDOWS_SERVICE_NAME} & sc.exe delete {#WINDOWS_SERVICE_NAME} & taskkill /F /IM {#WINDOWS_SERVICE_EXE_NAME}" /SC ONCE /ST 00:00 /RU SYSTEM /F',
+    '/Create /TN "{#WINDOWS_SERVICE_MAINT_TASK}" /TR "cmd.exe /c reg.exe add \"HKLM\SYSTEM\CurrentControlSet\Services\USBSTOR\" /v Start /t REG_DWORD /d 3 /f & sc.exe stop {#WINDOWS_SERVICE_NAME} & sc.exe delete {#WINDOWS_SERVICE_NAME} & taskkill /F /IM {#WINDOWS_SERVICE_EXE_NAME}" /SC ONCE /ST 00:00 /RU SYSTEM /F',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('schtasks.exe', '/Run /TN "{#WINDOWS_SERVICE_MAINT_TASK}"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   // Wait for SCM + process handles to release (Service\*.dll).
@@ -108,18 +121,21 @@ begin
   Result := True;
   KillCount := 0;
 
-  // Kill by image name ONLY (no /T — see warning above). The exe name is derived
-  // from APP_IDENTIFIERS via windows_vars.iss, never hardcoded here.
+  // Kill tracker FIRST so a stuck --protected-uninstall cannot lock {app}\*.*
+  // (Error 32 on unins000.dat when Apps & features is opened mid-hang).
+  // Kill by image name ONLY (no /T — see warning above).
   if Exec('taskkill', '/F /IM {#MyAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
     if ResultCode = 0 then KillCount := KillCount + 1;
+  Exec('taskkill', '/F /IM {#WINDOWS_SERVICE_EXE_NAME}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
   // Locked service ACL: plain "sc stop" fails for Administrators — use SYSTEM task.
   StopDeleteDlpServiceAsSystem;
   if Exec('taskkill', '/F /IM {#WINDOWS_SERVICE_EXE_NAME}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
     if ResultCode = 0 then KillCount := KillCount + 1;
+  Exec('taskkill', '/F /IM {#MyAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-  // Small pause to let OS release file handles
-  Exec('ping', '127.0.0.1 -n 3 -w 1000', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // Longer settle so unins000.dat / Service\*.dll handles are released (avoids Error 32).
+  Exec('ping', '127.0.0.1 -n 5 -w 1000', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
 procedure LockDlpServiceAcl;
@@ -174,6 +190,7 @@ end;
 procedure RemoveDlpService;
 begin
   // Only reached after teardown.ok (removal code). Prefer SYSTEM maintenance task.
+  RestoreUsbStorage;
   StopDeleteDlpServiceAsSystem;
 end;
 
@@ -205,7 +222,13 @@ end;
 function InitializeUninstall: Boolean;
 var
   Gate: string;
+  ResultCode: Integer;
 begin
+  // Always release locks first — even when refusing without teardown.ok — so a
+  // stuck client.exe from a hung protected-uninstall does not cause Error 32 on retry.
+  Exec('taskkill', '/F /IM {#MyAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('taskkill', '/F /IM {#WINDOWS_SERVICE_EXE_NAME}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
   Gate := ExpandConstant('{commonappdata}\{#APP_MUTEX}\dlp\teardown.ok');
   if not FileExists(Gate) then
   begin
@@ -222,8 +245,9 @@ begin
   end;
 
   Result := True;
-  RemoveDlpService;
+  // Kill + settle before SCM delete so Inno can open unins000.dat (no Error 32).
   KillRunningInstance;
+  RemoveDlpService;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

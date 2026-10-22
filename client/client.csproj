@@ -9,6 +9,10 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <NoWarn>$(NoWarn);NU1903</NoWarn>
     <DefaultServerUrl Condition="'$(DefaultServerUrl)'==''">http://localhost:8080</DefaultServerUrl>
+    <!-- Release/publish: no PDB next to the exe so unhandled stacks cannot leak
+         developer machine paths like C:\projects\alpha-ai-tracker\... -->
+    <DebugType Condition="'$(Configuration)'=='Release'">none</DebugType>
+    <DebugSymbols Condition="'$(Configuration)'=='Release'">false</DebugSymbols>
   </PropertyGroup>
 
   <!-- Read version from VERSION file (single source of truth).
@@ -77,5 +81,13 @@
     <None Remove="DlpService/**" />
     <EmbeddedResource Remove="DlpService/**" />
     <Content Remove="DlpService/**" />
+    <Compile Remove="client.Tests/**" />
+    <None Remove="client.Tests/**" />
+    <EmbeddedResource Remove="client.Tests/**" />
+    <Content Remove="client.Tests/**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="client.Tests" />
   </ItemGroup>
 </Project>

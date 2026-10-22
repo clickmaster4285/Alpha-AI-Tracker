@@ -7,14 +7,17 @@ using client.Core;
 namespace client.Services;
 
 /// <summary>
-/// Protected uninstall pipeline (fast, CLI-driven):
+/// Protected uninstall pipeline (CLI-driven):
 /// <list type="number">
 /// <item><b>Approve</b> — verify code with server (instant; fail on 401).</item>
-/// <item><b>Stop</b> — stop collectors (running instance or kill takeover).</item>
+/// <item><b>Stop</b> — stop collectors / kill takeover; disable auto-start watchdog bait.</item>
 /// <item><b>Sync</b> — drain unsynced rows (bounded).</item>
 /// <item><b>Status</b> — <c>self-remove</c>.</item>
-/// <item><b>Teardown</b> — wipe DB, <c>teardown.ok</c>, unlock/stop DLP.</item>
+/// <item><b>Wipe</b> — local account + machine id.</item>
+/// <item><b>Teardown</b> — <c>teardown.ok</c>, pipe unlock, USB restore, delete DLP service, verify.</item>
 /// </list>
+/// Full success requires independently verified local postconditions — not merely
+/// that <c>teardown.ok</c> exists.
 /// </summary>
 public sealed class ProtectedUninstallService
 {
@@ -25,10 +28,14 @@ public sealed class ProtectedUninstallService
     public static readonly TimeSpan PipelineBudget = TimeSpan.FromSeconds(90);
 
     private readonly AccountRemovalService _accountRemoval;
+    private readonly AutoStartService? _autoStart;
 
-    public ProtectedUninstallService(AccountRemovalService accountRemoval)
+    public ProtectedUninstallService(
+        AccountRemovalService accountRemoval,
+        AutoStartService? autoStart = null)
     {
         _accountRemoval = accountRemoval;
+        _autoStart = autoStart;
     }
 
     public static string TeardownOkPath =>
@@ -41,9 +48,13 @@ public sealed class ProtectedUninstallService
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             AppInfo.DataFolderName, "dlp", "removal.approved");
 
+    /// <summary>Last structured report from <see cref="RunPipelineDetailedAsync"/>.</summary>
+    public TeardownReport? LastReport { get; private set; }
+
     /// <summary>
     /// Full pipeline. Skip approve when <paramref name="codeAlreadyVerified"/>
     /// (CLI already consumed the one-time code).
+    /// Returns true only for <see cref="TeardownReport.FullLocalSuccess"/>.
     /// </summary>
     public async Task<bool> RunPipelineAsync(
         string rawCode,
@@ -52,31 +63,64 @@ public sealed class ProtectedUninstallService
         Action<string>? progress = null,
         bool codeAlreadyVerified = false)
     {
+        var report = await RunPipelineDetailedAsync(
+            rawCode, purpose, ct, progress, codeAlreadyVerified).ConfigureAwait(false);
+        return report.FullLocalSuccess;
+    }
+
+    public async Task<TeardownReport> RunPipelineDetailedAsync(
+        string rawCode,
+        string purpose = "both",
+        CancellationToken ct = default,
+        Action<string>? progress = null,
+        bool codeAlreadyVerified = false)
+    {
         var code = NormalizeCode(rawCode);
         RemovalProgress.Clear();
+        var steps = new List<string>();
 
         try
         {
+            Log("Starting protected uninstall pipeline");
+
             if (!codeAlreadyVerified)
             {
                 if (string.IsNullOrEmpty(code))
                 {
                     Fail("empty removal code");
-                    return false;
+                    return Finish(new TeardownReport
+                    {
+                        FailedOperation = "approve",
+                        Detail = "empty removal code",
+                    });
                 }
 
                 Set(progress, "approve", "Approving with server");
+                Log("Approving removal code with server");
                 if (!await VerifyCodeOnlyAsync(code, purpose, ct).ConfigureAwait(false))
-                    return false; // VerifyCodeOnlyAsync already Fail()'d with detail
+                {
+                    return Finish(new TeardownReport
+                    {
+                        FailedOperation = "approve",
+                        Detail = "removal code rejected or verify failed",
+                    });
+                }
                 ClearApprovedMarker();
+                Log("Approval completed");
             }
             else
             {
                 Set(progress, "approve", "Approved (CLI)");
                 ClearApprovedMarker();
+                Log("Approval skipped (code already verified)");
             }
 
-            // stop → sync → status → wipe
+            // Prevent BackgroundGuard / Run-key relaunch during teardown.
+            BackgroundGuardService.SuppressWatchdog = true;
+            Set(progress, "stop", "Disabling auto-start");
+            var autoClearedEarly = TryDisableAutoStart(steps);
+            Log($"Auto-start disable early: {autoClearedEarly}");
+
             var notified = await _accountRemoval.RunAsync(ct, phase =>
             {
                 var (p, label) = phase switch
@@ -90,26 +134,60 @@ public sealed class ProtectedUninstallService
                 Set(progress, p, label);
             }).ConfigureAwait(false);
 
+            Log($"Account removal completed (serverNotified={notified})");
             if (!notified)
             {
                 Console.Error.WriteLine(
-                    "Server self-remove did not confirm — local wipe done; continuing DLP teardown.");
+                    "[uninstall] Server self-remove did not confirm — local wipe done; continuing DLP teardown.");
             }
 
-            Set(progress, "teardown", "Removing DLP / unlock uninstall");
-            if (!await FinalizeTeardownAsync(purpose, ct).ConfigureAwait(false))
+            Set(progress, "teardown", "Unlocking DLP / removing service");
+            var teardown = await FinalizeTeardownDetailedAsync(purpose, ct, progress, steps)
+                .ConfigureAwait(false);
+
+            var autoCleared = autoClearedEarly || TryDisableAutoStart(steps) ||
+                              !(_autoStart?.IsAutoStartEnabled() ?? IsWindowsAutoStartPresent());
+
+            var report = new TeardownReport
             {
-                Fail("failed to write uninstall gate or unlock DLP");
-                return false;
+                AccountRemoved = true,
+                ServerNotified = notified,
+                GateWritten = teardown.GateWritten,
+                PipeUnlockOk = teardown.PipeUnlockOk,
+                PipeTimedOut = teardown.PipeTimedOut,
+                UsbRestored = teardown.UsbRestored,
+                DlpServiceGone = teardown.DlpServiceGone,
+                AutoStartCleared = autoCleared,
+                CleanupPendingElevation = teardown.CleanupPendingElevation,
+                FailedOperation = teardown.FailedOperation,
+                Detail = teardown.Detail,
+                Steps = steps,
+            };
+
+            if (report.FullLocalSuccess)
+            {
+                RemovalProgress.Write("done", "protected-uninstall successfully");
+                Log("Full uninstall verified");
+            }
+            else
+            {
+                RemovalProgress.Write("failed", report.SummaryLine);
+                Console.Error.WriteLine($"[uninstall] {report.SummaryLine}");
+                foreach (var s in steps)
+                    Console.Error.WriteLine($"[uninstall]   · {s}");
             }
 
-            RemovalProgress.Write("done", "protected-uninstall successfully");
-            return true;
+            return Finish(report);
         }
         catch (Exception ex)
         {
             Fail(ex.Message);
-            return false;
+            return Finish(new TeardownReport
+            {
+                FailedOperation = "pipeline",
+                Detail = ex.Message,
+                Steps = steps,
+            });
         }
     }
 
@@ -142,20 +220,136 @@ public sealed class ProtectedUninstallService
         string purpose = "both",
         CancellationToken ct = default)
     {
+        var r = await FinalizeTeardownDetailedAsync(purpose, ct).ConfigureAwait(false);
+        return r.GateWritten && r.UsbRestored && r.DlpServiceGone;
+    }
+
+    public static async Task<TeardownSlice> FinalizeTeardownDetailedAsync(
+        string purpose = "both",
+        CancellationToken ct = default,
+        Action<string>? progress = null,
+        List<string>? steps = null)
+    {
+        steps ??= new List<string>();
+        var sw = Stopwatch.StartNew();
+
+        Log("Writing teardown.ok gate");
+        Set(progress, "teardown", "Writing uninstall gate");
         if (!WriteTeardownOkLocal(purpose))
-            return false;
+        {
+            steps.Add("gate write failed");
+            return new TeardownSlice
+            {
+                FailedOperation = "write_teardown_ok",
+                Detail = "failed to write teardown.ok",
+            };
+        }
+        steps.Add($"gate written ({sw.ElapsedMilliseconds}ms)");
+        Log("Gate written");
 
+        var pipeOk = false;
+        var pipeTimedOut = false;
         if (OperatingSystem.IsWindows())
-            _ = await DlpPipeClient.ApplyTeardownGateAsync(purpose, ct).ConfigureAwait(false);
+        {
+            Log("Unlocking DLP teardown via named pipe");
+            Set(progress, "teardown", "Unlocking DLP service");
+            var pipeSw = Stopwatch.StartNew();
+            // Hard wall-clock: never wait forever if the pipe call itself hangs.
+            var pipeTask = DlpPipeClient.ApplyTeardownGateDetailedAsync(purpose, CancellationToken.None);
+            var pipeFinished = await Task.WhenAny(
+                    pipeTask,
+                    Task.Delay(DlpPipeClient.ApplyTeardownOverallTimeoutMs + 1_000, CancellationToken.None))
+                .ConfigureAwait(false);
+            if (pipeFinished == pipeTask)
+            {
+                var pipe = await pipeTask.ConfigureAwait(false);
+                pipeOk = pipe.Ok;
+                pipeTimedOut = pipe.TimedOut;
+                steps.Add(
+                    $"pipe unlock ok={pipeOk} timedOut={pipeTimedOut} " +
+                    $"err={pipe.Error ?? "none"} {pipeSw.ElapsedMilliseconds}ms");
+                if (pipeOk)
+                    Log("DLP unlock completed");
+                else
+                    Log($"DLP unlock failed: {pipe.Error ?? "not_ok"} (continuing SYSTEM cleanup)");
+            }
+            else
+            {
+                pipeTimedOut = true;
+                steps.Add($"pipe unlock abandoned after {pipeSw.ElapsedMilliseconds}ms (overall timeout)");
+                Log("DLP unlock timed out — continuing SYSTEM cleanup (will not wait on pipe)");
+            }
 
-        return File.Exists(TeardownOkPath);
+            // Brief settle only when unlock reported ok; never delay on timeout.
+            if (pipeOk)
+                await Task.Delay(400, CancellationToken.None).ConfigureAwait(false);
+
+            Log("Stopping/removing DLP service + restoring USBSTOR");
+            Set(progress, "teardown", "Removing DLP service registration");
+            var cleanupSw = Stopwatch.StartNew();
+            var cleanup = WindowsTeardownCleanup.RestoreUsbAndRemoveDlpService();
+            steps.AddRange(cleanup.Steps);
+            steps.Add($"cleanup summary={cleanup.Summary} {cleanupSw.ElapsedMilliseconds}ms");
+
+            Log($"USB restored={cleanup.UsbRestored}; DLP gone={cleanup.ServiceGone}");
+
+            var pendingElevation = !cleanup.ServiceGone && !cleanup.IsProcessElevated;
+            string? failedOp = null;
+            string? detail = null;
+            if (!cleanup.ServiceGone)
+            {
+                failedOp = "remove_dlp_service";
+                detail = cleanup.IsProcessElevated
+                    ? "service still registered after elevated cleanup"
+                    : "service still registered — re-run elevated or uninstall from Apps & features";
+            }
+            else if (!cleanup.UsbRestored)
+            {
+                failedOp = "restore_usbstor";
+                detail = $"USBSTOR Start={WindowsTeardownCleanup.ReadUsbStorStart()?.ToString() ?? "?"}";
+            }
+
+            Set(progress, "teardown", "Verifying remaining services");
+            Log($"Verifying: service={WindowsTeardownCleanup.QueryServiceState(AppInfo.WindowsServiceName)} " +
+                $"usbstor={WindowsTeardownCleanup.ReadUsbStorStart()?.ToString() ?? "?"}");
+
+            return new TeardownSlice
+            {
+                GateWritten = File.Exists(TeardownOkPath),
+                PipeUnlockOk = pipeOk,
+                PipeTimedOut = pipeTimedOut,
+                UsbRestored = cleanup.UsbRestored,
+                DlpServiceGone = cleanup.ServiceGone,
+                CleanupPendingElevation = pendingElevation,
+                FailedOperation = failedOp,
+                Detail = detail,
+            };
+        }
+
+        return new TeardownSlice
+        {
+            GateWritten = File.Exists(TeardownOkPath),
+            UsbRestored = true,
+            DlpServiceGone = true,
+        };
+    }
+
+    public sealed class TeardownSlice
+    {
+        public bool GateWritten { get; init; }
+        public bool PipeUnlockOk { get; init; }
+        public bool PipeTimedOut { get; init; }
+        public bool UsbRestored { get; init; }
+        public bool DlpServiceGone { get; init; }
+        public bool CleanupPendingElevation { get; init; }
+        public string? FailedOperation { get; init; }
+        public string? Detail { get; init; }
     }
 
     /// <summary>
-    /// CLI when another tracker holds the mutex:
-    /// 1) approve HERE (instant), 2) hand off GO to running instance,
-    /// 3) if it does not start within <see cref="HandoffGrace"/> → kill it
-    ///    and return <c>TakeOver</c> so Program can finish the pipeline itself.
+    /// CLI when another tracker holds the mutex: approve HERE, then always kill
+    /// the running instance and take over. Handoff-and-wait was unreliable
+    /// (progress stalls → 90s timeout with USB never restored).
     /// </summary>
     public static async Task<HandoffResult> ApproveAndHandoffAsync(
         string rawCode,
@@ -165,40 +359,13 @@ public sealed class ProtectedUninstallService
         if (!await ApproveAsync(NormalizeCode(rawCode), "both", ct, progress).ConfigureAwait(false))
             return HandoffResult.Failed;
 
-        Set(progress, "stop", "Handing off to running tracker");
-        // Code already consumed — running instance must NOT verify again.
-        if (!SingleInstanceService.SignalExistingInstance(
-                SingleInstanceService.CommandProtectedUninstallGo))
-        {
-            Set(progress, "stop", "Tracker not responding — taking over");
-            KillOtherClientProcesses();
-            return HandoffResult.TakeOver;
-        }
+        Set(progress, "stop", "Stopping running tracker");
+        _ = SingleInstanceService.SignalExistingInstance(
+            SingleInstanceService.CommandProtectedUninstallGo);
 
-        // Wait briefly for the running instance to start writing phases.
-        var graceDeadline = DateTime.UtcNow + HandoffGrace;
-        while (DateTime.UtcNow < graceDeadline)
-        {
-            ct.ThrowIfCancellationRequested();
-            if (RemovalProgress.TryRead(out var phase, out var label))
-            {
-                if (phase is "stop" or "sync" or "status" or "wipe" or "teardown" or "done")
-                {
-                    // Handoff alive — wait for terminal state.
-                    return await WaitUntilTerminalAsync(progress, label, ct).ConfigureAwait(false)
-                        ? HandoffResult.Completed
-                        : HandoffResult.Failed;
-                }
+        await Task.Delay(800, ct).ConfigureAwait(false);
 
-                if (phase == "failed")
-                    return HandoffResult.Failed;
-            }
-
-            await Task.Delay(150, ct).ConfigureAwait(false);
-        }
-
-        // No heartbeat — kill and take over (approved marker already set).
-        Set(progress, "stop", "Tracker stuck — stopping it and taking over");
+        Set(progress, "stop", "Taking over — sync and wipe in this process");
         KillOtherClientProcesses();
         return HandoffResult.TakeOver;
     }
@@ -288,6 +455,56 @@ public sealed class ProtectedUninstallService
     }
 
     // ── internals ────────────────────────────────────────────────────────────
+
+    private TeardownReport Finish(TeardownReport report)
+    {
+        LastReport = report;
+        return report;
+    }
+
+    private bool TryDisableAutoStart(List<string> steps)
+    {
+        try
+        {
+            if (_autoStart is not null)
+            {
+                var ok = _autoStart.DisableAutoStart();
+                var still = _autoStart.IsAutoStartEnabled();
+                steps.Add($"auto-start disable via service ok={ok} stillPresent={still}");
+                return !still;
+            }
+
+            if (OperatingSystem.IsWindows())
+            {
+                using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                    @"Software\Microsoft\Windows\CurrentVersion\Run", writable: true);
+                key?.DeleteValue("AlphaAITracker", throwOnMissingValue: false);
+                var gone = !IsWindowsAutoStartPresent();
+                steps.Add($"auto-start Run key cleared={gone}");
+                return gone;
+            }
+        }
+        catch (Exception ex)
+        {
+            steps.Add("auto-start disable error: " + ex.Message);
+        }
+        return false;
+    }
+
+    private static bool IsWindowsAutoStartPresent()
+    {
+        if (!OperatingSystem.IsWindows()) return false;
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Windows\CurrentVersion\Run");
+            return key?.GetValue("AlphaAITracker") != null;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     private static async Task<bool> WaitUntilTerminalAsync(
         Action<string>? progress, string? lastLabel, CancellationToken ct)
@@ -452,7 +669,7 @@ public sealed class ProtectedUninstallService
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Failed to write teardown.ok: {ex.Message}");
+            Console.Error.WriteLine($"[uninstall] Failed to write teardown.ok: {ex.Message}");
             return false;
         }
     }
@@ -466,6 +683,9 @@ public sealed class ProtectedUninstallService
     private static void Fail(string reason)
     {
         RemovalProgress.Write("failed", reason);
-        Console.Error.WriteLine($"protected-uninstall failed — {reason}");
+        Console.Error.WriteLine($"[uninstall] protected-uninstall failed — {reason}");
     }
+
+    private static void Log(string message) =>
+        Console.WriteLine($"[uninstall] {message}");
 }

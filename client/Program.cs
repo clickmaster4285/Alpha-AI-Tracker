@@ -242,26 +242,18 @@ if (!mutexCreated)
         }
 
         ProtectedUninstallService.HandoffResult handoff = ProtectedUninstallService.HandoffResult.Failed;
-        var ok = client.Services.CliConsole.RunWithSpinnerAsync(
+        _ = client.Services.CliConsole.RunWithSpinnerAsync(
                 "Protected uninstall",
                 async (setPhase, ct) =>
                 {
                     handoff = await ProtectedUninstallService.ApproveAndHandoffAsync(
                         protectedUninstallCode.Trim(), setPhase, ct);
-                    return handoff == ProtectedUninstallService.HandoffResult.Completed;
+                    // Always TakeOver or Failed — never wait on the other process.
+                    return handoff != ProtectedUninstallService.HandoffResult.Failed;
                 },
-                successMessage: "protected-uninstall successfully",
+                successMessage: "Approved — finishing removal in this process...",
                 failureMessage: "protected-uninstall failed")
             .GetAwaiter().GetResult();
-
-        if (handoff == ProtectedUninstallService.HandoffResult.Completed)
-        {
-            Console.WriteLine($"Gate: {ProtectedUninstallService.TeardownOkPath}");
-            Console.WriteLine("Uninstall from Apps & features now.");
-            Environment.ExitCode = 0;
-            client.Services.CliConsole.PauseBeforeExit(args);
-            return;
-        }
 
         if (handoff == ProtectedUninstallService.HandoffResult.Failed)
         {
@@ -270,18 +262,17 @@ if (!mutexCreated)
             return;
         }
 
-        // TakeOver: siblings killed — acquire the mutex and finish as cold-start.
-        Console.WriteLine("Taking over — finishing sync / wipe in this process...");
+        // TakeOver: siblings killed — their mutex is abandoned; WaitOne throws
+        // AbandonedMutexException which still means WE now own it.
         coldCodeAlreadyApproved = true;
-        if (appMutex.WaitOne(TimeSpan.FromSeconds(8)))
-            mutexCreated = true;
-        else
+        if (!TryAcquireAbandonedMutex(appMutex, TimeSpan.FromSeconds(8)))
         {
             Console.Error.WriteLine("protected-uninstall failed — could not acquire tracker lock after stop");
             Environment.ExitCode = 1;
             client.Services.CliConsole.PauseBeforeExit(args);
             return;
         }
+        mutexCreated = true;
         // fall through to host start + pipeline with codeAlreadyVerified
     }
     else if (isRemoveAccount)
@@ -306,15 +297,14 @@ if (!mutexCreated)
         }
 
         // Take over after kill (WaitForRemoveAccountAsync kills on stuck).
-        if (appMutex.WaitOne(TimeSpan.FromSeconds(8)))
-            mutexCreated = true;
-        else
+        if (!TryAcquireAbandonedMutex(appMutex, TimeSpan.FromSeconds(8)))
         {
             Console.Error.WriteLine("remove-account failed — could not acquire tracker lock");
             Environment.ExitCode = 1;
             client.Services.CliConsole.PauseBeforeExit(args);
             return;
         }
+        mutexCreated = true;
         // fall through — isRemoveAccount cold path
     }
     else
@@ -326,14 +316,9 @@ if (!mutexCreated)
         // launch (signal-and-exit), wait up to 8s for it to release ownership.
         if (args.Contains("--restart"))
         {
-            if (appMutex.WaitOne(TimeSpan.FromSeconds(8)))
-            {
-                mutexCreated = true;
-            }
-            else
-            {
+            if (!TryAcquireAbandonedMutex(appMutex, TimeSpan.FromSeconds(8)))
                 return;
-            }
+            mutexCreated = true;
         }
         else
         {
@@ -395,15 +380,19 @@ var builder = Host.CreateApplicationBuilder(args);
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
 
-var logLevel = config.LogLevel?.ToLowerInvariant() switch
-{
-    "verbose" => LogLevel.Trace,
-    "debug"   => LogLevel.Debug,
-    "info"    => LogLevel.Information,
-    "warn"    => LogLevel.Warning,
-    "error"   => LogLevel.Error,
-    _         => LogLevel.Information
-};
+// CLI removal must stay readable: suppress hosted-service chatter that drowned
+// the spinner and looked like a hang ("IdleDetector starting…") during uninstall.
+var logLevel = (isProtectedUninstall || isRemoveAccount)
+    ? LogLevel.Warning
+    : config.LogLevel?.ToLowerInvariant() switch
+    {
+        "verbose" => LogLevel.Trace,
+        "debug"   => LogLevel.Debug,
+        "info"    => LogLevel.Information,
+        "warn"    => LogLevel.Warning,
+        "error"   => LogLevel.Error,
+        _         => LogLevel.Information
+    };
 builder.Logging.SetMinimumLevel(logLevel);
 
 // Log file location. In dev (`dotnet run`) the app dir (bin/...) is writable,
@@ -502,10 +491,14 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.Lo
 // Parked when ALPHA_STREAM_ENABLED=false. Frames only after server "start".
 // ────────────────────────────────────────────────────────────────────────────
 builder.Services.AddSingleton<client.Services.ScreenCaptureService>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.ScreenCaptureService>());
 builder.Services.AddSingleton<client.Services.NetProbeService>();
 builder.Services.AddSingleton<client.Services.LiveStreamClient>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.LiveStreamClient>());
+// Skip live stream / capture loops during CLI removal — they only fight teardown.
+if (!isProtectedUninstall && !isRemoveAccount)
+{
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.ScreenCaptureService>());
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.LiveStreamClient>());
+}
 
 // HTTP Client
 builder.Services.AddSingleton<HttpClient>(sp =>
@@ -542,9 +535,13 @@ else
     throw new PlatformNotSupportedException($"Unsupported OS: {Environment.OSVersion}");
 }
 
-// Background services (order matters: guard first for most resilience)
+// Background services (order matters: guard first for most resilience).
+// Protected-uninstall / remove-account must NOT start the watchdog — it reinstalls
+// the Run key while we are trying to tear the product down (root cause of
+// auto-start surviving a "successful" uninstall).
 builder.Services.AddSingleton<AutoStartService>();
-builder.Services.AddHostedService<BackgroundGuardService>();
+if (!isProtectedUninstall && !isRemoveAccount)
+    builder.Services.AddHostedService<BackgroundGuardService>();
 builder.Services.AddSingleton<LogCollectorService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<LogCollectorService>());
 
@@ -566,18 +563,16 @@ builder.Services.AddSingleton<ProtectedUninstallService>();
 // Connects only after SyncService proves a 2xx (idle timeout fallback + reconnect).
 // Registered after SyncService so the sync loop is running before we wait on it.
 builder.Services.AddSingleton<client.Services.WsClient>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.WsClient>());
-
-// Self-updater — checks GitHub Releases for a newer installer, downloads it into the
-// user data dir and installs via the OS installer (pkexec dpkg / Inno / dmg). Always
-// registered (the service no-ops when ALPHA_UPDATE_ENABLED=false) so MainViewModel
-// and the dashboard can bind its state regardless.
 builder.Services.AddSingleton<AppUpdateService>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<AppUpdateService>());
+if (!isProtectedUninstall && !isRemoveAccount)
+{
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<client.Services.WsClient>());
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<AppUpdateService>());
+}
 
 // Near-real-time install/uninstall detection: watches .desktop/dpkg/Start Menu//Applications
 // and triggers an immediate inventory rescan on change — no GUI interaction needed.
-if (config.InventoryWatchEnabled)
+if (config.InventoryWatchEnabled && !isProtectedUninstall && !isRemoveAccount)
 {
     builder.Services.AddHostedService<InstalledSoftwareWatcher>();
 }
@@ -600,7 +595,8 @@ if (config.BrowserTrackingEnabled)
     // tree cannot expose the omnibox (Linux Chrome 136+ / snap Firefox). No restart,
     // no flag, no extension; works on all platforms and browsers incl. brand-new ones.
     builder.Services.AddSingleton<BrowserHistoryReader>();
-    builder.Services.AddHostedService<AccessibilityBrowserTracker>();
+    if (!isProtectedUninstall && !isRemoveAccount)
+        builder.Services.AddHostedService<AccessibilityBrowserTracker>();
 }
 
 // Desktop Event Bus (File Explorer tracking via AT-SPI on Linux, Shell COM on Windows,
@@ -616,11 +612,12 @@ if (config.FileJourneyEnabled)
         sp => sp.GetRequiredService<WindowsExplorerWatcher>());
     builder.Services.AddSingleton<FileSystemEventWatcher>();
     builder.Services.AddSingleton<RecentFilesWatcher>();
-    builder.Services.AddHostedService<DesktopEventService>();
+    if (!isProtectedUninstall && !isRemoveAccount)
+        builder.Services.AddHostedService<DesktopEventService>();
 }
 
 // USB / peripheral hotplug tracker (local SQLite only; no server sync yet)
-if (config.HardwareDevicesEnabled)
+if (config.HardwareDevicesEnabled && !isProtectedUninstall && !isRemoveAccount)
 {
     builder.Services.AddHostedService<HardwareDeviceWatcherService>();
 }
@@ -714,25 +711,45 @@ try
         if (isProtectedUninstall)
         {
             var protectedSvc = host.Services.GetRequiredService<ProtectedUninstallService>();
+            TeardownReport? report = null;
             var ok = await CliConsole.RunWithSpinnerAsync(
                 "Protected uninstall",
-                (setPhase, ct) => protectedSvc.RunPipelineAsync(
-                    protectedUninstallCode!,
-                    "both",
-                    ct,
-                    setPhase,
-                    codeAlreadyVerified: coldCodeAlreadyApproved),
+                async (setPhase, ct) =>
+                {
+                    report = await protectedSvc.RunPipelineDetailedAsync(
+                        protectedUninstallCode!,
+                        "both",
+                        ct,
+                        setPhase,
+                        codeAlreadyVerified: coldCodeAlreadyApproved);
+                    // Spinner "ok" line only for full verified success; partial uses exit 2.
+                    return report.FullLocalSuccess;
+                },
                 successMessage: "protected-uninstall successfully",
-                failureMessage: "protected-uninstall failed");
-            if (ok)
+                failureMessage: "protected-uninstall incomplete or failed");
+
+            report ??= protectedSvc.LastReport;
+            if (report is not null)
             {
-                Console.WriteLine($"Gate: {ProtectedUninstallService.TeardownOkPath}");
-                Console.WriteLine("You can now uninstall from Apps & features.");
-                Environment.ExitCode = 0;
+                Console.WriteLine(report.SummaryLine);
+                Console.WriteLine(
+                    $"account={report.AccountRemoved} serverNotified={report.ServerNotified} " +
+                    $"gate={report.GateWritten} pipeUnlock={report.PipeUnlockOk} " +
+                    $"usb={report.UsbRestored} dlpGone={report.DlpServiceGone} " +
+                    $"autoStartCleared={report.AutoStartCleared}");
+                if (report.GateWritten)
+                    Console.WriteLine($"Gate: {ProtectedUninstallService.TeardownOkPath}");
+                if (report.FullLocalSuccess)
+                    Console.WriteLine("You can now uninstall from Apps & features.");
+                else if (report.AccountRemoved && report.CleanupPendingElevation)
+                    Console.Error.WriteLine(
+                        "Re-run this command from an elevated (Administrator) prompt, " +
+                        "or finish removal via Apps & features (gate already written).");
+                Environment.ExitCode = report.ExitCode;
             }
             else
             {
-                Environment.ExitCode = 1;
+                Environment.ExitCode = ok ? 0 : 1;
             }
         }
         else
@@ -785,9 +802,18 @@ try
             Console.Error.WriteLine($"[remove-account] Failed to kill sibling processes: {ex.Message}");
         }
 
-        await host.StopAsync(CancellationToken.None);
-        shutdownSentinel.PowerOffWritten.Wait(TimeSpan.FromSeconds(3));
-        host.Dispose();
+        // Bounded stop — a hung hosted service must not leave the CLI spinner forever.
+        try
+        {
+            using var stopCts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            await host.StopAsync(stopCts.Token);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[uninstall] Host stop: {ex.Message}");
+        }
+        shutdownSentinel.PowerOffWritten.Wait(TimeSpan.FromSeconds(2));
+        try { host.Dispose(); } catch { /* ignore */ }
         CliConsole.PauseBeforeExit(args);
         return;
     }
@@ -931,6 +957,23 @@ finally
 {
     SingleInstanceService.StopServer();
     appMutex.Dispose();
+}
+
+/// <summary>
+/// After we kill the process that owned the single-instance mutex, WaitOne throws
+/// <see cref="AbandonedMutexException"/> — that still means this process acquired it.
+/// Never let that exception escape as an unhandled crash (and never dump source paths).
+/// </summary>
+static bool TryAcquireAbandonedMutex(Mutex mutex, TimeSpan timeout)
+{
+    try
+    {
+        return mutex.WaitOne(timeout);
+    }
+    catch (AbandonedMutexException)
+    {
+        return true;
+    }
 }
 
 static AppBuilder BuildAvaloniaApp()

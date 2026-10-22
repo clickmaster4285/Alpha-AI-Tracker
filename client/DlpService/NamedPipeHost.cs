@@ -248,18 +248,36 @@ public sealed class NamedPipeHost : BackgroundService
     private string CompleteTeardown(string purpose)
     {
         TeardownGate.MarkAuthorized(_cfg.DataDir, purpose);
-        if (OperatingSystem.IsWindows())
-            ServiceAclHardener.TryApplyOpen(_logger);
 
-        _logger.LogWarning(
-            "Authorized DLP service teardown (purpose={Purpose}) — stopping service",
-            purpose);
-
-        // Reply first, then stop so the client gets ok=true.
-        _ = Task.Run(async () =>
+        // CRITICAL: return ok=true on the pipe FIRST. USBSTOR + sc sdset can take
+        // seconds (or hang). Doing that before WriteLineAsync deadlocked the CLI:
+        // client hit a read timeout, Dispose waited on the service, service held the
+        // pipe while blocked in sc.exe — protected-uninstall froze on
+        // "Unlocking DLP service..." and Apps & features then hit Error 32 (files locked).
+        _ = Task.Run(() =>
         {
-            try { await Task.Delay(400); } catch { /* ignore */ }
-            _lifetime.StopApplication();
+            try
+            {
+                if (OperatingSystem.IsWindows())
+                {
+                    var usb = UsbStorEnforcer.Apply(block: false);
+                    _logger.LogWarning(
+                        "Teardown restored USBSTOR (changed={Changed}, detail={Detail}, start={Start})",
+                        usb.Changed, usb.Detail, usb.DesiredStart);
+                    ServiceAclHardener.TryApplyOpen(_logger);
+                }
+
+                _logger.LogWarning(
+                    "Authorized DLP service teardown (purpose={Purpose}) — stopping service",
+                    purpose);
+                Thread.Sleep(300);
+                _lifetime.StopApplication();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Post-reply teardown work failed");
+                try { _lifetime.StopApplication(); } catch { /* ignore */ }
+            }
         });
 
         return JsonSerializer.Serialize(new { ok = true, purpose, stopping = true });
