@@ -1,10 +1,11 @@
 # APP_IDENTIFIERS — App Identity Management
 
 > **Single source of truth for all package/app identifiers across the project.**
+> Includes Windows DLP SCM service name, display name, named pipe, and maint task (2026-10-22).
 
 ## Overview
 
-`APP_IDENTIFIERS` centralizes every piece of app identity metadata that used to be scattered and hardcoded across build scripts, installer templates, and platform configs.
+`APP_IDENTIFIERS` centralizes every piece of app identity metadata that used to be scattered and hardcoded across build scripts, installer templates, platform configs, and the DLP Windows service (`DlpService` / Inno / `install-service.ps1`).
 
 **Build-time consumers** — these `source` the file as shell:
 

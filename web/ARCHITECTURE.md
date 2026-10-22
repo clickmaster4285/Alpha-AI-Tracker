@@ -1,7 +1,15 @@
 # Web Architecture — Alpha AI Tracker Dashboard
 
-> **Last audited:** 2026-10-19 (device lifecycle status in Device Specs)
+> **Last audited:** 2026-10-22 (Security & DLP live pages)
 > **Changelog:**
+> - 2026-10-22: **Security & DLP pages go live (Rules / Alerts / Shadow IT) + Issue Removal Code.**
+>   Replaced mocks with `dlpApi` / `shadowItApi` in `lib/api.ts`. `/dlp-rules` — CRUD + **Publish**
+>   (immutable policy version). `/dlp-alerts` — infinite scroll + URL-synced filters + status
+>   counters; `DlpAlertDetailDialog` loads alert + `GET /dlp/alerts/:id/history`; triage fields
+>   only PATCH on **Save** (not on every dropdown change). `/shadow-it` — catalog list +
+>   Approve/Block/Flag. Employees row menu: **Issue Removal Code** → `POST /devices/removal-code`
+>   (code shown once). Labels in `lib/dlp-labels.ts`. RBAC keys already on sidebar:
+>   `dlp-rules` / `dlp-alerts` / `shadow-it`. Verified: `npx tsc --noEmit`.
 > - 2026-10-19 (late): **"All devices" removed from the Device Specs machine dropdown (user request).**
 >   `components/employees/EmployeePage.tsx` no longer renders the `__all__` sentinel (the
 >   `ALL_DEVICES` constant and its `SelectItem` are gone, and the trigger placeholder is now
@@ -253,6 +261,8 @@ web/
     │   ├── live-stream/         # Shared live-stream UI (main page + theater)
     │   │   ├── LiveStreamWatchTile.tsx · LiveStreamEmployeeSidebar.tsx · LiveStreamPreviewGrid.tsx
     │   │   └── live-stream-selection.ts  # MAX_TILES + parse/toggle ids
+    │   ├── dlp/
+    │   │   └── DlpAlertDetailDialog.tsx  # Alert detail + Save-only triage + history timeline
     │   ├── employees/           # Shared employee-page building blocks
     │   │   ├── EmployeePage.tsx #   Page shell: header + picker + loading/error/no-selection
     │   │   ├── InventoryTable.tsx  EmptyState.tsx  DeviceClassIcon.tsx
@@ -335,9 +345,9 @@ web/
             ├── reports/            # Reports & Analytics (mock data)
             ├── audit-log/          # Audit log (mock data)
             ├── executive-dashboard/  # Executive dashboard (mock data)
-            ├── dlp-alerts/         # DLP Alerts (mock data)
-            ├── dlp-rules/          # DLP Rules (mock data)
-            ├── shadow-it/          # Shadow IT (mock data)
+            ├── dlp-alerts/         # DLP Alerts (live API + detail/history dialog)
+            ├── dlp-rules/          # DLP Rules (live API + Publish)
+            ├── shadow-it/          # Shadow IT catalog (live API)
             ├── ai-summary/         # AI Summary (mock data)
             ├── onboarding/         # Onboarding (mock data)
             ├── projects/           # Projects (mock data)
@@ -480,9 +490,9 @@ in the `updateMutation`).
 | `/reports` | Reports | Hardcoded demo data (scaffolding) | ❌ |
 | `/audit-log` | Audit log | Hardcoded demo data (scaffolding) | ❌ |
 | `/executive-dashboard` | Exec dashboard | Hardcoded demo data (scaffolding) | ❌ |
-| `/dlp-alerts` | DLP Alerts | Hardcoded demo data (scaffolding) | ❌ |
-| `/dlp-rules` | DLP Rules | Hardcoded demo data (scaffolding) | ❌ |
-| `/shadow-it` | Shadow IT | Hardcoded demo data (scaffolding) | ❌ |
+| `/dlp-alerts` | DLP Alerts | Server (`GET/PATCH /dlp/alerts`, `GET /dlp/alerts/:id/history`; infinite scroll + URL filters; detail dialog Save-only triage) | ✅ |
+| `/dlp-rules` | DLP Rules | Server (`/dlp/rules` CRUD + `POST /dlp/rules/publish`) | ✅ |
+| `/shadow-it` | Shadow IT | Server (`GET/PATCH /shadow-it/apps`; Approve/Block/Flag) | ✅ |
 | `/emails` | Emails & Alerts | Hardcoded demo data (scaffolding) | ❌ |
 | `/projects` | Projects | Hardcoded demo data (scaffolding) | ❌ |
 | `/ai-summary` | AI Summary | Honest empty state (no endpoint) | ❌ |

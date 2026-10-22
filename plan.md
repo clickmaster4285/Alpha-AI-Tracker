@@ -1,10 +1,11 @@
 # Plan — Security & DLP (Windows Production)
 
-> **Status:** P0 complete · P1 USB + service install + protected removal (code / ACL / uninstall gate) shipped  
+> **Status:** P0 complete · P1 USB + service install + protected removal (code / ACL / uninstall gate) shipped · alert triage history (052) + detail UI shipped  
 > **Scope:** Windows-only endpoint DLP + Shadow IT + hardened agent lifecycle  
 > **Out of scope (v1–v3):** Linux/macOS enforcement, kernel minifilter (deferred to P6), TLS inspection / ChatGPT surgical upload block (deferred to P7)  
-> **Related UI mocks:** `/dlp-rules`, `/dlp-alerts`, `/shadow-it` (static today)  
-> **Last updated:** 2026-10-21
+> **Related UI:** `/dlp-rules`, `/dlp-alerts`, `/shadow-it` — **live API** (P0+P1); next: P2 WFP domains  
+> **Docs:** AGENTS.md · client/server/web ARCHITECTURE.md · WORKFLOW.md · TESTING.md · FILE_HIERARCHY.md updated 2026-10-22  
+> **Last updated:** 2026-10-22
 
 ---
 
@@ -118,16 +119,16 @@ Also keep server-initiated path: admin remove device → sync answers `wipe_loca
 
 ---
 
-## 3. Current state (baseline)
+## 3. Current state (baseline → after P0+P1)
 
-| Area | Today | Gap |
-|------|-------|-----|
-| Web `/dlp-*` / `/shadow-it` | Static mocks, local `useState` | No API |
-| Client USB | `HardwareDeviceWatcherService` plug/unplug; `FileSystemEventWatcher` on Removable | Detect only — no block |
-| Client apps | Installed software inventory + sync | No allow/deny enforce |
-| Client web | Browser tab / domain in journeys | No domain block |
-| Agent lifecycle | User `--background` + autostart; `--remove-account` / self-remove | Not SYSTEM service; not ACL-locked |
-| Policy pull | `ScheduleCacheService` pattern exists | No DLP policy bundle |
+| Area | Now (feature_dlp) | Remaining gap |
+|------|-------------------|---------------|
+| Web `/dlp-*` / `/shadow-it` | Live API: Rules CRUD+Publish, Alerts inbox+detail/history, Shadow IT Approve/Block/Flag, Issue Removal Code | P2 domain UX; P3 Shadow IT auto-rollup → `shadowDeny` |
+| Client USB | SYSTEM `UsbStorEnforcer` + RemovableDriveMonitor alerts when published `usb_*` block rules | Per-device allowlist (P5); file-extension minifilter (P6) |
+| Client apps | Installed software inventory + sync | Install hard block / AppLocker (P4); detect-only alerts (P3) |
+| Client web | Browser tab / domain in journeys | WFP domain block (P2) |
+| Agent lifecycle | LocalSystem DLP service + ACL lock + `--protected-uninstall --code` + Inno `teardown.ok` gate | Linux/macOS N/A; offline break-glass is IT runbook only |
+| Policy pull | DeviceAuth `GET /dlp/policy` + ProgramData PolicyStore | — (spine done) |
 
 ---
 
@@ -370,7 +371,9 @@ Server: no special env beyond normal DB; optional `DLP_REMOVAL_CODE_TTL_MIN=60`.
 - [x] `sc create` / installer registers service as LocalSystem + failure recovery; tracker writes `device.auth` for SYSTEM  
 - [x] Service ACL locked (SY full / BA query-only) + Inno hard uninstall gate on `teardown.ok` (no break-glass; Alpha AI Tracker only)  
 - [x] Removal code: web Issue + `--protected-uninstall --code` + service `AuthorizeTeardown` pipe  
-- [x] Web: live DLP Alerts (read) + Rules publish MVP  
+- [x] Web: live DLP Alerts (list + detail/history Save triage, migration 052) + Rules publish MVP  
+- [x] Service/pipe/mutex names from `APP_IDENTIFIERS`; installer stop/delete before file replace (Access Denied fix)  
+- [x] Tracker watchdog relaunches user helper if End Task'd (`ALPHA_DLP_WATCHDOG`)  
 
 ### P2 — Web domain block
 
@@ -464,13 +467,14 @@ Server: no special env beyond normal DB; optional `DLP_REMOVAL_CODE_TTL_MIN=60`.
 
 ## 17. Doc updates when shipping
 
-- [ ] `AGENTS.md` changelog + conventions (Device Lifecycle stays; add **DLP Policy Version Rule**, **Protected Removal Rule**)  
-- [ ] `client/ARCHITECTURE.md` — service topology, IPC, ProgramData store  
-- [ ] `server/ARCHITECTURE.md` — DLP routes + migrations  
-- [ ] `web/ARCHITECTURE.md` — three live pages  
-- [ ] `WORKFLOW.md` — installer steps for service + `config.enc` knobs  
-- [ ] `TESTING.md` — lab playbook for USB / domain / removal code  
+- [x] `AGENTS.md` changelog + conventions (Device Lifecycle stays; add **DLP Policy Version Rule**, **Protected Removal Rule**)  
+- [x] `client/ARCHITECTURE.md` — service topology, IPC, ProgramData store  
+- [x] `server/ARCHITECTURE.md` — DLP routes + migrations  
+- [x] `web/ARCHITECTURE.md` — three live pages  
+- [x] `WORKFLOW.md` — installer steps for service + `config.enc` knobs  
+- [x] `TESTING.md` — lab playbook for USB / removal code (domain block when P2 lands)  
+- [x] `FILE_HIERARCHY.md` — `DlpService/`, `dlp_repo`, web `components/dlp/`  
 
 ---
 
-*End of plan. Implement phase-by-phase; do not start P6/P7 until P1–P3 are proven on installed Windows builds.*
+*End of plan. Implement phase-by-phase; do not start P6/P7 until P1–P3 are proven on installed Windows builds. Docs refreshed 2026-10-22 for feature_dlp P0+P1.*

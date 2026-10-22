@@ -4,7 +4,7 @@ Annotated node tree for the whole monorepo. Every directory that holds source is
 
 **How to read it:** ⭐ marks an entry point or a single-source-of-truth file — start there. 🔒 marks a file with a rule attached; changing it without reading the rule breaks something in the field. Generated / vendored trees are marked and should never be edited by hand.
 
-*Last audited: 2026-09-29 (live stream theater + per-tile FPS + WebRTC SFU V2). Companion docs: [AGENTS.md](./AGENTS.md) (rules + completion state), [WORKFLOW.md](./WORKFLOW.md) (how work moves through the tree), [client/ARCHITECTURE.md](./client/ARCHITECTURE.md), [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md), [server/ARCHITECTURE.md](./server/ARCHITECTURE.md), [web/ARCHITECTURE.md](./web/ARCHITECTURE.md).*
+*Last audited: 2026-10-22 (Security & DLP P0+P1 — Windows service + live DLP pages). Companion docs: [AGENTS.md](./AGENTS.md) (rules + completion state), [WORKFLOW.md](./WORKFLOW.md), [TESTING.md](./TESTING.md), [plan.md](./plan.md), [client/ARCHITECTURE.md](./client/ARCHITECTURE.md), [client/UI_ARCHITECTURE.md](./client/UI_ARCHITECTURE.md), [server/ARCHITECTURE.md](./server/ARCHITECTURE.md), [web/ARCHITECTURE.md](./web/ARCHITECTURE.md).*
 
 ---
 
@@ -14,9 +14,10 @@ Annotated node tree for the whole monorepo. Every directory that holds source is
 Alpha-AI-TrackerV2.0/
 ├── AGENTS.md              ⭐ repo constitution — rules, contracts, completion state. Read first.
 ├── FILE_HIERARCHY.md         this file
-├── TESTING.md                live test playbooks for endpoints that need a running server (curl + expected responses)
-├── WORKFLOW.md               dev loop, rebrand, add-a-page, release pipeline
-├── client/                   .NET 10 / Avalonia desktop agent (the tracked machine)
+├── TESTING.md                live lab playbooks (DLP USB + removal code, orphan app-items, …)
+├── WORKFLOW.md               dev loop, rebrand, add-a-page, release pipeline, DLP installer knobs
+├── plan.md                   Security & DLP phased roadmap (P0+P1 shipped)
+├── client/                   .NET 10 / Avalonia desktop agent + Windows DlpService
 ├── server/                   Go API + Postgres + Redis (the collector of record)
 └── web/                      Next.js dashboard (the human-facing console)
 ```
@@ -38,7 +39,7 @@ client/
 ├── client.csproj                 🔒 reads VERSION at *evaluation* time; embeds APP_IDENTIFIERS;
 │                                    <AvaloniaResource Include="Assets\**"/> globs in all UI assets
 ├── APP_IDENTIFIERS               ⭐🔒 single source of truth for the product name/publisher/ids
-├── VERSION                       ⭐🔒 single source of truth for the version (currently 0.2.0)
+├── VERSION                       ⭐🔒 single source of truth for the version (read by AppInfo + packagers)
 ├── app.manifest                     Windows manifest (DPI, no elevation)
 ├── appsettings.json                 non-secret defaults; secrets live in config.enc
 ├── config.enc                       AES-256-GCM config, baked at build time by encrypt-config.sh
@@ -87,10 +88,20 @@ client/
 │   ├── HardwareDeviceWatcherService.cs  plug/unplug tracking
 │   ├── AutoStartService.cs          per-OS auto-start registration
 │   ├── BackgroundGuardService.cs    keeps tracking alive when the window is closed
+│   ├── AccountRemovalService.cs     drain → self-remove → wipe (CLI + wipe_local + protected uninstall)
+│   ├── ProtectedUninstallService.cs Windows: --protected-uninstall --code → pipe AuthorizeTeardown
+│   ├── DlpPipeClient.cs · DlpDeviceCredentialBridge.cs · WindowsTeardownCleanup.cs · CliConsole.cs
 │   ├── FileLoggerProvider.cs        file sink → ~/.config/<pkg>/ (never the install dir)
 │   └── Watchers/                    ATSPIEventWatcher · FileSystemEventWatcher · RecentFilesWatcher ·
 │                                    WindowsExplorerWatcher · IExplorerWindowProvider
 │                                    · SystemEventWatcher · InstalledSoftwareWatcher · IdleDetector …
+│
+├── DlpService/                   ⭐ Windows LocalSystem DLP process (separate .csproj)
+│   ├── Program.cs · AlphaAITracker.Service.csproj · install-service.ps1 · uninstall-service.ps1
+│   ├── PolicyPullWorker · EnforceWorker · UsbStorEnforcer · RemovableDriveMonitor
+│   ├── AlertSyncWorker · PolicyStore · NamedPipeHost · ServiceAclHardener · TrackerWatchdogWorker
+│   └── DeviceCredentialStore · TeardownGate · UserSessionProcessLauncher · DlpConfig
+│
 ├── Platform/                        one ProcessCollector.cs per OS — the only place OS branching lives
 │   ├── Linux/  Windows/  MacOS/
 │
@@ -180,11 +191,13 @@ server/
 │   ├── repository/              SQL only — one file per aggregate
 │   │   └── user_repo.go · employee_repo.go · department_repo.go · new_schema_repo.go
 │   │      · device_repo.go · monitoring_repo.go · rbac_repo.go · refresh_token_repo.go
+│   │      · dlp_repo.go (rules / policy versions / alerts / shadow IT / removal challenges)
 │   │
 │   ├── models/                  DB row shapes: user · employee · app_session ·
 │   │                            device_hardware_info · employee_app_link · device ·
-│   │                            status_tables · rbac · refresh_token
-│   ├── dto/                     wire shapes: user_dto · employee_dto · new_schema_dto · rbac_dto
+│   │                            status_tables · rbac · refresh_token · dlp.go
+│   ├── dto/                     wire shapes: user_dto · employee_dto · new_schema_dto · rbac_dto · dlp_dto
+│   ├── handlers/ · services/    … + dlp_handler.go / dlp_service.go (+ dlp_publish_smoke_test.go)
 │   ├── jobs/                    staleness_sweep.go (stale catalog links)
 │   │                            · retention_sweep.go (hourly data purge, RETENTION_DAYS)
 │   │                            · session_lifecycle_sweep.go (1-min ACTIVE→STALE→CLOSED sweep)
@@ -192,7 +205,8 @@ server/
 │   ├── scale/instance.go        INSTANCE_ID resolution
 │   └── stream/                  live preview WebRTC SFU — hub.go + sfu.go (preview only; no DB frames)
 │
-├── migrations/               ⭐ sequential SQL files (001…). Append-only: never edit applied migrations.
+├── migrations/               ⭐ sequential SQL files (001…052+). Append-only: never edit applied migrations.
+│                                051_dlp_security.sql · 052_dlp_alert_history.sql
 └── bin/                      ⚠️ build output
 ```
 
@@ -225,11 +239,11 @@ web/
     │       ├── device-specs        per-employee machine picture over GET /employees/:id/detail:
     │       │                       hardware · software · peripherals · permissions
     │       ├── configuration       apps · websites · categories (monitoring classification, 2026-08-22)
-    │       ├── shadow-it · logs (comprehensive · graphical · insights)
+    │       ├── shadow-it (live API) · logs (comprehensive · graphical · insights)
     │       ├── charts (activity · productivity) · reports · ai-summary
     │       ├── attendance · shifts · timesheets · hours-insights
+    │       ├── dlp-alerts · dlp-rules (live API + Publish / triage) · audit-log · emails
     │       ├── goals · kpis · projects · productivity-scoring
-    │       ├── dlp-alerts · dlp-rules · audit-log · emails
     │       ├── screenshots · live-stream (WebRTC SFU; FPS; Open theater → /live-stream/theater) · gps-location
     │       └── settings (billing · compliance · notifications · security ·
     │                     tracking · user-management · terms-and-conditions · profile)
@@ -241,6 +255,7 @@ web/
     │   ├── layout/                AppLayout · AppSidebar (Device Specs + Employee Journey are
     │   │                          collapsible sections) · TopBar · ProtectedRoute
     │   ├── live-stream/           WatchTile (FPS) · EmployeeSidebar · PreviewGrid · selection helpers
+    │   ├── dlp/                   DlpAlertDetailDialog (triage Save + history)
     │   ├── EmployeeSelector.tsx   searchable employee picker (shared query with EmployeePage)
     │   ├── employees/             EmployeePage shell · InventoryTable · EmptyState · DeviceClassIcon
     │   ├── journey/               FocusTime (foreground/background stacked bar) · ActivityFilters (search + date presets)
@@ -255,6 +270,8 @@ web/
     │
     ├── lib/
     │   ├── api.ts              ⭐ every server call goes through here — the client-side contract
+    │   │                         (incl. dlpApi · shadowItApi · issueRemovalCode)
+    │   ├── dlp-labels.ts          trigger / severity / status display labels
     │   ├── useLiveStreamSocket.ts  WebRTC watch PC + watch WS for /live-stream
     │   ├── format.ts              shared formatters (duration · seconds · MB · dates)
     │   ├── auth.tsx               session context

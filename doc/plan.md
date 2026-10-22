@@ -1,6 +1,6 @@
 # Protected Uninstall — Root Cause & Fix Plan
 
-> **Status:** Phase 1 complete — root cause identified; implementation follows this plan  
+> **Status:** Implemented on `feature_dlp` (ProtectedUninstallService + pipe AuthorizeTeardown + teardown.ok). Product roadmap: root [plan.md](../plan.md).  
 > **Date:** 2026-10-22  
 > **Machine evidence:** live PC after failed `--protected-uninstall` (progdata + `dotnetrunlog.txt`)
 

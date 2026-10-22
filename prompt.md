@@ -31,7 +31,7 @@ known risks. Do not copy assumptions from this file when repository evidence is 
 
 ## Project map
 
-- `client/` — .NET 10 and Avalonia desktop client.
+- `client/` — .NET 10 and Avalonia desktop client (+ Windows `DlpService` LocalSystem process).
 - `server/` — Go, Echo, PostgreSQL, and Redis API.
 - `web/` — Next.js and React administration dashboard.
 
@@ -39,10 +39,12 @@ Read only the references relevant to the task:
 
 - `WORKFLOW.md` for development and release procedures.
 - `FILE_HIERARCHY.md` for ownership and file placement.
+- `TESTING.md` for live lab playbooks (DLP USB / removal code, …).
+- `plan.md` for Security & DLP phased roadmap (P0+P1 shipped on `feature_dlp`).
 - `client/ARCHITECTURE.md`, `client/UI_ARCHITECTURE.md`, and `client/build.md` for client work.
 - `server/ARCHITECTURE.md` for server work.
 - `web/ARCHITECTURE.md` for web work.
-- `client/APP_IDENTIFIERS_README.md` and `client/VERSION_README.md` for branding/version work.
+- `client/APP_IDENTIFIERS_README.md` and `client/VERSION_README.md` for branding/version work (incl. Windows service / DLP pipe names).
 
 ## Operating contract
 
