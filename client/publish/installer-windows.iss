@@ -94,15 +94,65 @@ begin
   Exec('sc.exe', 'config USBSTOR start= demand', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
+// Strip AlphaAI-DLP hosts block + firewall rules left by DomainBlockEnforcer.
+// Protected-uninstall also does this; Inno covers Apps & features uninstall path.
+procedure ClearDlpWebBlock;
+var
+  ResultCode: Integer;
+  ScriptDir, ScriptPath: string;
+begin
+  ScriptDir := ExpandConstant('{commonappdata}\{#APP_MUTEX}\dlp');
+  ForceDirectories(ScriptDir);
+  ScriptPath := ScriptDir + '\teardown-clear-hosts.ps1';
+  SaveStringToFile(ScriptPath,
+    '$ErrorActionPreference=''SilentlyContinue'''#13#10 +
+    '$p=Join-Path $env:SystemRoot ''System32\drivers\etc\hosts'''#13#10 +
+    'if (Test-Path $p) {'#13#10 +
+    '  $c=Get-Content -LiteralPath $p -Raw'#13#10 +
+    '  if ($null -ne $c -and $c -match ''AlphaAI-DLP'') {'#13#10 +
+    '    $lines=$c -replace "`r`n","`n" -replace "`r","`n" -split "`n"'#13#10 +
+    '    $kept=New-Object System.Collections.Generic.List[string]'#13#10 +
+    '    $in=$false'#13#10 +
+    '    foreach ($line in $lines) {'#13#10 +
+    '      $t=$line.Trim()'#13#10 +
+    '      if ($t -eq ''# AlphaAI-DLP-BEGIN'') { $in=$true; continue }'#13#10 +
+    '      if ($t -eq ''# AlphaAI-DLP-END'') { $in=$false; continue }'#13#10 +
+    '      if ($in) { continue }'#13#10 +
+    '      if ($t -like ''*# AlphaAI-DLP*'') { continue }'#13#10 +
+    '      [void]$kept.Add($line)'#13#10 +
+    '    }'#13#10 +
+    '    while ($kept.Count -gt 0 -and [string]::IsNullOrWhiteSpace($kept[$kept.Count-1])) { $kept.RemoveAt($kept.Count-1) }'#13#10 +
+    '    $out=($kept -join "`r`n")'#13#10 +
+    '    if ($out.Length -gt 0) { $out += "`r`n" }'#13#10 +
+    '    [System.IO.File]::WriteAllText($p, $out, (New-Object System.Text.UTF8Encoding $false))'#13#10 +
+    '  }'#13#10 +
+    '}'#13#10 +
+    '$out = netsh advfirewall firewall show rule name=all 2>$null'#13#10 +
+    'foreach ($m in [regex]::Matches([string]$out, ''(?m)^Rule Name:\s*(.+?)\s*$'')) {'#13#10 +
+    '  $n=$m.Groups[1].Value.Trim()'#13#10 +
+    '  if ($n.StartsWith(''AlphaAI-DLP-'')) { netsh advfirewall firewall delete rule name="$n" | Out-Null }'#13#10 +
+    '}'#13#10 +
+    'ipconfig /flushdns | Out-Null'#13#10,
+    False);
+  Exec('powershell.exe',
+    '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
 procedure StopDeleteDlpServiceAsSystem;
 var
   ResultCode: Integer;
+  ScriptDir, Ps1Path: string;
 begin
   // Clear failure actions so SCM does not immediately restart after stop/kill.
+  ClearDlpWebBlock;
   RestoreUsbStorage;
   Exec('sc.exe', 'failure {#WINDOWS_SERVICE_NAME} reset= 0 actions= //', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  ScriptDir := ExpandConstant('{commonappdata}\{#APP_MUTEX}\dlp');
+  Ps1Path := ScriptDir + '\teardown-clear-hosts.ps1';
+  // SYSTEM one-shot: clear hosts/FW again, restore USB, stop/delete service.
   Exec('schtasks.exe',
-    '/Create /TN "{#WINDOWS_SERVICE_MAINT_TASK}" /TR "cmd.exe /c reg.exe add \"HKLM\SYSTEM\CurrentControlSet\Services\USBSTOR\" /v Start /t REG_DWORD /d 3 /f & sc.exe stop {#WINDOWS_SERVICE_NAME} & sc.exe delete {#WINDOWS_SERVICE_NAME} & taskkill /F /IM {#WINDOWS_SERVICE_EXE_NAME}" /SC ONCE /ST 00:00 /RU SYSTEM /F',
+    '/Create /TN "{#WINDOWS_SERVICE_MAINT_TASK}" /TR "cmd.exe /c powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"' + Ps1Path + '\" & reg.exe add \"HKLM\SYSTEM\CurrentControlSet\Services\USBSTOR\" /v Start /t REG_DWORD /d 3 /f & sc.exe stop {#WINDOWS_SERVICE_NAME} & sc.exe delete {#WINDOWS_SERVICE_NAME} & taskkill /F /IM {#WINDOWS_SERVICE_EXE_NAME}" /SC ONCE /ST 00:00 /RU SYSTEM /F',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('schtasks.exe', '/Run /TN "{#WINDOWS_SERVICE_MAINT_TASK}"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   // Wait for SCM + process handles to release (Service\*.dll).
@@ -110,6 +160,7 @@ begin
   Exec('schtasks.exe', '/Delete /TN "{#WINDOWS_SERVICE_MAINT_TASK}" /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   // Belt-and-suspenders: admin may still be able to terminate the process image.
   Exec('taskkill', '/F /IM {#WINDOWS_SERVICE_EXE_NAME}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  ClearDlpWebBlock;
   Exec('ping', '127.0.0.1 -n 2 -w 1000', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
@@ -190,6 +241,7 @@ end;
 procedure RemoveDlpService;
 begin
   // Only reached after teardown.ok (removal code). Prefer SYSTEM maintenance task.
+  ClearDlpWebBlock;
   RestoreUsbStorage;
   StopDeleteDlpServiceAsSystem;
 end;

@@ -53,15 +53,39 @@ public sealed class NamedPipeHost : BackgroundService
         await _store.InitializeAsync(stoppingToken);
         _logger.LogInformation("Named pipe listening on {Pipe}", _cfg.PipeName);
 
+        // Concurrent accept: a stuck HandleClientAsync (abandoned CLI write, slow
+        // AuthorizeTeardown HTTP) must not block ApplyTeardownGate / Health.
+        const int maxConcurrent = 4;
+        using var slot = new SemaphoreSlim(maxConcurrent, maxConcurrent);
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
+                await slot.WaitAsync(stoppingToken);
                 // LocalSystem default pipe ACL denies interactive users — CLI
                 // AuthorizeTeardown / ApplyTeardownGate would get Access Denied.
-                await using var server = CreatePipeServer(_cfg.PipeName);
-                await server.WaitForConnectionAsync(stoppingToken);
-                await HandleClientAsync(server, stoppingToken);
+                var server = CreatePipeServer(_cfg.PipeName, maxConcurrent);
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await server.WaitForConnectionAsync(stoppingToken);
+                        await HandleClientAsync(server, stoppingToken);
+                    }
+                    catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                    {
+                        /* shut down */
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Named pipe accept/handle error");
+                    }
+                    finally
+                    {
+                        try { await server.DisposeAsync(); } catch { /* ignore */ }
+                        try { slot.Release(); } catch { /* ignore */ }
+                    }
+                }, CancellationToken.None);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -69,18 +93,19 @@ public sealed class NamedPipeHost : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogDebug(ex, "Named pipe accept/handle error");
+                _logger.LogDebug(ex, "Named pipe accept loop error");
+                try { slot.Release(); } catch { /* ignore */ }
                 try { await Task.Delay(500, stoppingToken); } catch { /* ignore */ }
             }
         }
     }
 
-    private static NamedPipeServerStream CreatePipeServer(string pipeName)
+    private static NamedPipeServerStream CreatePipeServer(string pipeName, int maxInstances)
     {
         if (!OperatingSystem.IsWindows())
         {
             return new NamedPipeServerStream(
-                pipeName, PipeDirection.InOut, 1,
+                pipeName, PipeDirection.InOut, maxInstances,
                 PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
         }
 
@@ -102,7 +127,7 @@ public sealed class NamedPipeHost : BackgroundService
         return NamedPipeServerStreamAcl.Create(
             pipeName,
             PipeDirection.InOut,
-            maxNumberOfServerInstances: 2,
+            maxNumberOfServerInstances: maxInstances,
             PipeTransmissionMode.Byte,
             PipeOptions.Asynchronous,
             inBufferSize: 0,
@@ -115,7 +140,18 @@ public sealed class NamedPipeHost : BackgroundService
         using var reader = new StreamReader(server, Encoding.UTF8, leaveOpen: true);
         await using var writer = new StreamWriter(server, Encoding.UTF8, leaveOpen: true) { AutoFlush = true };
 
-        var line = await reader.ReadLineAsync(ct);
+        // Bound read so an abandoned client cannot hold a pipe instance forever.
+        using var readCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        readCts.CancelAfter(TimeSpan.FromSeconds(20));
+        string? line;
+        try
+        {
+            line = await reader.ReadLineAsync(readCts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
         if (string.IsNullOrWhiteSpace(line)) return;
 
         string response;

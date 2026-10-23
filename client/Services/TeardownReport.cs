@@ -2,8 +2,9 @@ namespace client.Services;
 
 /// <summary>
 /// Independently verified postconditions for protected uninstall.
-/// Full local success requires gate + USB restored + DLP service gone + auto-start cleared.
-/// Server notification is reported separately and never flips local success alone.
+/// Full local success requires gate + USB restored + hosts/FW cleared + DLP service gone +
+/// auto-start cleared. Server notification is reported separately and never flips local
+/// success alone.
 /// </summary>
 public sealed class TeardownReport
 {
@@ -13,6 +14,7 @@ public sealed class TeardownReport
     public bool PipeUnlockOk { get; init; }
     public bool PipeTimedOut { get; init; }
     public bool UsbRestored { get; init; }
+    public bool HostsCleared { get; init; }
     public bool DlpServiceGone { get; init; }
     public bool AutoStartCleared { get; init; }
     public bool CleanupPendingElevation { get; init; }
@@ -25,6 +27,7 @@ public sealed class TeardownReport
         AccountRemoved
         && GateWritten
         && UsbRestored
+        && HostsCleared
         && DlpServiceGone
         && AutoStartCleared;
 
@@ -58,6 +61,7 @@ public sealed class TeardownReport
                 var pending = new List<string>();
                 if (!DlpServiceGone) pending.Add("DLP service still registered");
                 if (!UsbRestored) pending.Add("USBSTOR not restored to manual(3)");
+                if (!HostsCleared) pending.Add("AlphaAI-DLP hosts/firewall still present");
                 if (!AutoStartCleared) pending.Add("auto-start still present");
                 if (CleanupPendingElevation) pending.Add("elevated cleanup required");
                 return "Partial uninstall — account wiped; remaining: " +

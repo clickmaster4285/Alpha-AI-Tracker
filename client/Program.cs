@@ -170,6 +170,7 @@ if (args.Contains("--self-test-stream-ladder"))
 // Every other launch frees the console so tracking/GUI has no black flash window.
 var isRemoveAccount = args.Contains("--remove-account");
 var isProtectedUninstall = args.Contains("--protected-uninstall");
+var isTeardownCleanupElevated = args.Contains("--teardown-cleanup-elevated");
 string? protectedUninstallCode = null;
 if (isProtectedUninstall)
 {
@@ -188,18 +189,47 @@ if (isProtectedUninstall)
     }
 }
 
-var isCliConsoleMode = isProtectedUninstall || isRemoveAccount
+var isCliConsoleMode = isProtectedUninstall || isRemoveAccount || isTeardownCleanupElevated
     || args.Contains("--print-config")
     || args.Contains("--encrypt-config");
 if (OperatingSystem.IsWindows())
 {
-    if (isCliConsoleMode || isProtectedUninstall || isRemoveAccount)
+    if (isCliConsoleMode || isProtectedUninstall || isRemoveAccount || isTeardownCleanupElevated)
         client.Services.CliConsole.Ensure();
     else
         client.Services.CliConsole.DetachForGui();
 }
 
 EnvLoader.Load();
+
+// Elevated-only hosts/USB/DLP cleanup after unelevated protected-uninstall wrote teardown.ok.
+// Spawned via UAC (runas) from WindowsTeardownCleanup.TryElevateCleanupViaUac.
+if (isTeardownCleanupElevated)
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        Console.Error.WriteLine("teardown-cleanup-elevated is Windows-only");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    if (!File.Exists(ProtectedUninstallService.TeardownOkPath))
+    {
+        Console.Error.WriteLine("teardown-cleanup-elevated refused — teardown.ok missing");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    Console.WriteLine("Elevated teardown cleanup (hosts + USBSTOR + DLP service)...");
+    var cleanup = WindowsTeardownCleanup.RestoreUsbAndRemoveDlpService();
+    foreach (var s in cleanup.Steps)
+        Console.WriteLine("  · " + s);
+    Console.WriteLine(
+        $"usb={cleanup.UsbRestored} hostsCleared={cleanup.HostsCleared} " +
+        $"dlpGone={cleanup.ServiceGone} summary={cleanup.Summary}");
+    Environment.ExitCode = (cleanup.UsbRestored && cleanup.HostsCleared && cleanup.ServiceGone) ? 0 : 2;
+    return;
+}
 
 // ─── Terms agent mode (instance 3, 2026-09-16) ───
 // `client.exe --terms` runs a STANDALONE Terms & Conditions app: its own process,
@@ -735,8 +765,8 @@ try
                 Console.WriteLine(
                     $"account={report.AccountRemoved} serverNotified={report.ServerNotified} " +
                     $"gate={report.GateWritten} pipeUnlock={report.PipeUnlockOk} " +
-                    $"usb={report.UsbRestored} dlpGone={report.DlpServiceGone} " +
-                    $"autoStartCleared={report.AutoStartCleared}");
+                    $"usb={report.UsbRestored} hostsCleared={report.HostsCleared} " +
+                    $"dlpGone={report.DlpServiceGone} autoStartCleared={report.AutoStartCleared}");
                 if (report.GateWritten)
                     Console.WriteLine($"Gate: {ProtectedUninstallService.TeardownOkPath}");
                 if (report.FullLocalSuccess)

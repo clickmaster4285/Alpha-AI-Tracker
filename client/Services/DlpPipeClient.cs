@@ -18,7 +18,7 @@ public static class DlpPipeClient
     public const int DefaultConnectTimeoutMs = 2_000;
     public const int DefaultResponseTimeoutMs = 12_000;
     /// <summary>Hard ceiling for ApplyTeardownGate including any stuck dispose.</summary>
-    public const int ApplyTeardownOverallTimeoutMs = 8_000;
+    public const int ApplyTeardownOverallTimeoutMs = 12_000;
 
     public sealed record PipeCallResult(bool Connected, bool TimedOut, string Body, string? Error);
 
@@ -148,7 +148,7 @@ public static class DlpPipeClient
         var sendTask = SendDetailedAsync(
             new { op = "ApplyTeardownGate", purpose },
             connectTimeoutMs: DefaultConnectTimeoutMs,
-            responseTimeoutMs: 4_000,
+            responseTimeoutMs: 8_000,
             ct: CancellationToken.None);
 
         var finished = await Task.WhenAny(

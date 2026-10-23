@@ -1,16 +1,18 @@
 using System.Diagnostics;
 using System.Runtime.Versioning;
 using System.Security.Principal;
+using System.Text;
+using System.Text.RegularExpressions;
 using client.Core;
 using Microsoft.Win32;
 
 namespace client.Services;
 
 /// <summary>
-/// Privileged Windows teardown: restore USBSTOR Start=3, stop/delete the DLP
-/// service, clear failure actions. Prefer SYSTEM via schtasks (same pattern as
-/// Inno). Every external process is hard-killed on timeout so the CLI never
-/// hangs indefinitely. Results are verified, not assumed.
+/// Privileged Windows teardown: restore USBSTOR Start=3, clear AlphaAI-DLP hosts
+/// sink + firewall rules, stop/delete the DLP service. Prefer SYSTEM via schtasks
+/// (same pattern as Inno). Every external process is hard-killed on timeout so the
+/// CLI never hangs indefinitely. Results are verified, not assumed.
 /// </summary>
 [SupportedOSPlatform("windows")]
 internal static class WindowsTeardownCleanup
@@ -19,21 +21,28 @@ internal static class WindowsTeardownCleanup
     private const int ProcessTimeoutMs = 15_000;
     private const int SystemTaskSettleMs = 4_000;
 
+    // Must match DomainBlockEnforcer markers (DlpService).
+    public const string HostsBeginMarker = "# AlphaAI-DLP-BEGIN";
+    public const string HostsEndMarker = "# AlphaAI-DLP-END";
+    public const string HostsMarkerPrefix = "# AlphaAI-DLP";
+    public const string FirewallRulePrefix = "AlphaAI-DLP-";
+
     public sealed record TeardownCleanupResult(
         bool UsbRestored,
         bool ServiceGone,
+        bool HostsCleared,
         bool AttemptedElevatedCleanup,
         bool IsProcessElevated,
         string Summary,
         IReadOnlyList<string> Steps);
 
     /// <summary>
-    /// Restore USB + remove DLP service registration. Idempotent.
+    /// Restore USB + clear web domain sink + remove DLP service registration. Idempotent.
     /// </summary>
     public static TeardownCleanupResult RestoreUsbAndRemoveDlpService()
     {
         if (!OperatingSystem.IsWindows())
-            return new TeardownCleanupResult(true, true, false, false, "not_windows", Array.Empty<string>());
+            return new TeardownCleanupResult(true, true, true, false, false, "not_windows", Array.Empty<string>());
 
         var steps = new List<string>();
         var svc = AppInfo.WindowsServiceName;
@@ -43,7 +52,13 @@ internal static class WindowsTeardownCleanup
 
         var beforeState = QueryServiceState(svc);
         var beforeUsb = ReadUsbStorStart();
-        steps.Add($"before service={beforeState} usbstor={beforeUsb?.ToString() ?? "?"}");
+        steps.Add(
+            $"before service={beforeState} usbstor={beforeUsb?.ToString() ?? "?"} " +
+            $"hostsDirty={!IsWebDomainBlockCleared()}");
+
+        // Clear hosts/FW BEFORE killing the service — the service's own Clear() is
+        // fire-and-forget and often loses the race to sc stop / taskkill.
+        TryClearWebDomainBlockDirect(steps);
 
         // Clear SCM failure actions so stop/kill is not undone by restart/5s.
         RunLogged(steps, "sc-failure-clear", "sc.exe",
@@ -54,13 +69,15 @@ internal static class WindowsTeardownCleanup
         RunLogged(steps, "sc-delete-direct", "sc.exe", $"delete \"{svc}\"", ProcessTimeoutMs);
         RunLogged(steps, "taskkill-direct", "taskkill.exe", $"/F /IM \"{exe}\"", ProcessTimeoutMs);
         TryRestoreUsbStorDirect(steps);
+        TryClearWebDomainBlockDirect(steps);
 
         var afterDirectGone = !ServiceExists(svc);
         var afterDirectUsb = ReadUsbStorStart() == UsbStorStartManual;
-        if (afterDirectGone && afterDirectUsb)
+        var afterDirectHosts = IsWebDomainBlockCleared();
+        if (afterDirectGone && afterDirectUsb && afterDirectHosts)
         {
             steps.Add("verified after direct cleanup");
-            return new TeardownCleanupResult(true, true, false, elevated,
+            return new TeardownCleanupResult(true, true, true, false, elevated,
                 "verified_direct", steps);
         }
 
@@ -73,21 +90,26 @@ internal static class WindowsTeardownCleanup
         RunLogged(steps, "sc-delete-retry", "sc.exe", $"delete \"{svc}\"", ProcessTimeoutMs);
         RunLogged(steps, "taskkill-retry", "taskkill.exe", $"/F /IM \"{exe}\"", ProcessTimeoutMs);
         TryRestoreUsbStorDirect(steps);
+        TryClearWebDomainBlockDirect(steps);
 
         var usbOk = ReadUsbStorStart() == UsbStorStartManual;
         var gone = !ServiceExists(svc);
+        var hostsOk = IsWebDomainBlockCleared();
         var afterState = QueryServiceState(svc);
-        steps.Add($"after service={afterState} usbstor={ReadUsbStorStart()?.ToString() ?? "?"} systemTask={systemOk}");
+        steps.Add(
+            $"after service={afterState} usbstor={ReadUsbStorStart()?.ToString() ?? "?"} " +
+            $"hostsCleared={hostsOk} systemTask={systemOk}");
 
-        var summary = (usbOk, gone) switch
+        var summary = (usbOk, gone, hostsOk) switch
         {
-            (true, true) => "verified",
-            (false, true) => "service_gone_usbstor_not_manual",
-            (true, false) => "usbstor_ok_service_still_registered",
+            (true, true, true) => "verified",
+            (true, true, false) => "service_gone_hosts_still_dirty",
+            (false, true, _) => "service_gone_usbstor_not_manual",
+            (true, false, _) => "usbstor_ok_service_still_registered",
             _ => "cleanup_incomplete",
         };
 
-        return new TeardownCleanupResult(usbOk, gone, systemOk, elevated, summary, steps);
+        return new TeardownCleanupResult(usbOk, gone, hostsOk, systemOk, elevated, summary, steps);
     }
 
     public static bool ServiceExists(string? serviceName = null)
@@ -133,6 +155,38 @@ internal static class WindowsTeardownCleanup
         }
     }
 
+    public static string HostsPath
+    {
+        get
+        {
+            var windir = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            return Path.Combine(windir, "System32", "drivers", "etc", "hosts");
+        }
+    }
+
+    /// <summary>True when no AlphaAI-DLP hosts markers and no owned firewall rules remain.</summary>
+    public static bool IsWebDomainBlockCleared()
+    {
+        if (!OperatingSystem.IsWindows()) return true;
+        try
+        {
+            if (File.Exists(HostsPath))
+            {
+                var text = File.ReadAllText(HostsPath);
+                if (text.Contains(HostsMarkerPrefix, StringComparison.OrdinalIgnoreCase) ||
+                    text.Contains(HostsBeginMarker, StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+        }
+        catch
+        {
+            // Unreadable hosts → treat as not cleared so SYSTEM path retries.
+            return false;
+        }
+
+        return ListOwnedFirewallRules().Count == 0;
+    }
+
     public static bool IsElevated()
     {
         try
@@ -156,19 +210,247 @@ internal static class WindowsTeardownCleanup
             "config USBSTOR start= demand", ProcessTimeoutMs);
     }
 
+    private static void TryClearWebDomainBlockDirect(List<string> steps)
+    {
+        try
+        {
+            var hostsDetail = ClearHostsFile();
+            steps.Add("hosts-clear " + hostsDetail);
+        }
+        catch (Exception ex)
+        {
+            steps.Add("hosts-clear error=" + ex.Message);
+        }
+
+        try
+        {
+            var removed = ClearOwnedFirewallRules();
+            steps.Add($"fw-clear removed={removed}");
+        }
+        catch (Exception ex)
+        {
+            steps.Add("fw-clear error=" + ex.Message);
+        }
+
+        RunLogged(steps, "flushdns", "ipconfig.exe", "/flushdns", ProcessTimeoutMs);
+    }
+
+    private static string ClearHostsFile()
+    {
+        if (!File.Exists(HostsPath))
+            return "hosts_absent";
+
+        string original;
+        try
+        {
+            original = File.ReadAllText(HostsPath, Encoding.UTF8);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return "access_denied_need_admin";
+        }
+
+        if (!original.Contains(HostsMarkerPrefix, StringComparison.OrdinalIgnoreCase) &&
+            !original.Contains(HostsBeginMarker, StringComparison.OrdinalIgnoreCase))
+            return "already_clean";
+
+        var next = StripOwnedHostsBlock(original).TrimEnd() + "\r\n";
+        try
+        {
+            var tmp = HostsPath + ".alpha-dlp-teardown.tmp";
+            File.WriteAllText(tmp, next, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            File.Copy(tmp, HostsPath, overwrite: true);
+            try { File.Delete(tmp); } catch { /* ignore */ }
+            return "hosts_cleared";
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return "access_denied_need_admin";
+        }
+    }
+
+    internal static string StripOwnedHostsBlock(string content)
+    {
+        var lines = content.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+        var kept = new List<string>(lines.Length);
+        var inBlock = false;
+        foreach (var line in lines)
+        {
+            var t = line.Trim();
+            if (t.Equals(HostsBeginMarker, StringComparison.OrdinalIgnoreCase))
+            {
+                inBlock = true;
+                continue;
+            }
+            if (t.Equals(HostsEndMarker, StringComparison.OrdinalIgnoreCase))
+            {
+                inBlock = false;
+                continue;
+            }
+            if (inBlock)
+                continue;
+            if (t.Contains(HostsMarkerPrefix, StringComparison.OrdinalIgnoreCase))
+                continue;
+            kept.Add(line);
+        }
+        while (kept.Count > 0 && string.IsNullOrWhiteSpace(kept[^1]))
+            kept.RemoveAt(kept.Count - 1);
+        return string.Join("\r\n", kept);
+    }
+
+    private static int ClearOwnedFirewallRules()
+    {
+        var names = ListOwnedFirewallRules();
+        var removed = 0;
+        foreach (var name in names)
+        {
+            var (exit, _, _) = RunCapture(
+                "netsh.exe",
+                $"advfirewall firewall delete rule name=\"{name.Replace("\"", "'")}\"",
+                ProcessTimeoutMs);
+            if (exit == 0) removed++;
+        }
+        return removed;
+    }
+
+    private static List<string> ListOwnedFirewallRules()
+    {
+        var list = new List<string>();
+        try
+        {
+            var (_, stdout, stderr) = RunCapture(
+                "netsh.exe", "advfirewall firewall show rule name=all", ProcessTimeoutMs);
+            var text = stdout + "\n" + stderr;
+            foreach (Match m in Regex.Matches(text, @"^Rule Name:\s*(.+)\s*$", RegexOptions.Multiline))
+            {
+                var name = m.Groups[1].Value.Trim();
+                if (name.StartsWith(FirewallRulePrefix, StringComparison.OrdinalIgnoreCase))
+                    list.Add(name);
+            }
+        }
+        catch
+        {
+            /* ignore — verification treats uncleared as dirty */
+        }
+        return list;
+    }
+
+    /// <summary>
+    /// User-writable staging dir for teardown scripts. ProgramData\dlp is often
+    /// ACL-locked (or holds SYSTEM-owned leftovers) so unelevated WriteAllText fails.
+    /// </summary>
+    public static string TeardownScriptDir
+    {
+        get
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "AlphaAITracker-teardown");
+            Directory.CreateDirectory(dir);
+            return dir;
+        }
+    }
+
+    /// <summary>
+    /// When the unelevated CLI cannot clear hosts / stop the DLP service, relaunch
+    /// this same binary elevated (UAC) to run cleanup only. Requires <c>teardown.ok</c>.
+    /// </summary>
+    public static TeardownCleanupResult TryElevateCleanupViaUac(List<string>? steps = null)
+    {
+        steps ??= new List<string>();
+        if (!OperatingSystem.IsWindows())
+            return new TeardownCleanupResult(true, true, true, false, false, "not_windows", steps);
+
+        if (IsElevated())
+            return RestoreUsbAndRemoveDlpService();
+
+        var gate = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            AppInfo.DataFolderName, "dlp", "teardown.ok");
+        if (!File.Exists(gate))
+        {
+            steps.Add("elevate skipped: teardown.ok missing");
+            return new TeardownCleanupResult(false, false, false, false, false, "no_gate", steps);
+        }
+
+        var exe = Environment.ProcessPath;
+        if (string.IsNullOrWhiteSpace(exe) || !File.Exists(exe))
+        {
+            steps.Add("elevate skipped: ProcessPath missing");
+            return new TeardownCleanupResult(false, false, false, false, false, "no_exe", steps);
+        }
+
+        steps.Add("requesting UAC elevation for hosts/USB/DLP cleanup");
+        try
+        {
+            using var p = Process.Start(new ProcessStartInfo
+            {
+                FileName = exe,
+                Arguments = "--teardown-cleanup-elevated --no-pause",
+                UseShellExecute = true,
+                Verb = "runas",
+            });
+            if (p is null)
+            {
+                steps.Add("elevate Process.Start returned null");
+                return new TeardownCleanupResult(false, false, false, false, false, "elevate_null", steps);
+            }
+
+            if (!p.WaitForExit(120_000))
+            {
+                try { p.Kill(entireProcessTree: true); } catch { /* ignore */ }
+                steps.Add("elevate child timed out after 120s");
+            }
+            else
+            {
+                steps.Add($"elevate child exit={p.ExitCode}");
+            }
+        }
+        catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
+        {
+            // ERROR_CANCELLED — user dismissed UAC
+            steps.Add("elevate cancelled by user (UAC)");
+            return new TeardownCleanupResult(
+                ReadUsbStorStart() == UsbStorStartManual,
+                !ServiceExists(),
+                IsWebDomainBlockCleared(),
+                false,
+                false,
+                "uac_cancelled",
+                steps);
+        }
+        catch (Exception ex)
+        {
+            steps.Add("elevate error: " + ex.Message);
+        }
+
+        var usbOk = ReadUsbStorStart() == UsbStorStartManual;
+        var gone = !ServiceExists();
+        var hostsOk = IsWebDomainBlockCleared();
+        var summary = (usbOk, gone, hostsOk) switch
+        {
+            (true, true, true) => "verified_after_elevate",
+            _ => "elevate_incomplete",
+        };
+        steps.Add($"after elevate usbstor={ReadUsbStorStart()?.ToString() ?? "?"} gone={gone} hostsCleared={hostsOk}");
+        return new TeardownCleanupResult(usbOk, gone, hostsOk, true, false, summary, steps);
+    }
+
     private static bool TrySystemCleanupTask(List<string> steps, string svc, string exe)
     {
         try
         {
-            var dir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                AppInfo.DataFolderName, "dlp");
-            Directory.CreateDirectory(dir);
+            // Never write under ProgramData\dlp — unelevated users often get Access Denied
+            // (or cannot overwrite SYSTEM-owned leftovers from a prior attempt).
+            var dir = TeardownScriptDir;
+
+            var ps1 = Path.Combine(dir, "teardown-clear-hosts.ps1");
+            File.WriteAllText(ps1, BuildHostsClearPowerShell(), Encoding.UTF8);
 
             var script = Path.Combine(dir, "teardown-cleanup.cmd");
             // Keep script short and non-interactive; no pauses.
+            // Clear hosts/FW first, then USB + service stop/delete.
             File.WriteAllText(script,
                 "@echo off\r\n" +
+                $"powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{ps1}\" >nul 2>&1\r\n" +
                 "reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Services\\USBSTOR\" /v Start /t REG_DWORD /d 3 /f >nul 2>&1\r\n" +
                 "sc config USBSTOR start= demand >nul 2>&1\r\n" +
                 $"sc failure \"{svc}\" reset= 0 actions= // >nul 2>&1\r\n" +
@@ -204,6 +486,37 @@ internal static class WindowsTeardownCleanup
             return false;
         }
     }
+
+    /// <summary>PowerShell used by SYSTEM / Inno to strip AlphaAI-DLP hosts + FW rules.</summary>
+    internal static string BuildHostsClearPowerShell() =>
+        "$ErrorActionPreference='SilentlyContinue'\r\n" +
+        "$p=Join-Path $env:SystemRoot 'System32\\drivers\\etc\\hosts'\r\n" +
+        "if (Test-Path $p) {\r\n" +
+        "  $c=Get-Content -LiteralPath $p -Raw\r\n" +
+        "  if ($null -ne $c -and $c -match 'AlphaAI-DLP') {\r\n" +
+        "    $lines=$c -replace \"`r`n\",\"`n\" -replace \"`r\",\"`n\" -split \"`n\"\r\n" +
+        "    $kept=New-Object System.Collections.Generic.List[string]\r\n" +
+        "    $in=$false\r\n" +
+        "    foreach ($line in $lines) {\r\n" +
+        "      $t=$line.Trim()\r\n" +
+        "      if ($t -eq '# AlphaAI-DLP-BEGIN') { $in=$true; continue }\r\n" +
+        "      if ($t -eq '# AlphaAI-DLP-END') { $in=$false; continue }\r\n" +
+        "      if ($in) { continue }\r\n" +
+        "      if ($t -like '*# AlphaAI-DLP*') { continue }\r\n" +
+        "      [void]$kept.Add($line)\r\n" +
+        "    }\r\n" +
+        "    while ($kept.Count -gt 0 -and [string]::IsNullOrWhiteSpace($kept[$kept.Count-1])) { $kept.RemoveAt($kept.Count-1) }\r\n" +
+        "    $out=($kept -join \"`r`n\")\r\n" +
+        "    if ($out.Length -gt 0) { $out += \"`r`n\" }\r\n" +
+        "    [System.IO.File]::WriteAllText($p, $out, (New-Object System.Text.UTF8Encoding $false))\r\n" +
+        "  }\r\n" +
+        "}\r\n" +
+        "$out = netsh advfirewall firewall show rule name=all 2>$null\r\n" +
+        "foreach ($m in [regex]::Matches([string]$out, '(?m)^Rule Name:\\s*(.+?)\\s*$')) {\r\n" +
+        "  $n=$m.Groups[1].Value.Trim()\r\n" +
+        "  if ($n.StartsWith('AlphaAI-DLP-')) { netsh advfirewall firewall delete rule name=\"$n\" | Out-Null }\r\n" +
+        "}\r\n" +
+        "ipconfig /flushdns | Out-Null\r\n";
 
     private static int RunLogged(List<string> steps, string op, string fileName, string args, int timeoutMs)
     {

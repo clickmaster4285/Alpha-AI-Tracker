@@ -156,6 +156,7 @@ public sealed class ProtectedUninstallService
                 PipeUnlockOk = teardown.PipeUnlockOk,
                 PipeTimedOut = teardown.PipeTimedOut,
                 UsbRestored = teardown.UsbRestored,
+                HostsCleared = teardown.HostsCleared,
                 DlpServiceGone = teardown.DlpServiceGone,
                 AutoStartCleared = autoCleared,
                 CleanupPendingElevation = teardown.CleanupPendingElevation,
@@ -221,7 +222,7 @@ public sealed class ProtectedUninstallService
         CancellationToken ct = default)
     {
         var r = await FinalizeTeardownDetailedAsync(purpose, ct).ConfigureAwait(false);
-        return r.GateWritten && r.UsbRestored && r.DlpServiceGone;
+        return r.GateWritten && r.UsbRestored && r.HostsCleared && r.DlpServiceGone;
     }
 
     public static async Task<TeardownSlice> FinalizeTeardownDetailedAsync(
@@ -253,47 +254,73 @@ public sealed class ProtectedUninstallService
         {
             Log("Unlocking DLP teardown via named pipe");
             Set(progress, "teardown", "Unlocking DLP service");
-            var pipeSw = Stopwatch.StartNew();
-            // Hard wall-clock: never wait forever if the pipe call itself hangs.
-            var pipeTask = DlpPipeClient.ApplyTeardownGateDetailedAsync(purpose, CancellationToken.None);
-            var pipeFinished = await Task.WhenAny(
-                    pipeTask,
-                    Task.Delay(DlpPipeClient.ApplyTeardownOverallTimeoutMs + 1_000, CancellationToken.None))
-                .ConfigureAwait(false);
-            if (pipeFinished == pipeTask)
+            // Retry: a single write_timeout often means another pipe client held the
+            // (old) single accept loop — second attempt usually succeeds after concurrent accept.
+            for (var attempt = 1; attempt <= 3 && !pipeOk; attempt++)
             {
-                var pipe = await pipeTask.ConfigureAwait(false);
-                pipeOk = pipe.Ok;
-                pipeTimedOut = pipe.TimedOut;
-                steps.Add(
-                    $"pipe unlock ok={pipeOk} timedOut={pipeTimedOut} " +
-                    $"err={pipe.Error ?? "none"} {pipeSw.ElapsedMilliseconds}ms");
-                if (pipeOk)
-                    Log("DLP unlock completed");
+                var pipeSw = Stopwatch.StartNew();
+                var pipeTask = DlpPipeClient.ApplyTeardownGateDetailedAsync(purpose, CancellationToken.None);
+                var pipeFinished = await Task.WhenAny(
+                        pipeTask,
+                        Task.Delay(DlpPipeClient.ApplyTeardownOverallTimeoutMs + 1_000, CancellationToken.None))
+                    .ConfigureAwait(false);
+                if (pipeFinished == pipeTask)
+                {
+                    var pipe = await pipeTask.ConfigureAwait(false);
+                    pipeOk = pipe.Ok;
+                    pipeTimedOut = pipe.TimedOut;
+                    steps.Add(
+                        $"pipe unlock attempt={attempt} ok={pipeOk} timedOut={pipeTimedOut} " +
+                        $"err={pipe.Error ?? "none"} {pipeSw.ElapsedMilliseconds}ms");
+                    if (pipeOk)
+                        Log("DLP unlock completed");
+                    else
+                        Log($"DLP unlock failed (attempt {attempt}): {pipe.Error ?? "not_ok"}");
+                }
                 else
-                    Log($"DLP unlock failed: {pipe.Error ?? "not_ok"} (continuing SYSTEM cleanup)");
+                {
+                    pipeTimedOut = true;
+                    steps.Add($"pipe unlock attempt={attempt} abandoned after {pipeSw.ElapsedMilliseconds}ms");
+                    Log($"DLP unlock timed out (attempt {attempt})");
+                }
+
+                if (!pipeOk && attempt < 3)
+                    await Task.Delay(500, CancellationToken.None).ConfigureAwait(false);
             }
-            else
-            {
-                pipeTimedOut = true;
-                steps.Add($"pipe unlock abandoned after {pipeSw.ElapsedMilliseconds}ms (overall timeout)");
-                Log("DLP unlock timed out — continuing SYSTEM cleanup (will not wait on pipe)");
-            }
+
+            if (!pipeOk)
+                Log("DLP unlock failed after retries — continuing SYSTEM / elevated cleanup");
 
             // Brief settle only when unlock reported ok; never delay on timeout.
+            // Service Clear() runs async after pipe reply — give it a moment, then
+            // CLI clears hosts itself (does not rely on that race).
             if (pipeOk)
-                await Task.Delay(400, CancellationToken.None).ConfigureAwait(false);
+                await Task.Delay(1_200, CancellationToken.None).ConfigureAwait(false);
 
-            Log("Stopping/removing DLP service + restoring USBSTOR");
+            Log("Stopping/removing DLP service + restoring USBSTOR + clearing hosts");
             Set(progress, "teardown", "Removing DLP service registration");
             var cleanupSw = Stopwatch.StartNew();
             var cleanup = WindowsTeardownCleanup.RestoreUsbAndRemoveDlpService();
             steps.AddRange(cleanup.Steps);
             steps.Add($"cleanup summary={cleanup.Summary} {cleanupSw.ElapsedMilliseconds}ms");
 
-            Log($"USB restored={cleanup.UsbRestored}; DLP gone={cleanup.ServiceGone}");
+            // Unelevated CLI cannot edit hosts / sc stop LocalSystem service — prompt UAC.
+            if ((!cleanup.ServiceGone || !cleanup.UsbRestored || !cleanup.HostsCleared) &&
+                !cleanup.IsProcessElevated)
+            {
+                Log("Cleanup incomplete without admin — requesting UAC elevation");
+                Set(progress, "teardown", "Administrator approval required for hosts/DLP cleanup");
+                var elevated = WindowsTeardownCleanup.TryElevateCleanupViaUac(steps);
+                cleanup = elevated;
+                steps.Add($"elevate summary={elevated.Summary}");
+            }
 
-            var pendingElevation = !cleanup.ServiceGone && !cleanup.IsProcessElevated;
+            Log(
+                $"USB restored={cleanup.UsbRestored}; hostsCleared={cleanup.HostsCleared}; " +
+                $"DLP gone={cleanup.ServiceGone}");
+
+            var pendingElevation =
+                (!cleanup.ServiceGone || !cleanup.HostsCleared) && !WindowsTeardownCleanup.IsElevated();
             string? failedOp = null;
             string? detail = null;
             if (!cleanup.ServiceGone)
@@ -308,10 +335,16 @@ public sealed class ProtectedUninstallService
                 failedOp = "restore_usbstor";
                 detail = $"USBSTOR Start={WindowsTeardownCleanup.ReadUsbStorStart()?.ToString() ?? "?"}";
             }
+            else if (!cleanup.HostsCleared)
+            {
+                failedOp = "clear_web_block";
+                detail = "AlphaAI-DLP hosts/firewall entries still present";
+            }
 
             Set(progress, "teardown", "Verifying remaining services");
             Log($"Verifying: service={WindowsTeardownCleanup.QueryServiceState(AppInfo.WindowsServiceName)} " +
-                $"usbstor={WindowsTeardownCleanup.ReadUsbStorStart()?.ToString() ?? "?"}");
+                $"usbstor={WindowsTeardownCleanup.ReadUsbStorStart()?.ToString() ?? "?"} " +
+                $"hostsCleared={cleanup.HostsCleared}");
 
             return new TeardownSlice
             {
@@ -319,6 +352,7 @@ public sealed class ProtectedUninstallService
                 PipeUnlockOk = pipeOk,
                 PipeTimedOut = pipeTimedOut,
                 UsbRestored = cleanup.UsbRestored,
+                HostsCleared = cleanup.HostsCleared,
                 DlpServiceGone = cleanup.ServiceGone,
                 CleanupPendingElevation = pendingElevation,
                 FailedOperation = failedOp,
@@ -330,6 +364,7 @@ public sealed class ProtectedUninstallService
         {
             GateWritten = File.Exists(TeardownOkPath),
             UsbRestored = true,
+            HostsCleared = true,
             DlpServiceGone = true,
         };
     }
@@ -340,6 +375,7 @@ public sealed class ProtectedUninstallService
         public bool PipeUnlockOk { get; init; }
         public bool PipeTimedOut { get; init; }
         public bool UsbRestored { get; init; }
+        public bool HostsCleared { get; init; }
         public bool DlpServiceGone { get; init; }
         public bool CleanupPendingElevation { get; init; }
         public string? FailedOperation { get; init; }
