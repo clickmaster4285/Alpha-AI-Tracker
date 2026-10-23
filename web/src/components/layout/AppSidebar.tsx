@@ -349,6 +349,11 @@ const navSections: NavSection[] = [
             module: "dlp-rules",
           },
           {
+            label: "Web Blocker",
+            path: "/web-blocker",
+            module: "web-blocker",
+          },
+          {
             label: "Shadow IT",
             path: "/shadow-it",
             module: "shadow-it",

@@ -20,7 +20,6 @@ const severityColors: Record<string, string> = {
 const triggerLabels: Record<string, string> = {
   usb_storage: 'USB Storage',
   usb_file: 'USB File',
-  web_navigate: 'Web Navigate',
   software_install: 'Software Install',
   software_uninstall: 'Software Uninstall',
   cloud_sync_folder: 'Cloud Sync Folder',
@@ -34,12 +33,16 @@ const actionLabels: Record<string, string> = {
   alert_block: 'Alert + Block',
 };
 
+function splitList(raw: string): string[] {
+  return raw.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+}
+
 export default function DLPRulesPage() {
   const qc = useQueryClient();
   const [showDialog, setShowDialog] = useState(false);
   const [name, setName] = useState('');
   const [trigger, setTrigger] = useState<DlpTrigger>('usb_storage');
-  const [pattern, setPattern] = useState('');
+  const [extensions, setExtensions] = useState('');
   const [action, setAction] = useState<DlpAction>('alert');
   const [severity, setSeverity] = useState<DlpSeverity>('high');
   const [publishMsg, setPublishMsg] = useState('');
@@ -49,33 +52,25 @@ export default function DLPRulesPage() {
     queryFn: () => dlpApi.rules.list(),
   });
 
+  const rules = data?.rules ?? [];
+
   const createMutation = useMutation({
-    mutationFn: () => {
-      const match: Record<string, unknown> = {};
-      const trimmed = pattern.trim();
-      if (trimmed) {
-        if (trigger === 'web_navigate') {
-          match.domains = trimmed.split(/[,\s]+/).filter(Boolean);
-        } else {
-          match.extensions = trimmed.split(/[,\s]+/).filter(Boolean);
-          match.pattern = trimmed;
-        }
-      }
-      return dlpApi.rules.create({
+    mutationFn: () =>
+      dlpApi.rules.create({
         name: name.trim(),
         trigger,
         action,
         severity,
-        match,
-        scope: { all: true },
+        extensions: splitList(extensions),
+        patterns: [],
+        scopeAll: true,
         enabled: true,
-      });
-    },
+      }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['dlp-rules'] });
       setShowDialog(false);
       setName('');
-      setPattern('');
+      setExtensions('');
     },
   });
 
@@ -91,12 +86,15 @@ export default function DLPRulesPage() {
     },
   });
 
-  const rules = data?.rules ?? [];
-
   return (
     <div className="space-y-4 animate-fade-in">
       <div className="flex items-center justify-between gap-2 flex-wrap">
-        <h3 className="font-display font-bold text-lg text-foreground">DLP Rules</h3>
+        <div>
+          <h3 className="font-display font-bold text-lg text-foreground">DLP Rules</h3>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            USB and non-web triggers (relational). Domain / path / schedule rules live under Web Blocker.
+          </p>
+        </div>
         <div className="flex items-center gap-2">
           <Button
             variant="outline"
@@ -141,8 +139,8 @@ export default function DLPRulesPage() {
                   <h4 className="font-display font-bold text-foreground truncate">{rule.name}</h4>
                   <p className="text-xs text-muted-foreground mt-0.5">
                     Trigger: {triggerLabels[rule.trigger] ?? rule.trigger}
-                    {rule.match && Object.keys(rule.match).length > 0 && (
-                      <> • Pattern: <code className="bg-muted px-1 rounded text-[10px]">{JSON.stringify(rule.match)}</code></>
+                    {(rule.extensions?.length ?? 0) > 0 && (
+                      <> • Ext: <code className="bg-muted px-1 rounded text-[10px]">{rule.extensions.join(', ')}</code></>
                     )}
                   </p>
                 </div>
@@ -180,18 +178,12 @@ export default function DLPRulesPage() {
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="usb_storage">USB Storage</SelectItem>
-                {/* <SelectItem value="usb_file">USB File</SelectItem>
-                <SelectItem value="web_navigate">Web Navigate</SelectItem>
-                <SelectItem value="cloud_sync_folder">Cloud Sync Folder</SelectItem>
-                <SelectItem value="software_install">Software Install</SelectItem>
-                <SelectItem value="file_transfer">File Transfer</SelectItem>
-                <SelectItem value="email">Email</SelectItem> */}
               </SelectContent>
             </Select>
             <Input
-              placeholder="Pattern / extensions / domains (comma-separated)"
-              value={pattern}
-              onChange={(e) => setPattern(e.target.value)}
+              placeholder="Extensions (optional, e.g. .xlsx, .csv)"
+              value={extensions}
+              onChange={(e) => setExtensions(e.target.value)}
             />
             <div className="grid grid-cols-2 gap-3">
               <Select value={action} onValueChange={(v) => setAction(v as DlpAction)}>

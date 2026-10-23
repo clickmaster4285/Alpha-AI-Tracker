@@ -1665,10 +1665,29 @@ export interface DlpRule {
   name: string;
   enabled: boolean;
   trigger: DlpTrigger;
-  match: Record<string, unknown>;
   action: DlpAction;
   severity: DlpSeverity;
-  scope: Record<string, unknown>;
+  scopeAll: boolean;
+  extensions: string[];
+  patterns: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WebBlockerRule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  action: DlpAction;
+  severity: DlpSeverity;
+  scopeAll: boolean;
+  domains: string[];
+  paths: string[];
+  scheduleEnabled: boolean;
+  scheduleStart: string;
+  scheduleEnd: string;
+  scheduleTimezone: string;
+  scheduleDays: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -1684,7 +1703,7 @@ export interface DlpAlert {
   severity: DlpSeverity;
   actionTaken: string;
   occurredAt: string;
-  evidence: Record<string, unknown>;
+  evidence: Record<string, string>;
   status: DlpAlertStatus;
   assignedTo: string;
   notes: string;
@@ -1778,21 +1797,48 @@ export const dlpApi = {
     create: (data: {
       name: string;
       trigger: string;
-      match?: Record<string, unknown>;
       action?: string;
       severity?: string;
-      scope?: Record<string, unknown>;
+      scopeAll?: boolean;
+      extensions?: string[];
+      patterns?: string[];
       enabled?: boolean;
     }) => request<DlpRule>('/dlp/rules', { method: 'POST', body: data }),
     update: (id: string, data: Partial<{
       name: string; enabled: boolean; trigger: string;
-      match: Record<string, unknown>; action: string; severity: string;
-      scope: Record<string, unknown>;
+      action: string; severity: string; scopeAll: boolean;
+      extensions: string[]; patterns: string[];
     }>) => request<DlpRule>(`/dlp/rules/${id}`, { method: 'PATCH', body: data }),
     delete: (id: string) =>
       request<{ message: string }>(`/dlp/rules/${id}`, { method: 'DELETE' }),
     publish: () =>
       request<PublishDlpPolicyResponse>('/dlp/rules/publish', { method: 'POST' }),
+  },
+
+  webBlocker: {
+    list: () => request<{ rules: WebBlockerRule[]; total: number }>('/web-blocker/rules'),
+    create: (data: {
+      name: string;
+      action?: string;
+      severity?: string;
+      scopeAll?: boolean;
+      domains?: string[];
+      paths?: string[];
+      scheduleEnabled?: boolean;
+      scheduleStart?: string;
+      scheduleEnd?: string;
+      scheduleTimezone?: string;
+      scheduleDays?: string[];
+      enabled?: boolean;
+    }) => request<WebBlockerRule>('/web-blocker/rules', { method: 'POST', body: data }),
+    update: (id: string, data: Partial<{
+      name: string; enabled: boolean; action: string; severity: string; scopeAll: boolean;
+      domains: string[]; paths: string[];
+      scheduleEnabled: boolean; scheduleStart: string; scheduleEnd: string;
+      scheduleTimezone: string; scheduleDays: string[];
+    }>) => request<WebBlockerRule>(`/web-blocker/rules/${id}`, { method: 'PATCH', body: data }),
+    delete: (id: string) =>
+      request<{ message: string }>(`/web-blocker/rules/${id}`, { method: 'DELETE' }),
   },
 
   alerts: {

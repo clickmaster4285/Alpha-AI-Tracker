@@ -42,6 +42,7 @@ const pageTitles: Record<string, string> = {
   "/executive-dashboard": "Executive Dashboard",
   "/dlp-alerts": "DLP Alerts",
   "/dlp-rules": "DLP Rules",
+  "/web-blocker": "Web Blocker",
   "/shadow-it": "Shadow IT",
   "/settings/billing": "Billing & Subscription",
   "/settings/compliance": "GDPR & Compliance",
