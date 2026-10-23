@@ -97,8 +97,7 @@ public sealed class AlertSyncWorker : BackgroundService
                 severity = a.Severity,
                 actionTaken = a.ActionTaken,
                 occurredAt = a.OccurredAt.UtcDateTime,
-                evidence = JsonSerializer.Deserialize<JsonElement>(
-                    string.IsNullOrWhiteSpace(a.EvidenceJson) ? "{}" : a.EvidenceJson),
+                evidence = a.Evidence ?? new Dictionary<string, string>(),
             }).ToArray(),
         };
 

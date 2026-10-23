@@ -264,6 +264,10 @@ public sealed class NamedPipeHost : BackgroundService
                     _logger.LogWarning(
                         "Teardown restored USBSTOR (changed={Changed}, detail={Detail}, start={Start})",
                         usb.Changed, usb.Detail, usb.DesiredStart);
+                    var web = DomainBlockEnforcer.Clear();
+                    _logger.LogWarning(
+                        "Teardown cleared AlphaAI-DLP hosts sink (changed={Changed}, detail={Detail})",
+                        web.Changed, web.Detail);
                     ServiceAclHardener.TryApplyOpen(_logger);
                 }
 
