@@ -12,6 +12,7 @@ public sealed class EnforceWorker : BackgroundService
     private readonly DlpConfig _cfg;
     private readonly PolicyStore _store;
     private readonly RemovableDriveMonitor _drives;
+    private readonly WebBlockState _webBlock;
     private readonly ILogger<EnforceWorker> _logger;
     private long _lastVersion = -1;
     private bool? _lastUsbBlock;
@@ -24,11 +25,13 @@ public sealed class EnforceWorker : BackgroundService
         DlpConfig cfg,
         PolicyStore store,
         RemovableDriveMonitor drives,
+        WebBlockState webBlock,
         ILogger<EnforceWorker> logger)
     {
         _cfg = cfg;
         _store = store;
         _drives = drives;
+        _webBlock = webBlock;
         _logger = logger;
     }
 
@@ -194,11 +197,16 @@ public sealed class EnforceWorker : BackgroundService
         if (wantDomains.Count == 0 && _lastWebFingerprint == "\0" && _cfg.WebBlock)
         {
             _lastWebFingerprint = "";
+            _webBlock.Set(version, Array.Empty<string>());
             return;
         }
 
         if (webFp == _lastWebFingerprint)
+        {
+            // Keep block-page / pipe snapshot fresh even when hosts write is a no-op.
+            _webBlock.Set(version, wantDomains);
             return;
+        }
 
         var result = DomainBlockEnforcer.Apply(wantDomains);
         await _store.AuditAsync(
@@ -240,6 +248,9 @@ public sealed class EnforceWorker : BackgroundService
 
         _lastWebFingerprint = webFp;
         _webAccessDeniedAlertQueued = false;
+        // Publish live list for block page + tracker UX even when hosts write was a no-op.
+        if (result.Detail != "access_denied_need_admin")
+            _webBlock.Set(version, wantDomains);
         _logger.LogInformation(
             "Web domains {State} (count={Count}, changed={Changed}, detail={Detail})",
             wantDomains.Count > 0 ? "BLOCK" : "CLEAR",

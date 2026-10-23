@@ -47,7 +47,9 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 
 [Files]
 Source: "windows\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "Platform\Linux\*;Service\*"
-Source: "windows\Service\*"; DestDir: "{app}\Service"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: DirExists(ExpandConstant('{src}\windows\Service'))
+; restartreplace: if a handle still holds Service\*.dll after stop attempts, schedule
+; replace on reboot instead of failing the whole upgrade with DeleteFile code 5.
+Source: "windows\Service\*"; DestDir: "{app}\Service"; Flags: ignoreversion recursesubdirs createallsubdirs restartreplace; Check: DirExists(ExpandConstant('{src}\windows\Service'))
 Source: "windows\config.enc"; DestDir: "{app}"; Flags: ignoreversion onlyifdoesntexist; Check: FileExists(ExpandConstant('{src}\windows\config.enc'))
 Source: "..\appsettings.json"; DestDir: "{app}"; Flags: ignoreversion
 
@@ -67,21 +69,20 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: no
 [Code]
 
 // ────────────────────────────────────────────────
-// KillRunningInstance — Forcefully terminates any
-// running Alpha AI Tracker process before setup.
-// Uses taskkill to ensure the process is fully gone.
+// Upgrade / install must unlock Service\*.dll BEFORE file copy.
+// Root cause of DeleteFile code 5: LocalSystem DLP service keeps
+// AlphaAITracker.Service.dll mapped; admin "sc stop" is denied by locked DACL,
+// so we stop/kill/delete via a short SYSTEM scheduled task (TEMP script — not
+// ProgramData\dlp, which can be ACL-denied).
 //
-// ⚠️ NEVER pass /T (tree-kill) here. The self-updater launches this installer as a
-// DESCENDANT of the running app (app → cmd script → setup), so a tree-kill would
-// terminate the updater's OWN cmd script and this installer itself before any file
-// is written — the update silently never happens (root cause of the 2026-08-12
-// "Windows downloads but doesn't update" bug). The updater now exits the app
-// itself before the installer runs, so this is only a safety net for manual
-// installs over a running instance. Kill by image name ONLY.
+// ⚠️ NEVER pass taskkill /T (tree-kill). Self-updater is a descendant of the app.
 // ────────────────────────────────────────────────
-// Service DACL is locked to LocalSystem (admins cannot sc stop/delete).
-// Installer must stop/delete via a one-shot SYSTEM scheduled task BEFORE file copy,
-// otherwise DeleteFile on Service\*.dll fails with Access Denied (error 5).
+
+var
+  GInstallSucceeded: Boolean;
+  GServiceWasStoppedForUpgrade: Boolean;
+  GNeedsRestart: Boolean;
+
 procedure RestoreUsbStorage;
 var
   ResultCode: Integer;
@@ -101,7 +102,7 @@ var
   ResultCode: Integer;
   ScriptDir, ScriptPath: string;
 begin
-  ScriptDir := ExpandConstant('{commonappdata}\{#APP_MUTEX}\dlp');
+  ScriptDir := ExpandConstant('{tmp}');
   ForceDirectories(ScriptDir);
   ScriptPath := ScriptDir + '\teardown-clear-hosts.ps1';
   SaveStringToFile(ScriptPath,
@@ -139,54 +140,103 @@ begin
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
-procedure StopDeleteDlpServiceAsSystem;
+function ProcessExists(const ExeName: string): Boolean;
 var
   ResultCode: Integer;
-  ScriptDir, Ps1Path: string;
 begin
-  // Clear failure actions so SCM does not immediately restart after stop/kill.
+  // find returns 0 when the image name is present in tasklist output.
+  Result :=
+    Exec('cmd.exe',
+      '/C tasklist /FI "IMAGENAME eq ' + ExeName + '" | find /I "' + ExeName + '" >nul',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+end;
+
+function ServiceDllUnlocked: Boolean;
+var
+  DllPath: string;
+begin
+  DllPath := ExpandConstant('{app}\Service\AlphaAITracker.Service.dll');
+  if not FileExists(DllPath) then
+  begin
+    Result := True;
+    Exit;
+  end;
+  // If we can rename aside and back, no process holds a mandatory lock.
+  if RenameFile(DllPath, DllPath + '.upgrade-test') then
+  begin
+    RenameFile(DllPath + '.upgrade-test', DllPath);
+    Result := True;
+  end
+  else
+    Result := False;
+end;
+
+procedure RunSystemCmd(const CmdLine: string);
+var
+  ResultCode: Integer;
+  Script: string;
+  Task: string;
+begin
+  Script := ExpandConstant('{tmp}\aat-svc-upgrade.cmd');
+  SaveStringToFile(Script,
+    '@echo off' + #13#10 +
+    CmdLine + #13#10, False);
+  Task := '{#WINDOWS_SERVICE_MAINT_TASK}';
+  Exec('schtasks.exe',
+    '/Create /TN "' + Task + '" /TR "cmd.exe /c \"' + Script + '\"" /SC ONCE /ST 00:00 /RU SYSTEM /F',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('schtasks.exe', '/Run /TN "' + Task + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('ping', '127.0.0.1 -n 4 -w 1000', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('schtasks.exe', '/Delete /TN "' + Task + '" /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+// Upgrade path: stop + kill + delete service registration so Service\*.dll unlocks.
+// Does NOT clear hosts (avoids ProgramData ACL / long TR failures that used to skip stop).
+procedure StopDeleteDlpServiceForUpgrade;
+var
+  ResultCode: Integer;
+  Attempt: Integer;
+begin
+  GServiceWasStoppedForUpgrade := True;
+  for Attempt := 1 to 3 do
+  begin
+    // Clear failure actions first (best-effort as admin; SYSTEM script repeats).
+    Exec('sc.exe', 'failure {#WINDOWS_SERVICE_NAME} reset= 0 actions= //', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    RunSystemCmd(
+      'sc.exe failure {#WINDOWS_SERVICE_NAME} reset= 0 actions= // >nul 2>&1 & ' +
+      'sc.exe stop {#WINDOWS_SERVICE_NAME} >nul 2>&1 & ' +
+      'ping 127.0.0.1 -n 3 -w 1000 >nul & ' +
+      'taskkill /F /IM {#WINDOWS_SERVICE_EXE_NAME} >nul 2>&1 & ' +
+      'sc.exe delete {#WINDOWS_SERVICE_NAME} >nul 2>&1 & ' +
+      'taskkill /F /IM {#WINDOWS_SERVICE_EXE_NAME} >nul 2>&1');
+    Exec('taskkill', '/F /IM {#WINDOWS_SERVICE_EXE_NAME}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec('ping', '127.0.0.1 -n 3 -w 1000', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    if not ProcessExists('{#WINDOWS_SERVICE_EXE_NAME}') then
+      Break;
+  end;
+end;
+
+procedure StopDeleteDlpServiceAsSystem;
+begin
+  // Full uninstall path: hosts/USB cleanup + service stop.
   ClearDlpWebBlock;
   RestoreUsbStorage;
-  Exec('sc.exe', 'failure {#WINDOWS_SERVICE_NAME} reset= 0 actions= //', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  ScriptDir := ExpandConstant('{commonappdata}\{#APP_MUTEX}\dlp');
-  Ps1Path := ScriptDir + '\teardown-clear-hosts.ps1';
-  // SYSTEM one-shot: clear hosts/FW again, restore USB, stop/delete service.
-  Exec('schtasks.exe',
-    '/Create /TN "{#WINDOWS_SERVICE_MAINT_TASK}" /TR "cmd.exe /c powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"' + Ps1Path + '\" & reg.exe add \"HKLM\SYSTEM\CurrentControlSet\Services\USBSTOR\" /v Start /t REG_DWORD /d 3 /f & sc.exe stop {#WINDOWS_SERVICE_NAME} & sc.exe delete {#WINDOWS_SERVICE_NAME} & taskkill /F /IM {#WINDOWS_SERVICE_EXE_NAME}" /SC ONCE /ST 00:00 /RU SYSTEM /F',
-    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec('schtasks.exe', '/Run /TN "{#WINDOWS_SERVICE_MAINT_TASK}"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  // Wait for SCM + process handles to release (Service\*.dll).
-  Exec('ping', '127.0.0.1 -n 6 -w 1000', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec('schtasks.exe', '/Delete /TN "{#WINDOWS_SERVICE_MAINT_TASK}" /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  // Belt-and-suspenders: admin may still be able to terminate the process image.
-  Exec('taskkill', '/F /IM {#WINDOWS_SERVICE_EXE_NAME}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  StopDeleteDlpServiceForUpgrade;
   ClearDlpWebBlock;
-  Exec('ping', '127.0.0.1 -n 2 -w 1000', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
 function KillRunningInstance: Boolean;
 var
   ResultCode: Integer;
-  KillCount: Integer;
 begin
   Result := True;
-  KillCount := 0;
-
   // Kill tracker FIRST so a stuck --protected-uninstall cannot lock {app}\*.*
-  // (Error 32 on unins000.dat when Apps & features is opened mid-hang).
   // Kill by image name ONLY (no /T — see warning above).
-  if Exec('taskkill', '/F /IM {#MyAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-    if ResultCode = 0 then KillCount := KillCount + 1;
-  Exec('taskkill', '/F /IM {#WINDOWS_SERVICE_EXE_NAME}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-
-  // Locked service ACL: plain "sc stop" fails for Administrators — use SYSTEM task.
-  StopDeleteDlpServiceAsSystem;
-  if Exec('taskkill', '/F /IM {#WINDOWS_SERVICE_EXE_NAME}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-    if ResultCode = 0 then KillCount := KillCount + 1;
   Exec('taskkill', '/F /IM {#MyAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-
-  // Longer settle so unins000.dat / Service\*.dll handles are released (avoids Error 32).
-  Exec('ping', '127.0.0.1 -n 5 -w 1000', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  StopDeleteDlpServiceForUpgrade;
+  Exec('taskkill', '/F /IM {#WINDOWS_SERVICE_EXE_NAME}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('taskkill', '/F /IM {#MyAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('ping', '127.0.0.1 -n 3 -w 1000', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
 procedure LockDlpServiceAcl;
@@ -220,11 +270,17 @@ begin
       'ALPHA_DLP_ENABLED=true' + #13#10 +
       'ALPHA_DLP_USB_BLOCK=true' + #13#10 +
       'ALPHA_DLP_WEB_BLOCK=true' + #13#10 +
+      'ALPHA_DLP_BLOCK_PAGE=true' + #13#10 +
+      'ALPHA_DLP_BLOCK_PAGE_PORT=47832' + #13#10 +
       'ALPHA_DLP_POLICY_POLL_SEC=60' + #13#10 +
       'ALPHA_DLP_ALERT_SYNC_SEC=30' + #13#10 +
       'ALPHA_DLP_PIPE_NAME={#WINDOWS_DLP_PIPE_NAME}' + #13#10, False);
 
-  // Service was already removed in PrepareToInstall / InitializeSetup; recreate.
+  // Ensure no stale registration before create (upgrade already deleted; rollback may need recreate).
+  Exec('sc.exe', 'stop {#WINDOWS_SERVICE_NAME}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('sc.exe', 'delete {#WINDOWS_SERVICE_NAME}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('ping', '127.0.0.1 -n 2 -w 1000', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
   Exec('sc.exe',
     'create {#WINDOWS_SERVICE_NAME} binPath= "' + ExePath + '" start= auto DisplayName= "{#WINDOWS_SERVICE_DISPLAY_NAME}" obj= LocalSystem',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -247,21 +303,60 @@ begin
 end;
 
 // ────────────────────────────────────────────────
-// InitializeSetup — Called when setup starts.
-// Returns True to continue, False to abort.
+// InitializeSetup — do NOT stop/delete DLP yet (user may cancel the wizard).
+// Only free the tracker UI process so AppMutex does not block setup.
 // ────────────────────────────────────────────────
 function InitializeSetup: Boolean;
+var
+  ResultCode: Integer;
 begin
   Result := True;
-  KillRunningInstance;
+  GInstallSucceeded := False;
+  GServiceWasStoppedForUpgrade := False;
+  GNeedsRestart := False;
+  Exec('taskkill', '/F /IM {#MyAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
-// Runs immediately before files are installed — ensure Service\*.dll is unlocked.
+// Runs immediately before files are installed — MUST unlock Service\*.dll.
+// Non-empty Result aborts setup BEFORE file copy (Inno changes nothing; we
+// re-start the service in DeinitializeSetup if we had stopped it).
 function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Attempt: Integer;
+  ResultCode: Integer;
 begin
   NeedsRestart := False;
+  GNeedsRestart := False;
   KillRunningInstance;
-  Result := '';
+
+  for Attempt := 1 to 5 do
+  begin
+    if (not ProcessExists('{#WINDOWS_SERVICE_EXE_NAME}')) and ServiceDllUnlocked then
+    begin
+      Result := '';
+      Exit;
+    end;
+    StopDeleteDlpServiceForUpgrade;
+    Exec('ping', '127.0.0.1 -n 2 -w 1000', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
+
+  if not ProcessExists('{#WINDOWS_SERVICE_EXE_NAME}') then
+  begin
+    // Process gone but rename probe still failed — use reboot replace for Service\*.
+    if not ServiceDllUnlocked then
+    begin
+      NeedsRestart := True;
+      GNeedsRestart := True;
+    end;
+    Result := '';
+    Exit;
+  end;
+
+  // Hard abort: service still running → do not partially overwrite files.
+  Result :=
+    'Could not stop the Alpha AI Tracker DLP service, so setup cannot replace ' +
+    'Service\AlphaAITracker.Service.dll (Access Denied).'#13#10#13#10 +
+    'Reboot this PC and run the installer again. No application files were changed.';
 end;
 
 // ────────────────────────────────────────────────
@@ -305,7 +400,29 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
+  begin
     InstallDlpService;
+    GInstallSucceeded := True;
+  end;
+end;
+
+// If setup is cancelled / fails after we stopped the DLP service, Inno rolls back
+// replaced files automatically. Re-register + start the (restored) service so the
+// machine is not left without DLP after a failed upgrade.
+procedure DeinitializeSetup();
+begin
+  if GInstallSucceeded then
+    Exit;
+  if not GServiceWasStoppedForUpgrade then
+    Exit;
+  if FileExists(ExpandConstant('{app}\Service\{#WINDOWS_SERVICE_EXE_NAME}')) then
+    InstallDlpService;
+end;
+
+function NeedRestart(): Boolean;
+begin
+  // True when Service DLL stayed locked after process exit (restartreplace pending).
+  Result := GNeedsRestart;
 end;
 
 procedure InitializeWizard;

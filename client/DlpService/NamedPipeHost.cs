@@ -19,6 +19,7 @@ public sealed class NamedPipeHost : BackgroundService
 
     private readonly DlpConfig _cfg;
     private readonly PolicyStore _store;
+    private readonly WebBlockState _webBlock;
     private readonly IHttpClientFactory _httpFactory;
     private readonly IHostApplicationLifetime _lifetime;
     private readonly ILogger<NamedPipeHost> _logger;
@@ -26,12 +27,14 @@ public sealed class NamedPipeHost : BackgroundService
     public NamedPipeHost(
         DlpConfig cfg,
         PolicyStore store,
+        WebBlockState webBlock,
         IHttpClientFactory httpFactory,
         IHostApplicationLifetime lifetime,
         ILogger<NamedPipeHost> logger)
     {
         _cfg = cfg;
         _store = store;
+        _webBlock = webBlock;
         _httpFactory = httpFactory;
         _lifetime = lifetime;
         _logger = logger;
@@ -163,6 +166,7 @@ public sealed class NamedPipeHost : BackgroundService
             {
                 "GetPolicyVersion" => await GetPolicyVersionJson(ct),
                 "Health" => await HealthJson(ct),
+                "GetWebBlockStatus" => await GetWebBlockStatusJson(ct),
                 "AuthorizeTeardown" => await AuthorizeTeardownJson(doc.RootElement, ct),
                 "ApplyTeardownGate" => ApplyTeardownGateJson(doc.RootElement),
                 _ => JsonSerializer.Serialize(new { ok = false, error = "unknown_op" }),
@@ -192,6 +196,37 @@ public sealed class NamedPipeHost : BackgroundService
             policyVersion = version,
             usbBlock = _cfg.UsbBlock,
             webBlock = _cfg.WebBlock,
+            blockPageEnabled = _cfg.BlockPageEnabled,
+            blockPagePort = _cfg.BlockPagePort,
+        });
+    }
+
+    private async Task<string> GetWebBlockStatusJson(CancellationToken ct)
+    {
+        // Rehydrate if EnforceWorker has not published yet (or fingerprint short-circuit).
+        if (_webBlock.Domains.Count == 0 && _cfg.WebBlock && _cfg.Enabled)
+        {
+            try
+            {
+                var (ver, _, bundleJson) = await _store.GetAppliedAsync(ct);
+                var bundle = PolicyBundleParser.Parse(bundleJson);
+                var domains = PolicyBundleParser.ActiveWebBlockDomains(bundle, DateTimeOffset.UtcNow);
+                if (domains.Count > 0)
+                    _webBlock.Set(ver, domains);
+            }
+            catch { /* keep empty */ }
+        }
+
+        var baseUrl = $"http://127.0.0.1:{_cfg.BlockPagePort}/";
+        var (version, liveDomains, updatedAt, pageUrl) = _webBlock.Snapshot(baseUrl);
+        return JsonSerializer.Serialize(new
+        {
+            ok = true,
+            policyVersion = version,
+            domains = liveDomains,
+            updatedAt = updatedAt == DateTimeOffset.MinValue ? (string?)null : updatedAt.ToString("o"),
+            blockPageUrl = pageUrl,
+            blockPageEnabled = _cfg.BlockPageEnabled && _cfg.WebBlock && _cfg.Enabled,
         });
     }
 
@@ -301,6 +336,8 @@ public sealed class NamedPipeHost : BackgroundService
                         "Teardown restored USBSTOR (changed={Changed}, detail={Detail}, start={Start})",
                         usb.Changed, usb.Detail, usb.DesiredStart);
                     var web = DomainBlockEnforcer.Clear();
+                    _webBlock.Set(0, Array.Empty<string>());
+                    try { BlockPageCertStore.Uninstall(_cfg, _logger); } catch { /* ignore */ }
                     _logger.LogWarning(
                         "Teardown cleared AlphaAI-DLP hosts sink (changed={Changed}, detail={Detail})",
                         web.Changed, web.Detail);

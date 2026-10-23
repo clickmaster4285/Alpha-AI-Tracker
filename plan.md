@@ -381,8 +381,9 @@ Server: no special env beyond normal DB; optional `DLP_REMOVAL_CODE_TTL_MIN=60`.
 - [x] DNS sink (hosts `AlphaAI-DLP-*` markers) apply/remove from `web_navigate` block rules + `shadowDeny.domains` (schedule-aware)  
 - [x] Alerts when domain sink is applied / access denied  
 - [x] Web **Web Blocker** UI: domains, URL paths (alert-match), timer-based schedule + RBAC `web-blocker`  
+- [x] Branded localhost block page (`BlockPageServer` :47832) + tracker opens it on denied navigate (no TLS MITM)  
 - [ ] Optional true WFP callout / per-connection block events (beyond hosts sink)  
-- [ ] Tracker-side path/navigate alert when browser hits a denied path (path hard-block still P7)  
+- [ ] Tracker-side path-pattern alert when browser hits a denied path (path hard-block still P7)  
 
 ### P3 — Shadow IT live
 

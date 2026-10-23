@@ -88,6 +88,7 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
     // absence (fresh session), which is what prevented window-stealing before.
     private IReadOnlyDictionary<int, int> _lastPollPidCounts = new Dictionary<int, int>();
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly IWebBlockHitSink? _webBlockHit;
     private volatile bool _stopping;
 
     private string? _employeeId;
@@ -100,7 +101,8 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
         ILogStore store,
         ILogger<AccessibilityBrowserTracker> logger,
         BrowserHistoryReader? history = null,
-        IBrowserRegistry? browserRegistry = null)
+        IBrowserRegistry? browserRegistry = null,
+        IWebBlockHitSink? webBlockHit = null)
     {
         _config = config;
         _reader = reader;
@@ -108,6 +110,7 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
         _store = store;
         _logger = logger;
         _browserRegistry = browserRegistry;
+        _webBlockHit = webBlockHit;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -540,6 +543,7 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
         _logger.LogDebug(
             "Browser journey opened via accessibility: {App} | {Title} | {Url}",
             session.AppDisplayName, snap.WindowTitle, string.IsNullOrEmpty(url) ? "(no url)" : url);
+        NotifyWebBlockHit(url, snap.WindowTitle, snap.ProcessName);
     }
 
     private async Task UpdateWindowAsync(TrackedWindow tw, AccessibilitySnapshot snap, CancellationToken ct)
@@ -694,6 +698,16 @@ public sealed class AccessibilityBrowserTracker : BackgroundService
         tw.LastUrl = url;
         tw.LastTitle = snap.WindowTitle;
         tw.LastActivity = now;
+        if (urlChanged || pendingDriven || titleChanged)
+            NotifyWebBlockHit(url, snap.WindowTitle, snap.ProcessName);
+    }
+
+    private void NotifyWebBlockHit(string? url, string? title, string? processName)
+    {
+        if (_webBlockHit is null) return;
+        if (string.IsNullOrWhiteSpace(url) && string.IsNullOrWhiteSpace(title)) return;
+        try { _webBlockHit.OnBrowserNavigation(url, title, processName); }
+        catch (Exception ex) { _logger.LogDebug(ex, "WebBlockHitSink failed"); }
     }
 
     private async Task CloseWindowAsync(string key, TrackedWindow tw, DateTime closedAt, CancellationToken ct)

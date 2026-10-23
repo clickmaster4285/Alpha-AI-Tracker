@@ -516,7 +516,13 @@ internal static class WindowsTeardownCleanup
         "  $n=$m.Groups[1].Value.Trim()\r\n" +
         "  if ($n.StartsWith('AlphaAI-DLP-')) { netsh advfirewall firewall delete rule name=\"$n\" | Out-Null }\r\n" +
         "}\r\n" +
-        "ipconfig /flushdns | Out-Null\r\n";
+        "ipconfig /flushdns | Out-Null\r\n" +
+        "# Remove local HTTPS block-page CA from Root store\r\n" +
+        "$store=New-Object System.Security.Cryptography.X509Certificates.X509Store('Root','LocalMachine')\r\n" +
+        "$store.Open('ReadWrite')\r\n" +
+        "$store.Certificates | Where-Object { $_.Subject -like '*Alpha AI Tracker DLP Block CA*' } | ForEach-Object { $store.Remove($_); }\r\n" +
+        "$store.Close()\r\n" +
+        "Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:ProgramData 'AlphaAITracker\\dlp\\block-page-ca.pfx')\r\n";
 
     private static int RunLogged(List<string> steps, string op, string fileName, string args, int timeoutMs)
     {

@@ -24,6 +24,7 @@ if (WindowsServiceHelpers.IsWindowsService())
 var cfg = DlpConfig.FromEnvironment();
 builder.Services.AddSingleton(cfg);
 builder.Services.AddSingleton<PolicyStore>();
+builder.Services.AddSingleton<WebBlockState>();
 builder.Services.AddSingleton<RemovableDriveMonitor>();
 builder.Services.AddHttpClient("dlp", c =>
 {
@@ -35,6 +36,8 @@ builder.Services.AddHostedService<PolicyPullWorker>();
 builder.Services.AddHostedService<AlertSyncWorker>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<RemovableDriveMonitor>());
 builder.Services.AddHostedService<EnforceWorker>();
+builder.Services.AddHostedService<BlockPageServer>();
+builder.Services.AddHostedService<BlockHttpsServer>();
 builder.Services.AddHostedService<NamedPipeHost>();
 builder.Services.AddHostedService<TrackerWatchdogWorker>();
 

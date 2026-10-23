@@ -5,13 +5,16 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Microsoft.Win32;
 
 namespace AlphaAITracker.Service;
 
 /// <summary>
 /// P2 web domain block (Windows):
-/// 1) hosts DNS sink for A + AAAA (<c>0.0.0.0</c> and <c>::</c>) with <c># AlphaAI-DLP</c> markers
-/// 2) outbound firewall rules <c>AlphaAI-DLP-*</c> for real IPs (DoH / browser bypass of hosts)
+/// 1) hosts DNS sink for A + AAAA (<c>127.0.0.1</c> and <c>::1</c>) with <c># AlphaAI-DLP</c> markers
+///    (loopback so a localhost block page can answer HTTP; <c>0.0.0.0</c> only yields ERR_ADDRESS_INVALID)
+/// 2) outbound firewall rules <c>AlphaAI-DLP-*</c> for real IPs
+/// 3) Chrome/Edge DnsOverHttpsMode=off while blocks are active (DoH bypasses hosts)
 /// Requires LocalSystem. Call <see cref="FlushDns"/> after apply.
 /// </summary>
 internal static class DomainBlockEnforcer
@@ -20,6 +23,8 @@ internal static class DomainBlockEnforcer
     public const string FirewallRulePrefix = "AlphaAI-DLP-";
     private const string BeginMarker = "# AlphaAI-DLP-BEGIN";
     private const string EndMarker = "# AlphaAI-DLP-END";
+    private const string ChromeDohKey = @"SOFTWARE\Policies\Google\Chrome";
+    private const string EdgeDohKey = @"SOFTWARE\Policies\Microsoft\Edge";
 
     private static readonly HttpClient DnsHttp = CreateDnsClient();
 
@@ -51,10 +56,24 @@ internal static class DomainBlockEnforcer
 
         var hostsResult = ApplyHosts(desired);
         var fwResult = ApplyFirewall(desired);
+        var dohResult = ApplyBrowserDohPolicy(block: desired.Count > 0);
         FlushDns();
 
-        var changed = hostsResult.Changed || fwResult.Changed;
-        var detail = $"hosts={hostsResult.Detail}; fw={fwResult.Detail}";
+        // Local CA for HTTPS block page on 127.0.0.1:443 (same-tab interstitial).
+        try
+        {
+            if (desired.Count > 0)
+                BlockPageCertStore.EnsureCa();
+            else
+                BlockPageCertStore.Uninstall();
+        }
+        catch
+        {
+            /* non-fatal — HTTP :80 / tracker open still work */
+        }
+
+        var changed = hostsResult.Changed || fwResult.Changed || dohResult.Changed;
+        var detail = $"hosts={hostsResult.Detail}; fw={fwResult.Detail}; doh={dohResult.Detail}";
         if (hostsResult.Detail.StartsWith("access_denied", StringComparison.Ordinal) ||
             fwResult.Detail.StartsWith("access_denied", StringComparison.Ordinal))
             detail = "access_denied_need_admin";
@@ -91,9 +110,10 @@ internal static class DomainBlockEnforcer
             sb.AppendLine(BeginMarker);
             foreach (var d in desired)
             {
-                // IPv4 + IPv6 — A-only sink leaves Happy Eyeballs / AAAA working.
-                sb.Append("0.0.0.0 ").Append(d).Append(' ').AppendLine(MarkerPrefix);
-                sb.Append(":: ").Append(d).Append(' ').AppendLine(MarkerPrefix);
+                // Loopback (not 0.0.0.0): HTTP can hit BlockPageServer on :80;
+                // HTTPS still fails closed without MITM — tracker opens the branded page.
+                sb.Append("127.0.0.1 ").Append(d).Append(' ').AppendLine(MarkerPrefix);
+                sb.Append("::1 ").Append(d).Append(' ').AppendLine(MarkerPrefix);
             }
             sb.AppendLine(EndMarker);
             next += sb.ToString();
@@ -290,6 +310,56 @@ internal static class DomainBlockEnforcer
             p?.WaitForExit(10_000);
         }
         catch { /* ignore */ }
+    }
+
+    /// <summary>
+    /// Chrome/Edge secure-DNS bypasses the hosts file. While web blocks are active,
+    /// force DnsOverHttpsMode=off via machine policy; clear on policy empty.
+    /// </summary>
+    private static Result ApplyBrowserDohPolicy(bool block)
+    {
+        try
+        {
+            var changed = false;
+            if (block)
+            {
+                changed |= SetDohMode(ChromeDohKey, "off");
+                changed |= SetDohMode(EdgeDohKey, "off");
+                return new Result(changed, 1, 1, changed ? "doh_off" : "doh_already_off");
+            }
+
+            changed |= DeleteDohMode(ChromeDohKey);
+            changed |= DeleteDohMode(EdgeDohKey);
+            return new Result(changed, 0, 0, changed ? "doh_cleared" : "doh_absent");
+        }
+        catch (Exception ex) when (IsAccessDenied(ex))
+        {
+            return new Result(false, 0, 0, "doh_access_denied");
+        }
+        catch (Exception ex)
+        {
+            return new Result(false, 0, 0, "doh_error:" + ex.Message);
+        }
+    }
+
+    private static bool SetDohMode(string keyPath, string mode)
+    {
+        using var key = Registry.LocalMachine.CreateSubKey(keyPath, writable: true);
+        if (key is null) return false;
+        var prev = key.GetValue("DnsOverHttpsMode") as string;
+        if (string.Equals(prev, mode, StringComparison.OrdinalIgnoreCase))
+            return false;
+        key.SetValue("DnsOverHttpsMode", mode, RegistryValueKind.String);
+        return true;
+    }
+
+    private static bool DeleteDohMode(string keyPath)
+    {
+        using var key = Registry.LocalMachine.OpenSubKey(keyPath, writable: true);
+        if (key is null) return false;
+        if (key.GetValue("DnsOverHttpsMode") is null) return false;
+        key.DeleteValue("DnsOverHttpsMode", throwOnMissingValue: false);
+        return true;
     }
 
     internal static string StripOwnedBlock(string content)
