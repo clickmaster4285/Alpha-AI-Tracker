@@ -88,6 +88,7 @@ var rbacCatalog = []moduleSeed{
 		Submodules: []submodulesSeed{
 			{Key: "dlp-alerts", Name: "DLP Alerts", Route: "/dlp-alerts"},
 			{Key: "dlp-rules", Name: "DLP Rules", Route: "/dlp-rules"},
+			{Key: "web-blocker", Name: "Web Blocker", Route: "/web-blocker"},
 			{Key: "shadow-it", Name: "Shadow IT", Route: "/shadow-it"},
 		},
 	},

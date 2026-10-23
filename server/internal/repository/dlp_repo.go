@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,11 +27,14 @@ func NewDlpRepo(pool *pgxpool.Pool) *DlpRepo {
 
 func (r *DlpRepo) ListRules(ctx context.Context) ([]models.DlpRule, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT id::text, name, enabled, trigger, match_json, action, severity, scope_json,
-		       created_at, updated_at
-		FROM dlp_rules
-		WHERE deleted_at IS NULL
-		ORDER BY created_at DESC`)
+		SELECT r.id::text, r.name, r.enabled, r.trigger, r.action, r.severity, r.scope_all,
+		       COALESCE((SELECT array_agg(e.extension ORDER BY e.extension)
+		                 FROM dlp_rule_extensions e WHERE e.rule_id=r.id), ARRAY[]::text[]),
+		       COALESCE((SELECT array_agg(p.pattern ORDER BY p.pattern)
+		                 FROM dlp_rule_patterns p WHERE p.rule_id=r.id), ARRAY[]::text[]),
+		       r.created_at, r.updated_at
+		FROM dlp_rules r WHERE r.deleted_at IS NULL
+		ORDER BY r.created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -40,11 +44,14 @@ func (r *DlpRepo) ListRules(ctx context.Context) ([]models.DlpRule, error) {
 
 func (r *DlpRepo) ListEnabledRules(ctx context.Context) ([]models.DlpRule, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT id::text, name, enabled, trigger, match_json, action, severity, scope_json,
-		       created_at, updated_at
-		FROM dlp_rules
-		WHERE deleted_at IS NULL AND enabled = TRUE
-		ORDER BY created_at ASC`)
+		SELECT r.id::text, r.name, r.enabled, r.trigger, r.action, r.severity, r.scope_all,
+		       COALESCE((SELECT array_agg(e.extension ORDER BY e.extension)
+		                 FROM dlp_rule_extensions e WHERE e.rule_id=r.id), ARRAY[]::text[]),
+		       COALESCE((SELECT array_agg(p.pattern ORDER BY p.pattern)
+		                 FROM dlp_rule_patterns p WHERE p.rule_id=r.id), ARRAY[]::text[]),
+		       r.created_at, r.updated_at
+		FROM dlp_rules r WHERE r.deleted_at IS NULL AND r.enabled=TRUE
+		ORDER BY r.created_at ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -53,36 +60,52 @@ func (r *DlpRepo) ListEnabledRules(ctx context.Context) ([]models.DlpRule, error
 }
 
 func (r *DlpRepo) GetRule(ctx context.Context, id string) (*models.DlpRule, error) {
-	row := r.pool.QueryRow(ctx, `
-		SELECT id::text, name, enabled, trigger, match_json, action, severity, scope_json,
-		       created_at, updated_at
-		FROM dlp_rules WHERE id = $1::uuid AND deleted_at IS NULL`, id)
-	rule, err := scanDlpRule(row)
+	rule, err := getDlpRule(ctx, r.pool, id)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
 	return rule, err
 }
 
-func (r *DlpRepo) CreateRule(ctx context.Context, name, trigger string, match, scope json.RawMessage, action, severity string, enabled bool) (*models.DlpRule, error) {
-	if len(match) == 0 {
-		match = json.RawMessage(`{}`)
+func (r *DlpRepo) CreateRule(ctx context.Context, name, trigger, action, severity string, enabled, scopeAll bool, extensions, patterns []string) (*models.DlpRule, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
 	}
-	if len(scope) == 0 {
-		scope = json.RawMessage(`{"all":true}`)
+	defer tx.Rollback(ctx)
+	var id string
+	err = tx.QueryRow(ctx, `
+		INSERT INTO dlp_rules (name,enabled,trigger,action,severity,scope_all)
+		VALUES ($1,$2,$3,$4,$5,$6) RETURNING id::text`,
+		name, enabled, trigger, action, severity, scopeAll).Scan(&id)
+	if err != nil {
+		return nil, err
 	}
-	row := r.pool.QueryRow(ctx, `
-		INSERT INTO dlp_rules (name, enabled, trigger, match_json, action, severity, scope_json)
-		VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7::jsonb)
-		RETURNING id::text, name, enabled, trigger, match_json, action, severity, scope_json, created_at, updated_at`,
-		name, enabled, trigger, []byte(match), action, severity, []byte(scope))
-	return scanDlpRule(row)
+	if err := replaceRuleValues(ctx, tx, id, extensions, patterns); err != nil {
+		return nil, err
+	}
+	rule, err := getDlpRule(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return rule, nil
 }
 
-func (r *DlpRepo) UpdateRule(ctx context.Context, id string, name *string, enabled *bool, trigger *string, match *json.RawMessage, action, severity *string, scope *json.RawMessage) (*models.DlpRule, error) {
-	cur, err := r.GetRule(ctx, id)
-	if err != nil || cur == nil {
-		return cur, err
+func (r *DlpRepo) UpdateRule(ctx context.Context, id string, name *string, enabled *bool, trigger, action, severity *string, scopeAll *bool, extensions, patterns *[]string) (*models.DlpRule, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	cur, err := getDlpRule(ctx, tx, id)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
 	}
 	if name != nil {
 		cur.Name = *name
@@ -93,26 +116,41 @@ func (r *DlpRepo) UpdateRule(ctx context.Context, id string, name *string, enabl
 	if trigger != nil {
 		cur.Trigger = *trigger
 	}
-	if match != nil {
-		cur.MatchJSON = *match
-	}
 	if action != nil {
 		cur.Action = *action
 	}
 	if severity != nil {
 		cur.Severity = *severity
 	}
-	if scope != nil {
-		cur.ScopeJSON = *scope
+	if scopeAll != nil {
+		cur.ScopeAll = *scopeAll
 	}
-	row := r.pool.QueryRow(ctx, `
-		UPDATE dlp_rules SET
-			name = $2, enabled = $3, trigger = $4,
-			match_json = $5::jsonb, action = $6, severity = $7, scope_json = $8::jsonb
-		WHERE id = $1::uuid AND deleted_at IS NULL
-		RETURNING id::text, name, enabled, trigger, match_json, action, severity, scope_json, created_at, updated_at`,
-		id, cur.Name, cur.Enabled, cur.Trigger, []byte(cur.MatchJSON), cur.Action, cur.Severity, []byte(cur.ScopeJSON))
-	return scanDlpRule(row)
+	if _, err := tx.Exec(ctx, `
+		UPDATE dlp_rules SET name=$2,enabled=$3,trigger=$4,action=$5,severity=$6,scope_all=$7
+		WHERE id=$1::uuid AND deleted_at IS NULL`,
+		id, cur.Name, cur.Enabled, cur.Trigger, cur.Action, cur.Severity, cur.ScopeAll); err != nil {
+		return nil, err
+	}
+	nextExtensions, nextPatterns := cur.Extensions, cur.Patterns
+	if extensions != nil {
+		nextExtensions = *extensions
+	}
+	if patterns != nil {
+		nextPatterns = *patterns
+	}
+	if extensions != nil || patterns != nil {
+		if err := replaceRuleValues(ctx, tx, id, nextExtensions, nextPatterns); err != nil {
+			return nil, err
+		}
+	}
+	rule, err := getDlpRule(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return rule, nil
 }
 
 func (r *DlpRepo) SoftDeleteRule(ctx context.Context, id string) error {
@@ -127,37 +165,200 @@ func (r *DlpRepo) SoftDeleteRule(ctx context.Context, id string) error {
 	return nil
 }
 
+// ── Web blocker rules ───────────────────────────────────────────────────────
+
+const webBlockerSelect = `
+	SELECT r.id::text,r.name,r.enabled,r.action,r.severity,r.scope_all,
+	       COALESCE((SELECT array_agg(d.domain ORDER BY d.domain) FROM web_blocker_domains d WHERE d.rule_id=r.id),ARRAY[]::text[]),
+	       COALESCE((SELECT array_agg(p.path_pattern ORDER BY p.path_pattern) FROM web_blocker_paths p WHERE p.rule_id=r.id),ARRAY[]::text[]),
+	       r.schedule_enabled,r.schedule_start,r.schedule_end,r.schedule_timezone,
+	       COALESCE((SELECT array_agg(s.day ORDER BY s.day) FROM web_blocker_schedule_days s WHERE s.rule_id=r.id),ARRAY[]::text[]),
+	       r.created_at,r.updated_at
+	FROM web_blocker_rules r`
+
+func (r *DlpRepo) ListWebBlockerRules(ctx context.Context) ([]models.WebBlockerRule, error) {
+	rows, err := r.pool.Query(ctx, webBlockerSelect+` WHERE r.deleted_at IS NULL ORDER BY r.created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanWebBlockerRules(rows)
+}
+
+func (r *DlpRepo) ListEnabledWebBlockerRules(ctx context.Context) ([]models.WebBlockerRule, error) {
+	rows, err := r.pool.Query(ctx, webBlockerSelect+` WHERE r.deleted_at IS NULL AND r.enabled=TRUE ORDER BY r.created_at ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanWebBlockerRules(rows)
+}
+
+func (r *DlpRepo) GetWebBlockerRule(ctx context.Context, id string) (*models.WebBlockerRule, error) {
+	rule, err := getWebBlockerRule(ctx, r.pool, id)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return rule, err
+}
+
+func (r *DlpRepo) CreateWebBlockerRule(ctx context.Context, rule models.WebBlockerRule) (*models.WebBlockerRule, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	err = tx.QueryRow(ctx, `
+		INSERT INTO web_blocker_rules
+			(name,enabled,action,severity,scope_all,schedule_enabled,schedule_start,schedule_end,schedule_timezone)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id::text`,
+		rule.Name, rule.Enabled, rule.Action, rule.Severity, rule.ScopeAll,
+		rule.ScheduleEnabled, rule.ScheduleStart, rule.ScheduleEnd, rule.ScheduleTimezone).Scan(&rule.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := replaceWebBlockerValues(ctx, tx, rule.ID, rule.Domains, rule.Paths, rule.ScheduleDays); err != nil {
+		return nil, err
+	}
+	created, err := getWebBlockerRule(ctx, tx, rule.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
+func (r *DlpRepo) UpdateWebBlockerRule(ctx context.Context, id string, rule models.WebBlockerRule) (*models.WebBlockerRule, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `
+		UPDATE web_blocker_rules SET name=$2,enabled=$3,action=$4,severity=$5,scope_all=$6,
+			schedule_enabled=$7,schedule_start=$8,schedule_end=$9,schedule_timezone=$10
+		WHERE id=$1::uuid AND deleted_at IS NULL`,
+		id, rule.Name, rule.Enabled, rule.Action, rule.Severity, rule.ScopeAll,
+		rule.ScheduleEnabled, rule.ScheduleStart, rule.ScheduleEnd, rule.ScheduleTimezone)
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, nil
+	}
+	if err := replaceWebBlockerValues(ctx, tx, id, rule.Domains, rule.Paths, rule.ScheduleDays); err != nil {
+		return nil, err
+	}
+	updated, err := getWebBlockerRule(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+func (r *DlpRepo) SoftDeleteWebBlockerRule(ctx context.Context, id string) error {
+	tag, err := r.pool.Exec(ctx, `UPDATE web_blocker_rules SET deleted_at=NOW() WHERE id=$1::uuid AND deleted_at IS NULL`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("web blocker rule not found")
+	}
+	return nil
+}
+
 // ── Policy versions ─────────────────────────────────────────────────────────
 
-func (r *DlpRepo) InsertPolicyVersion(ctx context.Context, bundle json.RawMessage, hash string, publishedBy *string) (*models.DlpPolicyVersion, error) {
+func (r *DlpRepo) InsertPolicyVersion(ctx context.Context, hash string, publishedBy *string) (*models.DlpPolicyVersion, error) {
 	var row pgx.Row
 	if publishedBy != nil && *publishedBy != "" {
 		row = r.pool.QueryRow(ctx, `
-			INSERT INTO dlp_policy_versions (bundle_json, bundle_hash, published_by)
-			VALUES ($1::jsonb, $2, $3::uuid)
-			RETURNING version, bundle_json, bundle_hash, published_at`,
-			[]byte(bundle), hash, *publishedBy)
+			INSERT INTO dlp_policy_versions (bundle_hash,published_by)
+			VALUES ($1,$2::uuid)
+			RETURNING version,bundle_hash,published_at,published_by`, hash, *publishedBy)
 	} else {
 		row = r.pool.QueryRow(ctx, `
-			INSERT INTO dlp_policy_versions (bundle_json, bundle_hash)
-			VALUES ($1::jsonb, $2)
-			RETURNING version, bundle_json, bundle_hash, published_at`,
-			[]byte(bundle), hash)
+			INSERT INTO dlp_policy_versions (bundle_hash)
+			VALUES ($1)
+			RETURNING version,bundle_hash,published_at,published_by`, hash)
 	}
 	var v models.DlpPolicyVersion
-	if err := row.Scan(&v.Version, &v.BundleJSON, &v.BundleHash, &v.PublishedAt); err != nil {
+	if err := row.Scan(&v.Version, &v.BundleHash, &v.PublishedAt, &v.PublishedBy); err != nil {
 		return nil, err
 	}
 	return &v, nil
 }
 
+func (r *DlpRepo) PublishSnapshot(ctx context.Context, version int64, rules []models.DlpRule, webRules []models.WebBlockerRule, shadowDomains []string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	for _, rule := range rules {
+		alert := rule.Action == "alert" || rule.Action == "alert_block"
+		_, err := tx.Exec(ctx, `
+			INSERT INTO dlp_policy_rules
+				(policy_version,rule_id,name,trigger,action,severity,alert,enabled)
+			VALUES ($1,$2::uuid,$3,$4,$5,$6,$7,$8)`,
+			version, rule.ID, rule.Name, rule.Trigger, rule.Action, rule.Severity, alert, rule.Enabled)
+		if err != nil {
+			return err
+		}
+		for _, ext := range cleanStrings(rule.Extensions, true) {
+			if _, err := tx.Exec(ctx, `INSERT INTO dlp_policy_extensions (policy_version,rule_id,extension) VALUES ($1,$2::uuid,$3)`, version, rule.ID, ext); err != nil {
+				return err
+			}
+		}
+	}
+	for _, rule := range webRules {
+		alert := rule.Action == "alert" || rule.Action == "alert_block"
+		_, err := tx.Exec(ctx, `
+			INSERT INTO dlp_policy_rules
+				(policy_version,rule_id,name,trigger,action,severity,alert,enabled,
+				 schedule_enabled,schedule_start,schedule_end,schedule_timezone)
+			VALUES ($1,$2::uuid,$3,'web_navigate',$4,$5,$6,$7,$8,$9,$10,$11)`,
+			version, rule.ID, rule.Name, rule.Action, rule.Severity, alert, rule.Enabled,
+			rule.ScheduleEnabled, rule.ScheduleStart, rule.ScheduleEnd, rule.ScheduleTimezone)
+		if err != nil {
+			return err
+		}
+		for _, domain := range cleanStrings(rule.Domains, true) {
+			if _, err := tx.Exec(ctx, `INSERT INTO dlp_policy_domains (policy_version,rule_id,domain,source) VALUES ($1,$2::uuid,$3,'rule')`, version, rule.ID, domain); err != nil {
+				return err
+			}
+		}
+		for _, path := range cleanStrings(rule.Paths, false) {
+			if _, err := tx.Exec(ctx, `INSERT INTO dlp_policy_paths (policy_version,rule_id,path_pattern) VALUES ($1,$2::uuid,$3)`, version, rule.ID, path); err != nil {
+				return err
+			}
+		}
+		for _, day := range cleanStrings(rule.ScheduleDays, true) {
+			if _, err := tx.Exec(ctx, `INSERT INTO dlp_policy_schedule_days (policy_version,rule_id,day) VALUES ($1,$2::uuid,$3)`, version, rule.ID, day); err != nil {
+				return err
+			}
+		}
+	}
+	for _, domain := range cleanStrings(shadowDomains, true) {
+		if _, err := tx.Exec(ctx, `INSERT INTO dlp_policy_domains (policy_version,rule_id,domain,source) VALUES ($1,NULL,$2,'shadow')`, version, domain); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
 func (r *DlpRepo) LatestPolicyVersion(ctx context.Context) (*models.DlpPolicyVersion, error) {
 	row := r.pool.QueryRow(ctx, `
-		SELECT version, bundle_json, bundle_hash, published_at
+		SELECT version,bundle_hash,published_at,published_by
 		FROM dlp_policy_versions
 		ORDER BY version DESC LIMIT 1`)
 	var v models.DlpPolicyVersion
-	err := row.Scan(&v.Version, &v.BundleJSON, &v.BundleHash, &v.PublishedAt)
+	err := row.Scan(&v.Version, &v.BundleHash, &v.PublishedAt, &v.PublishedBy)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -169,10 +370,10 @@ func (r *DlpRepo) LatestPolicyVersion(ctx context.Context) (*models.DlpPolicyVer
 
 func (r *DlpRepo) GetPolicyVersion(ctx context.Context, version int64) (*models.DlpPolicyVersion, error) {
 	row := r.pool.QueryRow(ctx, `
-		SELECT version, bundle_json, bundle_hash, published_at
+		SELECT version,bundle_hash,published_at,published_by
 		FROM dlp_policy_versions WHERE version = $1`, version)
 	var v models.DlpPolicyVersion
-	err := row.Scan(&v.Version, &v.BundleJSON, &v.BundleHash, &v.PublishedAt)
+	err := row.Scan(&v.Version, &v.BundleHash, &v.PublishedAt, &v.PublishedBy)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -182,12 +383,110 @@ func (r *DlpRepo) GetPolicyVersion(ctx context.Context, version int64) (*models.
 	return &v, nil
 }
 
-// UpdatePolicyBundle stamps the final bundle JSON/hash onto an already-inserted version row.
-func (r *DlpRepo) UpdatePolicyBundle(ctx context.Context, version int64, bundle json.RawMessage, hash string) error {
-	_, err := r.pool.Exec(ctx, `
-		UPDATE dlp_policy_versions SET bundle_json = $2::jsonb, bundle_hash = $3
-		WHERE version = $1`, version, []byte(bundle), hash)
+func (r *DlpRepo) UpdatePolicyHash(ctx context.Context, version int64, hash string) error {
+	_, err := r.pool.Exec(ctx, `UPDATE dlp_policy_versions SET bundle_hash=$2 WHERE version=$1`, version, hash)
 	return err
+}
+
+func (r *DlpRepo) AssembleBundleJSON(ctx context.Context, version int64) (json.RawMessage, error) {
+	header, err := r.GetPolicyVersion(ctx, version)
+	if err != nil {
+		return nil, err
+	}
+	if header == nil {
+		return nil, fmt.Errorf("dlp policy version not found")
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT pr.rule_id::text,pr.name,pr.enabled,pr.trigger,pr.action,pr.severity,pr.alert,
+		       pr.schedule_enabled,pr.schedule_start,pr.schedule_end,pr.schedule_timezone,
+		       COALESCE((SELECT array_agg(d.domain ORDER BY d.domain) FROM dlp_policy_domains d
+		                 WHERE d.policy_version=pr.policy_version AND d.rule_id=pr.rule_id AND d.source='rule'),ARRAY[]::text[]),
+		       COALESCE((SELECT array_agg(p.path_pattern ORDER BY p.path_pattern) FROM dlp_policy_paths p
+		                 WHERE p.policy_version=pr.policy_version AND p.rule_id=pr.rule_id),ARRAY[]::text[]),
+		       COALESCE((SELECT array_agg(s.day ORDER BY s.day) FROM dlp_policy_schedule_days s
+		                 WHERE s.policy_version=pr.policy_version AND s.rule_id=pr.rule_id),ARRAY[]::text[]),
+		       COALESCE((SELECT array_agg(e.extension ORDER BY e.extension) FROM dlp_policy_extensions e
+		                 WHERE e.policy_version=pr.policy_version AND e.rule_id=pr.rule_id),ARRAY[]::text[])
+		FROM dlp_policy_rules pr WHERE pr.policy_version=$1 ORDER BY pr.rule_id`, version)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type wireRule struct {
+		ID       string          `json:"id"`
+		Name     string          `json:"name"`
+		Enabled  bool            `json:"enabled"`
+		Trigger  string          `json:"trigger"`
+		Match    map[string]any  `json:"match"`
+		Action   string          `json:"action"`
+		Severity string          `json:"severity"`
+		Scope    map[string]bool `json:"scope"`
+		Alert    bool            `json:"alert"`
+	}
+	wireRules := make([]wireRule, 0)
+	for rows.Next() {
+		var id, name, trigger, action, severity, start, end, timezone string
+		var enabled, alert, scheduleEnabled bool
+		var domains, paths, days, extensions []string
+		if err := rows.Scan(&id, &name, &enabled, &trigger, &action, &severity, &alert,
+			&scheduleEnabled, &start, &end, &timezone, &domains, &paths, &days, &extensions); err != nil {
+			return nil, err
+		}
+		match := map[string]any{}
+		if len(extensions) > 0 {
+			match["extensions"] = extensions
+		}
+		if trigger == "web_navigate" {
+			match["domains"] = domains
+			match["paths"] = paths
+			match["schedule"] = map[string]any{
+				"enabled": scheduleEnabled, "days": days, "start": start, "end": end, "timezone": timezone,
+			}
+		}
+		wireRules = append(wireRules, wireRule{
+			ID: id, Name: name, Enabled: enabled, Trigger: trigger, Match: match,
+			Action: action, Severity: severity, Scope: map[string]bool{"all": true}, Alert: alert,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	shadowDomains := make([]string, 0)
+	shadowRows, err := r.pool.Query(ctx, `
+		SELECT domain FROM dlp_policy_domains
+		WHERE policy_version=$1 AND source='shadow' ORDER BY domain`, version)
+	if err != nil {
+		return nil, err
+	}
+	defer shadowRows.Close()
+	for shadowRows.Next() {
+		var domain string
+		if err := shadowRows.Scan(&domain); err != nil {
+			return nil, err
+		}
+		shadowDomains = append(shadowDomains, domain)
+	}
+	if err := shadowRows.Err(); err != nil {
+		return nil, err
+	}
+	bundle := struct {
+		PolicyVersion int64      `json:"policyVersion"`
+		PublishedAt   string     `json:"publishedAt"`
+		Rules         []wireRule `json:"rules"`
+		ShadowDeny    struct {
+			Domains    []string `json:"domains"`
+			Publishers []string `json:"publishers"`
+			AppNames   []string `json:"appNames"`
+		} `json:"shadowDeny"`
+	}{
+		PolicyVersion: version,
+		PublishedAt:   header.PublishedAt.UTC().Format(time.RFC3339),
+		Rules:         wireRules,
+	}
+	bundle.ShadowDeny.Domains = shadowDomains
+	bundle.ShadowDeny.Publishers = []string{}
+	bundle.ShadowDeny.AppNames = []string{}
+	return json.Marshal(bundle)
 }
 
 // ── Alerts ──────────────────────────────────────────────────────────────────
@@ -200,7 +499,7 @@ func (r *DlpRepo) UpsertAlerts(ctx context.Context, employeeID, machineID string
 	Severity      string
 	ActionTaken   string
 	OccurredAt    time.Time
-	Evidence      json.RawMessage
+	Evidence      map[string]string
 }) ([]string, []string, error) {
 	accepted := make([]string, 0, len(items))
 	rejected := make([]string, 0)
@@ -211,25 +510,58 @@ func (r *DlpRepo) UpsertAlerts(ctx context.Context, employeeID, machineID string
 		}
 		sev := normalizeSeverity(it.Severity)
 		taken := normalizeActionTaken(it.ActionTaken)
-		ev := it.Evidence
-		if len(ev) == 0 {
-			ev = json.RawMessage(`{}`)
+		tx, err := r.pool.Begin(ctx)
+		if err != nil {
+			rejected = append(rejected, it.ID)
+			continue
 		}
-		_, err := r.pool.Exec(ctx, `
+		_, err = tx.Exec(ctx, `
 			INSERT INTO dlp_alerts (
 				id, rule_id, policy_version, employee_id, machine_id,
-				type, severity, action_taken, occurred_at, evidence_json, synced_at
+				type, severity, action_taken, occurred_at, synced_at
 			) VALUES (
 				$1::uuid, $2::uuid, $3, $4, $5,
-				$6, $7, $8, $9, $10::jsonb, NOW()
+				$6, $7, $8, $9, NOW()
 			)
 			ON CONFLICT (id) DO UPDATE SET
 				synced_at = NOW(),
-				evidence_json = EXCLUDED.evidence_json,
 				action_taken = EXCLUDED.action_taken`,
 			it.ID, nullableUUID(it.RuleID), it.PolicyVersion, employeeID, machineID,
-			it.Type, sev, taken, it.OccurredAt, []byte(ev))
+			it.Type, sev, taken, it.OccurredAt)
 		if err != nil {
+			_ = tx.Rollback(ctx)
+			rejected = append(rejected, it.ID)
+			continue
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM dlp_alert_evidence WHERE alert_id=$1::uuid`, it.ID); err != nil {
+			_ = tx.Rollback(ctx)
+			rejected = append(rejected, it.ID)
+			continue
+		}
+		keys := make([]string, 0, len(it.Evidence))
+		for key := range it.Evidence {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		failed := false
+		for _, rawKey := range keys {
+			key := strings.TrimSpace(rawKey)
+			if key == "" {
+				continue
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO dlp_alert_evidence (alert_id,key,value)
+				VALUES ($1::uuid,$2,$3)`, it.ID, key, it.Evidence[rawKey]); err != nil {
+				failed = true
+				break
+			}
+		}
+		if failed {
+			_ = tx.Rollback(ctx)
+			rejected = append(rejected, it.ID)
+			continue
+		}
+		if err := tx.Commit(ctx); err != nil {
 			rejected = append(rejected, it.ID)
 			continue
 		}
@@ -274,8 +606,11 @@ func buildAlertWhere(f DlpAlertListFilter, opts alertWhereOpts) (string, []any) 
 	if f.Search != "" {
 		where = append(where, fmt.Sprintf(`(
 			a.id::text ILIKE $%d OR a.employee_id ILIKE $%d OR COALESCE(e.name,'') ILIKE $%d
-			OR a.type ILIKE $%d OR a.evidence_json::text ILIKE $%d
-		)`, n, n, n, n, n))
+			OR a.type ILIKE $%d OR EXISTS (
+				SELECT 1 FROM dlp_alert_evidence ae
+				WHERE ae.alert_id=a.id AND (ae.key ILIKE $%d OR ae.value ILIKE $%d)
+			)
+		)`, n, n, n, n, n, n))
 		args = append(args, "%"+f.Search+"%")
 		n++
 	}
@@ -337,7 +672,7 @@ func (r *DlpRepo) ListAlerts(ctx context.Context, f DlpAlertListFilter) ([]model
 	args = append(args, f.PerPage, offset)
 	listSQL := fmt.Sprintf(`
 		SELECT a.id::text, a.rule_id::text, a.policy_version, a.employee_id, a.machine_id,
-		       a.type, a.severity, a.action_taken, a.occurred_at, a.evidence_json,
+		       a.type, a.severity, a.action_taken, a.occurred_at,
 		       a.status, a.assigned_to, a.notes, a.synced_at, a.created_at, a.updated_at,
 		       COALESCE(e.name, '')
 		FROM dlp_alerts a
@@ -358,13 +693,17 @@ func (r *DlpRepo) ListAlerts(ctx context.Context, f DlpAlertListFilter) ([]model
 		var ruleID *string
 		if err := rows.Scan(
 			&a.ID, &ruleID, &a.PolicyVersion, &a.EmployeeID, &a.MachineID,
-			&a.Type, &a.Severity, &a.ActionTaken, &a.OccurredAt, &a.EvidenceJSON,
+			&a.Type, &a.Severity, &a.ActionTaken, &a.OccurredAt,
 			&a.Status, &a.AssignedTo, &a.Notes, &a.SyncedAt, &a.CreatedAt, &a.UpdatedAt,
 			&a.EmployeeName,
 		); err != nil {
 			return nil, 0, err
 		}
 		a.RuleID = ruleID
+		a.Evidence, err = loadAlertEvidence(ctx, r.pool, a.ID)
+		if err != nil {
+			return nil, 0, err
+		}
 		out = append(out, a)
 	}
 	return out, total, rows.Err()
@@ -442,12 +781,12 @@ func (r *DlpRepo) UpdateAlert(ctx context.Context, id string, patch UpdateAlertP
 	var ruleID *string
 	err = tx.QueryRow(ctx, `
 		SELECT id::text, rule_id::text, policy_version, employee_id, machine_id,
-		       type, severity, action_taken, occurred_at, evidence_json,
+		       type, severity, action_taken, occurred_at,
 		       status, assigned_to, notes, synced_at, created_at, updated_at
 		FROM dlp_alerts WHERE id = $1::uuid
 		FOR UPDATE`, id).Scan(
 		&cur.ID, &ruleID, &cur.PolicyVersion, &cur.EmployeeID, &cur.MachineID,
-		&cur.Type, &cur.Severity, &cur.ActionTaken, &cur.OccurredAt, &cur.EvidenceJSON,
+		&cur.Type, &cur.Severity, &cur.ActionTaken, &cur.OccurredAt,
 		&cur.Status, &cur.AssignedTo, &cur.Notes, &cur.SyncedAt, &cur.CreatedAt, &cur.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
@@ -494,19 +833,23 @@ func (r *DlpRepo) UpdateAlert(ctx context.Context, id string, patch UpdateAlertP
 			notes = $4
 		WHERE id = $1::uuid
 		RETURNING id::text, rule_id::text, policy_version, employee_id, machine_id,
-		          type, severity, action_taken, occurred_at, evidence_json,
+		          type, severity, action_taken, occurred_at,
 		          status, assigned_to, notes, synced_at, created_at, updated_at`,
 		id, nextStatus, nextAssigned, nextNotes)
 	var a models.DlpAlert
 	err = row.Scan(
 		&a.ID, &ruleID, &a.PolicyVersion, &a.EmployeeID, &a.MachineID,
-		&a.Type, &a.Severity, &a.ActionTaken, &a.OccurredAt, &a.EvidenceJSON,
+		&a.Type, &a.Severity, &a.ActionTaken, &a.OccurredAt,
 		&a.Status, &a.AssignedTo, &a.Notes, &a.SyncedAt, &a.CreatedAt, &a.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
 	}
 	a.RuleID = ruleID
+	a.Evidence, err = loadAlertEvidence(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
 
 	if len(changes) > 0 {
 		now := time.Now().UTC()
@@ -760,13 +1103,142 @@ type scannable interface {
 func scanDlpRule(row scannable) (*models.DlpRule, error) {
 	var rule models.DlpRule
 	err := row.Scan(
-		&rule.ID, &rule.Name, &rule.Enabled, &rule.Trigger, &rule.MatchJSON,
-		&rule.Action, &rule.Severity, &rule.ScopeJSON, &rule.CreatedAt, &rule.UpdatedAt,
+		&rule.ID, &rule.Name, &rule.Enabled, &rule.Trigger, &rule.Action,
+		&rule.Severity, &rule.ScopeAll, &rule.Extensions, &rule.Patterns,
+		&rule.CreatedAt, &rule.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
 	}
 	return &rule, nil
+}
+
+type dlpQuerier interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func getDlpRule(ctx context.Context, q dlpQuerier, id string) (*models.DlpRule, error) {
+	return scanDlpRule(q.QueryRow(ctx, `
+		SELECT r.id::text,r.name,r.enabled,r.trigger,r.action,r.severity,r.scope_all,
+		       COALESCE((SELECT array_agg(e.extension ORDER BY e.extension) FROM dlp_rule_extensions e WHERE e.rule_id=r.id),ARRAY[]::text[]),
+		       COALESCE((SELECT array_agg(p.pattern ORDER BY p.pattern) FROM dlp_rule_patterns p WHERE p.rule_id=r.id),ARRAY[]::text[]),
+		       r.created_at,r.updated_at
+		FROM dlp_rules r WHERE r.id=$1::uuid AND r.deleted_at IS NULL`, id))
+}
+
+func replaceRuleValues(ctx context.Context, tx pgx.Tx, id string, extensions, patterns []string) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM dlp_rule_extensions WHERE rule_id=$1::uuid`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM dlp_rule_patterns WHERE rule_id=$1::uuid`, id); err != nil {
+		return err
+	}
+	for _, extension := range cleanStrings(extensions, true) {
+		if _, err := tx.Exec(ctx, `INSERT INTO dlp_rule_extensions (rule_id,extension) VALUES ($1::uuid,$2)`, id, extension); err != nil {
+			return err
+		}
+	}
+	for _, pattern := range cleanStrings(patterns, false) {
+		if _, err := tx.Exec(ctx, `INSERT INTO dlp_rule_patterns (rule_id,pattern) VALUES ($1::uuid,$2)`, id, pattern); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func scanWebBlockerRules(rows pgx.Rows) ([]models.WebBlockerRule, error) {
+	out := make([]models.WebBlockerRule, 0)
+	for rows.Next() {
+		rule, err := scanWebBlockerRule(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *rule)
+	}
+	return out, rows.Err()
+}
+
+func scanWebBlockerRule(row scannable) (*models.WebBlockerRule, error) {
+	var rule models.WebBlockerRule
+	err := row.Scan(
+		&rule.ID, &rule.Name, &rule.Enabled, &rule.Action, &rule.Severity, &rule.ScopeAll,
+		&rule.Domains, &rule.Paths, &rule.ScheduleEnabled, &rule.ScheduleStart,
+		&rule.ScheduleEnd, &rule.ScheduleTimezone, &rule.ScheduleDays,
+		&rule.CreatedAt, &rule.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &rule, nil
+}
+
+func getWebBlockerRule(ctx context.Context, q dlpQuerier, id string) (*models.WebBlockerRule, error) {
+	return scanWebBlockerRule(q.QueryRow(ctx, webBlockerSelect+` WHERE r.id=$1::uuid AND r.deleted_at IS NULL`, id))
+}
+
+func replaceWebBlockerValues(ctx context.Context, tx pgx.Tx, id string, domains, paths, days []string) error {
+	for _, table := range []string{"web_blocker_domains", "web_blocker_paths", "web_blocker_schedule_days"} {
+		if _, err := tx.Exec(ctx, `DELETE FROM `+table+` WHERE rule_id=$1::uuid`, id); err != nil {
+			return err
+		}
+	}
+	for _, domain := range cleanStrings(domains, true) {
+		if _, err := tx.Exec(ctx, `INSERT INTO web_blocker_domains (rule_id,domain) VALUES ($1::uuid,$2)`, id, domain); err != nil {
+			return err
+		}
+	}
+	for _, path := range cleanStrings(paths, false) {
+		if _, err := tx.Exec(ctx, `INSERT INTO web_blocker_paths (rule_id,path_pattern) VALUES ($1::uuid,$2)`, id, path); err != nil {
+			return err
+		}
+	}
+	for _, day := range cleanStrings(days, true) {
+		if _, err := tx.Exec(ctx, `INSERT INTO web_blocker_schedule_days (rule_id,day) VALUES ($1::uuid,$2)`, id, day); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func cleanStrings(values []string, lower bool) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if lower {
+			value = strings.ToLower(value)
+		}
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func loadAlertEvidence(ctx context.Context, q dlpQuerier, alertID string) (map[string]string, error) {
+	rows, err := q.Query(ctx, `
+		SELECT key,value FROM dlp_alert_evidence
+		WHERE alert_id=$1::uuid ORDER BY key`, alertID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	evidence := make(map[string]string)
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return nil, err
+		}
+		evidence[key] = value
+	}
+	return evidence, rows.Err()
 }
 
 func nullableUUID(s *string) any {

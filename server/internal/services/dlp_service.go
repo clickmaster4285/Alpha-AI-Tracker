@@ -17,7 +17,7 @@ import (
 )
 
 var allowedTriggers = map[string]bool{
-	"usb_storage": true, "usb_file": true, "web_navigate": true,
+	"usb_storage": true, "usb_file": true,
 	"software_install": true, "software_uninstall": true, "cloud_sync_folder": true,
 	"file_transfer": true, "email": true,
 }
@@ -28,8 +28,8 @@ var allowedAlertStatuses = map[string]bool{
 }
 
 type DlpService struct {
-	repo               *repository.DlpRepo
-	removalCodeTTLMin  int
+	repo              *repository.DlpRepo
+	removalCodeTTLMin int
 }
 
 func NewDlpService(repo *repository.DlpRepo, removalCodeTTLMin int) *DlpService {
@@ -51,6 +51,9 @@ func (s *DlpService) CreateRule(ctx context.Context, req dto.CreateDlpRuleReques
 		return nil, fmt.Errorf("name is required")
 	}
 	trigger := strings.TrimSpace(req.Trigger)
+	if trigger == "web_navigate" {
+		return nil, fmt.Errorf("web_navigate rules must be created in Web Blocker")
+	}
 	if !allowedTriggers[trigger] {
 		return nil, fmt.Errorf("invalid trigger")
 	}
@@ -72,10 +75,17 @@ func (s *DlpService) CreateRule(ctx context.Context, req dto.CreateDlpRuleReques
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
-	return s.repo.CreateRule(ctx, name, trigger, req.Match, req.Scope, action, severity, enabled)
+	scopeAll := true
+	if req.ScopeAll != nil {
+		scopeAll = *req.ScopeAll
+	}
+	return s.repo.CreateRule(ctx, name, trigger, action, severity, enabled, scopeAll, req.Extensions, req.Patterns)
 }
 
 func (s *DlpService) UpdateRule(ctx context.Context, id string, req dto.UpdateDlpRuleRequest) (*models.DlpRule, error) {
+	if req.Trigger != nil && *req.Trigger == "web_navigate" {
+		return nil, fmt.Errorf("web_navigate rules must be created in Web Blocker")
+	}
 	if req.Trigger != nil && !allowedTriggers[*req.Trigger] {
 		return nil, fmt.Errorf("invalid trigger")
 	}
@@ -85,7 +95,7 @@ func (s *DlpService) UpdateRule(ctx context.Context, id string, req dto.UpdateDl
 	if req.Severity != nil && !allowedSeverities[*req.Severity] {
 		return nil, fmt.Errorf("invalid severity")
 	}
-	rule, err := s.repo.UpdateRule(ctx, id, req.Name, req.Enabled, req.Trigger, req.Match, req.Action, req.Severity, req.Scope)
+	rule, err := s.repo.UpdateRule(ctx, id, req.Name, req.Enabled, req.Trigger, req.Action, req.Severity, req.ScopeAll, req.Extensions, req.Patterns)
 	if err != nil {
 		return nil, err
 	}
@@ -99,80 +109,173 @@ func (s *DlpService) DeleteRule(ctx context.Context, id string) error {
 	return s.repo.SoftDeleteRule(ctx, id)
 }
 
+// ── Web blocker ─────────────────────────────────────────────────────────────
+
+func (s *DlpService) ListWebBlockerRules(ctx context.Context) ([]models.WebBlockerRule, error) {
+	return s.repo.ListWebBlockerRules(ctx)
+}
+
+func (s *DlpService) GetWebBlockerRule(ctx context.Context, id string) (*models.WebBlockerRule, error) {
+	rule, err := s.repo.GetWebBlockerRule(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if rule == nil {
+		return nil, fmt.Errorf("web blocker rule not found")
+	}
+	return rule, nil
+}
+
+func (s *DlpService) CreateWebBlockerRule(ctx context.Context, req dto.CreateWebBlockerRuleRequest) (*models.WebBlockerRule, error) {
+	rule, err := validateWebBlockerCreate(req)
+	if err != nil {
+		return nil, err
+	}
+	return s.repo.CreateWebBlockerRule(ctx, rule)
+}
+
+func (s *DlpService) UpdateWebBlockerRule(ctx context.Context, id string, req dto.UpdateWebBlockerRuleRequest) (*models.WebBlockerRule, error) {
+	cur, err := s.repo.GetWebBlockerRule(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if cur == nil {
+		return nil, fmt.Errorf("web blocker rule not found")
+	}
+	if req.Name != nil {
+		cur.Name = strings.TrimSpace(*req.Name)
+	}
+	if req.Enabled != nil {
+		cur.Enabled = *req.Enabled
+	}
+	if req.Action != nil {
+		cur.Action = strings.TrimSpace(*req.Action)
+	}
+	if req.Severity != nil {
+		cur.Severity = strings.TrimSpace(*req.Severity)
+	}
+	if req.ScopeAll != nil {
+		cur.ScopeAll = *req.ScopeAll
+	}
+	if req.Domains != nil {
+		cur.Domains = *req.Domains
+	}
+	if req.Paths != nil {
+		cur.Paths = *req.Paths
+	}
+	if req.ScheduleEnabled != nil {
+		cur.ScheduleEnabled = *req.ScheduleEnabled
+	}
+	if req.ScheduleStart != nil {
+		cur.ScheduleStart = strings.TrimSpace(*req.ScheduleStart)
+	}
+	if req.ScheduleEnd != nil {
+		cur.ScheduleEnd = strings.TrimSpace(*req.ScheduleEnd)
+	}
+	if req.ScheduleTimezone != nil {
+		cur.ScheduleTimezone = strings.TrimSpace(*req.ScheduleTimezone)
+	}
+	if req.ScheduleDays != nil {
+		cur.ScheduleDays = *req.ScheduleDays
+	}
+	if err := validateWebBlockerRule(*cur); err != nil {
+		return nil, err
+	}
+	rule, err := s.repo.UpdateWebBlockerRule(ctx, id, *cur)
+	if err != nil {
+		return nil, err
+	}
+	if rule == nil {
+		return nil, fmt.Errorf("web blocker rule not found")
+	}
+	return rule, nil
+}
+
+func (s *DlpService) DeleteWebBlockerRule(ctx context.Context, id string) error {
+	return s.repo.SoftDeleteWebBlockerRule(ctx, id)
+}
+
+func validateWebBlockerCreate(req dto.CreateWebBlockerRuleRequest) (models.WebBlockerRule, error) {
+	enabled, scopeAll := true, true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+	if req.ScopeAll != nil {
+		scopeAll = *req.ScopeAll
+	}
+	rule := models.WebBlockerRule{
+		Name: strings.TrimSpace(req.Name), Enabled: enabled,
+		Action: strings.TrimSpace(req.Action), Severity: strings.TrimSpace(req.Severity),
+		ScopeAll: scopeAll, Domains: req.Domains, Paths: req.Paths,
+		ScheduleEnabled: req.ScheduleEnabled, ScheduleStart: strings.TrimSpace(req.ScheduleStart),
+		ScheduleEnd: strings.TrimSpace(req.ScheduleEnd), ScheduleTimezone: strings.TrimSpace(req.ScheduleTimezone),
+		ScheduleDays: req.ScheduleDays,
+	}
+	if rule.Action == "" {
+		rule.Action = "block"
+	}
+	if rule.Severity == "" {
+		rule.Severity = "medium"
+	}
+	if rule.ScheduleTimezone == "" {
+		rule.ScheduleTimezone = "UTC"
+	}
+	return rule, validateWebBlockerRule(rule)
+}
+
+func validateWebBlockerRule(rule models.WebBlockerRule) error {
+	if strings.TrimSpace(rule.Name) == "" {
+		return fmt.Errorf("name is required")
+	}
+	if !allowedActions[rule.Action] {
+		return fmt.Errorf("invalid action")
+	}
+	if !allowedSeverities[rule.Severity] {
+		return fmt.Errorf("invalid severity")
+	}
+	if len(rule.Domains) == 0 {
+		return fmt.Errorf("at least one domain is required")
+	}
+	allowedDays := map[string]bool{"mon": true, "tue": true, "wed": true, "thu": true, "fri": true, "sat": true, "sun": true}
+	for _, day := range rule.ScheduleDays {
+		if !allowedDays[strings.ToLower(strings.TrimSpace(day))] {
+			return fmt.Errorf("invalid schedule day")
+		}
+	}
+	if rule.ScheduleEnabled && (rule.ScheduleStart == "" || rule.ScheduleEnd == "") {
+		return fmt.Errorf("schedule start and end are required when schedule is enabled")
+	}
+	return nil
+}
+
 // Publish compiles enabled rules + shadow deny into an immutable policy version.
 func (s *DlpService) Publish(ctx context.Context, publishedBy *string) (*dto.PublishDlpPolicyResponse, error) {
 	rules, err := s.repo.ListEnabledRules(ctx)
 	if err != nil {
 		return nil, err
 	}
-	domains, appNames, err := s.repo.ListUnauthorizedShadowDeny(ctx)
+	webRules, err := s.repo.ListEnabledWebBlockerRules(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if domains == nil {
-		domains = []string{}
-	}
-	if appNames == nil {
-		appNames = []string{}
-	}
-
-	type bundleRule struct {
-		ID       string          `json:"id"`
-		Name     string          `json:"name"`
-		Enabled  bool            `json:"enabled"`
-		Trigger  string          `json:"trigger"`
-		Match    json.RawMessage `json:"match"`
-		Action   string          `json:"action"`
-		Severity string          `json:"severity"`
-		Scope    json.RawMessage `json:"scope"`
-		Alert    bool            `json:"alert"`
-	}
-	br := make([]bundleRule, 0, len(rules))
-	for _, rule := range rules {
-		alert := rule.Action == "alert" || rule.Action == "alert_block"
-		br = append(br, bundleRule{
-			ID: rule.ID, Name: rule.Name, Enabled: rule.Enabled,
-			Trigger: rule.Trigger, Match: rule.MatchJSON, Action: rule.Action,
-			Severity: rule.Severity, Scope: rule.ScopeJSON, Alert: alert,
-		})
-	}
-
-	placeholder, err := json.Marshal(map[string]any{
-		"policyVersion": 0,
-		"rules":         br,
-		"shadowDeny": map[string]any{
-			"domains":    domains,
-			"publishers": []string{},
-			"appNames":   appNames,
-		},
-	})
+	domains, _, err := s.repo.ListUnauthorizedShadowDeny(ctx)
 	if err != nil {
 		return nil, err
 	}
-	ver, err := s.repo.InsertPolicyVersion(ctx, placeholder, "pending", publishedBy)
+	ver, err := s.repo.InsertPolicyVersion(ctx, "pending", publishedBy)
 	if err != nil {
 		return nil, err
 	}
-
-	// Hash is stored on dlp_policy_versions.bundle_hash and returned beside the
-	// bundle on pull — keep it out of the JSON body so the digest is stable.
-	finalObj := map[string]any{
-		"policyVersion": ver.Version,
-		"publishedAt":   ver.PublishedAt.UTC().Format(time.RFC3339),
-		"rules":         br,
-		"shadowDeny": map[string]any{
-			"domains":    domains,
-			"publishers": []string{},
-			"appNames":   appNames,
-		},
+	if err := s.repo.PublishSnapshot(ctx, ver.Version, rules, webRules, domains); err != nil {
+		return nil, err
 	}
-	final, err := json.Marshal(finalObj)
+	final, err := s.repo.AssembleBundleJSON(ctx, ver.Version)
 	if err != nil {
 		return nil, err
 	}
 	sum := sha256.Sum256(final)
 	finalHash := "sha256:" + hex.EncodeToString(sum[:])
-	if err := s.repo.UpdatePolicyBundle(ctx, ver.Version, final, finalHash); err != nil {
+	if err := s.repo.UpdatePolicyHash(ctx, ver.Version, finalHash); err != nil {
 		return nil, err
 	}
 
@@ -180,7 +283,7 @@ func (s *DlpService) Publish(ctx context.Context, publishedBy *string) (*dto.Pub
 		PolicyVersion: ver.Version,
 		Hash:          finalHash,
 		PublishedAt:   ver.PublishedAt,
-		RuleCount:     len(br),
+		RuleCount:     len(rules) + len(webRules),
 	}, nil
 }
 
@@ -205,12 +308,16 @@ func (s *DlpService) PullPolicy(ctx context.Context, sinceVersion int64) (*dto.D
 		}, nil
 	}
 	pub := latest.PublishedAt
+	bundle, err := s.repo.AssembleBundleJSON(ctx, latest.Version)
+	if err != nil {
+		return nil, err
+	}
 	if sinceVersion > 0 && sinceVersion >= latest.Version {
 		return &dto.DlpPolicyPullResponse{
 			PolicyVersion: latest.Version,
 			Hash:          latest.BundleHash,
 			PublishedAt:   &pub,
-			Bundle:        latest.BundleJSON,
+			Bundle:        bundle,
 			Unchanged:     true,
 		}, nil
 	}
@@ -218,7 +325,7 @@ func (s *DlpService) PullPolicy(ctx context.Context, sinceVersion int64) (*dto.D
 		PolicyVersion: latest.Version,
 		Hash:          latest.BundleHash,
 		PublishedAt:   &pub,
-		Bundle:        latest.BundleJSON,
+		Bundle:        bundle,
 	}, nil
 }
 
@@ -245,7 +352,7 @@ func (s *DlpService) SyncAlerts(ctx context.Context, employeeID, machineID strin
 		Severity      string
 		ActionTaken   string
 		OccurredAt    time.Time
-		Evidence      json.RawMessage
+		Evidence      map[string]string
 	}, 0, len(req.Alerts))
 	for _, a := range req.Alerts {
 		items = append(items, struct {
@@ -256,7 +363,7 @@ func (s *DlpService) SyncAlerts(ctx context.Context, employeeID, machineID strin
 			Severity      string
 			ActionTaken   string
 			OccurredAt    time.Time
-			Evidence      json.RawMessage
+			Evidence      map[string]string
 		}{
 			ID: a.ID, RuleID: a.RuleID, PolicyVersion: a.PolicyVersion,
 			Type: a.Type, Severity: a.Severity, ActionTaken: a.ActionTaken,

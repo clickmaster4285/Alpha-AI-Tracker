@@ -5,29 +5,68 @@ import (
 	"time"
 )
 
-// ── Admin: Rules ────────────────────────────────────────────────────────────
+// ── Admin: DLP Rules (non-web) ───────────────────────────────────────────────
 
 type CreateDlpRuleRequest struct {
-	Name     string          `json:"name"`
-	Enabled  *bool           `json:"enabled,omitempty"`
-	Trigger  string          `json:"trigger"`
-	Match    json.RawMessage `json:"match"`
-	Action   string          `json:"action"`
-	Severity string          `json:"severity"`
-	Scope    json.RawMessage `json:"scope"`
+	Name       string   `json:"name"`
+	Enabled    *bool    `json:"enabled,omitempty"`
+	Trigger    string   `json:"trigger"`
+	Action     string   `json:"action"`
+	Severity   string   `json:"severity"`
+	ScopeAll   *bool    `json:"scopeAll,omitempty"`
+	Extensions []string `json:"extensions"`
+	Patterns   []string `json:"patterns"`
 }
 
 type UpdateDlpRuleRequest struct {
-	Name     *string          `json:"name,omitempty"`
-	Enabled  *bool            `json:"enabled,omitempty"`
-	Trigger  *string          `json:"trigger,omitempty"`
-	Match    *json.RawMessage `json:"match,omitempty"`
-	Action   *string          `json:"action,omitempty"`
-	Severity *string          `json:"severity,omitempty"`
-	Scope    *json.RawMessage `json:"scope,omitempty"`
+	Name       *string  `json:"name,omitempty"`
+	Enabled    *bool    `json:"enabled,omitempty"`
+	Trigger    *string  `json:"trigger,omitempty"`
+	Action     *string  `json:"action,omitempty"`
+	Severity   *string  `json:"severity,omitempty"`
+	ScopeAll   *bool    `json:"scopeAll,omitempty"`
+	Extensions *[]string `json:"extensions,omitempty"`
+	Patterns   *[]string `json:"patterns,omitempty"`
 }
 
 type DlpRuleListResponse struct {
+	Rules []any `json:"rules"`
+	Total int   `json:"total"`
+}
+
+// ── Admin: Web Blocker ──────────────────────────────────────────────────────
+
+type CreateWebBlockerRuleRequest struct {
+	Name              string   `json:"name"`
+	Enabled           *bool    `json:"enabled,omitempty"`
+	Action            string   `json:"action"`
+	Severity          string   `json:"severity"`
+	ScopeAll          *bool    `json:"scopeAll,omitempty"`
+	Domains           []string `json:"domains"`
+	Paths             []string `json:"paths"`
+	ScheduleEnabled   bool     `json:"scheduleEnabled"`
+	ScheduleStart     string   `json:"scheduleStart"`
+	ScheduleEnd       string   `json:"scheduleEnd"`
+	ScheduleTimezone  string   `json:"scheduleTimezone"`
+	ScheduleDays      []string `json:"scheduleDays"`
+}
+
+type UpdateWebBlockerRuleRequest struct {
+	Name              *string  `json:"name,omitempty"`
+	Enabled           *bool    `json:"enabled,omitempty"`
+	Action            *string  `json:"action,omitempty"`
+	Severity          *string  `json:"severity,omitempty"`
+	ScopeAll          *bool    `json:"scopeAll,omitempty"`
+	Domains           *[]string `json:"domains,omitempty"`
+	Paths             *[]string `json:"paths,omitempty"`
+	ScheduleEnabled   *bool    `json:"scheduleEnabled,omitempty"`
+	ScheduleStart     *string  `json:"scheduleStart,omitempty"`
+	ScheduleEnd       *string  `json:"scheduleEnd,omitempty"`
+	ScheduleTimezone  *string  `json:"scheduleTimezone,omitempty"`
+	ScheduleDays      *[]string `json:"scheduleDays,omitempty"`
+}
+
+type WebBlockerRuleListResponse struct {
 	Rules []any `json:"rules"`
 	Total int   `json:"total"`
 }
@@ -39,7 +78,7 @@ type PublishDlpPolicyResponse struct {
 	RuleCount     int       `json:"ruleCount"`
 }
 
-// ── Device: Policy pull ─────────────────────────────────────────────────────
+// ── Device: Policy pull (wire bundle still JSON — assembled from relational rows) ─
 
 type DlpPolicyPullResponse struct {
 	PolicyVersion int64           `json:"policyVersion"`
@@ -52,14 +91,14 @@ type DlpPolicyPullResponse struct {
 // ── Device: Alert sync ──────────────────────────────────────────────────────
 
 type SyncDlpAlertItem struct {
-	ID            string          `json:"id"`
-	RuleID        *string         `json:"ruleId,omitempty"`
-	PolicyVersion int64           `json:"policyVersion"`
-	Type          string          `json:"type"`
-	Severity      string          `json:"severity"`
-	ActionTaken   string          `json:"actionTaken"`
-	OccurredAt    time.Time       `json:"occurredAt"`
-	Evidence      json.RawMessage `json:"evidence"`
+	ID            string            `json:"id"`
+	RuleID        *string           `json:"ruleId,omitempty"`
+	PolicyVersion int64             `json:"policyVersion"`
+	Type          string            `json:"type"`
+	Severity      string            `json:"severity"`
+	ActionTaken   string            `json:"actionTaken"`
+	OccurredAt    time.Time         `json:"occurredAt"`
+	Evidence      map[string]string `json:"evidence"`
 }
 
 type SyncDlpAlertsRequest struct {
@@ -95,45 +134,39 @@ type UpdateDlpAlertRequest struct {
 	Notes      *string `json:"notes,omitempty"`
 }
 
-// DlpAlertHistoryEvent is one field change in the triage audit trail.
 type DlpAlertHistoryEvent struct {
 	ID            int64     `json:"id"`
 	AlertID       string    `json:"alertId"`
 	ChangedBy     *string   `json:"changedBy,omitempty"`
 	ChangedByName string    `json:"changedByName"`
-	Field         string    `json:"field"` // status | assigned_to | notes
+	Field         string    `json:"field"`
 	OldValue      string    `json:"oldValue"`
 	NewValue      string    `json:"newValue"`
 	CreatedAt     time.Time `json:"createdAt"`
 }
 
-// DlpAlertHistoryResponse is the triage audit trail for one alert.
 type DlpAlertHistoryResponse struct {
 	Events []DlpAlertHistoryEvent `json:"events"`
 }
 
 type DlpAlertListResponse struct {
-	Alerts     []any `json:"alerts"`
-	Total      int   `json:"total"`
-	Page       int   `json:"page"`
-	PerPage    int   `json:"perPage"`
-	Open       int   `json:"open"`
-	Investigating int `json:"investigating"`
-	Resolved   int   `json:"resolved"`
-	// FalsePositive counts alerts dismissed as a false positive.
-	FalsePositive int `json:"falsePositive"`
-	// Types lists the distinct alert types present under the current
-	// filters, so the web page can offer a type filter without hardcoding
-	// the vocabulary client-side.
-	Types []string `json:"types"`
+	Alerts         []any    `json:"alerts"`
+	Total          int      `json:"total"`
+	Page           int      `json:"page"`
+	PerPage        int      `json:"perPage"`
+	Open           int      `json:"open"`
+	Investigating  int      `json:"investigating"`
+	Resolved       int      `json:"resolved"`
+	FalsePositive  int      `json:"falsePositive"`
+	Types          []string `json:"types"`
 }
 
 // ── Shadow IT ───────────────────────────────────────────────────────────────
 
 type UpdateShadowItAppRequest struct {
-	AuthStatus *string `json:"authStatus,omitempty"` // approved | unauthorized | under_review
+	AuthStatus *string `json:"authStatus,omitempty"`
 	Risk       *string `json:"risk,omitempty"`
-	Action     *string `json:"action,omitempty"` // approve | block | flag — maps to authStatus
+	Action     *string `json:"action,omitempty"` // approve | block | flag
 }
 
 type ShadowItListResponse struct {
@@ -151,7 +184,7 @@ type ShadowItListResponse struct {
 type IssueRemovalCodeRequest struct {
 	MachineID  string `json:"machineId"`
 	EmployeeID string `json:"employeeId"`
-	Purpose    string `json:"purpose"` // stop | uninstall | both
+	Purpose    string `json:"purpose"`
 	TTLMinutes int    `json:"ttlMinutes,omitempty"`
 }
 

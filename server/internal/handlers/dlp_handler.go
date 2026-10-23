@@ -142,6 +142,66 @@ func (h *DlpHandler) DeleteRule(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{"message": "rule deleted"})
 }
 
+func (h *DlpHandler) ListWebBlockerRules(c echo.Context) error {
+	rules, err := h.svc.ListWebBlockerRules(c.Request().Context())
+	if err != nil {
+		return errorResponse(c, http.StatusInternalServerError, "Failed to list Web Blocker rules", err)
+	}
+	out := make([]any, len(rules))
+	for i := range rules {
+		out[i] = rules[i]
+	}
+	return c.JSON(http.StatusOK, dto.WebBlockerRuleListResponse{Rules: out, Total: len(out)})
+}
+
+func (h *DlpHandler) GetWebBlockerRule(c echo.Context) error {
+	rule, err := h.svc.GetWebBlockerRule(c.Request().Context(), c.Param("id"))
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return errorResponse(c, http.StatusNotFound, "Failed to get Web Blocker rule", err)
+		}
+		return errorResponse(c, http.StatusInternalServerError, "Failed to get Web Blocker rule", err)
+	}
+	return c.JSON(http.StatusOK, rule)
+}
+
+func (h *DlpHandler) CreateWebBlockerRule(c echo.Context) error {
+	var req dto.CreateWebBlockerRuleRequest
+	if err := c.Bind(&req); err != nil {
+		return errorResponse(c, http.StatusBadRequest, "Invalid request body", err)
+	}
+	rule, err := h.svc.CreateWebBlockerRule(c.Request().Context(), req)
+	if err != nil {
+		return errorResponse(c, http.StatusBadRequest, "Failed to create Web Blocker rule", err)
+	}
+	return c.JSON(http.StatusCreated, rule)
+}
+
+func (h *DlpHandler) UpdateWebBlockerRule(c echo.Context) error {
+	var req dto.UpdateWebBlockerRuleRequest
+	if err := c.Bind(&req); err != nil {
+		return errorResponse(c, http.StatusBadRequest, "Invalid request body", err)
+	}
+	rule, err := h.svc.UpdateWebBlockerRule(c.Request().Context(), c.Param("id"), req)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return errorResponse(c, http.StatusNotFound, "Failed to update Web Blocker rule", err)
+		}
+		return errorResponse(c, http.StatusBadRequest, "Failed to update Web Blocker rule", err)
+	}
+	return c.JSON(http.StatusOK, rule)
+}
+
+func (h *DlpHandler) DeleteWebBlockerRule(c echo.Context) error {
+	if err := h.svc.DeleteWebBlockerRule(c.Request().Context(), c.Param("id")); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return errorResponse(c, http.StatusNotFound, "Failed to delete Web Blocker rule", err)
+		}
+		return errorResponse(c, http.StatusInternalServerError, "Failed to delete Web Blocker rule", err)
+	}
+	return c.JSON(http.StatusOK, map[string]string{"message": "rule deleted"})
+}
+
 func (h *DlpHandler) Publish(c echo.Context) error {
 	var publishedBy *string
 	if uid, ok := c.Get("user_id").(string); ok && uid != "" {

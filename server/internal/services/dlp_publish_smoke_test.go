@@ -32,12 +32,11 @@ func TestDlpPublishAndPullSmoke(t *testing.T) {
 	svc := NewDlpService(repo, 60)
 
 	rule, err := svc.CreateRule(ctx, dto.CreateDlpRuleRequest{
-		Name:     "Smoke USB Block",
-		Trigger:  "usb_storage",
-		Action:   "alert_block",
-		Severity: "critical",
-		Match:    []byte(`{"extensions":[".xlsx"]}`),
-		Scope:    []byte(`{"all":true}`),
+		Name:       "Smoke USB Block",
+		Trigger:    "usb_storage",
+		Action:     "alert_block",
+		Severity:   "critical",
+		Extensions: []string{".xlsx"},
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
