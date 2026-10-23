@@ -4,13 +4,13 @@ Procedures that need a running server (and for DLP, an installed Windows agent).
 
 Companion: [plan.md](./plan.md) (DLP roadmap), [WORKFLOW.md](./WORKFLOW.md), [client/build.md](./client/build.md).
 
-*Last audited: 2026-10-22*
+*Last audited: 2026-10-23*
 
 ---
 
-## Security & DLP (Windows lab — P0+P1)
+## Security & DLP (Windows lab — P0+P1+P2 domain)
 
-**Prereqs:** server with migrations 051/052 applied; web admin with `dlp-rules` / `dlp-alerts` grants; Windows PC with tracker + DLP service installed (Inno or `client/DlpService/install-service.ps1` elevated).
+**Prereqs:** server with migrations 051/052 applied; web admin with `dlp-rules` / `dlp-alerts` / `web-blocker` grants; Windows PC with tracker + DLP service installed (Inno or `client/DlpService/install-service.ps1` elevated).
 
 ### A. Policy publish → service pull
 
@@ -44,8 +44,18 @@ Companion: [plan.md](./plan.md) (DLP roadmap), [WORKFLOW.md](./WORKFLOW.md), [cl
 
 ### E. RBAC
 
-1. Role without `dlp-*` / `shadow-it` → sidebar entries hidden; direct URL → `/unauthorized`.
-2. `company_admin` → all three Security & DLP pages reachable.
+1. Role without `dlp-*` / `web-blocker` / `shadow-it` → sidebar entries hidden; direct URL → `/unauthorized`.
+2. `company_admin` → Security & DLP pages (Alerts / Rules / Web Blocker / Shadow IT) reachable.
+
+### F. Web Blocker (domain DNS sink — P2)
+
+1. Web `/web-blocker` → Add rule: domains e.g. `example.com`, action **Block** or **Alert + Block**, optional schedule window.
+2. **Publish** → wait for policy pull on the PC.
+3. Expect hosts `# AlphaAI-DLP-BEGIN` block with both `0.0.0.0` **and** `::` for the domain (+ www), and `netsh advfirewall` rules named `AlphaAI-DLP-*` for real A/AAAA IPs (DoH bypass).
+4. Flush DNS happens on apply. Browser should fail; if Chrome Secure DNS is on, firewall IP rules are the effective block.
+5. `/dlp-alerts` shows a `web_navigate` row when the sink was applied.
+6. Delete/Publish clear → hosts + firewall owned rules removed; teardown clears too.
+7. **Honesty:** URL **paths** are alert-match only — not hard-blocked at the network layer.
 
 ---
 

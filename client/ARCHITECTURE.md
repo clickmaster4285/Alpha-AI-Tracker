@@ -5,7 +5,7 @@
 > - 2026-10-22: **Windows Security & DLP — LocalSystem service + protected uninstall (P0+P1).**
 >   New project `client/DlpService` (`AlphaAITracker.Service.exe`, names from `APP_IDENTIFIERS`
 >   `WINDOWS_SERVICE_NAME` / `WINDOWS_DLP_PIPE_NAME` / `APP_MUTEX`): PolicyPullWorker,
->   EnforceWorker + `UsbStorEnforcer`, RemovableDriveMonitor, AlertSyncWorker, NamedPipeHost,
+>   EnforceWorker + `UsbStorEnforcer` + `DomainBlockEnforcer` (P2 hosts DNS sink), RemovableDriveMonitor, AlertSyncWorker, NamedPipeHost,
 >   ServiceAclHardener, TrackerWatchdogWorker, ProgramData store under
 >   `%ProgramData%\<APP_MUTEX>\dlp\` (policy blob, local alerts, `service.env`, `device.auth`,
 >   `teardown.ok`) — **never** multi-writes the user helper's SQLite. User helper:
@@ -519,7 +519,7 @@ Production blocking and protected lifecycle live here — **not** in the Avaloni
 ```
 AlphaAITracker.Service.exe (LocalSystem)
   ├── PolicyPullWorker     GET /dlp/policy → PolicyStore
-  ├── EnforceWorker        UsbStorEnforcer when usb_* block rules present
+  ├── EnforceWorker        UsbStorEnforcer (usb_*) + DomainBlockEnforcer (web_navigate / schedule)
   ├── RemovableDriveMonitor  plug events → local alert queue
   ├── AlertSyncWorker      POST /dlp/alerts/sync (≤60s cadence)
   ├── NamedPipeHost        health / AuthorizeTeardown / GetPolicyVersion
@@ -537,7 +537,7 @@ client.exe (user session) — collectors, GUI, device.auth bridge, --protected-u
 | `%ProgramData%\<APP_MUTEX>\dlp\policy.vN.json` | Last applied bundle |
 | `%ProgramData%\<APP_MUTEX>\dlp\teardown.ok` | Uninstaller gate after successful protected uninstall |
 
-`ALPHA_DLP_ENABLED=false` parks every worker (tracker behaves as pre-DLP). P2+ (WFP domains, AppLocker, minifilter) not yet implemented — see `plan.md`.
+`ALPHA_DLP_ENABLED=false` parks every worker (tracker behaves as pre-DLP). P2 domain block uses hosts DNS sink (`DomainBlockEnforcer`); optional WFP callout / path hard-block / AppLocker / minifilter still open — see `plan.md`.
 
 ---
 

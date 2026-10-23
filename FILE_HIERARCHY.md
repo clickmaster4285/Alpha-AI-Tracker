@@ -242,7 +242,7 @@ web/
     │       ├── shadow-it (live API) · logs (comprehensive · graphical · insights)
     │       ├── charts (activity · productivity) · reports · ai-summary
     │       ├── attendance · shifts · timesheets · hours-insights
-    │       ├── dlp-alerts · dlp-rules (live API + Publish / triage) · audit-log · emails
+    │       ├── dlp-alerts · dlp-rules · web-blocker (domains/paths/schedule) · audit-log · emails
     │       ├── goals · kpis · projects · productivity-scoring
     │       ├── screenshots · live-stream (WebRTC SFU; FPS; Open theater → /live-stream/theater) · gps-location
     │       └── settings (billing · compliance · notifications · security ·

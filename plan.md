@@ -1,11 +1,11 @@
 # Plan — Security & DLP (Windows Production)
 
-> **Status:** P0 complete · P1 USB + service install + protected removal (code / ACL / uninstall gate) shipped · alert triage history (052) + detail UI shipped  
+> **Status:** P0+P1 shipped · **P2 in progress** — `/web-blocker` UI + hosts DNS sink domain enforce + schedule-aware apply  
 > **Scope:** Windows-only endpoint DLP + Shadow IT + hardened agent lifecycle  
 > **Out of scope (v1–v3):** Linux/macOS enforcement, kernel minifilter (deferred to P6), TLS inspection / ChatGPT surgical upload block (deferred to P7)  
-> **Related UI:** `/dlp-rules`, `/dlp-alerts`, `/shadow-it` — **live API** (P0+P1); next: P2 WFP domains  
-> **Docs:** AGENTS.md · client/server/web ARCHITECTURE.md · WORKFLOW.md · TESTING.md · FILE_HIERARCHY.md updated 2026-10-22  
-> **Last updated:** 2026-10-22
+> **Related UI:** `/dlp-rules`, `/dlp-alerts`, `/web-blocker`, `/shadow-it`  
+> **Docs:** AGENTS.md · client/server/web ARCHITECTURE.md · WORKFLOW.md · TESTING.md · FILE_HIERARCHY.md  
+> **Last updated:** 2026-10-23
 
 ---
 
@@ -19,7 +19,8 @@ Ship a **production-grade Windows Security & DLP stack**: admin configures rules
 
 | Web route | Module | Job |
 |-----------|--------|-----|
-| `/dlp-rules` | **DLP Rules** | Policy authoring: trigger, match pattern, action (Alert / Block / Alert+Block), severity, scope (dept / all) |
+| `/dlp-rules` | **DLP Rules** | Non-web policy authoring (USB, …): trigger, match, action, severity, scope |
+| `/web-blocker` | **Web Blocker** | Domain / URL path / timer-based web rules (`web_navigate`) → same Publish spine |
 | `/dlp-alerts` | **DLP Alerts** | Incident inbox: triage Open → Investigating → Resolved / False Positive |
 | `/shadow-it` | **Shadow IT** | App/SaaS inventory: Approved / Unauthorized / Under Review → Approve / Block / Flag |
 
@@ -377,9 +378,11 @@ Server: no special env beyond normal DB; optional `DLP_REMOVAL_CODE_TTL_MIN=60`.
 
 ### P2 — Web domain block
 
-- [ ] WFP (or equivalent) apply/remove `AlphaAI-DLP-*` filters from `web_navigate` / Shadow IT deny domains  
-- [ ] Alerts on block events  
-- [ ] Web Rules UI: domain patterns  
+- [x] DNS sink (hosts `AlphaAI-DLP-*` markers) apply/remove from `web_navigate` block rules + `shadowDeny.domains` (schedule-aware)  
+- [x] Alerts when domain sink is applied / access denied  
+- [x] Web **Web Blocker** UI: domains, URL paths (alert-match), timer-based schedule + RBAC `web-blocker`  
+- [ ] Optional true WFP callout / per-connection block events (beyond hosts sink)  
+- [ ] Tracker-side path/navigate alert when browser hits a denied path (path hard-block still P7)  
 
 ### P3 — Shadow IT live
 

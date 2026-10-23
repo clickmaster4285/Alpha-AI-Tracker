@@ -1,7 +1,10 @@
 # Web Architecture — Alpha AI Tracker Dashboard
 
-> **Last audited:** 2026-10-22 (Security & DLP live pages)
+> **Last audited:** 2026-10-23 (Web Blocker + P2 domain UI)
 > **Changelog:**
+> - 2026-10-23: **Web Blocker page** under Security & DLP (`/web-blocker`, RBAC `web-blocker`).
+>   Authors `web_navigate` rules with `match.domains` / `match.paths` / `match.schedule`
+>   (timer window); still uses `POST /dlp/rules/publish`. `/dlp-rules` lists non-web triggers only.
 > - 2026-10-22: **Security & DLP pages go live (Rules / Alerts / Shadow IT) + Issue Removal Code.**
 >   Replaced mocks with `dlpApi` / `shadowItApi` in `lib/api.ts`. `/dlp-rules` — CRUD + **Publish**
 >   (immutable policy version). `/dlp-alerts` — infinite scroll + URL-synced filters + status
@@ -491,7 +494,8 @@ in the `updateMutation`).
 | `/audit-log` | Audit log | Hardcoded demo data (scaffolding) | ❌ |
 | `/executive-dashboard` | Exec dashboard | Hardcoded demo data (scaffolding) | ❌ |
 | `/dlp-alerts` | DLP Alerts | Server (`GET/PATCH /dlp/alerts`, `GET /dlp/alerts/:id/history`; infinite scroll + URL filters; detail dialog Save-only triage) | ✅ |
-| `/dlp-rules` | DLP Rules | Server (`/dlp/rules` CRUD + `POST /dlp/rules/publish`) | ✅ |
+| `/dlp-rules` | DLP Rules | Server (`/dlp/rules` CRUD + `POST /dlp/rules/publish`; non-web triggers) | ✅ |
+| `/web-blocker` | Web Blocker | Same rules API filtered to `web_navigate` (domains / paths / schedule) + Publish | ✅ |
 | `/shadow-it` | Shadow IT | Server (`GET/PATCH /shadow-it/apps`; Approve/Block/Flag) | ✅ |
 | `/emails` | Emails & Alerts | Hardcoded demo data (scaffolding) | ❌ |
 | `/projects` | Projects | Hardcoded demo data (scaffolding) | ❌ |

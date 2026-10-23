@@ -1,7 +1,16 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-10-22
+> **Last audited:** 2026-10-23
 > **Changelog:**
+>
+> - 2026-10-23: **P2 Web Blocker (web + Windows service) — domain DNS sink + schedule.** New web
+>   route `/web-blocker` (RBAC `web-blocker` under `security-dlp`) authors `web_navigate` rules with
+>   `match.domains` / `match.paths` / `match.schedule`; `/dlp-rules` keeps non-web triggers.
+>   Service: `DomainBlockEnforcer` rewrites system hosts with `# AlphaAI-DLP` markers (plan “DNS
+>   sink”); `EnforceWorker` applies schedule-aware domain sets; teardown clears the sink; apply
+>   alerts sync as `web_navigate`. Path patterns are stored for later alert-match (hosts cannot
+>   hard-block URL paths). Verified: `go build`/`go vet`; `dotnet build` DlpService; `npx tsc
+>   --noEmit`. Lab: `TESTING.md` §F.
 >
 > - 2026-10-22: **Security & DLP P0+P1 shipped (server + Windows service + web) — USBSTOR block, policy publish, alert inbox + triage history, protected uninstall.**
 >   Windows-only enforcement lives in a **LocalSystem** process (`client/DlpService` →
