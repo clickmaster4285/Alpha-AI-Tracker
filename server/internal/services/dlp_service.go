@@ -355,6 +355,15 @@ func (s *DlpService) SyncAlerts(ctx context.Context, employeeID, machineID strin
 		Evidence      map[string]string
 	}, 0, len(req.Alerts))
 	for _, a := range req.Alerts {
+		ev := map[string]string(a.Evidence)
+		if ev == nil {
+			ev = map[string]string{}
+		}
+		// Empty ruleId must not be cast to uuid — treat as unset.
+		ruleID := a.RuleID
+		if ruleID != nil && strings.TrimSpace(*ruleID) == "" {
+			ruleID = nil
+		}
 		items = append(items, struct {
 			ID            string
 			RuleID        *string
@@ -365,9 +374,9 @@ func (s *DlpService) SyncAlerts(ctx context.Context, employeeID, machineID strin
 			OccurredAt    time.Time
 			Evidence      map[string]string
 		}{
-			ID: a.ID, RuleID: a.RuleID, PolicyVersion: a.PolicyVersion,
+			ID: a.ID, RuleID: ruleID, PolicyVersion: a.PolicyVersion,
 			Type: a.Type, Severity: a.Severity, ActionTaken: a.ActionTaken,
-			OccurredAt: a.OccurredAt, Evidence: a.Evidence,
+			OccurredAt: a.OccurredAt.Time, Evidence: ev,
 		})
 	}
 	accepted, rejected, err := s.repo.UpsertAlerts(ctx, employeeID, machineID, items)

@@ -1,7 +1,10 @@
 package dto
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -90,15 +93,102 @@ type DlpPolicyPullResponse struct {
 
 // ── Device: Alert sync ──────────────────────────────────────────────────────
 
+// EvidenceMap accepts flat string maps OR nested JSON (arrays/objects/numbers)
+// by stringifying non-string values. Prevents 400 when the Windows service
+// sends evidence like {"domains":["youtube.com"]} from JsonSerializer.
+type EvidenceMap map[string]string
+
+func (m *EvidenceMap) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
+		*m = EvidenceMap{}
+		return nil
+	}
+	var asStrings map[string]string
+	if err := json.Unmarshal(data, &asStrings); err == nil {
+		*m = EvidenceMap(asStrings)
+		return nil
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("evidence: %w", err)
+	}
+	out := make(EvidenceMap, len(raw))
+	for k, v := range raw {
+		v = bytes.TrimSpace(v)
+		var s string
+		if err := json.Unmarshal(v, &s); err == nil {
+			out[k] = s
+			continue
+		}
+		out[k] = string(v)
+	}
+	*m = out
+	return nil
+}
+
+// FlexibleTime accepts RFC3339 with/without fractional seconds and without a zone
+// (treats zoneless as UTC) so .NET System.Text.Json DateTime payloads bind cleanly.
+type FlexibleTime struct{ time.Time }
+
+func (t *FlexibleTime) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if bytes.Equal(data, []byte("null")) {
+		t.Time = time.Time{}
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		t.Time = time.Time{}
+		return nil
+	}
+	formats := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04:05.999999999Z07:00",
+		"2006-01-02T15:04:05.9999999Z",
+		"2006-01-02T15:04:05Z",
+		"2006-01-02T15:04:05.9999999",
+		"2006-01-02T15:04:05",
+	}
+	var parseErr error
+	for _, f := range formats {
+		parsed, err := time.Parse(f, s)
+		if err == nil {
+			if parsed.Location() == time.Local && !strings.ContainsAny(s, "Z+-") {
+				parsed = time.Date(
+					parsed.Year(), parsed.Month(), parsed.Day(),
+					parsed.Hour(), parsed.Minute(), parsed.Second(), parsed.Nanosecond(),
+					time.UTC)
+			}
+			t.Time = parsed.UTC()
+			return nil
+		}
+		parseErr = err
+	}
+	return fmt.Errorf("occurredAt: %w", parseErr)
+}
+
+func (t FlexibleTime) MarshalJSON() ([]byte, error) {
+	if t.Time.IsZero() {
+		return []byte("null"), nil
+	}
+	return json.Marshal(t.Time.UTC().Format(time.RFC3339Nano))
+}
+
 type SyncDlpAlertItem struct {
-	ID            string            `json:"id"`
-	RuleID        *string           `json:"ruleId,omitempty"`
-	PolicyVersion int64             `json:"policyVersion"`
-	Type          string            `json:"type"`
-	Severity      string            `json:"severity"`
-	ActionTaken   string            `json:"actionTaken"`
-	OccurredAt    time.Time         `json:"occurredAt"`
-	Evidence      map[string]string `json:"evidence"`
+	ID            string       `json:"id"`
+	RuleID        *string      `json:"ruleId,omitempty"`
+	PolicyVersion int64        `json:"policyVersion"`
+	Type          string       `json:"type"`
+	Severity      string       `json:"severity"`
+	ActionTaken   string       `json:"actionTaken"`
+	OccurredAt    FlexibleTime `json:"occurredAt"`
+	Evidence      EvidenceMap  `json:"evidence"`
 }
 
 type SyncDlpAlertsRequest struct {

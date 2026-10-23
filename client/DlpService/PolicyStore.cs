@@ -625,6 +625,11 @@ public sealed class PolicyStore : IAsyncDisposable
                     JsonValueKind.True => "true",
                     JsonValueKind.False => "false",
                     JsonValueKind.Null => "",
+                    JsonValueKind.Array => string.Join(",",
+                        p.Value.EnumerateArray()
+                            .Select(el => el.ValueKind == JsonValueKind.String
+                                ? (el.GetString() ?? "")
+                                : el.GetRawText())),
                     _ => p.Value.GetRawText(),
                 };
             }

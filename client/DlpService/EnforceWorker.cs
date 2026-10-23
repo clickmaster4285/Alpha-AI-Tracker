@@ -145,7 +145,11 @@ public sealed class EnforceWorker : BackgroundService
                     rule?.Severity ?? "critical",
                     "blocked_failed",
                     DateTimeOffset.UtcNow,
-                    JsonSerializer.Serialize(new { reason = result.Detail, desiredBlock = wantUsbBlock }),
+                    JsonSerializer.Serialize(new Dictionary<string, string>
+                    {
+                        ["reason"] = result.Detail ?? "",
+                        ["desiredBlock"] = wantUsbBlock ? "true" : "false",
+                    }),
                     ct);
             }
             return;
@@ -168,11 +172,11 @@ public sealed class EnforceWorker : BackgroundService
                 rule?.Severity ?? "critical",
                 "blocked",
                 DateTimeOffset.UtcNow,
-                JsonSerializer.Serialize(new
+                JsonSerializer.Serialize(new Dictionary<string, string>
                 {
-                    action = "usbstor_disabled",
-                    previousStart = result.PreviousStart,
-                    desiredStart = result.DesiredStart,
+                    ["action"] = "usbstor_disabled",
+                    ["previousStart"] = result.PreviousStart?.ToString() ?? "",
+                    ["desiredStart"] = result.DesiredStart.ToString(),
                 }),
                 ct);
         }
@@ -224,10 +228,10 @@ public sealed class EnforceWorker : BackgroundService
                     rule?.Severity ?? "high",
                     "blocked_failed",
                     DateTimeOffset.UtcNow,
-                    JsonSerializer.Serialize(new
+                    JsonSerializer.Serialize(new Dictionary<string, string>
                     {
-                        reason = result.Detail,
-                        domains = wantDomains,
+                        ["reason"] = result.Detail ?? "",
+                        ["domains"] = string.Join(",", wantDomains),
                     }),
                     ct);
             }
@@ -252,11 +256,12 @@ public sealed class EnforceWorker : BackgroundService
                 rule?.Severity ?? "high",
                 "blocked",
                 DateTimeOffset.UtcNow,
-                JsonSerializer.Serialize(new
+                JsonSerializer.Serialize(new Dictionary<string, string>
                 {
-                    action = "hosts_dns_sink",
-                    domains = wantDomains,
-                    detail = result.Detail,
+                    ["action"] = "hosts_dns_sink",
+                    ["domains"] = string.Join(",", wantDomains),
+                    ["detail"] = result.Detail ?? "",
+                    ["count"] = wantDomains.Count.ToString(),
                 }),
                 ct);
         }

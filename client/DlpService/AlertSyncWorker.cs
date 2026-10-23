@@ -86,18 +86,20 @@ public sealed class AlertSyncWorker : BackgroundService
         var batch = await _store.GetUnsyncedAlertsAsync(100, ct);
         if (batch.Count == 0) return;
 
+        // Evidence must stay map[string]string on the wire (no nested arrays/objects).
+        // occurredAt must be RFC3339 with Z so Go time.Time binds (avoid 400).
         var payload = new
         {
-            alerts = batch.Select(a => new
+            alerts = batch.Select(a => new Dictionary<string, object?>
             {
-                id = a.Id,
-                ruleId = a.RuleId,
-                policyVersion = a.PolicyVersion,
-                type = a.Type,
-                severity = a.Severity,
-                actionTaken = a.ActionTaken,
-                occurredAt = a.OccurredAt.UtcDateTime,
-                evidence = a.Evidence ?? new Dictionary<string, string>(),
+                ["id"] = a.Id,
+                ["ruleId"] = string.IsNullOrWhiteSpace(a.RuleId) ? null : a.RuleId,
+                ["policyVersion"] = a.PolicyVersion,
+                ["type"] = a.Type,
+                ["severity"] = a.Severity,
+                ["actionTaken"] = a.ActionTaken,
+                ["occurredAt"] = a.OccurredAt.UtcDateTime.ToString("o"),
+                ["evidence"] = FlattenEvidenceForWire(a.Evidence),
             }).ToArray(),
         };
 
@@ -142,5 +144,23 @@ public sealed class AlertSyncWorker : BackgroundService
 
         await _store.MarkAlertsSyncedAsync(accepted, ct);
         _logger.LogInformation("Synced {Count} DLP alerts", accepted.Count);
+    }
+
+    /// <summary>
+    /// Wire evidence is always string→string. If a value looks like a JSON array/object
+    /// (legacy queue), keep it as a compact string so the server can store it.
+    /// </summary>
+    private static Dictionary<string, string> FlattenEvidenceForWire(
+        Dictionary<string, string>? evidence)
+    {
+        if (evidence == null || evidence.Count == 0)
+            return new Dictionary<string, string>();
+        var outMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (k, v) in evidence)
+        {
+            if (string.IsNullOrWhiteSpace(k)) continue;
+            outMap[k] = v ?? "";
+        }
+        return outMap;
     }
 }

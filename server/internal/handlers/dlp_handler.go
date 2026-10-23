@@ -50,6 +50,9 @@ func (h *DlpHandler) SyncAlerts(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return errorResponse(c, http.StatusBadRequest, "Invalid request body", err)
 	}
+	if len(req.Alerts) == 0 {
+		return c.JSON(http.StatusOK, dto.SyncDlpAlertsResponse{AcceptedIDs: []string{}})
+	}
 	resp, err := h.svc.SyncAlerts(c.Request().Context(), employeeID, machineID, req)
 	if err != nil {
 		return errorResponse(c, http.StatusInternalServerError, "Failed to sync DLP alerts", err)
