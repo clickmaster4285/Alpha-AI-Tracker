@@ -1,7 +1,10 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-10-22 (Security & DLP P0+P1)
+> **Last audited:** 2026-10-24 (Web Blocker expand + revision history)
 > **Changelog:**
+> - 2026-10-24: **Web Blocker** — migration **054** revision child tables (relational, no TEXT[]);
+>   `ExpandRelatedDomains` + `POST /web-blocker/domains/expand`; `GET /web-blocker/rules/:id/history`;
+>   create/update `expandRelated`; EvidenceMap alert sync 400 fix (nested JSON → string).
 > - 2026-10-22: **Security & DLP spine + alert triage history (migrations 051/052).**
 >   Migration **051** adds `dlp_rules` (editable), `dlp_policy_versions` (immutable published
 >   bundles), `dlp_alerts` (device-synced inbox), `shadow_it_apps`, `removal_challenges`

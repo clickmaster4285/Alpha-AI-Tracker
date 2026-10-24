@@ -36,6 +36,7 @@ builder.Services.AddHostedService<PolicyPullWorker>();
 builder.Services.AddHostedService<AlertSyncWorker>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<RemovableDriveMonitor>());
 builder.Services.AddHostedService<EnforceWorker>();
+builder.Services.AddHostedService<DnsBlockPinWorker>();
 builder.Services.AddHostedService<BlockPageServer>();
 builder.Services.AddHostedService<BlockHttpsServer>();
 builder.Services.AddHostedService<NamedPipeHost>();

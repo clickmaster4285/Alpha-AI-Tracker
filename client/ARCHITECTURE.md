@@ -1,7 +1,11 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-10-22 (Windows DLP service P0+P1)
+> **Last audited:** 2026-10-24 (P2 web-block DNS pin / mid-session cut)
 > **Changelog:**
+> - 2026-10-24: **P2 mid-session web block without employee restart.** `DnsBlockPinWorker` +
+>   `DnsCacheReader` + `TcpConnectionKiller`; `DomainBlockEnforcer` incremental firewall / IP cache /
+>   PIN rules / browser DoH+URLBlocklist; EnforceWorker re-applies hosts on every policy version.
+>   No winsock/NIC reset. Lab: `TESTING.md` §F.
 > - 2026-10-22: **Windows Security & DLP — LocalSystem service + protected uninstall (P0+P1).**
 >   New project `client/DlpService` (`AlphaAITracker.Service.exe`, names from `APP_IDENTIFIERS`
 >   `WINDOWS_SERVICE_NAME` / `WINDOWS_DLP_PIPE_NAME` / `APP_MUTEX`): PolicyPullWorker,
@@ -520,6 +524,7 @@ Production blocking and protected lifecycle live here — **not** in the Avaloni
 AlphaAITracker.Service.exe (LocalSystem)
   ├── PolicyPullWorker     GET /dlp/policy → PolicyStore
   ├── EnforceWorker        UsbStorEnforcer (usb_*) + DomainBlockEnforcer (web_navigate / schedule)
+  ├── DnsBlockPinWorker    DNS-cache → AlphaAI-DLP-PIN-* firewall + TCP-kill (CDN subdomains, no restart)
   ├── RemovableDriveMonitor  plug events → local alert queue
   ├── AlertSyncWorker      POST /dlp/alerts/sync (≤60s cadence)
   ├── NamedPipeHost        health / AuthorizeTeardown / GetPolicyVersion
@@ -537,7 +542,7 @@ client.exe (user session) — collectors, GUI, device.auth bridge, --protected-u
 | `%ProgramData%\<APP_MUTEX>\dlp\policy.vN.json` | Last applied bundle |
 | `%ProgramData%\<APP_MUTEX>\dlp\teardown.ok` | Uninstaller gate after successful protected uninstall |
 
-`ALPHA_DLP_ENABLED=false` parks every worker (tracker behaves as pre-DLP). P2 domain block uses hosts DNS sink (`DomainBlockEnforcer`); optional WFP callout / path hard-block / AppLocker / minifilter still open — see `plan.md`.
+`ALPHA_DLP_ENABLED=false` parks every worker (tracker behaves as pre-DLP). P2 domain block: hosts DNS sink + incremental firewall + TCP-kill + **`DnsBlockPinWorker`** (live CDN IP pin, no employee restart). Optional true WFP callout / path hard-block / AppLocker / minifilter still open — see `plan.md`.
 
 ---
 

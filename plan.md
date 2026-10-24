@@ -1,11 +1,11 @@
 # Plan — Security & DLP (Windows Production)
 
-> **Status:** P0+P1 shipped · **P2 in progress** — `/web-blocker` UI + hosts DNS sink domain enforce + schedule-aware apply  
+> **Status:** P0+P1 shipped · **P2 largely complete** — web-blocker + hosts/firewall/DNS-pin mid-session cut (no employee restart)  
 > **Scope:** Windows-only endpoint DLP + Shadow IT + hardened agent lifecycle  
 > **Out of scope (v1–v3):** Linux/macOS enforcement, kernel minifilter (deferred to P6), TLS inspection / ChatGPT surgical upload block (deferred to P7)  
 > **Related UI:** `/dlp-rules`, `/dlp-alerts`, `/web-blocker`, `/shadow-it`  
 > **Docs:** AGENTS.md · client/server/web ARCHITECTURE.md · WORKFLOW.md · TESTING.md · FILE_HIERARCHY.md  
-> **Last updated:** 2026-10-23
+> **Last updated:** 2026-10-24
 
 ---
 
@@ -380,9 +380,12 @@ Server: no special env beyond normal DB; optional `DLP_REMOVAL_CODE_TTL_MIN=60`.
 
 - [x] DNS sink (hosts `AlphaAI-DLP-*` markers) apply/remove from `web_navigate` block rules + `shadowDeny.domains` (schedule-aware)  
 - [x] Alerts when domain sink is applied / access denied  
-- [x] Web **Web Blocker** UI: domains, URL paths (alert-match), timer-based schedule + RBAC `web-blocker`  
-- [x] Branded localhost block page (`BlockPageServer` :47832) + tracker opens it on denied navigate (no TLS MITM)  
-- [ ] Optional true WFP callout / per-connection block events (beyond hosts sink)  
+- [x] Web **Web Blocker** UI: domain chips, related-domain expand, Active/Inactive auto-publish, edit + revision history (migration 054 relational), RBAC `web-blocker`  
+- [x] Branded localhost block page (`BlockPageServer` / HTTPS :443 + local CA) + tracker opens it on denied navigate (no TLS MITM)  
+- [x] Outbound firewall `AlphaAI-DLP-*` (incremental + IP cache) + `TcpConnectionKiller` on policy apply  
+- [x] **DNS-cache pin** (`DnsBlockPinWorker`): live `*.googlevideo.com` (etc.) IPs → `AlphaAI-DLP-PIN-*` + TCP-kill — mid-session cut **without** PC/browser restart  
+- [x] Chrome/Edge DoH-off (+ URLBlocklist/QuicAllowed as defense-in-depth; not required for the cut)  
+- [ ] Optional true WFP callout / per-connection block events (beyond netsh firewall + DNS pin)  
 - [ ] Tracker-side path-pattern alert when browser hits a denied path (path hard-block still P7)  
 
 ### P3 — Shadow IT live

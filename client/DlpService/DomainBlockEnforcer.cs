@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
@@ -10,12 +11,14 @@ using Microsoft.Win32;
 namespace AlphaAITracker.Service;
 
 /// <summary>
-/// P2 web domain block (Windows):
-/// 1) hosts DNS sink for A + AAAA (<c>127.0.0.1</c> and <c>::1</c>) with <c># AlphaAI-DLP</c> markers
-///    (loopback so a localhost block page can answer HTTP; <c>0.0.0.0</c> only yields ERR_ADDRESS_INVALID)
-/// 2) outbound firewall rules <c>AlphaAI-DLP-*</c> for real IPs
-/// 3) Chrome/Edge DnsOverHttpsMode=off while blocks are active (DoH bypasses hosts)
-/// Requires LocalSystem. Call <see cref="FlushDns"/> after apply.
+/// P2 web domain block (Windows) — production path:
+/// 1) hosts DNS sink (A+AAAA → loopback) with <c># AlphaAI-DLP</c> markers
+/// 2) outbound firewall <c>AlphaAI-DLP-*</c> on real CDN/apex IPs (cuts mid-session streams
+///    without winsock/NIC reset — QUIC/UDP and new TCP die; DNS cache alone is not enough)
+/// 3) Chrome/Edge DnsOverHttpsMode=off (DoH bypasses hosts)
+/// 4) OS <c>ipconfig /flushdns</c> only — never release/renew/winsock reset
+/// Incremental firewall apply + DNS IP cache (TTL) keep apply cheap on large fleets.
+/// Requires LocalSystem.
 /// </summary>
 internal static class DomainBlockEnforcer
 {
@@ -23,10 +26,33 @@ internal static class DomainBlockEnforcer
     public const string FirewallRulePrefix = "AlphaAI-DLP-";
     private const string BeginMarker = "# AlphaAI-DLP-BEGIN";
     private const string EndMarker = "# AlphaAI-DLP-END";
-    private const string ChromeDohKey = @"SOFTWARE\Policies\Google\Chrome";
-    private const string EdgeDohKey = @"SOFTWARE\Policies\Microsoft\Edge";
+    private const string ChromePolicyKey = @"SOFTWARE\Policies\Google\Chrome";
+    private const string EdgePolicyKey = @"SOFTWARE\Policies\Microsoft\Edge";
+    private const string ChromeUrlBlockKey = ChromePolicyKey + @"\URLBlocklist";
+    private const string EdgeUrlBlockKey = EdgePolicyKey + @"\URLBlocklist";
+
+    /// <summary>How long resolved A/AAAA stay cached before a background refresh.</summary>
+    private static readonly TimeSpan IpCacheTtl = TimeSpan.FromMinutes(20);
 
     private static readonly HttpClient DnsHttp = CreateDnsClient();
+    private static readonly ConcurrentDictionary<string, IpCacheEntry> IpCache =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Last applied domain→IP fingerprint per firewall rule (incremental diff).</summary>
+    private static readonly object FwStateGate = new();
+    private static Dictionary<string, string> _lastFwFingerprints =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Live CDN IPs discovered via DNS cache (rr*---sn-*.googlevideo.com, …).
+    /// Separate from apex resolve rules — hosts cannot wildcard these names.
+    /// </summary>
+    private const string PinnedRulePrefix = FirewallRulePrefix + "PIN-";
+    private static readonly ConcurrentDictionary<string, byte> PinnedIps =
+        new(StringComparer.OrdinalIgnoreCase);
+    private const int MaxIpsPerPinnedRule = 40;
+
+    private sealed record IpCacheEntry(IReadOnlyList<string> Ips, DateTimeOffset ExpiresUtc);
 
     public sealed record Result(
         bool Changed,
@@ -54,12 +80,22 @@ internal static class DomainBlockEnforcer
             .OrderBy(d => d, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
+        // 1) Browser URLBlocklist wildcards (*.googlevideo.com) — hosts/firewall only know
+        //    apex IPs; YouTube media uses rr*---sn-*.googlevideo.com (different IPs).
+        // 2) Firewall + TCP-kill for resolved apex/CDN IPs (defense in depth).
+        // 3) Hosts + DoH-off + flushdns for new lookups.
+        // Full apply: drop live CDN pins; DnsBlockPinWorker re-learns under the new set.
+        ClearPinnedIps();
+
+        var browserResult = ApplyBrowserPolicies(desired);
+        var fwResult = ApplyFirewallIncremental(desired, forceIpRefresh: true);
+        var tcpKilled = 0;
+        if (desired.Count > 0 && !fwResult.Detail.StartsWith("access_denied", StringComparison.Ordinal))
+            tcpKilled = KillEstablishedTcp(desired);
+
         var hostsResult = ApplyHosts(desired);
-        var fwResult = ApplyFirewall(desired);
-        var dohResult = ApplyBrowserDohPolicy(block: desired.Count > 0);
         FlushDns();
 
-        // Local CA for HTTPS block page on 127.0.0.1:443 (same-tab interstitial).
         try
         {
             if (desired.Count > 0)
@@ -69,19 +105,164 @@ internal static class DomainBlockEnforcer
         }
         catch
         {
-            /* non-fatal — HTTP :80 / tracker open still work */
+            /* non-fatal */
         }
 
-        var changed = hostsResult.Changed || fwResult.Changed || dohResult.Changed;
-        var detail = $"hosts={hostsResult.Detail}; fw={fwResult.Detail}; doh={dohResult.Detail}";
+        var changed = hostsResult.Changed || fwResult.Changed || browserResult.Changed || tcpKilled > 0;
+        var detail =
+            $"browser={browserResult.Detail}; hosts={hostsResult.Detail}; fw={fwResult.Detail}; tcp_kill={tcpKilled}";
         if (hostsResult.Detail.StartsWith("access_denied", StringComparison.Ordinal) ||
-            fwResult.Detail.StartsWith("access_denied", StringComparison.Ordinal))
+            fwResult.Detail.StartsWith("access_denied", StringComparison.Ordinal) ||
+            browserResult.Detail.StartsWith("access_denied", StringComparison.Ordinal))
             detail = "access_denied_need_admin";
 
         return new Result(changed, desired.Count, desired.Count, detail);
     }
 
     public static Result Clear() => Apply(Array.Empty<string>());
+
+    /// <summary>
+    /// While the domain set is unchanged, periodically refresh CDN IPs and patch firewall
+    /// rules so rotating googlevideo addresses stay blocked (no full re-apply).
+    /// </summary>
+    public static Result RefreshStaleFirewallIps(IReadOnlyList<string> domains)
+    {
+        if (!OperatingSystem.IsWindows() || domains.Count == 0)
+            return new Result(false, domains.Count, 0, "skip");
+
+        var desired = domains
+            .SelectMany(PolicyBundleParser.NormalizeDomain)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(d => d, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var fw = ApplyFirewallIncremental(desired, forceIpRefresh: false, onlyIfStale: true);
+        if (!fw.Changed)
+            return fw;
+        var killed = KillEstablishedTcp(desired);
+        return new Result(true, desired.Count, fw.AppliedCount, $"{fw.Detail}; tcp_kill={killed}");
+    }
+
+    /// <summary>
+    /// True when <paramref name="host"/> equals a blocked apex or is a subdomain of one
+    /// (e.g. rr1---sn-x.googlevideo.com matches googlevideo.com).
+    /// </summary>
+    public static bool HostMatchesBlockedDomains(string host, IReadOnlyList<string> domains)
+    {
+        if (string.IsNullOrWhiteSpace(host) || domains.Count == 0)
+            return false;
+        host = host.Trim().TrimEnd('.').ToLowerInvariant();
+        foreach (var raw in domains)
+        {
+            var apex = NormalizeApex(raw);
+            if (apex.Length == 0)
+                continue;
+            if (host.Equals(apex, StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (host.EndsWith("." + apex, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Pin live CDN IPs into outbound firewall rules and return how many were newly added.
+    /// Called by <see cref="DnsBlockPinWorker"/> — no browser/PC restart required.
+    /// </summary>
+    public static int PinRemoteIps(IEnumerable<string> ips)
+    {
+        if (!OperatingSystem.IsWindows())
+            return 0;
+
+        var added = 0;
+        foreach (var raw in ips)
+        {
+            if (!IPAddress.TryParse(raw, out var addr))
+                continue;
+            if (addr.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6))
+                continue;
+            if (IPAddress.IsLoopback(addr) || addr.Equals(IPAddress.Any) || addr.Equals(IPAddress.IPv6Any))
+                continue;
+            var ip = addr.ToString();
+            if (PinnedIps.TryAdd(ip, 0))
+                added++;
+        }
+        if (added == 0)
+            return 0;
+
+        RebuildPinnedFirewallRules();
+        return added;
+    }
+
+    public static void ClearPinnedIps()
+    {
+        PinnedIps.Clear();
+        try
+        {
+            foreach (var name in ListOwnedFirewallRules()
+                         .Where(n => n.StartsWith(PinnedRulePrefix, StringComparison.OrdinalIgnoreCase)))
+            {
+                RunNetsh($"advfirewall firewall delete rule name=\"{EscapeNetsh(name)}\"");
+            }
+        }
+        catch { /* ignore */ }
+    }
+
+    private static void RebuildPinnedFirewallRules()
+    {
+        var all = PinnedIps.Keys
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        // Drop old PIN rules then recreate chunks (netsh remoteip length limit).
+        foreach (var name in ListOwnedFirewallRules()
+                     .Where(n => n.StartsWith(PinnedRulePrefix, StringComparison.OrdinalIgnoreCase)))
+        {
+            RunNetsh($"advfirewall firewall delete rule name=\"{EscapeNetsh(name)}\"");
+        }
+
+        for (var i = 0; i < all.Count; i += MaxIpsPerPinnedRule)
+        {
+            var chunk = all.Skip(i).Take(MaxIpsPerPinnedRule).ToList();
+            var ruleName = PinnedRulePrefix + (i / MaxIpsPerPinnedRule);
+            var remote = string.Join(",", chunk);
+            var args =
+                $"advfirewall firewall add rule name=\"{EscapeNetsh(ruleName)}\" " +
+                $"dir=out action=block protocol=any remoteip={remote} " +
+                $"enable=yes profile=any";
+            RunNetsh(args);
+        }
+    }
+
+    private static string NormalizeApex(string raw)
+    {
+        var d = raw.Trim().ToLowerInvariant();
+        if (d.StartsWith("www.", StringComparison.Ordinal)) d = d[4..];
+        if (d.StartsWith("m.", StringComparison.Ordinal)) d = d[2..];
+        return d.TrimEnd('.');
+    }
+
+    /// <summary>
+    /// Tear down live TCP sockets to blocked remotes (SetTcpEntry DELETE_TCB). Complements
+    /// firewall (which mainly stops new flows / UDP-QUIC) so HTTPS mid-watch dies quickly.
+    /// </summary>
+    private static int KillEstablishedTcp(IReadOnlyList<string> desired)
+    {
+        try
+        {
+            var ips = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var domain in SelectResolveTargets(desired))
+            {
+                foreach (var ip in ResolvePublicIps(domain))
+                    ips.Add(ip);
+            }
+            return TcpConnectionKiller.KillToRemoteIps(ips);
+        }
+        catch
+        {
+            return 0;
+        }
+    }
 
     private static Result ApplyHosts(IReadOnlyList<string> desired)
     {
@@ -110,8 +291,6 @@ internal static class DomainBlockEnforcer
             sb.AppendLine(BeginMarker);
             foreach (var d in desired)
             {
-                // Loopback (not 0.0.0.0): HTTP can hit BlockPageServer on :80;
-                // HTTPS still fails closed without MITM — tracker opens the branded page.
                 sb.Append("127.0.0.1 ").Append(d).Append(' ').AppendLine(MarkerPrefix);
                 sb.Append("::1 ").Append(d).Append(' ').AppendLine(MarkerPrefix);
             }
@@ -141,43 +320,106 @@ internal static class DomainBlockEnforcer
         }
     }
 
-    private static Result ApplyFirewall(IReadOnlyList<string> desired)
+    /// <summary>
+    /// Diff-based firewall: remove obsolete AlphaAI-DLP rules, add/replace only changed domains.
+    /// Avoids delete-all + recreate on every policy tick (CPU + brief unprotected window).
+    /// </summary>
+    private static Result ApplyFirewallIncremental(
+        IReadOnlyList<string> desired,
+        bool forceIpRefresh = false,
+        bool onlyIfStale = false)
     {
         try
         {
-            var existing = ListOwnedFirewallRules();
-            foreach (var name in existing)
-                RunNetsh($"advfirewall firewall delete rule name=\"{EscapeNetsh(name)}\"");
-
+            var resolveTargets = SelectResolveTargets(desired);
             if (desired.Count == 0)
-                return new Result(existing.Count > 0, 0, 0, existing.Count > 0 ? "fw_cleared" : "fw_empty");
-
-            var added = 0;
-            foreach (var domain in desired)
             {
-                // Skip www. twin — resolve apex only once when both present.
-                if (domain.StartsWith("www.", StringComparison.OrdinalIgnoreCase))
-                {
-                    var apex = domain[4..];
-                    if (desired.Contains(apex, StringComparer.OrdinalIgnoreCase))
-                        continue;
-                }
-
-                var ips = ResolvePublicIps(domain);
-                if (ips.Count == 0)
-                    continue;
-
-                var ruleName = FirewallRulePrefix + SanitizeRuleName(domain);
-                var remote = string.Join(",", ips);
-                var args =
-                    $"advfirewall firewall add rule name=\"{EscapeNetsh(ruleName)}\" " +
-                    $"dir=out action=block protocol=any remoteip={remote} " +
-                    $"enable=yes profile=any";
-                var (ok, _) = RunNetsh(args);
-                if (ok) added++;
+                var ownedWhenEmpty = ListOwnedFirewallRules();
+                foreach (var name in ownedWhenEmpty)
+                    RunNetsh($"advfirewall firewall delete rule name=\"{EscapeNetsh(name)}\"");
+                lock (FwStateGate)
+                    _lastFwFingerprints = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                IpCache.Clear();
+                return new Result(ownedWhenEmpty.Count > 0, 0, 0,
+                    ownedWhenEmpty.Count > 0 ? "fw_cleared" : "fw_empty");
             }
 
-            return new Result(true, desired.Count, added, $"fw_rules={added}");
+            var desiredByRule = new Dictionary<string, (string Domain, string IpCsv, string Fp)>(
+                StringComparer.OrdinalIgnoreCase);
+            var anyStale = false;
+            foreach (var domain in resolveTargets)
+            {
+                if (IsStale(domain))
+                    anyStale = true;
+                var ips = ResolvePublicIps(domain, forceRefresh: forceIpRefresh);
+                if (ips.Count == 0)
+                    continue;
+                var ruleName = FirewallRulePrefix + SanitizeRuleName(domain);
+                var ipCsv = string.Join(",", ips.OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
+                var fp = domain.ToLowerInvariant() + "|" + ipCsv;
+                desiredByRule[ruleName] = (domain, ipCsv, fp);
+            }
+
+            if (onlyIfStale && !anyStale && !forceIpRefresh)
+            {
+                lock (FwStateGate)
+                {
+                    if (SameRuleSet(_lastFwFingerprints, desiredByRule))
+                        return new Result(false, desired.Count, desiredByRule.Count, "fw_fresh");
+                }
+            }
+
+            var existing = ListOwnedFirewallRules();
+            var existingSet = new HashSet<string>(existing, StringComparer.OrdinalIgnoreCase);
+            var removed = 0;
+            var added = 0;
+            var updated = 0;
+
+            Dictionary<string, string> prevFp;
+            lock (FwStateGate)
+                prevFp = new Dictionary<string, string>(_lastFwFingerprints, StringComparer.OrdinalIgnoreCase);
+
+            foreach (var name in existing)
+            {
+                if (desiredByRule.ContainsKey(name))
+                    continue;
+                RunNetsh($"advfirewall firewall delete rule name=\"{EscapeNetsh(name)}\"");
+                removed++;
+            }
+
+            foreach (var (ruleName, entry) in desiredByRule)
+            {
+                var needsWrite = !existingSet.Contains(ruleName)
+                    || !prevFp.TryGetValue(ruleName, out var oldFp)
+                    || !string.Equals(oldFp, entry.Fp, StringComparison.Ordinal);
+                if (!needsWrite)
+                    continue;
+
+                if (existingSet.Contains(ruleName))
+                {
+                    RunNetsh($"advfirewall firewall delete rule name=\"{EscapeNetsh(ruleName)}\"");
+                    updated++;
+                }
+                else
+                {
+                    added++;
+                }
+
+                var args =
+                    $"advfirewall firewall add rule name=\"{EscapeNetsh(ruleName)}\" " +
+                    $"dir=out action=block protocol=any remoteip={entry.IpCsv} " +
+                    $"enable=yes profile=any";
+                RunNetsh(args);
+            }
+
+            var nextFp = desiredByRule.ToDictionary(
+                kv => kv.Key, kv => kv.Value.Fp, StringComparer.OrdinalIgnoreCase);
+            lock (FwStateGate)
+                _lastFwFingerprints = nextFp;
+
+            var changed = removed > 0 || added > 0 || updated > 0;
+            return new Result(changed, desired.Count, desiredByRule.Count,
+                $"fw_add={added} upd={updated} rm={removed} rules={desiredByRule.Count}");
         }
         catch (Exception ex) when (IsAccessDenied(ex))
         {
@@ -189,12 +431,71 @@ internal static class DomainBlockEnforcer
         }
     }
 
+    private static bool SameRuleSet(
+        Dictionary<string, string> prev,
+        Dictionary<string, (string Domain, string IpCsv, string Fp)> desired)
+    {
+        if (prev.Count != desired.Count)
+            return false;
+        foreach (var (name, entry) in desired)
+        {
+            if (!prev.TryGetValue(name, out var fp) ||
+                !string.Equals(fp, entry.Fp, StringComparison.Ordinal))
+                return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Domains to resolve for firewall IPs. Skip www./m. twins when the apex is also
+    /// in the set (same A records usually) — fewer DNS queries, same block coverage.
+    /// Keep alternate apexes (googlevideo.com, youtu.be, …) — those cut mid-watch CDN.
+    /// </summary>
+    private static List<string> SelectResolveTargets(IReadOnlyList<string> desired)
+    {
+        var set = new HashSet<string>(desired, StringComparer.OrdinalIgnoreCase);
+        var list = new List<string>();
+        foreach (var domain in desired)
+        {
+            if (domain.StartsWith("www.", StringComparison.OrdinalIgnoreCase))
+            {
+                var apex = domain[4..];
+                if (set.Contains(apex))
+                    continue;
+            }
+            if (domain.StartsWith("m.", StringComparison.OrdinalIgnoreCase))
+            {
+                var apex = domain[2..];
+                if (set.Contains(apex))
+                    continue;
+            }
+            list.Add(domain);
+        }
+        return list;
+    }
+
+    private static bool IsStale(string domain)
+    {
+        if (!IpCache.TryGetValue(domain, out var e))
+            return true;
+        return DateTimeOffset.UtcNow >= e.ExpiresUtc;
+    }
+
     /// <summary>
     /// Resolve A/AAAA via Cloudflare DNS-over-HTTPS JSON so we get real IPs even when
-    /// local hosts already sinks the name (needed for firewall rules vs browser DoH).
+    /// local hosts already sinks the name (needed for firewall vs browser DoH).
+    /// Results cached for <see cref="IpCacheTtl"/>.
     /// </summary>
-    internal static IReadOnlyList<string> ResolvePublicIps(string domain)
+    internal static IReadOnlyList<string> ResolvePublicIps(string domain, bool forceRefresh = false)
     {
+        IpCache.TryGetValue(domain, out var cached);
+        if (!forceRefresh &&
+            cached is not null &&
+            DateTimeOffset.UtcNow < cached.ExpiresUtc)
+        {
+            return cached.Ips;
+        }
+
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         try
         {
@@ -231,7 +532,6 @@ internal static class DomainBlockEnforcer
         }
         catch
         {
-            // Fallback: system DNS (may be 0.0.0.0 if hosts already applied).
             try
             {
                 foreach (var addr in Dns.GetHostAddresses(domain))
@@ -246,7 +546,13 @@ internal static class DomainBlockEnforcer
             catch { /* ignore */ }
         }
 
-        return set.ToList();
+        var list = set.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+        // Keep previous IPs if resolve failed (CDN blip) so we don't drop mid-session blocks.
+        if (list.Count == 0 && cached is { Ips.Count: > 0 })
+            return cached.Ips;
+
+        IpCache[domain] = new IpCacheEntry(list, DateTimeOffset.UtcNow.Add(IpCacheTtl));
+        return list;
     }
 
     private static List<string> ListOwnedFirewallRules()
@@ -256,7 +562,6 @@ internal static class DomainBlockEnforcer
         if (!ok || string.IsNullOrEmpty(output))
             return list;
 
-        // Rules are blocks; "Rule Name:" lines.
         foreach (Match m in Regex.Matches(output, @"^Rule Name:\s*(.+)\s*$", RegexOptions.Multiline))
         {
             var name = m.Groups[1].Value.Trim();
@@ -313,33 +618,115 @@ internal static class DomainBlockEnforcer
     }
 
     /// <summary>
-    /// Chrome/Edge secure-DNS bypasses the hosts file. While web blocks are active,
-    /// force DnsOverHttpsMode=off via machine policy; clear on policy empty.
+    /// Chrome/Edge machine policies while web block is active:
+    /// DoH off, QuicAllowed=0, URLBlocklist wildcards for each apex (covers *.googlevideo.com).
+    /// URLBlocklist is what stops mid-watch YouTube — hosts cannot wildcard CDN subdomains.
     /// </summary>
-    private static Result ApplyBrowserDohPolicy(bool block)
+    private static Result ApplyBrowserPolicies(IReadOnlyList<string> domains)
     {
         try
         {
             var changed = false;
-            if (block)
+            if (domains.Count == 0)
             {
-                changed |= SetDohMode(ChromeDohKey, "off");
-                changed |= SetDohMode(EdgeDohKey, "off");
-                return new Result(changed, 1, 1, changed ? "doh_off" : "doh_already_off");
+                changed |= ClearBrowserPolicies(ChromePolicyKey, ChromeUrlBlockKey);
+                changed |= ClearBrowserPolicies(EdgePolicyKey, EdgeUrlBlockKey);
+                return new Result(changed, 0, 0, changed ? "browser_cleared" : "browser_absent");
             }
 
-            changed |= DeleteDohMode(ChromeDohKey);
-            changed |= DeleteDohMode(EdgeDohKey);
-            return new Result(changed, 0, 0, changed ? "doh_cleared" : "doh_absent");
+            var patterns = BuildUrlBlockPatterns(domains);
+            changed |= SetDohMode(ChromePolicyKey, "off");
+            changed |= SetDohMode(EdgePolicyKey, "off");
+            changed |= SetQuicAllowed(ChromePolicyKey, allowed: false);
+            changed |= SetQuicAllowed(EdgePolicyKey, allowed: false);
+            changed |= SetUrlBlocklist(ChromeUrlBlockKey, patterns);
+            changed |= SetUrlBlocklist(EdgeUrlBlockKey, patterns);
+            return new Result(changed, domains.Count, patterns.Count,
+                $"urlblock={patterns.Count}; doh=off; quic=off");
         }
         catch (Exception ex) when (IsAccessDenied(ex))
         {
-            return new Result(false, 0, 0, "doh_access_denied");
+            return new Result(false, domains.Count, 0, "access_denied_need_admin");
         }
         catch (Exception ex)
         {
-            return new Result(false, 0, 0, "doh_error:" + ex.Message);
+            return new Result(false, domains.Count, 0, "browser_error:" + ex.Message);
         }
+    }
+
+    private static List<string> BuildUrlBlockPatterns(IReadOnlyList<string> domains)
+    {
+        var apexes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var raw in domains)
+        {
+            var d = raw.Trim().ToLowerInvariant();
+            if (d.StartsWith("www.", StringComparison.Ordinal)) d = d[4..];
+            if (d.StartsWith("m.", StringComparison.Ordinal)) d = d[2..];
+            if (string.IsNullOrWhiteSpace(d) || !d.Contains('.'))
+                continue;
+            apexes.Add(d);
+        }
+
+        var patterns = new List<string>();
+        foreach (var a in apexes.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+        {
+            // Enterprise URLBlocklist patterns — subdomains of googlevideo/youtube included.
+            patterns.Add(a);
+            patterns.Add($"*.{a}");
+            patterns.Add($"*://{a}/*");
+            patterns.Add($"*://*.{a}/*");
+        }
+        return patterns;
+    }
+
+    private static bool SetUrlBlocklist(string keyPath, IReadOnlyList<string> patterns)
+    {
+        // Replace whole list so removals stick (Chrome reads numbered REG_SZ values).
+        try { Registry.LocalMachine.DeleteSubKeyTree(keyPath, throwOnMissingSubKey: false); }
+        catch { /* ignore */ }
+
+        using var key = Registry.LocalMachine.CreateSubKey(keyPath, writable: true);
+        if (key is null) return false;
+        for (var i = 0; i < patterns.Count; i++)
+            key.SetValue((i + 1).ToString(), patterns[i], RegistryValueKind.String);
+        return true;
+    }
+
+    private static bool SetQuicAllowed(string keyPath, bool allowed)
+    {
+        using var key = Registry.LocalMachine.CreateSubKey(keyPath, writable: true);
+        if (key is null) return false;
+        var want = allowed ? 1 : 0;
+        var prev = key.GetValue("QuicAllowed");
+        if (prev is int i && i == want)
+            return false;
+        key.SetValue("QuicAllowed", want, RegistryValueKind.DWord);
+        return true;
+    }
+
+    private static bool ClearBrowserPolicies(string policyKey, string urlBlockKey)
+    {
+        var changed = false;
+        try
+        {
+            Registry.LocalMachine.DeleteSubKeyTree(urlBlockKey, throwOnMissingSubKey: false);
+            changed = true;
+        }
+        catch { /* absent */ }
+
+        using var key = Registry.LocalMachine.OpenSubKey(policyKey, writable: true);
+        if (key is null) return changed;
+        if (key.GetValue("DnsOverHttpsMode") is not null)
+        {
+            key.DeleteValue("DnsOverHttpsMode", throwOnMissingValue: false);
+            changed = true;
+        }
+        if (key.GetValue("QuicAllowed") is not null)
+        {
+            key.DeleteValue("QuicAllowed", throwOnMissingValue: false);
+            changed = true;
+        }
+        return changed;
     }
 
     private static bool SetDohMode(string keyPath, string mode)
@@ -350,15 +737,6 @@ internal static class DomainBlockEnforcer
         if (string.Equals(prev, mode, StringComparison.OrdinalIgnoreCase))
             return false;
         key.SetValue("DnsOverHttpsMode", mode, RegistryValueKind.String);
-        return true;
-    }
-
-    private static bool DeleteDohMode(string keyPath)
-    {
-        using var key = Registry.LocalMachine.OpenSubKey(keyPath, writable: true);
-        if (key is null) return false;
-        if (key.GetValue("DnsOverHttpsMode") is null) return false;
-        key.DeleteValue("DnsOverHttpsMode", throwOnMissingValue: false);
         return true;
     }
 

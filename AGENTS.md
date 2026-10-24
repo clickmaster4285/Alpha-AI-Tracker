@@ -1,7 +1,22 @@
 # Alpha AI Tracker — Project Map
 
-> **Last audited:** 2026-10-23
+> **Last audited:** 2026-10-24
 > **Changelog:**
+>
+> - 2026-10-24: **P2 Web Blocker hardening — mid-session YouTube without PC/browser restart (service +
+>   web + server).** Root gap: hosts cannot wildcard `rr*---sn-*.googlevideo.com`, and apex firewall
+>   IPs miss rotating CDN nodes; TCP-kill alone misses QUIC. **Service:** incremental
+>   `AlphaAI-DLP-*` firewall + IP resolve cache (TTL); `TcpConnectionKiller` (`SetTcpEntry`); Chrome/Edge
+>   DoH-off + optional URLBlocklist/QuicAllowed; new **`DnsBlockPinWorker`** polls DNS client cache →
+>   pins live CDN IPs into `AlphaAI-DLP-PIN-*` + TCP-kill (no winsock/NIC reset, no employee restart).
+>   EnforceWorker forces hosts re-apply on every new policy version. **Web `/web-blocker`:** edit +
+>   revision history (migration **054** relational child tables — no TEXT[]); Active/Inactive +
+>   auto-publish; domain chips; related-domain expand (www/m + curated packs); suggestions deduped;
+>   URL paths field removed from UI. **Server:** `ExpandRelatedDomains`,
+>   `POST /web-blocker/domains/expand`, `GET /web-blocker/rules/:id/history`. Earlier same week:
+>   `EvidenceMap` sync 400 fix; protected-uninstall hosts clear; HTTPS branded block page + local CA;
+>   installer service-lock DeleteFile 5 fix. Verified: `dotnet build` DlpService; `go build`/`go vet`;
+>   `npx tsc --noEmit`. Lab: `TESTING.md` §F.
 >
 > - 2026-10-23: **P2 Web Blocker (web + Windows service) — domain DNS sink + schedule.** New web
 >   route `/web-blocker` (RBAC `web-blocker` under `security-dlp`) authors `web_navigate` rules with

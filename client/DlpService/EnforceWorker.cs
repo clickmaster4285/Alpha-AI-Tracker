@@ -207,7 +207,18 @@ public sealed class EnforceWorker : BackgroundService
 
         if (webFp == _lastWebFingerprint)
         {
-            // Keep block-page / pipe snapshot fresh even when hosts write is a no-op.
+            // Domain set unchanged — still refresh CDN IPs when cache TTL expires so
+            // rotating googlevideo addresses stay firewall-blocked (mid-session cut).
+            if (wantDomains.Count > 0)
+            {
+                var refresh = DomainBlockEnforcer.RefreshStaleFirewallIps(wantDomains);
+                if (refresh.Changed)
+                {
+                    _logger.LogInformation(
+                        "Web firewall IP refresh ({Detail})", refresh.Detail);
+                    await _store.AuditAsync("web_fw_ip_refresh", refresh.Detail, ct);
+                }
+            }
             _webBlock.Set(version, wantDomains);
             return;
         }
@@ -273,7 +284,7 @@ public sealed class EnforceWorker : BackgroundService
                 DateTimeOffset.UtcNow,
                 JsonSerializer.Serialize(new Dictionary<string, string>
                 {
-                    ["action"] = "hosts_dns_sink",
+                    ["action"] = "hosts_and_firewall",
                     ["domains"] = string.Join(",", wantDomains),
                     ["detail"] = result.Detail ?? "",
                     ["count"] = wantDomains.Count.ToString(),

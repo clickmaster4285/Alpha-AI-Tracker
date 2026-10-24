@@ -1,7 +1,9 @@
 # Web Architecture — Alpha AI Tracker Dashboard
 
-> **Last audited:** 2026-10-23 (Web Blocker + P2 domain UI)
+> **Last audited:** 2026-10-24 (Web Blocker edit/history/related domains)
 > **Changelog:**
+> - 2026-10-24: **Web Blocker UX** — domain chips, related-domain suggestions (deduped), Active/Inactive
+>   auto-publish, edit + revision history dialog, URL paths field removed from create/edit form.
 > - 2026-10-23: **Web Blocker page** under Security & DLP (`/web-blocker`, RBAC `web-blocker`).
 >   Authors `web_navigate` rules with `match.domains` / `match.paths` / `match.schedule`
 >   (timer window); still uses `POST /dlp/rules/publish`. `/dlp-rules` lists non-web triggers only.
@@ -495,7 +497,7 @@ in the `updateMutation`).
 | `/executive-dashboard` | Exec dashboard | Hardcoded demo data (scaffolding) | ❌ |
 | `/dlp-alerts` | DLP Alerts | Server (`GET/PATCH /dlp/alerts`, `GET /dlp/alerts/:id/history`; infinite scroll + URL filters; detail dialog Save-only triage) | ✅ |
 | `/dlp-rules` | DLP Rules | Server (`/dlp/rules` CRUD + `POST /dlp/rules/publish`; non-web triggers) | ✅ |
-| `/web-blocker` | Web Blocker | Same rules API filtered to `web_navigate` (domains / paths / schedule) + Publish | ✅ |
+| `/web-blocker` | Web Blocker | `/web-blocker/rules` CRUD + expand/history; auto-publish on save/toggle; related domains | ✅ |
 | `/shadow-it` | Shadow IT | Server (`GET/PATCH /shadow-it/apps`; Approve/Block/Flag) | ✅ |
 | `/emails` | Emails & Alerts | Hardcoded demo data (scaffolding) | ❌ |
 | `/projects` | Projects | Hardcoded demo data (scaffolding) | ❌ |

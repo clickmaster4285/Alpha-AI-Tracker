@@ -47,15 +47,17 @@ Companion: [plan.md](./plan.md) (DLP roadmap), [WORKFLOW.md](./WORKFLOW.md), [cl
 1. Role without `dlp-*` / `web-blocker` / `shadow-it` → sidebar entries hidden; direct URL → `/unauthorized`.
 2. `company_admin` → Security & DLP pages (Alerts / Rules / Web Blocker / Shadow IT) reachable.
 
-### F. Web Blocker (domain DNS sink — P2)
+### F. Web Blocker (hosts + firewall + DNS pin — P2)
 
-1. Web `/web-blocker` → Add rule: domains e.g. `example.com`, action **Block** or **Alert + Block**, optional schedule window.
-2. **Publish** → wait for policy pull on the PC.
-3. Expect hosts `# AlphaAI-DLP-BEGIN` block with both `0.0.0.0` **and** `::` for the domain (+ www), and `netsh advfirewall` rules named `AlphaAI-DLP-*` for real A/AAAA IPs (DoH bypass).
-4. Flush DNS happens on apply. Browser should fail; if Chrome Secure DNS is on, firewall IP rules are the effective block.
-5. `/dlp-alerts` shows a `web_navigate` row when the sink was applied.
-6. Delete/Publish clear → hosts + firewall owned rules removed; teardown clears too.
-7. **Honesty:** URL **paths** are alert-match only — not hard-blocked at the network layer.
+1. Web `/web-blocker` → Add rule: `youtube.com` with **Include related domains** (chips, not commas), action **Block** / **Alert + Block**, Status Active.
+2. Save auto-publishes → wait for policy pull (~30–60s). Active/Inactive also auto-publishes.
+3. Expect hosts `# AlphaAI-DLP-BEGIN` with `127.0.0.1` / `::1` per domain; `netsh` rules `AlphaAI-DLP-*` (apex) and soon `AlphaAI-DLP-PIN-*` (live CDN IPs).
+4. Apply path: browser policies + firewall + TCP-kill + hosts + flushdns only — **never** winsock / `ipconfig /release` / NIC reset.
+5. **Mid-session lab (no employee restart):** start YouTube playback → Publish/Activate → keep the same tab playing. `DnsBlockPinWorker` should see `rr*---sn-*.googlevideo.com` in DNS cache, pin those IPs, TCP-kill; playback should stall within a few seconds to ~1–2 minutes without closing Chrome or rebooting. Second browser should fail on navigate.
+6. Confirm: `netsh advfirewall firewall show rule name=all | findstr AlphaAI-DLP-PIN` shows pinned rules after video DNS runs; service log / `enforcement_audit` may show `web_dns_pin`.
+7. Active→Inactive clears hosts + owned FW + pins; Active again re-applies.
+8. Teardown / clear policy removes owned hosts block + all `AlphaAI-DLP-*` rules.
+9. Edit a rule → History dialog shows prior revisions (migration 054).
 
 ---
 

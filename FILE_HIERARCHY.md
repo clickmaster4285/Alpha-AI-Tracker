@@ -98,9 +98,10 @@ client/
 │
 ├── DlpService/                   ⭐ Windows LocalSystem DLP process (separate .csproj)
 │   ├── Program.cs · AlphaAITracker.Service.csproj · install-service.ps1 · uninstall-service.ps1
-│   ├── PolicyPullWorker · EnforceWorker · UsbStorEnforcer · RemovableDriveMonitor
+│   ├── PolicyPullWorker · EnforceWorker · DnsBlockPinWorker · UsbStorEnforcer · RemovableDriveMonitor
+│   ├── DomainBlockEnforcer · TcpConnectionKiller · DnsCacheReader · BlockPage(Server|Https|Cert)
 │   ├── AlertSyncWorker · PolicyStore · NamedPipeHost · ServiceAclHardener · TrackerWatchdogWorker
-│   └── DeviceCredentialStore · TeardownGate · UserSessionProcessLauncher · DlpConfig
+│   └── DeviceCredentialStore · TeardownGate · UserSessionProcessLauncher · DlpConfig · WebBlockState
 │
 ├── Platform/                        one ProcessCollector.cs per OS — the only place OS branching lives
 │   ├── Linux/  Windows/  MacOS/
