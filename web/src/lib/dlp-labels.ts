@@ -74,6 +74,68 @@ export function severityLabel(severity?: string | null): string {
 }
 
 /**
+ * Parse blocked / related domains from free-form evidence.
+ * Agents may send `domains` as CSV, JSON array string, or a single `domain` / `url`.
+ */
+export function evidenceDomains(evidence?: Record<string, unknown> | null): string[] {
+  if (!evidence || typeof evidence !== 'object') return [];
+  const out: string[] = [];
+  const push = (raw: string) => {
+    const s = raw.trim().toLowerCase();
+    if (!s || out.includes(s)) return;
+    out.push(s);
+  };
+
+  const domainsVal = evidence.domains;
+  if (typeof domainsVal === 'string' && domainsVal.trim()) {
+    const t = domainsVal.trim();
+    if (t.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(t) as unknown;
+        if (Array.isArray(parsed)) {
+          for (const item of parsed) {
+            if (typeof item === 'string') push(item);
+          }
+        }
+      } catch {
+        for (const part of t.split(/[,;\s]+/)) push(part);
+      }
+    } else {
+      for (const part of t.split(/[,;]+/)) push(part);
+    }
+  } else if (Array.isArray(domainsVal)) {
+    for (const item of domainsVal) {
+      if (typeof item === 'string') push(item);
+    }
+  }
+
+  for (const key of ['domain', 'host', 'hostname'] as const) {
+    const v = evidence[key];
+    if (typeof v === 'string' && v.trim()) push(v);
+  }
+
+  const url = evidence.url;
+  if (typeof url === 'string' && url.trim()) {
+    try {
+      const u = new URL(url.trim());
+      if (u.hostname) push(u.hostname);
+    } catch {
+      /* not a URL */
+    }
+  }
+
+  return out;
+}
+
+/** One-line domain hint for list rows (first domain + optional +N). */
+export function evidenceDomainLabel(evidence?: Record<string, unknown> | null): string {
+  const domains = evidenceDomains(evidence);
+  if (domains.length === 0) return '';
+  if (domains.length === 1) return domains[0];
+  return `${domains[0]} +${domains.length - 1}`;
+}
+
+/**
  * Extract a short, human "what happened" string from the evidence object.
  *
  * The evidence JSON is free-form (the agent decides the shape), so we look
@@ -82,8 +144,10 @@ export function severityLabel(severity?: string | null): string {
  */
 export function evidenceSummary(evidence?: Record<string, unknown> | null): string {
   if (!evidence || typeof evidence !== 'object') return '';
+  const domainLabel = evidenceDomainLabel(evidence);
+  if (domainLabel) return domainLabel;
   const preferred = [
-    'path', 'file', 'domain', 'url', 'app', 'application', 'process',
+    'path', 'file', 'url', 'app', 'application', 'process',
     'device', 'volume', 'reason', 'action', 'extension', 'target', 'source',
   ];
   for (const key of preferred) {

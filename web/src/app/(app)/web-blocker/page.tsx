@@ -6,6 +6,7 @@ import { Globe, History, Loader2, Pencil, Plus, Trash2, Upload, X } from 'lucide
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Switch } from '@/components/ui/switch';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { TimezoneCombobox, browserTimezone } from '@/components/TimezoneCombobox';
@@ -439,23 +440,31 @@ export default function WebBlockerPage() {
                   </div>
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0 flex-wrap justify-end">
-                  <button
-                    type="button"
-                    onClick={() => toggleMutation.mutate({ id: rule.id, enabled: !rule.enabled })}
-                    className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
-                      rule.enabled
-                        ? 'bg-success/15 text-success border-success/30'
-                        : 'bg-muted text-muted-foreground border-border'
-                    }`}
+                  <label
+                    className="inline-flex items-center gap-2 cursor-pointer"
                     title={
                       rule.enabled
                         ? 'Deactivate and publish (removes from agent hosts)'
                         : 'Activate and publish (re-applies agent hosts)'
                     }
-                    disabled={toggleMutation.isPending}
                   >
-                    {toggleMutation.isPending ? '…' : rule.enabled ? 'Active' : 'Inactive'}
-                  </button>
+                    <Switch
+                      checked={rule.enabled}
+                      disabled={toggleMutation.isPending}
+                      onCheckedChange={(checked) =>
+                        toggleMutation.mutate({ id: rule.id, enabled: checked })
+                      }
+                      className="h-4 w-7 [&>span]:h-3 [&>span]:w-3 [&>span]:data-[state=checked]:translate-x-3"
+                      aria-label={rule.enabled ? 'Deactivate rule' : 'Activate rule'}
+                    />
+                    <span
+                      className={`text-xs font-medium ${
+                        rule.enabled ? 'text-success' : 'text-muted-foreground'
+                      }`}
+                    >
+                      {rule.enabled ? 'Active' : 'Inactive'}
+                    </span>
+                  </label>
                   <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${severityColors[rule.severity] ?? ''}`}>
                     {rule.severity}
                   </span>
@@ -595,20 +604,18 @@ export default function WebBlockerPage() {
               </Select>
             </div>
 
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-medium text-muted-foreground">Status</span>
-              <button
-                type="button"
-                onClick={() => setForm((f) => ({ ...f, enabled: !f.enabled }))}
-                className={`px-2.5 py-1 rounded-full text-xs font-medium border ${
-                  form.enabled
-                    ? 'bg-success/15 text-success border-success/30'
-                    : 'bg-muted text-muted-foreground border-border'
-                }`}
-              >
-                {form.enabled ? 'Active' : 'Inactive'}
-              </button>
-            </div>
+            <label className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2">
+              <span className="text-sm">
+                Status:{' '}
+                <span className={form.enabled ? 'text-success font-medium' : 'text-muted-foreground'}>
+                  {form.enabled ? 'Active' : 'Inactive'}
+                </span>
+              </span>
+              <Switch
+                checked={form.enabled}
+                onCheckedChange={(checked) => setForm((f) => ({ ...f, enabled: checked }))}
+              />
+            </label>
 
             <label className="flex items-center gap-2 text-sm cursor-pointer">
               <input

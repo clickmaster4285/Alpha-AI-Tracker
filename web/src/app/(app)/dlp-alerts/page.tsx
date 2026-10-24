@@ -23,6 +23,7 @@ import { useUrlActivityFilter } from '@/hooks/use-url-activity-filter';
 import {
   actionLabel,
   alertTypeLabel,
+  evidenceDomainLabel,
   evidenceSummary,
   severityLabel,
   statusLabel,
@@ -266,6 +267,7 @@ function DLPAlertsInner() {
         <div className="bg-card rounded-xl border border-border divide-y divide-border overflow-hidden">
           {alerts.map((a, i) => {
             const evidence = evidenceSummary(a.evidence);
+            const blockedDomain = evidenceDomainLabel(a.evidence);
             return (
               <motion.button
                 key={a.id}
@@ -295,6 +297,11 @@ function DLPAlertsInner() {
                     <span className="text-sm font-medium text-foreground">
                       {alertTypeLabel(a.type)}
                     </span>
+                    {blockedDomain && (
+                      <code className="px-1.5 py-0.5 rounded bg-muted text-[11px] font-mono text-foreground max-w-[14rem] truncate">
+                        {blockedDomain}
+                      </code>
+                    )}
                     <span
                       className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${SEVERITY_BADGE[a.severity] ?? ''}`}
                     >
@@ -310,7 +317,7 @@ function DLPAlertsInner() {
                     {[
                       a.employeeName || a.employeeId,
                       actionLabel(a.actionTaken),
-                      evidence || null,
+                      !blockedDomain && evidence ? evidence : null,
                     ]
                       .filter(Boolean)
                       .join(' · ')}

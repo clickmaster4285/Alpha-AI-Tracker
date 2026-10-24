@@ -1674,6 +1674,24 @@ export interface DlpRule {
   updatedAt: string;
 }
 
+/** Snapshot taken before each classic DLP rule UPDATE. */
+export interface DlpRuleRevision {
+  id: number;
+  ruleId: string;
+  revision: number;
+  name: string;
+  enabled: boolean;
+  trigger: DlpTrigger;
+  action: DlpAction;
+  severity: DlpSeverity;
+  scopeAll: boolean;
+  extensions: string[];
+  patterns: string[];
+  changedBy?: string;
+  changedByName: string;
+  createdAt: string;
+}
+
 export interface WebBlockerRule {
   id: string;
   name: string;
@@ -1821,6 +1839,7 @@ export const dlpApi = {
 
   rules: {
     list: () => request<{ rules: DlpRule[]; total: number }>('/dlp/rules'),
+    get: (id: string) => request<DlpRule>(`/dlp/rules/${id}`),
     create: (data: {
       name: string;
       trigger: string;
@@ -1838,6 +1857,10 @@ export const dlpApi = {
     }>) => request<DlpRule>(`/dlp/rules/${id}`, { method: 'PATCH', body: data }),
     delete: (id: string) =>
       request<{ message: string }>(`/dlp/rules/${id}`, { method: 'DELETE' }),
+    history: (id: string) =>
+      request<{ revisions: DlpRuleRevision[]; total: number }>(
+        `/dlp/rules/${id}/history`,
+      ),
     publish: () =>
       request<PublishDlpPolicyResponse>('/dlp/rules/publish', { method: 'POST' }),
   },

@@ -94,7 +94,7 @@ func (r *DlpRepo) CreateRule(ctx context.Context, name, trigger, action, severit
 	return rule, nil
 }
 
-func (r *DlpRepo) UpdateRule(ctx context.Context, id string, name *string, enabled *bool, trigger, action, severity *string, scopeAll *bool, extensions, patterns *[]string) (*models.DlpRule, error) {
+func (r *DlpRepo) UpdateRule(ctx context.Context, id string, name *string, enabled *bool, trigger, action, severity *string, scopeAll *bool, extensions, patterns *[]string, changedBy *string) (*models.DlpRule, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -105,6 +105,9 @@ func (r *DlpRepo) UpdateRule(ctx context.Context, id string, name *string, enabl
 		return nil, nil
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := insertDlpRuleRevision(ctx, tx, *cur, changedBy); err != nil {
 		return nil, err
 	}
 	if name != nil {
@@ -126,7 +129,7 @@ func (r *DlpRepo) UpdateRule(ctx context.Context, id string, name *string, enabl
 		cur.ScopeAll = *scopeAll
 	}
 	if _, err := tx.Exec(ctx, `
-		UPDATE dlp_rules SET name=$2,enabled=$3,trigger=$4,action=$5,severity=$6,scope_all=$7
+		UPDATE dlp_rules SET name=$2,enabled=$3,trigger=$4,action=$5,severity=$6,scope_all=$7,updated_at=NOW()
 		WHERE id=$1::uuid AND deleted_at IS NULL`,
 		id, cur.Name, cur.Enabled, cur.Trigger, cur.Action, cur.Severity, cur.ScopeAll); err != nil {
 		return nil, err
@@ -151,6 +154,105 @@ func (r *DlpRepo) UpdateRule(ctx context.Context, id string, name *string, enabl
 		return nil, err
 	}
 	return rule, nil
+}
+
+func (r *DlpRepo) ListDlpRuleRevisions(ctx context.Context, ruleID string) ([]models.DlpRuleRevision, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT rev.id, rev.rule_id::text, rev.revision, rev.name, rev.enabled, rev.trigger, rev.action, rev.severity,
+		       rev.scope_all,
+		       COALESCE((SELECT array_agg(e.extension ORDER BY e.extension)
+		                 FROM dlp_revision_extensions e WHERE e.revision_id=rev.id), ARRAY[]::text[]),
+		       COALESCE((SELECT array_agg(p.pattern ORDER BY p.pattern)
+		                 FROM dlp_revision_patterns p WHERE p.revision_id=rev.id), ARRAY[]::text[]),
+		       rev.changed_by::text, COALESCE(u.name, ''), rev.created_at
+		FROM dlp_rule_revisions rev
+		LEFT JOIN users u ON u.id = rev.changed_by AND u.deleted_at IS NULL
+		WHERE rev.rule_id = $1::uuid
+		ORDER BY rev.revision DESC`, ruleID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]models.DlpRuleRevision, 0)
+	for rows.Next() {
+		var rev models.DlpRuleRevision
+		var changedBy *string
+		if err := rows.Scan(
+			&rev.ID, &rev.RuleID, &rev.Revision, &rev.Name, &rev.Enabled, &rev.Trigger, &rev.Action, &rev.Severity,
+			&rev.ScopeAll, &rev.Extensions, &rev.Patterns,
+			&changedBy, &rev.ChangedByName, &rev.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		rev.ChangedBy = changedBy
+		if rev.Extensions == nil {
+			rev.Extensions = []string{}
+		}
+		if rev.Patterns == nil {
+			rev.Patterns = []string{}
+		}
+		out = append(out, rev)
+	}
+	return out, rows.Err()
+}
+
+func insertDlpRuleRevision(ctx context.Context, tx pgx.Tx, cur models.DlpRule, changedBy *string) error {
+	var nextRev int
+	if err := tx.QueryRow(ctx,
+		`SELECT COALESCE(MAX(revision),0)+1 FROM dlp_rule_revisions WHERE rule_id=$1::uuid`,
+		cur.ID).Scan(&nextRev); err != nil {
+		return err
+	}
+
+	var revisionID int64
+	if changedBy != nil && *changedBy != "" {
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO dlp_rule_revisions
+				(rule_id,revision,name,enabled,trigger,action,severity,scope_all,changed_by)
+			VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9::uuid)
+			RETURNING id`,
+			cur.ID, nextRev, cur.Name, cur.Enabled, cur.Trigger, cur.Action, cur.Severity, cur.ScopeAll, *changedBy,
+		).Scan(&revisionID); err != nil {
+			return err
+		}
+	} else {
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO dlp_rule_revisions
+				(rule_id,revision,name,enabled,trigger,action,severity,scope_all)
+			VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8)
+			RETURNING id`,
+			cur.ID, nextRev, cur.Name, cur.Enabled, cur.Trigger, cur.Action, cur.Severity, cur.ScopeAll,
+		).Scan(&revisionID); err != nil {
+			return err
+		}
+	}
+	return replaceDlpRevisionValues(ctx, tx, revisionID, cur.Extensions, cur.Patterns)
+}
+
+func replaceDlpRevisionValues(ctx context.Context, tx pgx.Tx, revisionID int64, extensions, patterns []string) error {
+	for _, ext := range extensions {
+		ext = strings.TrimSpace(ext)
+		if ext == "" {
+			continue
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO dlp_revision_extensions (revision_id, extension) VALUES ($1,$2)
+			 ON CONFLICT (revision_id, extension) DO NOTHING`, revisionID, ext); err != nil {
+			return err
+		}
+	}
+	for _, pat := range patterns {
+		pat = strings.TrimSpace(pat)
+		if pat == "" {
+			continue
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO dlp_revision_patterns (revision_id, pattern) VALUES ($1,$2)
+			 ON CONFLICT (revision_id, pattern) DO NOTHING`, revisionID, pat); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *DlpRepo) SoftDeleteRule(ctx context.Context, id string) error {

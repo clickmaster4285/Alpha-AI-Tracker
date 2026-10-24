@@ -45,6 +45,17 @@ func (s *DlpService) ListRules(ctx context.Context) ([]models.DlpRule, error) {
 	return s.repo.ListRules(ctx)
 }
 
+func (s *DlpService) GetRule(ctx context.Context, id string) (*models.DlpRule, error) {
+	rule, err := s.repo.GetRule(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if rule == nil {
+		return nil, fmt.Errorf("dlp rule not found")
+	}
+	return rule, nil
+}
+
 func (s *DlpService) CreateRule(ctx context.Context, req dto.CreateDlpRuleRequest) (*models.DlpRule, error) {
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
@@ -82,7 +93,7 @@ func (s *DlpService) CreateRule(ctx context.Context, req dto.CreateDlpRuleReques
 	return s.repo.CreateRule(ctx, name, trigger, action, severity, enabled, scopeAll, req.Extensions, req.Patterns)
 }
 
-func (s *DlpService) UpdateRule(ctx context.Context, id string, req dto.UpdateDlpRuleRequest) (*models.DlpRule, error) {
+func (s *DlpService) UpdateRule(ctx context.Context, id string, req dto.UpdateDlpRuleRequest, changedBy *string) (*models.DlpRule, error) {
 	if req.Trigger != nil && *req.Trigger == "web_navigate" {
 		return nil, fmt.Errorf("web_navigate rules must be created in Web Blocker")
 	}
@@ -95,7 +106,7 @@ func (s *DlpService) UpdateRule(ctx context.Context, id string, req dto.UpdateDl
 	if req.Severity != nil && !allowedSeverities[*req.Severity] {
 		return nil, fmt.Errorf("invalid severity")
 	}
-	rule, err := s.repo.UpdateRule(ctx, id, req.Name, req.Enabled, req.Trigger, req.Action, req.Severity, req.ScopeAll, req.Extensions, req.Patterns)
+	rule, err := s.repo.UpdateRule(ctx, id, req.Name, req.Enabled, req.Trigger, req.Action, req.Severity, req.ScopeAll, req.Extensions, req.Patterns, changedBy)
 	if err != nil {
 		return nil, err
 	}
@@ -107,6 +118,17 @@ func (s *DlpService) UpdateRule(ctx context.Context, id string, req dto.UpdateDl
 
 func (s *DlpService) DeleteRule(ctx context.Context, id string) error {
 	return s.repo.SoftDeleteRule(ctx, id)
+}
+
+func (s *DlpService) ListDlpRuleRevisions(ctx context.Context, ruleID string) ([]models.DlpRuleRevision, error) {
+	cur, err := s.repo.GetRule(ctx, ruleID)
+	if err != nil {
+		return nil, err
+	}
+	if cur == nil {
+		return nil, fmt.Errorf("dlp rule not found")
+	}
+	return s.repo.ListDlpRuleRevisions(ctx, ruleID)
 }
 
 // ── Web blocker ─────────────────────────────────────────────────────────────

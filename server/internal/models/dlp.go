@@ -21,6 +21,24 @@ type DlpRule struct {
 	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
+// DlpRuleRevision is a snapshot of a classic DLP rule taken before each UPDATE.
+type DlpRuleRevision struct {
+	ID            int64     `json:"id"`
+	RuleID        string    `json:"ruleId"`
+	Revision      int       `json:"revision"`
+	Name          string    `json:"name"`
+	Enabled       bool      `json:"enabled"`
+	Trigger       string    `json:"trigger"`
+	Action        string    `json:"action"`
+	Severity      string    `json:"severity"`
+	ScopeAll      bool      `json:"scopeAll"`
+	Extensions    []string  `json:"extensions"`
+	Patterns      []string  `json:"patterns"`
+	ChangedBy     *string   `json:"changedBy,omitempty"`
+	ChangedByName string    `json:"changedByName"`
+	CreatedAt     time.Time `json:"createdAt"`
+}
+
 // WebBlockerRule is an admin-editable website block rule (dedicated tables).
 type WebBlockerRule struct {
 	ID                string    `json:"id"`

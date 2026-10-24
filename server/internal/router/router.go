@@ -240,6 +240,8 @@ func Setup(
 		dlp := protected.Group("/dlp")
 		dlp.GET("/rules", dlpHandler.ListRules)
 		dlp.POST("/rules", dlpHandler.CreateRule)
+		dlp.GET("/rules/:id", dlpHandler.GetRule)
+		dlp.GET("/rules/:id/history", dlpHandler.ListDlpRuleRevisions)
 		dlp.PATCH("/rules/:id", dlpHandler.UpdateRule)
 		dlp.DELETE("/rules/:id", dlpHandler.DeleteRule)
 		dlp.POST("/rules/publish", dlpHandler.Publish)

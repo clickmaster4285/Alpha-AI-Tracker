@@ -1,7 +1,10 @@
 # Server Architecture — Alpha AI Tracker API
 
-> **Last audited:** 2026-10-24 (Web Blocker expand + revision history)
+> **Last audited:** 2026-10-24 (DLP rule revisions 055)
 > **Changelog:**
+> - 2026-10-24: **Classic DLP rule revisions** — migration **055** `dlp_rule_revisions` +
+>   `dlp_revision_extensions` / `dlp_revision_patterns`; snapshot before each `PATCH /dlp/rules/:id`;
+>   `GET /dlp/rules/:id` + `GET /dlp/rules/:id/history`.
 > - 2026-10-24: **Web Blocker** — migration **054** revision child tables (relational, no TEXT[]);
 >   `ExpandRelatedDomains` + `POST /web-blocker/domains/expand`; `GET /web-blocker/rules/:id/history`;
 >   create/update `expandRelated`; EvidenceMap alert sync 400 fix (nested JSON → string).
@@ -541,8 +544,10 @@ path that moves draft rules onto endpoints (immutable `dlp_policy_versions`).
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET/POST | `/dlp/rules` | List / create editable rules |
-| PATCH/DELETE | `/dlp/rules/:id` | Update / soft-delete |
+| GET/POST | `/dlp/rules` | List / create editable rules (non-web triggers) |
+| GET | `/dlp/rules/:id` | Single rule detail |
+| GET | `/dlp/rules/:id/history` | Pre-update snapshots (migration 055) |
+| PATCH/DELETE | `/dlp/rules/:id` | Update (snapshots revision) / soft-delete |
 | POST | `/dlp/rules/publish` | Compile enabled rules → new `dlp_policy_versions` row (`policyVersion`, `hash`, `ruleCount`) |
 | GET | `/dlp/alerts` | Infinite-scroll inbox (`q`, `status`, `severity`, `type`, `employeeId`, `dateFrom`, `dateTo`, `page`, `perPage`) + status counters |
 | PATCH | `/dlp/alerts/:id` | Triage: `status` / `assignedTo` / `notes` (writes `dlp_alert_events` per changed field) |

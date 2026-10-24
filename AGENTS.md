@@ -3,6 +3,14 @@
 > **Last audited:** 2026-10-24
 > **Changelog:**
 >
+> - 2026-10-24: **DLP web UX — alerts domains + full DLP rules CRUD/history + status Switch.**
+>   `/dlp-alerts` list shows blocked domain chip from evidence; detail Domains section is a
+>   per-domain list (not CSV). `/dlp-rules` gains edit + detail dialog + revision history
+>   (migration **055** `dlp_rule_revisions` + child extension/pattern tables; `GET/PATCH`
+>   history endpoints mirror Web Blocker) and Active/Inactive Switch with auto-publish.
+>   `/web-blocker` list + form status use the same Switch control. Verified: `go build`/`go
+>   vet`; `npx tsc --noEmit`.
+>
 > - 2026-10-24: **Reusable searchable IANA timezone picker (web).** New
 >   `web/src/components/TimezoneCombobox.tsx` (`@vvo/tzdb` + cmdk). Used by `/web-blocker` schedule
 >   and `/shifts` forms so admins pick real zones (e.g. Asia/Karachi) instead of free-text that

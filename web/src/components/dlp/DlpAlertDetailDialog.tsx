@@ -27,7 +27,14 @@ import {
   type DlpAlertHistoryEvent,
   type DlpAlertStatus,
 } from '@/lib/api';
-import { actionLabel, alertTypeLabel, severityLabel, statusLabel, titleize } from '@/lib/dlp-labels';
+import {
+  actionLabel,
+  alertTypeLabel,
+  evidenceDomains,
+  severityLabel,
+  statusLabel,
+  titleize,
+} from '@/lib/dlp-labels';
 import { formatDateTime, formatRelative } from '@/lib/format';
 
 const SEVERITY_BADGE: Record<string, string> = {
@@ -144,7 +151,10 @@ export default function DlpAlertDetailDialog({ alert, open, onOpenChange }: Prop
 
   if (!alert) return null;
 
-  const evidenceEntries = Object.entries(alert.evidence ?? {});
+  const domains = evidenceDomains(alert.evidence);
+  const evidenceEntries = Object.entries(alert.evidence ?? {}).filter(
+    ([key]) => key !== 'domains' && key !== 'domain',
+  );
   const saving = saveMutation.isPending;
   const assigneeLabel = ASSIGNEE_LABEL[status];
 
@@ -198,11 +208,27 @@ export default function DlpAlertDetailDialog({ alert, open, onOpenChange }: Prop
             <Fact label="Raw type" value={titleize(alert.type)} />
           </dl>
 
+          {/* ── Domains (list, not CSV) ───────────────────────────── */}
+          {domains.length > 0 && (
+            <section>
+              <h3 className="text-sm font-semibold text-foreground mb-2">
+                Domains ({domains.length})
+              </h3>
+              <ul className="rounded-lg border border-border bg-muted/30 divide-y divide-border max-h-48 overflow-y-auto">
+                {domains.map((d) => (
+                  <li key={d} className="px-3 py-2 text-xs font-mono text-foreground break-all">
+                    {d}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+
           {/* ── Evidence ──────────────────────────────────────────── */}
           <section>
             <div className="flex items-center justify-between mb-2">
               <h3 className="text-sm font-semibold text-foreground">Evidence</h3>
-              {evidenceEntries.length > 0 && (
+              {Object.keys(alert.evidence ?? {}).length > 0 && (
                 <button
                   type="button"
                   onClick={copyEvidence}
@@ -213,8 +239,10 @@ export default function DlpAlertDetailDialog({ alert, open, onOpenChange }: Prop
                 </button>
               )}
             </div>
-            {evidenceEntries.length === 0 ? (
+            {evidenceEntries.length === 0 && domains.length === 0 ? (
               <p className="text-xs text-muted-foreground">No evidence was reported with this alert.</p>
+            ) : evidenceEntries.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No additional evidence fields.</p>
             ) : (
               <div className="rounded-lg border border-border bg-muted/30 divide-y divide-border">
                 {evidenceEntries.map(([key, value]) => (

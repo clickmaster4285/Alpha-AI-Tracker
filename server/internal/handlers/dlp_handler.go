@@ -119,13 +119,28 @@ func (h *DlpHandler) CreateRule(c echo.Context) error {
 	return c.JSON(http.StatusCreated, rule)
 }
 
+func (h *DlpHandler) GetRule(c echo.Context) error {
+	rule, err := h.svc.GetRule(c.Request().Context(), c.Param("id"))
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return errorResponse(c, http.StatusNotFound, "Failed to get DLP rule", err)
+		}
+		return errorResponse(c, http.StatusInternalServerError, "Failed to get DLP rule", err)
+	}
+	return c.JSON(http.StatusOK, rule)
+}
+
 func (h *DlpHandler) UpdateRule(c echo.Context) error {
 	id := c.Param("id")
 	var req dto.UpdateDlpRuleRequest
 	if err := c.Bind(&req); err != nil {
 		return errorResponse(c, http.StatusBadRequest, "Invalid request body", err)
 	}
-	rule, err := h.svc.UpdateRule(c.Request().Context(), id, req)
+	var changedBy *string
+	if uid, ok := c.Get("user_id").(string); ok && uid != "" {
+		changedBy = &uid
+	}
+	rule, err := h.svc.UpdateRule(c.Request().Context(), id, req, changedBy)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			return errorResponse(c, http.StatusNotFound, "Failed to update DLP rule", err)
@@ -143,6 +158,21 @@ func (h *DlpHandler) DeleteRule(c echo.Context) error {
 		return errorResponse(c, http.StatusInternalServerError, "Failed to delete DLP rule", err)
 	}
 	return c.JSON(http.StatusOK, map[string]string{"message": "rule deleted"})
+}
+
+func (h *DlpHandler) ListDlpRuleRevisions(c echo.Context) error {
+	revs, err := h.svc.ListDlpRuleRevisions(c.Request().Context(), c.Param("id"))
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return errorResponse(c, http.StatusNotFound, "Failed to list DLP rule revisions", err)
+		}
+		return errorResponse(c, http.StatusInternalServerError, "Failed to list DLP rule revisions", err)
+	}
+	out := make([]any, len(revs))
+	for i := range revs {
+		out[i] = revs[i]
+	}
+	return c.JSON(http.StatusOK, dto.DlpRuleRevisionListResponse{Revisions: out, Total: len(out)})
 }
 
 func (h *DlpHandler) ListWebBlockerRules(c echo.Context) error {

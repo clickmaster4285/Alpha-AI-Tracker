@@ -1,7 +1,10 @@
 # Web Architecture — Alpha AI Tracker Dashboard
 
-> **Last audited:** 2026-10-24 (TimezoneCombobox + Web Blocker schedule TZ)
+> **Last audited:** 2026-10-24 (DLP alerts domains + DLP rules CRUD/history Switch)
 > **Changelog:**
+> - 2026-10-24: **DLP UX** — `/dlp-alerts` shows blocked domain chip + detail Domains list
+>   (`evidenceDomains` in `dlp-labels.ts`). `/dlp-rules` full edit/detail/history + Active Switch
+>   with auto-publish (`GET /dlp/rules/:id/history`). `/web-blocker` status uses Switch (list + form).
 > - 2026-10-24: **Reusable `TimezoneCombobox`** (`components/TimezoneCombobox.tsx`, `@vvo/tzdb` +
 >   cmdk search). Wired into `/web-blocker` schedule form and `/shifts` create/edit. Prefer IANA
 >   picks (e.g. Asia/Karachi) so Windows DLP schedule eval does not silently fall back to UTC.
@@ -499,8 +502,8 @@ in the `updateMutation`).
 | `/audit-log` | Audit log | Hardcoded demo data (scaffolding) | ❌ |
 | `/executive-dashboard` | Exec dashboard | Hardcoded demo data (scaffolding) | ❌ |
 | `/dlp-alerts` | DLP Alerts | Server (`GET/PATCH /dlp/alerts`, `GET /dlp/alerts/:id/history`; infinite scroll + URL filters; detail dialog Save-only triage) | ✅ |
-| `/dlp-rules` | DLP Rules | Server (`/dlp/rules` CRUD + `POST /dlp/rules/publish`; non-web triggers) | ✅ |
-| `/web-blocker` | Web Blocker | `/web-blocker/rules` CRUD + expand/history; auto-publish; related domains; schedule + `TimezoneCombobox` | ✅ |
+| `/dlp-rules` | DLP Rules | `/dlp/rules` CRUD + get/history + publish; edit/detail dialogs; Active Switch auto-publish | ✅ |
+| `/web-blocker` | Web Blocker | `/web-blocker/rules` CRUD + expand/history; Switch status + auto-publish; schedule + `TimezoneCombobox` | ✅ |
 | `/shadow-it` | Shadow IT | Server (`GET/PATCH /shadow-it/apps`; Approve/Block/Flag) | ✅ |
 | `/emails` | Emails & Alerts | Hardcoded demo data (scaffolding) | ❌ |
 | `/projects` | Projects | Hardcoded demo data (scaffolding) | ❌ |

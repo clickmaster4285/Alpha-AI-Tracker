@@ -37,6 +37,11 @@ type DlpRuleListResponse struct {
 	Total int   `json:"total"`
 }
 
+type DlpRuleRevisionListResponse struct {
+	Revisions []any `json:"revisions"`
+	Total     int   `json:"total"`
+}
+
 // ── Admin: Web Blocker ──────────────────────────────────────────────────────
 
 type CreateWebBlockerRuleRequest struct {
