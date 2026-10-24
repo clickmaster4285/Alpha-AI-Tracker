@@ -3,6 +3,11 @@
 > **Last audited:** 2026-10-24
 > **Changelog:**
 >
+> - 2026-10-24: **Reusable searchable IANA timezone picker (web).** New
+>   `web/src/components/TimezoneCombobox.tsx` (`@vvo/tzdb` + cmdk). Used by `/web-blocker` schedule
+>   and `/shifts` forms so admins pick real zones (e.g. Asia/Karachi) instead of free-text that
+>   can break Windows DLP schedule eval (silent UTC fallback). Verified: `npx tsc --noEmit`.
+>
 > - 2026-10-24: **Production web-block reconcile + DNS-pin generation lock (DlpService).** Root cause
 >   of YouTube staying blocked after Inactive while Facebook cleared: orphan
 >   `AlphaAI-DLP-PIN-*` firewall rules (CDN IPs, not in `dlp.db` / not named per-site) plus pin

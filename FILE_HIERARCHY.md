@@ -258,6 +258,7 @@ web/
     │   ├── live-stream/           WatchTile (FPS) · EmployeeSidebar · PreviewGrid · selection helpers
     │   ├── dlp/                   DlpAlertDetailDialog (triage Save + history)
     │   ├── EmployeeSelector.tsx   searchable employee picker (shared query with EmployeePage)
+    │   ├── TimezoneCombobox.tsx   searchable IANA TZ picker (@vvo/tzdb) — Web Blocker + Shifts
     │   ├── employees/             EmployeePage shell · InventoryTable · EmptyState · DeviceClassIcon
     │   ├── journey/               FocusTime (foreground/background stacked bar) · ActivityFilters (search + date presets)
     │   ├── sessions/              SessionStatusBadge (3-state app_sessions lifecycle: ACTIVE / STALE / CLOSED)

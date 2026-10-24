@@ -70,6 +70,12 @@ After **Delete rule + Publish** (or Active→Inactive) wait ~30–60s for policy
 5. Chrome: open a **fresh** tab to the formerly blocked site — must **not** show “Your organization doesn't allow…”. Empty `dlp.db` alone is not enough; leftovers mean EnforceWorker must run `Apply([])` / self-heal (`web_domain_clear` in audit). Chrome may take a moment to drop enterprise policy after registry clear.
 6. **PIN leftovers:** YouTube often stays denied via `AlphaAI-DLP-PIN-*` (CDN IPs) even when `youtube` is gone from hosts. `findstr AlphaAI-DLP` must show **no** `PIN-` rules after clear. Pins are **not** in `dlp.db` — clear is by firewall name prefix under a generation lock so the pin worker cannot recreate them after Inactive.
 
+#### F.1b Schedule + timezone
+
+1. Create/edit a web-blocker rule → enable **Timer-based restriction** → pick days/start/end.
+2. Timezone field is a searchable dropdown (`TimezoneCombobox`); select **Asia/Karachi** (or the employee locale), not free-text / not UTC unless intended.
+3. Publish → wait for pull. Inside the window (in that IANA zone) domains block; outside the window they clear (hosts/FW/PIN). Wrong TZ or silent UTC fallback on the service makes the window look “broken” in local wall-clock.
+
 #### F.2 High-churn lab (100-site production path)
 
 1. Publish ~20+ domains including `youtube.com` (+ related) and several others.

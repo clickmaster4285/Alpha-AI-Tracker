@@ -9,17 +9,10 @@ import { shiftsApi, type Shift, type CreateShiftPayload } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { TimezoneCombobox, browserTimezone } from '@/components/TimezoneCombobox';
 import { useUrlQueryState } from '@/hooks/use-url-query-state';
 
 const ALL_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const;
-
-function browserTimezone(): string {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-  } catch {
-    return 'UTC';
-  }
-}
 
 const DEFAULT_FORM: CreateShiftPayload = {
   name: '',
@@ -459,10 +452,9 @@ function ShiftManagementInner() {
             </div>
             <div>
               <label className="text-sm font-semibold text-foreground mb-1 block">IANA Timezone</label>
-              <Input
+              <TimezoneCombobox
                 value={form.timezone}
-                onChange={e => setForm({ ...form, timezone: e.target.value })}
-                placeholder="e.g. Asia/Karachi"
+                onChange={(tz) => setForm({ ...form, timezone: tz })}
               />
             </div>
             <div>

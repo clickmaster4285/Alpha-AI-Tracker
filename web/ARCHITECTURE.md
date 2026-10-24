@@ -1,7 +1,10 @@
 # Web Architecture — Alpha AI Tracker Dashboard
 
-> **Last audited:** 2026-10-24 (Web Blocker edit/history/related domains)
+> **Last audited:** 2026-10-24 (TimezoneCombobox + Web Blocker schedule TZ)
 > **Changelog:**
+> - 2026-10-24: **Reusable `TimezoneCombobox`** (`components/TimezoneCombobox.tsx`, `@vvo/tzdb` +
+>   cmdk search). Wired into `/web-blocker` schedule form and `/shifts` create/edit. Prefer IANA
+>   picks (e.g. Asia/Karachi) so Windows DLP schedule eval does not silently fall back to UTC.
 > - 2026-10-24: **Web Blocker UX** — domain chips, related-domain suggestions (deduped), Active/Inactive
 >   auto-publish, edit + revision history dialog, URL paths field removed from create/edit form.
 > - 2026-10-23: **Web Blocker page** under Security & DLP (`/web-blocker`, RBAC `web-blocker`).
@@ -485,7 +488,7 @@ in the `updateMutation`).
 | `/live-stream` | Live stream | WebRTC SFU VP8 preview (Windows; consent `live_view`; FPS; multi-tile `?ids=`; optional ticket `watchBaseUrl`; Open theater) | ✅ |
 | `/live-stream/theater` | Live stream theater | Full-bleed popout (no AppSidebar); employee sidebar + same tiles; `(live-popout)` layout | ✅ |
 | `/kpis` | KPIs & KRAs | Hardcoded demo data (scaffolding) | ❌ |
-| `/shifts` | Shift management | Server (`/shifts` CRUD; IANA timezone field; new-shift defaults to browser zone) | ✅ |
+| `/shifts` | Shift management | Server (`/shifts` CRUD; `TimezoneCombobox` IANA picker; defaults to browser zone) | ✅ |
 | `/timesheets` | Timesheets | Server (`/attendance/range`; empty from/to = last 366 days; Events modal via `GET /attendance/events`) | ✅ |
 | `/attendance` | Attendance log | Server (`/attendance/range` per employee/day; status + late minutes from server) | ✅ |
 | `/gps-location` | GPS & Location | Coming Soon (`LOCATION_UI_ENABLED=false`; live code in `GpsLocationLive.tsx`) | ⏸ |
@@ -497,7 +500,7 @@ in the `updateMutation`).
 | `/executive-dashboard` | Exec dashboard | Hardcoded demo data (scaffolding) | ❌ |
 | `/dlp-alerts` | DLP Alerts | Server (`GET/PATCH /dlp/alerts`, `GET /dlp/alerts/:id/history`; infinite scroll + URL filters; detail dialog Save-only triage) | ✅ |
 | `/dlp-rules` | DLP Rules | Server (`/dlp/rules` CRUD + `POST /dlp/rules/publish`; non-web triggers) | ✅ |
-| `/web-blocker` | Web Blocker | `/web-blocker/rules` CRUD + expand/history; auto-publish on save/toggle; related domains | ✅ |
+| `/web-blocker` | Web Blocker | `/web-blocker/rules` CRUD + expand/history; auto-publish; related domains; schedule + `TimezoneCombobox` | ✅ |
 | `/shadow-it` | Shadow IT | Server (`GET/PATCH /shadow-it/apps`; Approve/Block/Flag) | ✅ |
 | `/emails` | Emails & Alerts | Hardcoded demo data (scaffolding) | ❌ |
 | `/projects` | Projects | Hardcoded demo data (scaffolding) | ❌ |
