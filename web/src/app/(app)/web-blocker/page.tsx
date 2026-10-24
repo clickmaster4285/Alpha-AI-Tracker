@@ -270,34 +270,53 @@ export default function WebBlockerPage() {
         expandRelated: form.expandRelated,
       };
       if (editing) {
-        return dlpApi.webBlocker.update(editing.id, payload);
+        await dlpApi.webBlocker.update(editing.id, payload);
+      } else {
+        await dlpApi.webBlocker.create(payload);
       }
-      return dlpApi.webBlocker.create(payload);
+      // Push to agents so Active rules re-appear in hosts without a separate Publish click.
+      return dlpApi.rules.publish();
     },
-    onSuccess: () => {
+    onSuccess: (res) => {
       qc.invalidateQueries({ queryKey: ['web-blocker-rules'] });
       setDialogOpen(false);
       setEditing(null);
       setForm(emptyForm());
       setSuggested([]);
+      setPublishMsg(`Published policy v${res.policyVersion} (${res.ruleCount} rules)`);
     },
-  });
-
-  const toggleMutation = useMutation({
-    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
-      dlpApi.webBlocker.update(id, { enabled }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['web-blocker-rules'] }),
-  });
-
-  const deleteMutation = useMutation({
-    mutationFn: (id: string) => dlpApi.webBlocker.delete(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['web-blocker-rules'] }),
   });
 
   const publishMutation = useMutation({
     mutationFn: () => dlpApi.rules.publish(),
     onSuccess: (res) => {
       setPublishMsg(`Published policy v${res.policyVersion} (${res.ruleCount} rules)`);
+    },
+  });
+
+  // Active/Inactive only updates the draft rule — Windows hosts follow the *published*
+  // policy. Auto-publish after toggle so re-Activate re-applies the DNS sink.
+  const toggleMutation = useMutation({
+    mutationFn: async ({ id, enabled }: { id: string; enabled: boolean }) => {
+      await dlpApi.webBlocker.update(id, { enabled });
+      return dlpApi.rules.publish();
+    },
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ['web-blocker-rules'] });
+      setPublishMsg(
+        `Published policy v${res.policyVersion} (${res.ruleCount} rules) — agents will refresh within ~${30}s`,
+      );
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async (id: string) => {
+      await dlpApi.webBlocker.delete(id);
+      return dlpApi.rules.publish();
+    },
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ['web-blocker-rules'] });
+      setPublishMsg(`Published policy v${res.policyVersion} after delete`);
     },
   });
 
@@ -427,9 +446,14 @@ export default function WebBlockerPage() {
                         ? 'bg-success/15 text-success border-success/30'
                         : 'bg-muted text-muted-foreground border-border'
                     }`}
-                    title={rule.enabled ? 'Click to deactivate' : 'Click to activate'}
+                    title={
+                      rule.enabled
+                        ? 'Deactivate and publish (removes from agent hosts)'
+                        : 'Activate and publish (re-applies agent hosts)'
+                    }
+                    disabled={toggleMutation.isPending}
                   >
-                    {rule.enabled ? 'Active' : 'Inactive'}
+                    {toggleMutation.isPending ? '…' : rule.enabled ? 'Active' : 'Inactive'}
                   </button>
                   <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${severityColors[rule.severity] ?? ''}`}>
                     {rule.severity}

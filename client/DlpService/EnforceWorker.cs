@@ -88,6 +88,9 @@ public sealed class EnforceWorker : BackgroundService
         if (version != _lastVersion)
         {
             _lastVersion = version;
+            // New published policy must always re-sync hosts (clear OR re-block).
+            // Without this, empty→same-domain fingerprints could skip Apply after a clear.
+            _lastWebFingerprint = "\0";
             _accessDeniedAlertQueued = false;
             _webAccessDeniedAlertQueued = false;
             await _store.AuditAsync("enforce_reload", $"version={version} hash={hash}", ct);
@@ -192,9 +195,10 @@ public sealed class EnforceWorker : BackgroundService
         string webFp,
         CancellationToken ct)
     {
-        // Skip first tick when empty and web-block enabled — avoid hosts write on cold start.
-        // When ALPHA_DLP_WEB_BLOCK=false, fall through so Apply([]) clears any leftover sink.
-        if (wantDomains.Count == 0 && _lastWebFingerprint == "\0" && _cfg.WebBlock)
+        // Skip hosts write only on true cold start (no published policy yet).
+        // Must NOT skip when a new empty policy arrives after a prior block — that clear
+        // is required — and must not skip re-block after Active is published again.
+        if (wantDomains.Count == 0 && _lastWebFingerprint == "\0" && version <= 0 && _cfg.WebBlock)
         {
             _lastWebFingerprint = "";
             _webBlock.Set(version, Array.Empty<string>());
