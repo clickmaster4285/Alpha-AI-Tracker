@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Globe, History, Loader2, Pencil, Plus, Trash2, Upload, X } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -123,7 +123,6 @@ function DomainChipInput({
 type FormState = {
   name: string;
   domains: string[];
-  paths: string;
   action: DlpAction;
   severity: DlpSeverity;
   enabled: boolean;
@@ -138,7 +137,6 @@ type FormState = {
 const emptyForm = (): FormState => ({
   name: '',
   domains: [],
-  paths: '',
   action: 'alert_block',
   severity: 'high',
   enabled: true,
@@ -153,8 +151,7 @@ const emptyForm = (): FormState => ({
 function formFromRule(rule: WebBlockerRule): FormState {
   return {
     name: rule.name,
-    domains: [...(rule.domains ?? [])],
-    paths: (rule.paths ?? []).join(', '),
+    domains: uniqueDomains(rule.domains ?? []),
     action: rule.action,
     severity: rule.severity,
     enabled: rule.enabled,
@@ -167,11 +164,21 @@ function formFromRule(rule: WebBlockerRule): FormState {
   };
 }
 
-function splitPaths(raw: string): string[] {
-  return raw
-    .split(/[\n,]+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+function uniqueDomains(list: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of list) {
+    const d = normalizeDomainClient(raw);
+    if (!d || seen.has(d)) continue;
+    seen.add(d);
+    out.push(d);
+  }
+  return out;
+}
+
+function notAlreadySelected(candidates: string[], selected: string[]): string[] {
+  const have = new Set(selected.map(normalizeDomainClient));
+  return uniqueDomains(candidates).filter((d) => !have.has(d));
 }
 
 export default function WebBlockerPage() {
@@ -201,12 +208,15 @@ export default function WebBlockerPage() {
       setSuggested([]);
       return;
     }
+    const domainsSnapshot = form.domains;
     let cancelled = false;
     const t = setTimeout(() => {
       dlpApi.webBlocker
-        .expandDomains(form.domains)
+        .expandDomains(domainsSnapshot)
         .then((res) => {
-          if (!cancelled) setSuggested(res.suggested ?? []);
+          if (cancelled) return;
+          // Always strip anything already in Domains (avoids stale/race duplicates).
+          setSuggested(notAlreadySelected(res.suggested ?? [], domainsSnapshot));
         })
         .catch(() => {
           if (!cancelled) setSuggested([]);
@@ -217,6 +227,12 @@ export default function WebBlockerPage() {
       clearTimeout(t);
     };
   }, [form.domains, form.expandRelated]);
+
+  // Defense in depth: never show a chip that is already selected.
+  const visibleSuggested = useMemo(
+    () => notAlreadySelected(suggested, form.domains),
+    [suggested, form.domains],
+  );
 
   const openCreate = () => {
     setEditing(null);
@@ -234,19 +250,16 @@ export default function WebBlockerPage() {
 
   const saveMutation = useMutation({
     mutationFn: async () => {
-      const pathList = splitPaths(form.paths);
-      if (form.domains.length === 0 && pathList.length === 0) {
-        throw new Error('Add at least one domain or URL path');
-      }
-      if (form.domains.length === 0) {
+      const domains = uniqueDomains(form.domains);
+      if (domains.length === 0) {
         throw new Error('At least one domain is required');
       }
       const payload = {
         name: form.name.trim(),
         action: form.action,
         severity: form.severity,
-        domains: form.domains,
-        paths: pathList,
+        domains,
+        paths: [] as string[],
         scheduleEnabled: form.scheduleOn,
         scheduleStart: form.scheduleOn ? form.startTime : '',
         scheduleEnd: form.scheduleOn ? form.endTime : '',
@@ -266,6 +279,7 @@ export default function WebBlockerPage() {
       setDialogOpen(false);
       setEditing(null);
       setForm(emptyForm());
+      setSuggested([]);
     },
   });
 
@@ -297,22 +311,22 @@ export default function WebBlockerPage() {
   };
 
   const addSuggested = (d: string) => {
-    setForm((prev) =>
-      prev.domains.includes(d) ? prev : { ...prev, domains: [...prev.domains, d] },
-    );
+    const normalized = normalizeDomainClient(d);
+    if (!normalized) return;
+    setSuggested((prev) => prev.filter((x) => normalizeDomainClient(x) !== normalized));
+    setForm((prev) => {
+      if (prev.domains.some((x) => normalizeDomainClient(x) === normalized)) return prev;
+      return { ...prev, domains: [...prev.domains, normalized] };
+    });
   };
 
   const addAllSuggested = () => {
-    setForm((prev) => {
-      const seen = new Set(prev.domains);
-      const next = [...prev.domains];
-      for (const d of suggested) {
-        if (seen.has(d)) continue;
-        seen.add(d);
-        next.push(d);
-      }
-      return { ...prev, domains: next };
-    });
+    const toAdd = visibleSuggested;
+    setSuggested([]);
+    setForm((prev) => ({
+      ...prev,
+      domains: uniqueDomains([...prev.domains, ...toAdd]),
+    }));
   };
 
   const canSave =
@@ -326,8 +340,8 @@ export default function WebBlockerPage() {
         <div>
           <h3 className="font-display font-bold text-lg text-foreground">Web Blocker</h3>
           <p className="text-xs text-muted-foreground mt-0.5">
-            Relational web rules (domains / paths / schedule). Domains hard-block on Windows after
-            Publish (hosts + firewall). Paths are alert-match only. Edits keep revision history.
+            Domain block rules with optional schedule. Domains hard-block on Windows after Publish
+            (hosts + firewall). Edits keep revision history.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -400,13 +414,6 @@ export default function WebBlockerPage() {
                           </span>
                         )}
                       </div>
-                    )}
-                    {(rule.paths?.length ?? 0) > 0 && (
-                      <p className="text-xs text-muted-foreground">
-                        Paths:{' '}
-                        <code className="bg-muted px-1 rounded text-[10px]">{rule.paths.join(', ')}</code>
-                        <span className="ml-1 text-[10px] text-warning">(alert match)</span>
-                      </p>
                     )}
                     {sched && <p className="text-xs text-muted-foreground">Schedule: {sched}</p>}
                   </div>
@@ -488,11 +495,11 @@ export default function WebBlockerPage() {
               <label className="text-xs font-medium text-muted-foreground">Domains</label>
               <DomainChipInput
                 domains={form.domains}
-                onChange={(domains) => setForm((f) => ({ ...f, domains }))}
+                onChange={(domains) => setForm((f) => ({ ...f, domains: uniqueDomains(domains) }))}
                 placeholder="example.com — Enter to add"
               />
               <p className="text-[10px] text-muted-foreground mt-1">
-                Add one domain at a time (Enter). Commas also work if you paste a list.
+                Add one domain at a time (Enter). Duplicates are ignored.
               </p>
             </div>
 
@@ -512,18 +519,18 @@ export default function WebBlockerPage() {
               </span>
             </label>
 
-            {form.expandRelated && suggested.length > 0 && (
+            {form.expandRelated && visibleSuggested.length > 0 && (
               <div className="rounded-lg border border-border bg-muted/30 p-2.5 space-y-2">
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-[11px] font-medium text-muted-foreground">
-                    Suggested related ({suggested.length})
+                    Suggested related ({visibleSuggested.length})
                   </p>
                   <Button type="button" variant="outline" size="sm" className="h-7 text-xs" onClick={addAllSuggested}>
                     Add all
                   </Button>
                 </div>
                 <div className="flex flex-wrap gap-1">
-                  {suggested.map((d) => (
+                  {visibleSuggested.map((d) => (
                     <button
                       key={d}
                       type="button"
@@ -536,16 +543,6 @@ export default function WebBlockerPage() {
                 </div>
               </div>
             )}
-
-            <div>
-              <label className="text-xs font-medium text-muted-foreground">URL paths</label>
-              <Input
-                className="mt-1"
-                placeholder="/share/*, /c/chat"
-                value={form.paths}
-                onChange={(e) => setForm((f) => ({ ...f, paths: e.target.value }))}
-              />
-            </div>
 
             <div className="grid grid-cols-2 gap-3">
               <Select
