@@ -1692,6 +1692,33 @@ export interface WebBlockerRule {
   updatedAt: string;
 }
 
+/** Snapshot taken before each Web Blocker rule UPDATE. */
+export interface WebBlockerRuleRevision {
+  id: number;
+  ruleId: string;
+  revision: number;
+  name: string;
+  enabled: boolean;
+  action: DlpAction;
+  severity: DlpSeverity;
+  scopeAll: boolean;
+  domains: string[];
+  paths: string[];
+  scheduleEnabled: boolean;
+  scheduleStart: string;
+  scheduleEnd: string;
+  scheduleTimezone: string;
+  scheduleDays: string[];
+  changedBy?: string;
+  changedByName: string;
+  createdAt: string;
+}
+
+export interface ExpandWebBlockerDomainsResponse {
+  domains: string[];
+  suggested: string[];
+}
+
 export interface DlpAlert {
   id: string;
   ruleId?: string;
@@ -1830,15 +1857,26 @@ export const dlpApi = {
       scheduleTimezone?: string;
       scheduleDays?: string[];
       enabled?: boolean;
+      expandRelated?: boolean;
     }) => request<WebBlockerRule>('/web-blocker/rules', { method: 'POST', body: data }),
     update: (id: string, data: Partial<{
       name: string; enabled: boolean; action: string; severity: string; scopeAll: boolean;
       domains: string[]; paths: string[];
       scheduleEnabled: boolean; scheduleStart: string; scheduleEnd: string;
       scheduleTimezone: string; scheduleDays: string[];
+      expandRelated: boolean;
     }>) => request<WebBlockerRule>(`/web-blocker/rules/${id}`, { method: 'PATCH', body: data }),
     delete: (id: string) =>
       request<{ message: string }>(`/web-blocker/rules/${id}`, { method: 'DELETE' }),
+    history: (id: string) =>
+      request<{ revisions: WebBlockerRuleRevision[]; total: number }>(
+        `/web-blocker/rules/${id}/history`,
+      ),
+    expandDomains: (domains: string[]) =>
+      request<ExpandWebBlockerDomainsResponse>('/web-blocker/domains/expand', {
+        method: 'POST',
+        body: { domains },
+      }),
   },
 
   alerts: {

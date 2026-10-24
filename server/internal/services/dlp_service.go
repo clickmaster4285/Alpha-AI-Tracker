@@ -134,7 +134,7 @@ func (s *DlpService) CreateWebBlockerRule(ctx context.Context, req dto.CreateWeb
 	return s.repo.CreateWebBlockerRule(ctx, rule)
 }
 
-func (s *DlpService) UpdateWebBlockerRule(ctx context.Context, id string, req dto.UpdateWebBlockerRuleRequest) (*models.WebBlockerRule, error) {
+func (s *DlpService) UpdateWebBlockerRule(ctx context.Context, id string, req dto.UpdateWebBlockerRuleRequest, changedBy *string) (*models.WebBlockerRule, error) {
 	cur, err := s.repo.GetWebBlockerRule(ctx, id)
 	if err != nil {
 		return nil, err
@@ -158,10 +158,10 @@ func (s *DlpService) UpdateWebBlockerRule(ctx context.Context, id string, req dt
 		cur.ScopeAll = *req.ScopeAll
 	}
 	if req.Domains != nil {
-		cur.Domains = *req.Domains
+		cur.Domains = normalizeDomainList(*req.Domains)
 	}
 	if req.Paths != nil {
-		cur.Paths = *req.Paths
+		cur.Paths = normalizePathList(*req.Paths)
 	}
 	if req.ScheduleEnabled != nil {
 		cur.ScheduleEnabled = *req.ScheduleEnabled
@@ -178,10 +178,13 @@ func (s *DlpService) UpdateWebBlockerRule(ctx context.Context, id string, req dt
 	if req.ScheduleDays != nil {
 		cur.ScheduleDays = *req.ScheduleDays
 	}
+	if req.ExpandRelated != nil && *req.ExpandRelated {
+		cur.Domains = ExpandRelatedDomains(cur.Domains)
+	}
 	if err := validateWebBlockerRule(*cur); err != nil {
 		return nil, err
 	}
-	rule, err := s.repo.UpdateWebBlockerRule(ctx, id, *cur)
+	rule, err := s.repo.UpdateWebBlockerRule(ctx, id, *cur, changedBy)
 	if err != nil {
 		return nil, err
 	}
@@ -195,6 +198,26 @@ func (s *DlpService) DeleteWebBlockerRule(ctx context.Context, id string) error 
 	return s.repo.SoftDeleteWebBlockerRule(ctx, id)
 }
 
+func (s *DlpService) ListWebBlockerRevisions(ctx context.Context, ruleID string) ([]models.WebBlockerRuleRevision, error) {
+	cur, err := s.repo.GetWebBlockerRule(ctx, ruleID)
+	if err != nil {
+		return nil, err
+	}
+	if cur == nil {
+		return nil, fmt.Errorf("web blocker rule not found")
+	}
+	return s.repo.ListWebBlockerRevisions(ctx, ruleID)
+}
+
+func (s *DlpService) ExpandWebBlockerDomains(domains []string) dto.ExpandWebBlockerDomainsResponse {
+	normalized := normalizeDomainList(domains)
+	expanded := ExpandRelatedDomains(normalized)
+	return dto.ExpandWebBlockerDomainsResponse{
+		Domains:   expanded,
+		Suggested: SuggestRelatedDomains(normalized),
+	}
+}
+
 func validateWebBlockerCreate(req dto.CreateWebBlockerRuleRequest) (models.WebBlockerRule, error) {
 	enabled, scopeAll := true, true
 	if req.Enabled != nil {
@@ -203,10 +226,14 @@ func validateWebBlockerCreate(req dto.CreateWebBlockerRuleRequest) (models.WebBl
 	if req.ScopeAll != nil {
 		scopeAll = *req.ScopeAll
 	}
+	domains := normalizeDomainList(req.Domains)
+	if req.ExpandRelated {
+		domains = ExpandRelatedDomains(domains)
+	}
 	rule := models.WebBlockerRule{
 		Name: strings.TrimSpace(req.Name), Enabled: enabled,
 		Action: strings.TrimSpace(req.Action), Severity: strings.TrimSpace(req.Severity),
-		ScopeAll: scopeAll, Domains: req.Domains, Paths: req.Paths,
+		ScopeAll: scopeAll, Domains: domains, Paths: normalizePathList(req.Paths),
 		ScheduleEnabled: req.ScheduleEnabled, ScheduleStart: strings.TrimSpace(req.ScheduleStart),
 		ScheduleEnd: strings.TrimSpace(req.ScheduleEnd), ScheduleTimezone: strings.TrimSpace(req.ScheduleTimezone),
 		ScheduleDays: req.ScheduleDays,
@@ -221,6 +248,40 @@ func validateWebBlockerCreate(req dto.CreateWebBlockerRuleRequest) (models.WebBl
 		rule.ScheduleTimezone = "UTC"
 	}
 	return rule, validateWebBlockerRule(rule)
+}
+
+func normalizeDomainList(in []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(in))
+	for _, raw := range in {
+		d := NormalizeDomain(raw)
+		if d == "" {
+			continue
+		}
+		if _, ok := seen[d]; ok {
+			continue
+		}
+		seen[d] = struct{}{}
+		out = append(out, d)
+	}
+	return out
+}
+
+func normalizePathList(in []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(in))
+	for _, raw := range in {
+		p := strings.TrimSpace(raw)
+		if p == "" {
+			continue
+		}
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	return out
 }
 
 func validateWebBlockerRule(rule models.WebBlockerRule) error {

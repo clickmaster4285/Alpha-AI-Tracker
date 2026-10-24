@@ -52,26 +52,43 @@ type CreateWebBlockerRuleRequest struct {
 	ScheduleEnd       string   `json:"scheduleEnd"`
 	ScheduleTimezone  string   `json:"scheduleTimezone"`
 	ScheduleDays      []string `json:"scheduleDays"`
+	// ExpandRelated merges www./m. + curated CDN/alternate-apex packs into Domains.
+	ExpandRelated bool `json:"expandRelated,omitempty"`
 }
 
 type UpdateWebBlockerRuleRequest struct {
-	Name              *string  `json:"name,omitempty"`
-	Enabled           *bool    `json:"enabled,omitempty"`
-	Action            *string  `json:"action,omitempty"`
-	Severity          *string  `json:"severity,omitempty"`
-	ScopeAll          *bool    `json:"scopeAll,omitempty"`
+	Name              *string   `json:"name,omitempty"`
+	Enabled           *bool     `json:"enabled,omitempty"`
+	Action            *string   `json:"action,omitempty"`
+	Severity          *string   `json:"severity,omitempty"`
+	ScopeAll          *bool     `json:"scopeAll,omitempty"`
 	Domains           *[]string `json:"domains,omitempty"`
 	Paths             *[]string `json:"paths,omitempty"`
-	ScheduleEnabled   *bool    `json:"scheduleEnabled,omitempty"`
-	ScheduleStart     *string  `json:"scheduleStart,omitempty"`
-	ScheduleEnd       *string  `json:"scheduleEnd,omitempty"`
-	ScheduleTimezone  *string  `json:"scheduleTimezone,omitempty"`
+	ScheduleEnabled   *bool     `json:"scheduleEnabled,omitempty"`
+	ScheduleStart     *string   `json:"scheduleStart,omitempty"`
+	ScheduleEnd       *string   `json:"scheduleEnd,omitempty"`
+	ScheduleTimezone  *string   `json:"scheduleTimezone,omitempty"`
 	ScheduleDays      *[]string `json:"scheduleDays,omitempty"`
+	ExpandRelated     *bool     `json:"expandRelated,omitempty"`
 }
 
 type WebBlockerRuleListResponse struct {
 	Rules []any `json:"rules"`
 	Total int   `json:"total"`
+}
+
+type ExpandWebBlockerDomainsRequest struct {
+	Domains []string `json:"domains"`
+}
+
+type ExpandWebBlockerDomainsResponse struct {
+	Domains   []string `json:"domains"`
+	Suggested []string `json:"suggested"`
+}
+
+type WebBlockerRevisionListResponse struct {
+	Revisions []any `json:"revisions"`
+	Total     int   `json:"total"`
 }
 
 type PublishDlpPolicyResponse struct {

@@ -230,15 +230,27 @@ func (r *DlpRepo) CreateWebBlockerRule(ctx context.Context, rule models.WebBlock
 	return created, nil
 }
 
-func (r *DlpRepo) UpdateWebBlockerRule(ctx context.Context, id string, rule models.WebBlockerRule) (*models.WebBlockerRule, error) {
+func (r *DlpRepo) UpdateWebBlockerRule(ctx context.Context, id string, rule models.WebBlockerRule, changedBy *string) (*models.WebBlockerRule, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+
+	cur, err := getWebBlockerRule(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+	if cur == nil {
+		return nil, nil
+	}
+	if err := insertWebBlockerRevision(ctx, tx, *cur, changedBy); err != nil {
+		return nil, err
+	}
+
 	tag, err := tx.Exec(ctx, `
 		UPDATE web_blocker_rules SET name=$2,enabled=$3,action=$4,severity=$5,scope_all=$6,
-			schedule_enabled=$7,schedule_start=$8,schedule_end=$9,schedule_timezone=$10
+			schedule_enabled=$7,schedule_start=$8,schedule_end=$9,schedule_timezone=$10, updated_at=NOW()
 		WHERE id=$1::uuid AND deleted_at IS NULL`,
 		id, rule.Name, rule.Enabled, rule.Action, rule.Severity, rule.ScopeAll,
 		rule.ScheduleEnabled, rule.ScheduleStart, rule.ScheduleEnd, rule.ScheduleTimezone)
@@ -259,6 +271,127 @@ func (r *DlpRepo) UpdateWebBlockerRule(ctx context.Context, id string, rule mode
 		return nil, err
 	}
 	return updated, nil
+}
+
+func (r *DlpRepo) ListWebBlockerRevisions(ctx context.Context, ruleID string) ([]models.WebBlockerRuleRevision, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT rev.id, rev.rule_id::text, rev.revision, rev.name, rev.enabled, rev.action, rev.severity,
+		       rev.scope_all,
+		       COALESCE((SELECT array_agg(d.domain ORDER BY d.domain)
+		                 FROM web_blocker_revision_domains d WHERE d.revision_id=rev.id), ARRAY[]::text[]),
+		       COALESCE((SELECT array_agg(p.path_pattern ORDER BY p.path_pattern)
+		                 FROM web_blocker_revision_paths p WHERE p.revision_id=rev.id), ARRAY[]::text[]),
+		       rev.schedule_enabled, rev.schedule_start, rev.schedule_end, rev.schedule_timezone,
+		       COALESCE((SELECT array_agg(s.day ORDER BY s.day)
+		                 FROM web_blocker_revision_schedule_days s WHERE s.revision_id=rev.id), ARRAY[]::text[]),
+		       rev.changed_by::text, COALESCE(u.name, ''), rev.created_at
+		FROM web_blocker_rule_revisions rev
+		LEFT JOIN users u ON u.id = rev.changed_by AND u.deleted_at IS NULL
+		WHERE rev.rule_id = $1::uuid
+		ORDER BY rev.revision DESC`, ruleID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]models.WebBlockerRuleRevision, 0)
+	for rows.Next() {
+		var rev models.WebBlockerRuleRevision
+		var changedBy *string
+		if err := rows.Scan(
+			&rev.ID, &rev.RuleID, &rev.Revision, &rev.Name, &rev.Enabled, &rev.Action, &rev.Severity,
+			&rev.ScopeAll, &rev.Domains, &rev.Paths, &rev.ScheduleEnabled, &rev.ScheduleStart,
+			&rev.ScheduleEnd, &rev.ScheduleTimezone, &rev.ScheduleDays,
+			&changedBy, &rev.ChangedByName, &rev.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		rev.ChangedBy = changedBy
+		if rev.Domains == nil {
+			rev.Domains = []string{}
+		}
+		if rev.Paths == nil {
+			rev.Paths = []string{}
+		}
+		if rev.ScheduleDays == nil {
+			rev.ScheduleDays = []string{}
+		}
+		out = append(out, rev)
+	}
+	return out, rows.Err()
+}
+
+func insertWebBlockerRevision(ctx context.Context, tx pgx.Tx, cur models.WebBlockerRule, changedBy *string) error {
+	var nextRev int
+	if err := tx.QueryRow(ctx,
+		`SELECT COALESCE(MAX(revision),0)+1 FROM web_blocker_rule_revisions WHERE rule_id=$1::uuid`,
+		cur.ID).Scan(&nextRev); err != nil {
+		return err
+	}
+
+	var revisionID int64
+	if changedBy != nil && *changedBy != "" {
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO web_blocker_rule_revisions
+				(rule_id,revision,name,enabled,action,severity,scope_all,
+				 schedule_enabled,schedule_start,schedule_end,schedule_timezone,changed_by)
+			VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::uuid)
+			RETURNING id`,
+			cur.ID, nextRev, cur.Name, cur.Enabled, cur.Action, cur.Severity, cur.ScopeAll,
+			cur.ScheduleEnabled, cur.ScheduleStart, cur.ScheduleEnd, cur.ScheduleTimezone, *changedBy,
+		).Scan(&revisionID); err != nil {
+			return err
+		}
+	} else {
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO web_blocker_rule_revisions
+				(rule_id,revision,name,enabled,action,severity,scope_all,
+				 schedule_enabled,schedule_start,schedule_end,schedule_timezone)
+			VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+			RETURNING id`,
+			cur.ID, nextRev, cur.Name, cur.Enabled, cur.Action, cur.Severity, cur.ScopeAll,
+			cur.ScheduleEnabled, cur.ScheduleStart, cur.ScheduleEnd, cur.ScheduleTimezone,
+		).Scan(&revisionID); err != nil {
+			return err
+		}
+	}
+	return replaceWebBlockerRevisionValues(ctx, tx, revisionID, cur.Domains, cur.Paths, cur.ScheduleDays)
+}
+
+func replaceWebBlockerRevisionValues(ctx context.Context, tx pgx.Tx, revisionID int64, domains, paths, days []string) error {
+	for _, domain := range domains {
+		domain = strings.TrimSpace(domain)
+		if domain == "" {
+			continue
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO web_blocker_revision_domains (revision_id, domain) VALUES ($1,$2)
+			 ON CONFLICT (revision_id, domain) DO NOTHING`, revisionID, domain); err != nil {
+			return err
+		}
+	}
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO web_blocker_revision_paths (revision_id, path_pattern) VALUES ($1,$2)
+			 ON CONFLICT (revision_id, path_pattern) DO NOTHING`, revisionID, path); err != nil {
+			return err
+		}
+	}
+	for _, day := range days {
+		day = strings.ToLower(strings.TrimSpace(day))
+		if day == "" {
+			continue
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO web_blocker_revision_schedule_days (revision_id, day) VALUES ($1,$2)
+			 ON CONFLICT (revision_id, day) DO NOTHING`, revisionID, day); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *DlpRepo) SoftDeleteWebBlockerRule(ctx context.Context, id string) error {

@@ -40,6 +40,28 @@ type WebBlockerRule struct {
 	UpdatedAt         time.Time `json:"updatedAt"`
 }
 
+// WebBlockerRuleRevision is a snapshot of a rule taken before each UPDATE.
+type WebBlockerRuleRevision struct {
+	ID               int64     `json:"id"`
+	RuleID           string    `json:"ruleId"`
+	Revision         int       `json:"revision"`
+	Name             string    `json:"name"`
+	Enabled          bool      `json:"enabled"`
+	Action           string    `json:"action"`
+	Severity         string    `json:"severity"`
+	ScopeAll         bool      `json:"scopeAll"`
+	Domains          []string  `json:"domains"`
+	Paths            []string  `json:"paths"`
+	ScheduleEnabled  bool      `json:"scheduleEnabled"`
+	ScheduleStart    string    `json:"scheduleStart"`
+	ScheduleEnd      string    `json:"scheduleEnd"`
+	ScheduleTimezone string    `json:"scheduleTimezone"`
+	ScheduleDays     []string  `json:"scheduleDays"`
+	ChangedBy        *string   `json:"changedBy,omitempty"`
+	ChangedByName    string    `json:"changedByName"`
+	CreatedAt        time.Time `json:"createdAt"`
+}
+
 // DlpPolicyVersion is an immutable published policy header (snapshot rows live in child tables).
 type DlpPolicyVersion struct {
 	Version     int64       `json:"policyVersion"`

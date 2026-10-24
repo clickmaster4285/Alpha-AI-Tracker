@@ -185,7 +185,11 @@ func (h *DlpHandler) UpdateWebBlockerRule(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return errorResponse(c, http.StatusBadRequest, "Invalid request body", err)
 	}
-	rule, err := h.svc.UpdateWebBlockerRule(c.Request().Context(), c.Param("id"), req)
+	var changedBy *string
+	if uid, ok := c.Get("user_id").(string); ok && uid != "" {
+		changedBy = &uid
+	}
+	rule, err := h.svc.UpdateWebBlockerRule(c.Request().Context(), c.Param("id"), req, changedBy)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			return errorResponse(c, http.StatusNotFound, "Failed to update Web Blocker rule", err)
@@ -203,6 +207,29 @@ func (h *DlpHandler) DeleteWebBlockerRule(c echo.Context) error {
 		return errorResponse(c, http.StatusInternalServerError, "Failed to delete Web Blocker rule", err)
 	}
 	return c.JSON(http.StatusOK, map[string]string{"message": "rule deleted"})
+}
+
+func (h *DlpHandler) ListWebBlockerRevisions(c echo.Context) error {
+	revs, err := h.svc.ListWebBlockerRevisions(c.Request().Context(), c.Param("id"))
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return errorResponse(c, http.StatusNotFound, "Failed to list Web Blocker revisions", err)
+		}
+		return errorResponse(c, http.StatusInternalServerError, "Failed to list Web Blocker revisions", err)
+	}
+	out := make([]any, len(revs))
+	for i := range revs {
+		out[i] = revs[i]
+	}
+	return c.JSON(http.StatusOK, dto.WebBlockerRevisionListResponse{Revisions: out, Total: len(out)})
+}
+
+func (h *DlpHandler) ExpandWebBlockerDomains(c echo.Context) error {
+	var req dto.ExpandWebBlockerDomainsRequest
+	if err := c.Bind(&req); err != nil {
+		return errorResponse(c, http.StatusBadRequest, "Invalid request body", err)
+	}
+	return c.JSON(http.StatusOK, h.svc.ExpandWebBlockerDomains(req.Domains))
 }
 
 func (h *DlpHandler) Publish(c echo.Context) error {

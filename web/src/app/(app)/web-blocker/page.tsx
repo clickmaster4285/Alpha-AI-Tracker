@@ -1,14 +1,20 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import { Globe, Loader2, Plus, Trash2, Upload } from 'lucide-react';
+import { Globe, History, Loader2, Pencil, Plus, Trash2, Upload, X } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { dlpApi, type DlpAction, type DlpSeverity } from '@/lib/api';
+import {
+  dlpApi,
+  type DlpAction,
+  type DlpSeverity,
+  type WebBlockerRule,
+  type WebBlockerRuleRevision,
+} from '@/lib/api';
 
 const severityColors: Record<string, string> = {
   critical: 'bg-destructive/15 text-destructive',
@@ -35,7 +41,133 @@ const DAY_OPTIONS = [
 
 type DayId = (typeof DAY_OPTIONS)[number]['id'];
 
-function splitList(raw: string): string[] {
+function normalizeDomainClient(raw: string): string {
+  let s = raw.trim().toLowerCase();
+  if (!s) return '';
+  s = s.replace(/^https?:\/\//, '').replace(/^\/\//, '');
+  const cut = s.search(/[/?#]/);
+  if (cut >= 0) s = s.slice(0, cut);
+  s = s.replace(/\.$/, '');
+  return s;
+}
+
+function DomainChipInput({
+  domains,
+  onChange,
+  placeholder,
+}: {
+  domains: string[];
+  onChange: (next: string[]) => void;
+  placeholder?: string;
+}) {
+  const [draft, setDraft] = useState('');
+
+  const commit = (raw: string) => {
+    const parts = raw
+      .split(/[\s,]+/)
+      .map(normalizeDomainClient)
+      .filter(Boolean);
+    if (parts.length === 0) return;
+    const seen = new Set(domains);
+    const next = [...domains];
+    for (const p of parts) {
+      if (seen.has(p)) continue;
+      seen.add(p);
+      next.push(p);
+    }
+    onChange(next);
+    setDraft('');
+  };
+
+  return (
+    <div className="mt-1 rounded-md border border-border bg-background px-2 py-1.5 focus-within:ring-1 focus-within:ring-ring">
+      <div className="flex flex-wrap gap-1.5">
+        {domains.map((d) => (
+          <span
+            key={d}
+            className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-foreground"
+          >
+            {d}
+            <button
+              type="button"
+              aria-label={`Remove ${d}`}
+              className="rounded hover:bg-destructive/15 p-0.5"
+              onClick={() => onChange(domains.filter((x) => x !== d))}
+            >
+              <X className="w-3 h-3 text-muted-foreground" />
+            </button>
+          </span>
+        ))}
+        <input
+          className="min-w-[10rem] flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground py-0.5"
+          placeholder={domains.length === 0 ? placeholder ?? 'Type a domain and press Enter' : 'Add another…'}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ',' || e.key === 'Tab') {
+              e.preventDefault();
+              commit(draft);
+            } else if (e.key === 'Backspace' && !draft && domains.length > 0) {
+              onChange(domains.slice(0, -1));
+            }
+          }}
+          onBlur={() => {
+            if (draft.trim()) commit(draft);
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+type FormState = {
+  name: string;
+  domains: string[];
+  paths: string;
+  action: DlpAction;
+  severity: DlpSeverity;
+  enabled: boolean;
+  expandRelated: boolean;
+  scheduleOn: boolean;
+  scheduleDays: DayId[];
+  startTime: string;
+  endTime: string;
+  timezone: string;
+};
+
+const emptyForm = (): FormState => ({
+  name: '',
+  domains: [],
+  paths: '',
+  action: 'alert_block',
+  severity: 'high',
+  enabled: true,
+  expandRelated: true,
+  scheduleOn: false,
+  scheduleDays: ['mon', 'tue', 'wed', 'thu', 'fri'],
+  startTime: '09:00',
+  endTime: '18:00',
+  timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+});
+
+function formFromRule(rule: WebBlockerRule): FormState {
+  return {
+    name: rule.name,
+    domains: [...(rule.domains ?? [])],
+    paths: (rule.paths ?? []).join(', '),
+    action: rule.action,
+    severity: rule.severity,
+    enabled: rule.enabled,
+    expandRelated: false,
+    scheduleOn: rule.scheduleEnabled,
+    scheduleDays: (rule.scheduleDays ?? []) as DayId[],
+    startTime: rule.scheduleStart || '09:00',
+    endTime: rule.scheduleEnd || '18:00',
+    timezone: rule.scheduleTimezone || 'UTC',
+  };
+}
+
+function splitPaths(raw: string): string[] {
   return raw
     .split(/[\n,]+/)
     .map((s) => s.trim())
@@ -44,20 +176,12 @@ function splitList(raw: string): string[] {
 
 export default function WebBlockerPage() {
   const qc = useQueryClient();
-  const [showDialog, setShowDialog] = useState(false);
-  const [name, setName] = useState('');
-  const [domains, setDomains] = useState('');
-  const [paths, setPaths] = useState('');
-  const [action, setAction] = useState<DlpAction>('alert_block');
-  const [severity, setSeverity] = useState<DlpSeverity>('high');
-  const [scheduleOn, setScheduleOn] = useState(false);
-  const [scheduleDays, setScheduleDays] = useState<DayId[]>(['mon', 'tue', 'wed', 'thu', 'fri']);
-  const [startTime, setStartTime] = useState('09:00');
-  const [endTime, setEndTime] = useState('18:00');
-  const [timezone, setTimezone] = useState(
-    () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
-  );
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editing, setEditing] = useState<WebBlockerRule | null>(null);
+  const [form, setForm] = useState<FormState>(emptyForm);
+  const [suggested, setSuggested] = useState<string[]>([]);
   const [publishMsg, setPublishMsg] = useState('');
+  const [historyRule, setHistoryRule] = useState<WebBlockerRule | null>(null);
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ['web-blocker-rules'],
@@ -66,36 +190,89 @@ export default function WebBlockerPage() {
 
   const rules = data?.rules ?? [];
 
-  const createMutation = useMutation({
-    mutationFn: () => {
-      const domainList = splitList(domains);
-      const pathList = splitList(paths);
-      if (domainList.length === 0 && pathList.length === 0) {
-        return Promise.reject(new Error('Add at least one domain or URL path'));
+  const historyQuery = useQuery({
+    queryKey: ['web-blocker-history', historyRule?.id],
+    queryFn: () => dlpApi.webBlocker.history(historyRule!.id),
+    enabled: !!historyRule,
+  });
+
+  useEffect(() => {
+    if (!form.expandRelated || form.domains.length === 0) {
+      setSuggested([]);
+      return;
+    }
+    let cancelled = false;
+    const t = setTimeout(() => {
+      dlpApi.webBlocker
+        .expandDomains(form.domains)
+        .then((res) => {
+          if (!cancelled) setSuggested(res.suggested ?? []);
+        })
+        .catch(() => {
+          if (!cancelled) setSuggested([]);
+        });
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [form.domains, form.expandRelated]);
+
+  const openCreate = () => {
+    setEditing(null);
+    setForm(emptyForm());
+    setSuggested([]);
+    setDialogOpen(true);
+  };
+
+  const openEdit = (rule: WebBlockerRule) => {
+    setEditing(rule);
+    setForm(formFromRule(rule));
+    setSuggested([]);
+    setDialogOpen(true);
+  };
+
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      const pathList = splitPaths(form.paths);
+      if (form.domains.length === 0 && pathList.length === 0) {
+        throw new Error('Add at least one domain or URL path');
       }
-      return dlpApi.webBlocker.create({
-        name: name.trim(),
-        action,
-        severity,
-        domains: domainList,
+      if (form.domains.length === 0) {
+        throw new Error('At least one domain is required');
+      }
+      const payload = {
+        name: form.name.trim(),
+        action: form.action,
+        severity: form.severity,
+        domains: form.domains,
         paths: pathList,
-        scheduleEnabled: scheduleOn,
-        scheduleStart: scheduleOn ? startTime : '',
-        scheduleEnd: scheduleOn ? endTime : '',
-        scheduleTimezone: scheduleOn ? timezone.trim() || 'UTC' : 'UTC',
-        scheduleDays: scheduleOn ? scheduleDays : [],
+        scheduleEnabled: form.scheduleOn,
+        scheduleStart: form.scheduleOn ? form.startTime : '',
+        scheduleEnd: form.scheduleOn ? form.endTime : '',
+        scheduleTimezone: form.scheduleOn ? form.timezone.trim() || 'UTC' : 'UTC',
+        scheduleDays: form.scheduleOn ? form.scheduleDays : [],
         scopeAll: true,
-        enabled: true,
-      });
+        enabled: form.enabled,
+        expandRelated: form.expandRelated,
+      };
+      if (editing) {
+        return dlpApi.webBlocker.update(editing.id, payload);
+      }
+      return dlpApi.webBlocker.create(payload);
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['web-blocker-rules'] });
-      setShowDialog(false);
-      setName('');
-      setDomains('');
-      setPaths('');
-      setScheduleOn(false);
+      setDialogOpen(false);
+      setEditing(null);
+      setForm(emptyForm());
     },
+  });
+
+  const toggleMutation = useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
+      dlpApi.webBlocker.update(id, { enabled }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['web-blocker-rules'] }),
   });
 
   const deleteMutation = useMutation({
@@ -111,15 +288,37 @@ export default function WebBlockerPage() {
   });
 
   const toggleDay = (id: DayId) => {
-    setScheduleDays((prev) =>
-      prev.includes(id) ? prev.filter((d) => d !== id) : [...prev, id],
+    setForm((prev) => ({
+      ...prev,
+      scheduleDays: prev.scheduleDays.includes(id)
+        ? prev.scheduleDays.filter((d) => d !== id)
+        : [...prev.scheduleDays, id],
+    }));
+  };
+
+  const addSuggested = (d: string) => {
+    setForm((prev) =>
+      prev.domains.includes(d) ? prev : { ...prev, domains: [...prev.domains, d] },
     );
   };
 
-  const canCreate =
-    name.trim().length > 0 &&
-    (splitList(domains).length > 0 || splitList(paths).length > 0) &&
-    (!scheduleOn || scheduleDays.length > 0);
+  const addAllSuggested = () => {
+    setForm((prev) => {
+      const seen = new Set(prev.domains);
+      const next = [...prev.domains];
+      for (const d of suggested) {
+        if (seen.has(d)) continue;
+        seen.add(d);
+        next.push(d);
+      }
+      return { ...prev, domains: next };
+    });
+  };
+
+  const canSave =
+    form.name.trim().length > 0 &&
+    form.domains.length > 0 &&
+    (!form.scheduleOn || form.scheduleDays.length > 0);
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -128,7 +327,7 @@ export default function WebBlockerPage() {
           <h3 className="font-display font-bold text-lg text-foreground">Web Blocker</h3>
           <p className="text-xs text-muted-foreground mt-0.5">
             Relational web rules (domains / paths / schedule). Domains hard-block on Windows after
-            Publish (hosts + firewall). Paths are alert-match only.
+            Publish (hosts + firewall). Paths are alert-match only. Edits keep revision history.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -143,7 +342,7 @@ export default function WebBlockerPage() {
             Publish
           </Button>
           <Button
-            onClick={() => setShowDialog(true)}
+            onClick={openCreate}
             size="sm"
             className="gap-1 gradient-primary text-primary-foreground"
           >
@@ -163,16 +362,15 @@ export default function WebBlockerPage() {
       {isError && <p className="text-sm text-destructive">Failed to load web blocker rules</p>}
       {!isLoading && !isError && rules.length === 0 && (
         <p className="text-sm text-muted-foreground py-8 text-center">
-          No web block rules yet. Add domains or paths, then Publish so Windows agents can pull them.
+          No web block rules yet. Add domains, then Publish so Windows agents can pull them.
         </p>
       )}
 
       <div className="space-y-3">
         {rules.map((rule, i) => {
-          const sched =
-            rule.scheduleEnabled
-              ? `${(rule.scheduleDays ?? []).join(', ') || 'all days'} · ${rule.scheduleStart || '?'}–${rule.scheduleEnd || '?'} (${rule.scheduleTimezone || 'UTC'})`
-              : null;
+          const sched = rule.scheduleEnabled
+            ? `${(rule.scheduleDays ?? []).join(', ') || 'all days'} · ${rule.scheduleStart || '?'}–${rule.scheduleEnd || '?'} (${rule.scheduleTimezone || 'UTC'})`
+            : null;
           return (
             <motion.div
               key={rule.id}
@@ -187,10 +385,21 @@ export default function WebBlockerPage() {
                   <div className="min-w-0 space-y-1">
                     <h4 className="font-display font-bold text-foreground truncate">{rule.name}</h4>
                     {(rule.domains?.length ?? 0) > 0 && (
-                      <p className="text-xs text-muted-foreground">
-                        Domains:{' '}
-                        <code className="bg-muted px-1 rounded text-[10px]">{rule.domains.join(', ')}</code>
-                      </p>
+                      <div className="flex flex-wrap gap-1">
+                        {rule.domains.slice(0, 12).map((d) => (
+                          <code
+                            key={d}
+                            className="bg-muted px-1.5 py-0.5 rounded text-[10px] text-muted-foreground"
+                          >
+                            {d}
+                          </code>
+                        ))}
+                        {rule.domains.length > 12 && (
+                          <span className="text-[10px] text-muted-foreground">
+                            +{rule.domains.length - 12} more
+                          </span>
+                        )}
+                      </div>
                     )}
                     {(rule.paths?.length ?? 0) > 0 && (
                       <p className="text-xs text-muted-foreground">
@@ -202,18 +411,41 @@ export default function WebBlockerPage() {
                     {sched && <p className="text-xs text-muted-foreground">Schedule: {sched}</p>}
                   </div>
                 </div>
-                <div className="flex items-center gap-2 flex-shrink-0">
+                <div className="flex items-center gap-2 flex-shrink-0 flex-wrap justify-end">
+                  <button
+                    type="button"
+                    onClick={() => toggleMutation.mutate({ id: rule.id, enabled: !rule.enabled })}
+                    className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                      rule.enabled
+                        ? 'bg-success/15 text-success border-success/30'
+                        : 'bg-muted text-muted-foreground border-border'
+                    }`}
+                    title={rule.enabled ? 'Click to deactivate' : 'Click to activate'}
+                  >
+                    {rule.enabled ? 'Active' : 'Inactive'}
+                  </button>
                   <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${severityColors[rule.severity] ?? ''}`}>
                     {rule.severity}
                   </span>
                   <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-accent text-accent-foreground">
                     {actionLabels[rule.action] ?? rule.action}
                   </span>
-                  {!rule.enabled && (
-                    <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-muted text-muted-foreground">
-                      Disabled
-                    </span>
-                  )}
+                  <button
+                    type="button"
+                    onClick={() => openEdit(rule)}
+                    className="p-1.5 rounded hover:bg-muted"
+                    aria-label="Edit rule"
+                  >
+                    <Pencil className="w-3.5 h-3.5 text-muted-foreground" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setHistoryRule(rule)}
+                    className="p-1.5 rounded hover:bg-muted"
+                    aria-label="Revision history"
+                  >
+                    <History className="w-3.5 h-3.5 text-muted-foreground" />
+                  </button>
                   <button
                     type="button"
                     onClick={() => deleteMutation.mutate(rule.id)}
@@ -229,33 +461,97 @@ export default function WebBlockerPage() {
         })}
       </div>
 
-      <Dialog open={showDialog} onOpenChange={setShowDialog}>
-        <DialogContent className="bg-card max-h-[90vh] overflow-y-auto">
+      <Dialog
+        open={dialogOpen}
+        onOpenChange={(open) => {
+          setDialogOpen(open);
+          if (!open) {
+            setEditing(null);
+            setForm(emptyForm());
+          }
+        }}
+      >
+        <DialogContent className="bg-card max-h-[90vh] overflow-y-auto sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle className="font-display">New web block rule</DialogTitle>
+            <DialogTitle className="font-display">
+              {editing ? 'Edit web block rule' : 'New web block rule'}
+            </DialogTitle>
           </DialogHeader>
           <div className="space-y-3 mt-2">
-            <Input placeholder="Rule name *" value={name} onChange={(e) => setName(e.target.value)} />
+            <Input
+              placeholder="Rule name *"
+              value={form.name}
+              onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+            />
+
             <div>
               <label className="text-xs font-medium text-muted-foreground">Domains</label>
-              <Input
-                className="mt-1"
-                placeholder="example.com, *.dropbox.com"
-                value={domains}
-                onChange={(e) => setDomains(e.target.value)}
+              <DomainChipInput
+                domains={form.domains}
+                onChange={(domains) => setForm((f) => ({ ...f, domains }))}
+                placeholder="example.com — Enter to add"
               />
+              <p className="text-[10px] text-muted-foreground mt-1">
+                Add one domain at a time (Enter). Commas also work if you paste a list.
+              </p>
             </div>
+
+            <label className="flex items-start gap-2 text-sm cursor-pointer">
+              <input
+                type="checkbox"
+                checked={form.expandRelated}
+                onChange={(e) => setForm((f) => ({ ...f, expandRelated: e.target.checked }))}
+                className="rounded border-border mt-0.5"
+              />
+              <span>
+                Include related domains
+                <span className="block text-[10px] text-muted-foreground font-normal">
+                  Always adds www./m. for every site. Known sites (YouTube, Facebook, …) also get
+                  CDNs and alternate apexes. Unknown sites cannot invent arbitrary CDNs.
+                </span>
+              </span>
+            </label>
+
+            {form.expandRelated && suggested.length > 0 && (
+              <div className="rounded-lg border border-border bg-muted/30 p-2.5 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-[11px] font-medium text-muted-foreground">
+                    Suggested related ({suggested.length})
+                  </p>
+                  <Button type="button" variant="outline" size="sm" className="h-7 text-xs" onClick={addAllSuggested}>
+                    Add all
+                  </Button>
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {suggested.map((d) => (
+                    <button
+                      key={d}
+                      type="button"
+                      onClick={() => addSuggested(d)}
+                      className="text-[10px] px-1.5 py-0.5 rounded border border-dashed border-border hover:border-primary hover:text-primary"
+                    >
+                      + {d}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div>
               <label className="text-xs font-medium text-muted-foreground">URL paths</label>
               <Input
                 className="mt-1"
                 placeholder="/share/*, /c/chat"
-                value={paths}
-                onChange={(e) => setPaths(e.target.value)}
+                value={form.paths}
+                onChange={(e) => setForm((f) => ({ ...f, paths: e.target.value }))}
               />
             </div>
+
             <div className="grid grid-cols-2 gap-3">
-              <Select value={action} onValueChange={(v) => setAction(v as DlpAction)}>
+              <Select
+                value={form.action}
+                onValueChange={(v) => setForm((f) => ({ ...f, action: v as DlpAction }))}
+              >
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="alert">Alert Only</SelectItem>
@@ -263,7 +559,10 @@ export default function WebBlockerPage() {
                   <SelectItem value="alert_block">Alert + Block</SelectItem>
                 </SelectContent>
               </Select>
-              <Select value={severity} onValueChange={(v) => setSeverity(v as DlpSeverity)}>
+              <Select
+                value={form.severity}
+                onValueChange={(v) => setForm((f) => ({ ...f, severity: v as DlpSeverity }))}
+              >
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="critical">Critical</SelectItem>
@@ -274,21 +573,36 @@ export default function WebBlockerPage() {
               </Select>
             </div>
 
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-medium text-muted-foreground">Status</span>
+              <button
+                type="button"
+                onClick={() => setForm((f) => ({ ...f, enabled: !f.enabled }))}
+                className={`px-2.5 py-1 rounded-full text-xs font-medium border ${
+                  form.enabled
+                    ? 'bg-success/15 text-success border-success/30'
+                    : 'bg-muted text-muted-foreground border-border'
+                }`}
+              >
+                {form.enabled ? 'Active' : 'Inactive'}
+              </button>
+            </div>
+
             <label className="flex items-center gap-2 text-sm cursor-pointer">
               <input
                 type="checkbox"
-                checked={scheduleOn}
-                onChange={(e) => setScheduleOn(e.target.checked)}
+                checked={form.scheduleOn}
+                onChange={(e) => setForm((f) => ({ ...f, scheduleOn: e.target.checked }))}
                 className="rounded border-border"
               />
               Timer-based restriction
             </label>
 
-            {scheduleOn && (
+            {form.scheduleOn && (
               <div className="space-y-2 rounded-lg border border-border p-3 bg-muted/30">
                 <div className="flex flex-wrap gap-1.5">
                   {DAY_OPTIONS.map((d) => {
-                    const on = scheduleDays.includes(d.id);
+                    const on = form.scheduleDays.includes(d.id);
                     return (
                       <button
                         key={d.id}
@@ -308,16 +622,24 @@ export default function WebBlockerPage() {
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="text-[10px] text-muted-foreground">Start</label>
-                    <Input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} />
+                    <Input
+                      type="time"
+                      value={form.startTime}
+                      onChange={(e) => setForm((f) => ({ ...f, startTime: e.target.value }))}
+                    />
                   </div>
                   <div>
                     <label className="text-[10px] text-muted-foreground">End</label>
-                    <Input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} />
+                    <Input
+                      type="time"
+                      value={form.endTime}
+                      onChange={(e) => setForm((f) => ({ ...f, endTime: e.target.value }))}
+                    />
                   </div>
                 </div>
                 <Input
-                  value={timezone}
-                  onChange={(e) => setTimezone(e.target.value)}
+                  value={form.timezone}
+                  onChange={(e) => setForm((f) => ({ ...f, timezone: e.target.value }))}
                   placeholder="Asia/Karachi"
                 />
               </div>
@@ -325,16 +647,69 @@ export default function WebBlockerPage() {
 
             <Button
               className="w-full gradient-primary text-primary-foreground"
-              disabled={!canCreate || createMutation.isPending}
-              onClick={() => createMutation.mutate()}
+              disabled={!canSave || saveMutation.isPending}
+              onClick={() => saveMutation.mutate()}
             >
-              {createMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Create rule'}
+              {saveMutation.isPending ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : editing ? (
+                'Save changes'
+              ) : (
+                'Create rule'
+              )}
             </Button>
-            {createMutation.isError && (
+            {saveMutation.isError && (
               <p className="text-xs text-destructive">
-                {(createMutation.error as Error)?.message || 'Create failed'}
+                {(saveMutation.error as Error)?.message || 'Save failed'}
               </p>
             )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!historyRule} onOpenChange={(open) => !open && setHistoryRule(null)}>
+        <DialogContent className="bg-card max-h-[90vh] overflow-y-auto sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="font-display">
+              History{historyRule ? ` — ${historyRule.name}` : ''}
+            </DialogTitle>
+          </DialogHeader>
+          {historyQuery.isLoading && (
+            <div className="flex justify-center py-8">
+              <Loader2 className="w-5 h-5 animate-spin text-primary" />
+            </div>
+          )}
+          {historyQuery.isError && (
+            <p className="text-sm text-destructive">Failed to load revision history</p>
+          )}
+          {!historyQuery.isLoading && !historyQuery.isError && (historyQuery.data?.revisions?.length ?? 0) === 0 && (
+            <p className="text-sm text-muted-foreground py-6 text-center">
+              No previous versions yet. History is saved when you edit a rule.
+            </p>
+          )}
+          <div className="space-y-3">
+            {(historyQuery.data?.revisions ?? []).map((rev: WebBlockerRuleRevision) => (
+              <div key={rev.id} className="rounded-lg border border-border p-3 space-y-1">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-foreground">
+                    Revision #{rev.revision}
+                  </span>
+                  <span className="text-[10px] text-muted-foreground">
+                    {new Date(rev.createdAt).toLocaleString()}
+                  </span>
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  {rev.changedByName || 'Unknown'} · {rev.enabled ? 'Active' : 'Inactive'} ·{' '}
+                  {actionLabels[rev.action] ?? rev.action} · {rev.severity}
+                </p>
+                <p className="text-xs font-medium text-foreground">{rev.name}</p>
+                {(rev.domains?.length ?? 0) > 0 && (
+                  <p className="text-[10px] text-muted-foreground break-all">
+                    Domains: {rev.domains.join(', ')}
+                  </p>
+                )}
+              </div>
+            ))}
           </div>
         </DialogContent>
       </Dialog>
