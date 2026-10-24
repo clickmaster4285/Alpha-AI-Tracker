@@ -2,12 +2,23 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
-import { Globe, History, Loader2, Pencil, Plus, Trash2, Upload, X } from 'lucide-react';
+import { getTimeZones } from '@vvo/tzdb';
+import { Check, ChevronsUpDown, Globe, History, Loader2, Pencil, Plus, Trash2, Upload, X } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from '@/components/ui/command';
+import { cn } from '@/lib/utils';
 import {
   dlpApi,
   type DlpAction,
@@ -15,6 +26,113 @@ import {
   type WebBlockerRule,
   type WebBlockerRuleRevision,
 } from '@/lib/api';
+
+/** IANA zones for schedule (matches Windows DLP client TZ resolution). */
+const TIMEZONE_OPTIONS: { value: string; label: string }[] = (() => {
+  const formatOffset = (mins: number) => {
+    const sign = mins >= 0 ? '+' : '-';
+    const abs = Math.abs(mins);
+    const h = Math.floor(abs / 60);
+    const m = abs % 60;
+    return `UTC${sign}${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  };
+  const zones = getTimeZones({ includeUtc: true });
+  const seen = new Set<string>();
+  const rows: { value: string; label: string; sort: number }[] = [];
+  for (const z of zones) {
+    if (seen.has(z.name)) continue;
+    seen.add(z.name);
+    const city = z.mainCities?.[0] ? ` — ${z.mainCities[0]}` : '';
+    rows.push({
+      value: z.name,
+      label: `${formatOffset(z.currentTimeOffsetInMinutes)} · ${z.name.replace(/_/g, ' ')}${city}`,
+      sort: z.currentTimeOffsetInMinutes,
+    });
+  }
+  if (!seen.has('UTC')) {
+    rows.push({ value: 'UTC', label: 'UTC+00:00 · UTC', sort: 0 });
+  }
+  rows.sort((a, b) => a.sort - b.sort || a.value.localeCompare(b.value));
+  return rows.map(({ value, label }) => ({ value, label }));
+})();
+
+function TimezoneCombobox({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (tz: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const selected =
+    TIMEZONE_OPTIONS.find((z) => z.value === value) ??
+    (value.trim()
+      ? { value, label: `${value} (saved)` }
+      : TIMEZONE_OPTIONS.find((z) => z.value === 'UTC')!);
+
+  return (
+    <Popover open={open} onOpenChange={setOpen} modal>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          role="combobox"
+          aria-expanded={open}
+          className="w-full justify-between font-normal h-10 px-3"
+        >
+          <span className="truncate text-left">{selected.label}</span>
+          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-0 bg-card border-border" align="start">
+        <Command>
+          <CommandInput placeholder="Search timezone…" />
+          <CommandList className="max-h-72">
+            <CommandEmpty>No timezone found.</CommandEmpty>
+            <CommandGroup>
+              {value.trim() !== '' &&
+                !TIMEZONE_OPTIONS.some((z) => z.value === value) && (
+                  <CommandItem
+                    value={`${value} saved`}
+                    onSelect={() => {
+                      onChange(value);
+                      setOpen(false);
+                    }}
+                  >
+                    <Check
+                      className={cn(
+                        'mr-2 h-4 w-4',
+                        value === selected.value ? 'opacity-100' : 'opacity-0',
+                      )}
+                    />
+                    {value} (saved)
+                  </CommandItem>
+                )}
+              {TIMEZONE_OPTIONS.map((z) => (
+                <CommandItem
+                  key={z.value}
+                  value={`${z.value} ${z.label}`}
+                  onSelect={() => {
+                    onChange(z.value);
+                    setOpen(false);
+                  }}
+                >
+                  <Check
+                    className={cn(
+                      'mr-2 h-4 w-4',
+                      value === z.value ? 'opacity-100' : 'opacity-0',
+                    )}
+                  />
+                  <span className="truncate">{z.label}</span>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+  );
+}
 
 const severityColors: Record<string, string> = {
   critical: 'bg-destructive/15 text-destructive',
@@ -658,11 +776,16 @@ export default function WebBlockerPage() {
                     />
                   </div>
                 </div>
-                <Input
-                  value={form.timezone}
-                  onChange={(e) => setForm((f) => ({ ...f, timezone: e.target.value }))}
-                  placeholder="Asia/Karachi"
-                />
+                <div>
+                  <label className="text-[10px] text-muted-foreground">Timezone</label>
+                  <TimezoneCombobox
+                    value={form.timezone.trim() || 'UTC'}
+                    onChange={(tz) => setForm((f) => ({ ...f, timezone: tz }))}
+                  />
+                  <p className="text-[10px] text-muted-foreground mt-1">
+                    Search and select an IANA zone (e.g. Asia/Karachi). Schedule times use this zone on the employee PC.
+                  </p>
+                </div>
               </div>
             )}
 
