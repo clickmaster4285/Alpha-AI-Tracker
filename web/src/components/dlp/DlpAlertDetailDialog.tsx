@@ -208,19 +208,22 @@ export default function DlpAlertDetailDialog({ alert, open, onOpenChange }: Prop
             <Fact label="Raw type" value={titleize(alert.type)} />
           </dl>
 
-          {/* ── Domains (list, not CSV) ───────────────────────────── */}
+          {/* ── Domains (chips, not CSV) ──────────────────────────── */}
           {domains.length > 0 && (
             <section>
               <h3 className="text-sm font-semibold text-foreground mb-2">
                 Domains ({domains.length})
               </h3>
-              <ul className="rounded-lg border border-border bg-muted/30 divide-y divide-border max-h-48 overflow-y-auto">
+              <div className="flex flex-wrap gap-1.5 max-h-48 overflow-y-auto">
                 {domains.map((d) => (
-                  <li key={d} className="px-3 py-2 text-xs font-mono text-foreground break-all">
+                  <code
+                    key={d}
+                    className="bg-muted px-1.5 py-0.5 rounded text-[10px] text-muted-foreground break-all"
+                  >
                     {d}
-                  </li>
+                  </code>
                 ))}
-              </ul>
+              </div>
             </section>
           )}
 

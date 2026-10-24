@@ -421,7 +421,7 @@ export default function WebBlockerPage() {
                     <h4 className="font-display font-bold text-foreground truncate">{rule.name}</h4>
                     {(rule.domains?.length ?? 0) > 0 && (
                       <div className="flex flex-wrap gap-1">
-                        {rule.domains.slice(0, 12).map((d) => (
+                        {rule.domains.map((d) => (
                           <code
                             key={d}
                             className="bg-muted px-1.5 py-0.5 rounded text-[10px] text-muted-foreground"
@@ -429,11 +429,6 @@ export default function WebBlockerPage() {
                             {d}
                           </code>
                         ))}
-                        {rule.domains.length > 12 && (
-                          <span className="text-[10px] text-muted-foreground">
-                            +{rule.domains.length - 12} more
-                          </span>
-                        )}
                       </div>
                     )}
                     {sched && <p className="text-xs text-muted-foreground">Schedule: {sched}</p>}
@@ -738,9 +733,16 @@ export default function WebBlockerPage() {
                 </p>
                 <p className="text-xs font-medium text-foreground">{rev.name}</p>
                 {(rev.domains?.length ?? 0) > 0 && (
-                  <p className="text-[10px] text-muted-foreground break-all">
-                    Domains: {rev.domains.join(', ')}
-                  </p>
+                  <div className="flex flex-wrap gap-1 pt-0.5">
+                    {rev.domains.map((d) => (
+                      <code
+                        key={d}
+                        className="bg-muted px-1.5 py-0.5 rounded text-[10px] text-muted-foreground"
+                      >
+                        {d}
+                      </code>
+                    ))}
+                  </div>
                 )}
               </div>
             ))}

@@ -61,15 +61,9 @@ const TRIGGER_OPTIONS: { value: DlpTrigger; label: string }[] = [
   { value: 'email', label: 'Email' },
 ];
 
-function splitList(raw: string): string[] {
-  return raw.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
-}
-
 type FormState = {
   name: string;
   trigger: DlpTrigger;
-  extensions: string;
-  patterns: string;
   action: DlpAction;
   severity: DlpSeverity;
   enabled: boolean;
@@ -78,8 +72,6 @@ type FormState = {
 const emptyForm = (): FormState => ({
   name: '',
   trigger: 'usb_storage',
-  extensions: '',
-  patterns: '',
   action: 'alert',
   severity: 'high',
   enabled: true,
@@ -89,8 +81,6 @@ function formFromRule(rule: DlpRule): FormState {
   return {
     name: rule.name,
     trigger: rule.trigger,
-    extensions: (rule.extensions ?? []).join(', '),
-    patterns: (rule.patterns ?? []).join(', '),
     action: rule.action,
     severity: rule.severity,
     enabled: rule.enabled,
@@ -135,32 +125,6 @@ function RuleDetailBody({
         </div>
       </dl>
 
-      {(rule.extensions?.length ?? 0) > 0 && (
-        <section>
-          <h4 className="text-sm font-semibold mb-2">Extensions ({rule.extensions.length})</h4>
-          <ul className="rounded-lg border border-border divide-y divide-border max-h-40 overflow-y-auto">
-            {rule.extensions.map((ext) => (
-              <li key={ext} className="px-3 py-1.5 text-xs font-mono">
-                {ext}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      {(rule.patterns?.length ?? 0) > 0 && (
-        <section>
-          <h4 className="text-sm font-semibold mb-2">Patterns ({rule.patterns.length})</h4>
-          <ul className="rounded-lg border border-border divide-y divide-border max-h-40 overflow-y-auto">
-            {rule.patterns.map((p) => (
-              <li key={p} className="px-3 py-1.5 text-xs font-mono break-all">
-                {p}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
       <section>
         <h4 className="text-sm font-semibold mb-2">Revision history</h4>
         {historyLoading && (
@@ -187,11 +151,6 @@ function RuleDetailBody({
                   {triggerLabels[rev.trigger] ?? rev.trigger} ·{' '}
                   {actionLabels[rev.action] ?? rev.action} · {rev.severity}
                 </p>
-                {(rev.extensions?.length ?? 0) > 0 && (
-                  <p className="font-mono text-muted-foreground truncate">
-                    Ext: {rev.extensions.join(', ')}
-                  </p>
-                )}
               </li>
             ))}
           </ul>
@@ -248,8 +207,8 @@ export default function DLPRulesPage() {
         trigger: form.trigger,
         action: form.action,
         severity: form.severity,
-        extensions: splitList(form.extensions),
-        patterns: splitList(form.patterns),
+        extensions: [] as string[],
+        patterns: [] as string[],
         scopeAll: true,
         enabled: form.enabled,
       };
@@ -367,16 +326,6 @@ export default function DLPRulesPage() {
                   <h4 className="font-display font-bold text-foreground truncate">{rule.name}</h4>
                   <p className="text-xs text-muted-foreground mt-0.5">
                     Trigger: {triggerLabels[rule.trigger] ?? rule.trigger}
-                    {(rule.extensions?.length ?? 0) > 0 && (
-                      <>
-                        {' '}
-                        · Ext:{' '}
-                        <code className="bg-muted px-1 rounded text-[10px]">
-                          {rule.extensions.slice(0, 4).join(', ')}
-                          {rule.extensions.length > 4 ? ` +${rule.extensions.length - 4}` : ''}
-                        </code>
-                      </>
-                    )}
                   </p>
                 </div>
               </button>
@@ -481,16 +430,6 @@ export default function DLPRulesPage() {
                 ))}
               </SelectContent>
             </Select>
-            <Input
-              placeholder="Extensions (optional, e.g. .xlsx, .csv)"
-              value={form.extensions}
-              onChange={(e) => setForm((f) => ({ ...f, extensions: e.target.value }))}
-            />
-            <Input
-              placeholder="Patterns (optional, comma-separated)"
-              value={form.patterns}
-              onChange={(e) => setForm((f) => ({ ...f, patterns: e.target.value }))}
-            />
             <div className="grid grid-cols-2 gap-3">
               <Select
                 value={form.action}
@@ -620,11 +559,6 @@ export default function DLPRulesPage() {
                     {triggerLabels[rev.trigger] ?? rev.trigger} ·{' '}
                     {actionLabels[rev.action] ?? rev.action} · {rev.severity}
                   </p>
-                  {(rev.extensions?.length ?? 0) > 0 && (
-                    <p className="font-mono text-muted-foreground truncate">
-                      Ext: {rev.extensions.join(', ')}
-                    </p>
-                  )}
                 </li>
               ))}
             </ul>
