@@ -7,6 +7,7 @@ namespace AlphaAITracker.Service;
 ///
 /// Why: hosts cannot wildcard CDN subdomains; apex firewall IPs miss rotating video nodes.
 /// This path needs no PC/browser restart — employees keep working; new media lookups die.
+/// Pins are NOT stored in dlp.db — only in memory + Windows Firewall; clear by PIN- prefix.
 /// </summary>
 public sealed class DnsBlockPinWorker : BackgroundService
 {
@@ -16,6 +17,7 @@ public sealed class DnsBlockPinWorker : BackgroundService
     private readonly ILogger<DnsBlockPinWorker> _logger;
     private readonly HashSet<string> _seenHosts = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset _lastLog = DateTimeOffset.MinValue;
+    private bool _clearedWhileEmpty;
 
     public DnsBlockPinWorker(
         DlpConfig cfg,
@@ -70,13 +72,27 @@ public sealed class DnsBlockPinWorker : BackgroundService
 
     private async Task TickAsync(CancellationToken ct)
     {
-        var domains = _webBlock.Domains;
+        var (_, domains, _, generation) = _webBlock.Snapshot();
         if (domains.Count == 0)
         {
             if (_seenHosts.Count > 0)
                 _seenHosts.Clear();
+            // EnforceWorker Apply clears PINs; this is a belt-and-suspenders heal if
+            // WebBlockState is empty but orphan PIN-* rules remain (e.g. crash mid-clear).
+            if (!_clearedWhileEmpty)
+            {
+                var clear = DomainBlockEnforcer.ClearPinnedIps();
+                _clearedWhileEmpty = true;
+                if (clear.Changed)
+                {
+                    await _store.AuditAsync("web_dns_pin_clear", clear.Detail, ct);
+                    _logger.LogInformation("DNS pin cleared while domains empty ({Detail})", clear.Detail);
+                }
+            }
             return;
         }
+
+        _clearedWhileEmpty = false;
 
         var cacheNames = DnsCacheReader.ListHostNames();
         if (cacheNames.Count == 0)
@@ -96,8 +112,6 @@ public sealed class DnsBlockPinWorker : BackgroundService
         var ips = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var host in matchedHosts)
         {
-            // Prefer fresh DoH resolve so we get real CDN A/AAAA even when hosts
-            // later sinks apex names (subdomains are usually not in hosts).
             foreach (var ip in DomainBlockEnforcer.ResolvePublicIps(host, forceRefresh: false))
                 ips.Add(ip);
             _seenHosts.Add(host);
@@ -106,7 +120,8 @@ public sealed class DnsBlockPinWorker : BackgroundService
         if (ips.Count == 0)
             return;
 
-        var newlyPinned = DomainBlockEnforcer.PinRemoteIps(ips);
+        // Stale generation → Apply already cleared PINs for a newer policy; drop this batch.
+        var newlyPinned = DomainBlockEnforcer.PinRemoteIps(ips, generation);
         var killed = 0;
         if (newlyPinned > 0 || matchedHosts.Count > 0)
             killed = TcpConnectionKiller.KillToRemoteIps(ips);
@@ -115,15 +130,15 @@ public sealed class DnsBlockPinWorker : BackgroundService
         {
             await _store.AuditAsync(
                 "web_dns_pin",
-                $"hosts={matchedHosts.Count} pin_new={newlyPinned} ips={ips.Count} tcp_kill={killed}",
+                $"gen={generation} hosts={matchedHosts.Count} pin_new={newlyPinned} ips={ips.Count} tcp_kill={killed}",
                 ct);
 
             if (DateTimeOffset.UtcNow - _lastLog > TimeSpan.FromSeconds(20))
             {
                 _lastLog = DateTimeOffset.UtcNow;
                 _logger.LogInformation(
-                    "DNS pin: matched={Matched} newIps={New} totalPinnedBatch={Ips} tcpKill={Kill} sample={Sample}",
-                    matchedHosts.Count, newlyPinned, ips.Count, killed,
+                    "DNS pin: gen={Gen} matched={Matched} newIps={New} totalPinnedBatch={Ips} tcpKill={Kill} sample={Sample}",
+                    generation, matchedHosts.Count, newlyPinned, ips.Count, killed,
                     string.Join(",", matchedHosts.Take(3)));
             }
         }

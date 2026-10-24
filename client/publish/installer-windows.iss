@@ -270,8 +270,6 @@ begin
       'ALPHA_DLP_ENABLED=true' + #13#10 +
       'ALPHA_DLP_USB_BLOCK=true' + #13#10 +
       'ALPHA_DLP_WEB_BLOCK=true' + #13#10 +
-      'ALPHA_DLP_BLOCK_PAGE=true' + #13#10 +
-      'ALPHA_DLP_BLOCK_PAGE_PORT=47832' + #13#10 +
       'ALPHA_DLP_POLICY_POLL_SEC=60' + #13#10 +
       'ALPHA_DLP_ALERT_SYNC_SEC=30' + #13#10 +
       'ALPHA_DLP_PIPE_NAME={#WINDOWS_DLP_PIPE_NAME}' + #13#10, False);

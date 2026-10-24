@@ -196,8 +196,6 @@ public sealed class NamedPipeHost : BackgroundService
             policyVersion = version,
             usbBlock = _cfg.UsbBlock,
             webBlock = _cfg.WebBlock,
-            blockPageEnabled = _cfg.BlockPageEnabled,
-            blockPagePort = _cfg.BlockPagePort,
         });
     }
 
@@ -212,21 +210,19 @@ public sealed class NamedPipeHost : BackgroundService
                 var bundle = PolicyBundleParser.Parse(bundleJson);
                 var domains = PolicyBundleParser.ActiveWebBlockDomains(bundle, DateTimeOffset.UtcNow);
                 if (domains.Count > 0)
-                    _webBlock.Set(ver, domains);
+                    _webBlock.Set(ver, domains, DomainBlockEnforcer.CurrentGeneration);
             }
             catch { /* keep empty */ }
         }
 
-        var baseUrl = $"http://127.0.0.1:{_cfg.BlockPagePort}/";
-        var (version, liveDomains, updatedAt, pageUrl) = _webBlock.Snapshot(baseUrl);
+        var (version, liveDomains, updatedAt, generation) = _webBlock.Snapshot();
         return JsonSerializer.Serialize(new
         {
             ok = true,
             policyVersion = version,
             domains = liveDomains,
+            generation,
             updatedAt = updatedAt == DateTimeOffset.MinValue ? (string?)null : updatedAt.ToString("o"),
-            blockPageUrl = pageUrl,
-            blockPageEnabled = _cfg.BlockPageEnabled && _cfg.WebBlock && _cfg.Enabled,
         });
     }
 
@@ -336,10 +332,9 @@ public sealed class NamedPipeHost : BackgroundService
                         "Teardown restored USBSTOR (changed={Changed}, detail={Detail}, start={Start})",
                         usb.Changed, usb.Detail, usb.DesiredStart);
                     var web = DomainBlockEnforcer.Clear();
-                    _webBlock.Set(0, Array.Empty<string>());
-                    try { BlockPageCertStore.Uninstall(_cfg, _logger); } catch { /* ignore */ }
+                    _webBlock.Set(0, Array.Empty<string>(), DomainBlockEnforcer.CurrentGeneration);
                     _logger.LogWarning(
-                        "Teardown cleared AlphaAI-DLP hosts sink (changed={Changed}, detail={Detail})",
+                        "Teardown cleared AlphaAI-DLP hosts/FW/PIN/URLBlocklist (changed={Changed}, detail={Detail})",
                         web.Changed, web.Detail);
                     ServiceAclHardener.TryApplyOpen(_logger);
                 }

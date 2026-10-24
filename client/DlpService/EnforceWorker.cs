@@ -195,20 +195,21 @@ public sealed class EnforceWorker : BackgroundService
         string webFp,
         CancellationToken ct)
     {
-        // Skip hosts write only on true cold start (no published policy yet).
-        // Must NOT skip when a new empty policy arrives after a prior block — that clear
-        // is required — and must not skip re-block after Active is published again.
-        if (wantDomains.Count == 0 && _lastWebFingerprint == "\0" && version <= 0 && _cfg.WebBlock)
+        // Skip hosts write only on true cold start (no published policy yet) AND no
+        // leftover OS artifacts. If URLBlocklist/hosts/FW still present, fall through
+        // to Apply([]) so a wiped dlp.db / version-0 boot still self-heals.
+        if (wantDomains.Count == 0 && _lastWebFingerprint == "\0" && version <= 0 && _cfg.WebBlock
+            && !DomainBlockEnforcer.HasLeftoverOsArtifacts())
         {
             _lastWebFingerprint = "";
-            _webBlock.Set(version, Array.Empty<string>());
+            _webBlock.Set(version, Array.Empty<string>(), DomainBlockEnforcer.CurrentGeneration);
             return;
         }
 
-        if (webFp == _lastWebFingerprint)
+        var drift = !DomainBlockEnforcer.OsStateMatchesDesired(wantDomains);
+        if (webFp == _lastWebFingerprint && !drift)
         {
-            // Domain set unchanged — still refresh CDN IPs when cache TTL expires so
-            // rotating googlevideo addresses stay firewall-blocked (mid-session cut).
+            // Domain set + OS match — still refresh CDN IPs when cache TTL expires.
             if (wantDomains.Count > 0)
             {
                 var refresh = DomainBlockEnforcer.RefreshStaleFirewallIps(wantDomains);
@@ -219,27 +220,44 @@ public sealed class EnforceWorker : BackgroundService
                     await _store.AuditAsync("web_fw_ip_refresh", refresh.Detail, ct);
                 }
             }
-            _webBlock.Set(version, wantDomains);
+            _webBlock.Set(version, wantDomains, DomainBlockEnforcer.CurrentGeneration);
             return;
         }
 
+        if (webFp == _lastWebFingerprint && drift)
+        {
+            _logger.LogWarning(
+                "Web block OS drift vs policy (count={Count}) — reconciling hosts/FW/PIN/URLBlocklist",
+                wantDomains.Count);
+            await _store.AuditAsync(
+                "web_domain_reconcile",
+                $"count={wantDomains.Count} fp_unchanged=1",
+                ct);
+        }
+
         var result = DomainBlockEnforcer.Apply(wantDomains);
+        var auditAction = wantDomains.Count == 0 ? "web_domain_clear" : "web_domain_apply";
         await _store.AuditAsync(
-            "web_domain_apply",
+            auditAction,
             $"count={wantDomains.Count} changed={result.Changed} detail={result.Detail}",
             ct);
 
-        if (result.Detail == "access_denied_need_admin")
+        if (result.Detail == "access_denied_need_admin"
+            || result.Detail.StartsWith("browser_error", StringComparison.Ordinal)
+            || result.Detail.StartsWith("pin_clear_failed", StringComparison.Ordinal)
+            || result.Detail.StartsWith("fw_clear_incomplete", StringComparison.Ordinal)
+            || result.Detail.StartsWith("fw_error", StringComparison.Ordinal))
         {
             if (DateTimeOffset.UtcNow - _lastAccessDeniedLog > TimeSpan.FromMinutes(2))
             {
                 _lastAccessDeniedLog = DateTimeOffset.UtcNow;
                 _logger.LogWarning(
-                    "Web domain enforce needs Administrator / LocalSystem to update hosts ({Path}).",
-                    DomainBlockEnforcer.HostsPath);
+                    "Web domain enforce needs Administrator / LocalSystem or clear incomplete ({Path}). detail={Detail}",
+                    DomainBlockEnforcer.HostsPath, result.Detail);
             }
 
-            if (!_webAccessDeniedAlertQueued && wantDomains.Count > 0)
+            if (!_webAccessDeniedAlertQueued && wantDomains.Count > 0
+                && result.Detail == "access_denied_need_admin")
             {
                 _webAccessDeniedAlertQueued = true;
                 var rule = PolicyBundleParser.FirstWebBlockRule(bundle, DateTimeOffset.UtcNow);
@@ -258,18 +276,30 @@ public sealed class EnforceWorker : BackgroundService
                     }),
                     ct);
             }
+            // Do NOT advance fingerprint — retry next tick (PIN leftovers / URLBlocklist).
+            return;
+        }
+
+        // Refuse fingerprint advance until OS matches desired (empty or shrunk set).
+        if (!DomainBlockEnforcer.OsStateMatchesDesired(wantDomains))
+        {
+            _logger.LogWarning(
+                "Web domain apply incomplete ({Detail}) — OS still drifts; will retry",
+                result.Detail);
+            await _store.AuditAsync(
+                wantDomains.Count == 0 ? "web_domain_clear_incomplete" : "web_domain_reconcile_incomplete",
+                result.Detail ?? "",
+                ct);
             return;
         }
 
         _lastWebFingerprint = webFp;
         _webAccessDeniedAlertQueued = false;
-        // Publish live list for block page + tracker UX even when hosts write was a no-op.
-        if (result.Detail != "access_denied_need_admin")
-            _webBlock.Set(version, wantDomains);
+        _webBlock.Set(version, wantDomains, DomainBlockEnforcer.CurrentGeneration);
         _logger.LogInformation(
-            "Web domains {State} (count={Count}, changed={Changed}, detail={Detail})",
+            "Web domains {State} (count={Count}, changed={Changed}, gen={Gen}, detail={Detail})",
             wantDomains.Count > 0 ? "BLOCK" : "CLEAR",
-            wantDomains.Count, result.Changed, result.Detail);
+            wantDomains.Count, result.Changed, DomainBlockEnforcer.CurrentGeneration, result.Detail);
 
         if (result.Changed && wantDomains.Count > 0)
         {

@@ -15,9 +15,6 @@ public sealed class DlpConfig
     public int AlertSyncSec { get; init; } = 60;
     public bool UsbBlock { get; init; } = true;
     public bool WebBlock { get; init; } = true;
-    /// <summary>Serve branded localhost block page (no TLS MITM).</summary>
-    public bool BlockPageEnabled { get; init; } = true;
-    public int BlockPagePort { get; init; } = BlockPageServer.DefaultPort;
     public int MaxLocalAlerts { get; init; } = 50_000;
     public int DedupSec { get; init; } = 300;
     public string PipeName { get; init; } = "";
@@ -46,8 +43,6 @@ public sealed class DlpConfig
             AlertSyncSec = GetInt("ALPHA_DLP_ALERT_SYNC_SEC", 60),
             UsbBlock = GetBool("ALPHA_DLP_USB_BLOCK", true),
             WebBlock = GetBool("ALPHA_DLP_WEB_BLOCK", true),
-            BlockPageEnabled = GetBool("ALPHA_DLP_BLOCK_PAGE", true),
-            BlockPagePort = GetInt("ALPHA_DLP_BLOCK_PAGE_PORT", BlockPageServer.DefaultPort),
             MaxLocalAlerts = GetInt("ALPHA_DLP_MAX_LOCAL_ALERTS", 50_000),
             DedupSec = GetInt("ALPHA_DLP_DEDUP_SEC", 300),
             PipeName = Environment.GetEnvironmentVariable("ALPHA_DLP_PIPE_NAME") is { Length: > 0 } p

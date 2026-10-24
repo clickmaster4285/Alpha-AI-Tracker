@@ -50,14 +50,33 @@ Companion: [plan.md](./plan.md) (DLP roadmap), [WORKFLOW.md](./WORKFLOW.md), [cl
 ### F. Web Blocker (hosts + firewall + DNS pin — P2)
 
 1. Web `/web-blocker` → Add rule: `youtube.com` with **Include related domains** (chips, not commas), action **Block** / **Alert + Block**, Status Active.
-2. Save auto-publishes → wait for policy pull (~30–60s). Active/Inactive also auto-publishes.
-3. Expect hosts `# AlphaAI-DLP-BEGIN` with `127.0.0.1` / `::1` per domain; `netsh` rules `AlphaAI-DLP-*` (apex) and soon `AlphaAI-DLP-PIN-*` (live CDN IPs).
+2. Save auto-publishes → wait for policy pull (~30–60s). Active/Inactive also auto-publishes. **Delete without Publish leaves the last published bundle on the client** until a new version is published.
+3. Expect hosts `# AlphaAI-DLP-BEGIN` with `127.0.0.1` / `::1` per domain; `netsh` rules `AlphaAI-DLP-*` (apex) and soon `AlphaAI-DLP-PIN-*` (live CDN IPs). Chrome/Edge may show the org “This page is blocked” interstitial from `URLBlocklist` (not a localhost page — `:47832` branded page was removed).
 4. Apply path: browser policies + firewall + TCP-kill + hosts + flushdns only — **never** winsock / `ipconfig /release` / NIC reset.
 5. **Mid-session lab (no employee restart):** start YouTube playback → Publish/Activate → keep the same tab playing. `DnsBlockPinWorker` should see `rr*---sn-*.googlevideo.com` in DNS cache, pin those IPs, TCP-kill; playback should stall within a few seconds to ~1–2 minutes without closing Chrome or rebooting. Second browser should fail on navigate.
 6. Confirm: `netsh advfirewall firewall show rule name=all | findstr AlphaAI-DLP-PIN` shows pinned rules after video DNS runs; service log / `enforcement_audit` may show `web_dns_pin`.
-7. Active→Inactive clears hosts + owned FW + pins; Active again re-applies.
-8. Teardown / clear policy removes owned hosts block + all `AlphaAI-DLP-*` rules.
+7. Active→Inactive clears hosts + owned FW + pins + URLBlocklist; Active again re-applies.
+8. Teardown / clear policy removes owned hosts block + all `AlphaAI-DLP-*` rules + browser policies.
 9. Edit a rule → History dialog shows prior revisions (migration 054).
+
+#### F.1 Clear-path after rule delete (stale-block regression)
+
+After **Delete rule + Publish** (or Active→Inactive) wait ~30–60s for policy pull, then verify **all** of:
+
+1. `%ProgramData%\AlphaAITracker\dlp\dlp.db` — no active web domains for that rule / empty domain set in applied policy.
+2. `C:\Windows\System32\drivers\etc\hosts` — no `# AlphaAI-DLP-BEGIN` / `# AlphaAI-DLP` block.
+3. `netsh advfirewall firewall show rule name=all | findstr AlphaAI-DLP` — empty (no apex or `PIN-` rules).
+4. Registry — no `HKLM\SOFTWARE\Policies\Google\Chrome\URLBlocklist` (and Edge twin `...\Microsoft\Edge\URLBlocklist`).
+5. Chrome: open a **fresh** tab to the formerly blocked site — must **not** show “Your organization doesn't allow…”. Empty `dlp.db` alone is not enough; leftovers mean EnforceWorker must run `Apply([])` / self-heal (`web_domain_clear` in audit). Chrome may take a moment to drop enterprise policy after registry clear.
+6. **PIN leftovers:** YouTube often stays denied via `AlphaAI-DLP-PIN-*` (CDN IPs) even when `youtube` is gone from hosts. `findstr AlphaAI-DLP` must show **no** `PIN-` rules after clear. Pins are **not** in `dlp.db` — clear is by firewall name prefix under a generation lock so the pin worker cannot recreate them after Inactive.
+
+#### F.2 High-churn lab (100-site production path)
+
+1. Publish ~20+ domains including `youtube.com` (+ related) and several others.
+2. Within a few minutes: Inactive half → Publish; Delete some → Publish; fix a typo domain → Publish; Active again.
+3. After each pull (~30–60s): hosts AlphaAI block and `netsh … findstr AlphaAI-DLP` must match **exactly** the active set (no orphan apex; no `PIN-*` when empty; no youtube/PIN when youtube removed).
+4. Confirm YouTube loads again after youtube removed **without** manual `netsh delete` (`ERR_NETWORK_ACCESS_DENIED` gone in Chrome / Edge / Cursor Browser Tab).
+5. Audit may show `web_domain_reconcile` / `web_dns_pin_clear` when OS drifted and self-healed.
 
 ---
 

@@ -1,7 +1,17 @@
 # Client Architecture — Alpha AI Tracker Desktop App
 
-> **Last audited:** 2026-10-24 (P2 web-block DNS pin / mid-session cut)
+> **Last audited:** 2026-10-24 (web-block reconcile + pin generation lock)
 > **Changelog:**
+> - 2026-10-24: **Production reconcile for high-churn web block.** `PolicyGeneration` + `PinGate`
+>   so `DnsBlockPinWorker` cannot recreate `AlphaAI-DLP-PIN-*` after Inactive; honest pin/FW
+>   clear verify; `OsStateMatchesDesired` forces Apply on OS drift (`web_domain_reconcile`).
+>   Pins live in memory + Windows Firewall only (not `dlp.db`); cleared by `PIN-` prefix.
+>   Lab: `TESTING.md` §F.2.
+> - 2026-10-24: **Removed localhost block page; fixed stale OS blocks after rule delete.** Dropped
+>   `BlockPageServer`/`BlockHttpsServer`/`BlockPageCertStore`, tracker `WebBlockUxService` /
+>   `IWebBlockHitSink`, `ALPHA_DLP_BLOCK_PAGE*`. Empty-policy clear + `HasLeftoverOsArtifacts`
+>   self-heal (hosts / `AlphaAI-DLP-*` / URLBlocklist); no fingerprint advance on failed clear.
+>   Lab: `TESTING.md` §F.1.
 > - 2026-10-24: **P2 mid-session web block without employee restart.** `DnsBlockPinWorker` +
 >   `DnsCacheReader` + `TcpConnectionKiller`; `DomainBlockEnforcer` incremental firewall / IP cache /
 >   PIN rules / browser DoH+URLBlocklist; EnforceWorker re-applies hosts on every policy version.

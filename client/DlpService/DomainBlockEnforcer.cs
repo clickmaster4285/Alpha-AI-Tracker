@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -46,11 +47,25 @@ internal static class DomainBlockEnforcer
     /// <summary>
     /// Live CDN IPs discovered via DNS cache (rr*---sn-*.googlevideo.com, …).
     /// Separate from apex resolve rules — hosts cannot wildcard these names.
+    /// Rule names are <c>AlphaAI-DLP-PIN-0</c>… (IP chunks), not per-site — clear by prefix.
     /// </summary>
     private const string PinnedRulePrefix = FirewallRulePrefix + "PIN-";
     private static readonly ConcurrentDictionary<string, byte> PinnedIps =
         new(StringComparer.OrdinalIgnoreCase);
     private const int MaxIpsPerPinnedRule = 40;
+
+    /// <summary>
+    /// Serializes Apply pin-clear vs DnsBlockPinWorker writes so Inactive cannot race
+    /// with PIN recreation. Bumped at the start of every <see cref="Apply"/>.
+    /// </summary>
+    private static readonly object PinGate = new();
+    private static long _policyGeneration;
+    private static List<string>? _ownedRuleCache;
+    private static DateTimeOffset _ownedRuleCacheAt = DateTimeOffset.MinValue;
+    private static readonly TimeSpan OwnedRuleCacheTtl = TimeSpan.FromSeconds(2);
+
+    /// <summary>Current apply generation — pin worker must pass this into <see cref="PinRemoteIps"/>.</summary>
+    public static long CurrentGeneration => Interlocked.Read(ref _policyGeneration);
 
     private sealed record IpCacheEntry(IReadOnlyList<string> Ips, DateTimeOffset ExpiresUtc);
 
@@ -80,15 +95,32 @@ internal static class DomainBlockEnforcer
             .OrderBy(d => d, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        // 1) Browser URLBlocklist wildcards (*.googlevideo.com) — hosts/firewall only know
-        //    apex IPs; YouTube media uses rr*---sn-*.googlevideo.com (different IPs).
-        // 2) Firewall + TCP-kill for resolved apex/CDN IPs (defense in depth).
-        // 3) Hosts + DoH-off + flushdns for new lookups.
-        // Full apply: drop live CDN pins; DnsBlockPinWorker re-learns under the new set.
-        ClearPinnedIps();
+        // Bump generation under PinGate FIRST so in-flight PinRemoteIps(oldGen) no-ops,
+        // then wipe PIN-* (same as manual netsh delete of AlphaAI-DLP-PIN-N) + apex FW.
+        Result pinClear;
+        Result fwResult;
+        lock (PinGate)
+        {
+            Interlocked.Increment(ref _policyGeneration);
+            pinClear = ClearPinnedIpsUnlocked();
+            if (pinClear.Detail.StartsWith("pin_clear_failed", StringComparison.Ordinal) ||
+                pinClear.Detail.StartsWith("access_denied", StringComparison.Ordinal))
+            {
+                return new Result(false, desired.Count, 0, pinClear.Detail);
+            }
+
+            fwResult = ApplyFirewallIncremental(desired, forceIpRefresh: true);
+            InvalidateOwnedRuleCache();
+        }
+
+        if (fwResult.Detail.StartsWith("access_denied", StringComparison.Ordinal) ||
+            fwResult.Detail.StartsWith("fw_clear_incomplete", StringComparison.Ordinal) ||
+            fwResult.Detail.StartsWith("fw_error", StringComparison.Ordinal))
+        {
+            return new Result(false, desired.Count, 0, fwResult.Detail);
+        }
 
         var browserResult = ApplyBrowserPolicies(desired);
-        var fwResult = ApplyFirewallIncremental(desired, forceIpRefresh: true);
         var tcpKilled = 0;
         if (desired.Count > 0 && !fwResult.Detail.StartsWith("access_denied", StringComparison.Ordinal))
             tcpKilled = KillEstablishedTcp(desired);
@@ -96,30 +128,152 @@ internal static class DomainBlockEnforcer
         var hostsResult = ApplyHosts(desired);
         FlushDns();
 
-        try
-        {
-            if (desired.Count > 0)
-                BlockPageCertStore.EnsureCa();
-            else
-                BlockPageCertStore.Uninstall();
-        }
-        catch
-        {
-            /* non-fatal */
-        }
-
-        var changed = hostsResult.Changed || fwResult.Changed || browserResult.Changed || tcpKilled > 0;
+        var changed = hostsResult.Changed || fwResult.Changed || browserResult.Changed
+                      || pinClear.Changed || tcpKilled > 0;
         var detail =
-            $"browser={browserResult.Detail}; hosts={hostsResult.Detail}; fw={fwResult.Detail}; tcp_kill={tcpKilled}";
+            $"gen={CurrentGeneration}; pin={pinClear.Detail}; browser={browserResult.Detail}; " +
+            $"hosts={hostsResult.Detail}; fw={fwResult.Detail}; tcp_kill={tcpKilled}";
         if (hostsResult.Detail.StartsWith("access_denied", StringComparison.Ordinal) ||
-            fwResult.Detail.StartsWith("access_denied", StringComparison.Ordinal) ||
             browserResult.Detail.StartsWith("access_denied", StringComparison.Ordinal))
             detail = "access_denied_need_admin";
+        else if (browserResult.Detail.StartsWith("browser_error", StringComparison.Ordinal))
+            detail = browserResult.Detail;
 
         return new Result(changed, desired.Count, desired.Count, detail);
     }
 
     public static Result Clear() => Apply(Array.Empty<string>());
+
+    /// <summary>
+    /// True when hosts / owned firewall / Chrome·Edge URLBlocklist still show AlphaAI web-block
+    /// artifacts after policy wants zero domains. Used by EnforceWorker to self-heal stale blocks.
+    /// </summary>
+    public static bool HasLeftoverOsArtifacts()
+    {
+        if (!OperatingSystem.IsWindows())
+            return false;
+
+        try
+        {
+            if (File.Exists(HostsPath))
+            {
+                var content = File.ReadAllText(HostsPath);
+                if (content.Contains(BeginMarker, StringComparison.OrdinalIgnoreCase) ||
+                    content.Contains(MarkerPrefix, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+        catch
+        {
+            /* unreadable hosts — treat as no leftover for this probe */
+        }
+
+        try
+        {
+            if (ListOwnedFirewallRules(bypassCache: true).Count > 0)
+                return true;
+        }
+        catch
+        {
+            /* netsh failed */
+        }
+
+        try
+        {
+            using (var chrome = Registry.LocalMachine.OpenSubKey(ChromeUrlBlockKey))
+            {
+                if (chrome is not null) return true;
+            }
+            using var edge = Registry.LocalMachine.OpenSubKey(EdgeUrlBlockKey);
+            if (edge is not null) return true;
+        }
+        catch
+        {
+            /* registry probe failed */
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Reconcile check: OS hosts + apex FW match <paramref name="domains"/>.
+    /// Empty desired ⇒ no AlphaAI artifacts (including PIN-*). Non-empty ⇒ hosts set equal
+    /// and no orphan apex rules (PIN-* allowed — pin worker re-learns under current gen).
+    /// </summary>
+    public static bool OsStateMatchesDesired(IReadOnlyList<string> domains)
+    {
+        if (!OperatingSystem.IsWindows())
+            return true;
+
+        var desired = domains
+            .SelectMany(PolicyBundleParser.NormalizeDomain)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (desired.Count == 0)
+            return !HasLeftoverOsArtifacts();
+
+        var hostsDomains = ReadHostsBlockedDomains();
+        if (!hostsDomains.SetEquals(desired))
+            return false;
+
+        var desiredRuleNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var d in SelectResolveTargets(desired.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList()))
+            desiredRuleNames.Add(FirewallRulePrefix + SanitizeRuleName(d));
+
+        foreach (var name in ListOwnedFirewallRules(bypassCache: true))
+        {
+            if (name.StartsWith(PinnedRulePrefix, StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (!desiredRuleNames.Contains(name))
+                return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>Domains listed inside the AlphaAI hosts block (empty if none).</summary>
+    public static HashSet<string> ReadHostsBlockedDomains()
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            if (!File.Exists(HostsPath))
+                return set;
+            var content = File.ReadAllText(HostsPath);
+            var inBlock = false;
+            foreach (var rawLine in content.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
+            {
+                var t = rawLine.Trim();
+                if (t.Equals(BeginMarker, StringComparison.OrdinalIgnoreCase))
+                {
+                    inBlock = true;
+                    continue;
+                }
+                if (t.Equals(EndMarker, StringComparison.OrdinalIgnoreCase))
+                {
+                    inBlock = false;
+                    continue;
+                }
+                if (!inBlock && !t.Contains(MarkerPrefix, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                // "127.0.0.1 host # AlphaAI-DLP" or "::1 host # AlphaAI-DLP"
+                var parts = t.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length < 2)
+                    continue;
+                if (parts[0] is not ("127.0.0.1" or "::1" or "0.0.0.0" or "::"))
+                    continue;
+                var host = parts[1].Trim().TrimEnd('.');
+                if (host.Length > 0 && host[0] != '#')
+                    set.Add(host.ToLowerInvariant());
+            }
+        }
+        catch
+        {
+            /* unreadable */
+        }
+        return set;
+    }
 
     /// <summary>
     /// While the domain set is unchanged, periodically refresh CDN IPs and patch firewall
@@ -136,7 +290,12 @@ internal static class DomainBlockEnforcer
             .OrderBy(d => d, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        var fw = ApplyFirewallIncremental(desired, forceIpRefresh: false, onlyIfStale: true);
+        Result fw;
+        lock (PinGate)
+        {
+            fw = ApplyFirewallIncremental(desired, forceIpRefresh: false, onlyIfStale: true);
+            InvalidateOwnedRuleCache();
+        }
         if (!fw.Changed)
             return fw;
         var killed = KillEstablishedTcp(desired);
@@ -166,56 +325,90 @@ internal static class DomainBlockEnforcer
     }
 
     /// <summary>
-    /// Pin live CDN IPs into outbound firewall rules and return how many were newly added.
-    /// Called by <see cref="DnsBlockPinWorker"/> — no browser/PC restart required.
+    /// Pin live CDN IPs into outbound firewall rules. No-ops when
+    /// <paramref name="expectedGeneration"/> is stale (Apply already bumped gen / cleared PINs).
     /// </summary>
-    public static int PinRemoteIps(IEnumerable<string> ips)
+    public static int PinRemoteIps(IEnumerable<string> ips, long expectedGeneration)
     {
         if (!OperatingSystem.IsWindows())
             return 0;
 
-        var added = 0;
-        foreach (var raw in ips)
+        lock (PinGate)
         {
-            if (!IPAddress.TryParse(raw, out var addr))
-                continue;
-            if (addr.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6))
-                continue;
-            if (IPAddress.IsLoopback(addr) || addr.Equals(IPAddress.Any) || addr.Equals(IPAddress.IPv6Any))
-                continue;
-            var ip = addr.ToString();
-            if (PinnedIps.TryAdd(ip, 0))
-                added++;
-        }
-        if (added == 0)
-            return 0;
+            if (expectedGeneration != Interlocked.Read(ref _policyGeneration))
+                return 0;
 
-        RebuildPinnedFirewallRules();
-        return added;
+            var added = 0;
+            foreach (var raw in ips)
+            {
+                if (!IPAddress.TryParse(raw, out var addr))
+                    continue;
+                if (addr.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6))
+                    continue;
+                if (IPAddress.IsLoopback(addr) || addr.Equals(IPAddress.Any) || addr.Equals(IPAddress.IPv6Any))
+                    continue;
+                var ip = addr.ToString();
+                if (PinnedIps.TryAdd(ip, 0))
+                    added++;
+            }
+            if (added == 0)
+                return 0;
+
+            RebuildPinnedFirewallRulesUnlocked();
+            InvalidateOwnedRuleCache();
+            return added;
+        }
     }
 
-    public static void ClearPinnedIps()
+    /// <summary>
+    /// Delete every <c>AlphaAI-DLP-PIN-*</c> firewall rule (by prefix — no per-site name needed)
+    /// and clear in-memory pin set. Verifies leftovers; does not swallow failures.
+    /// </summary>
+    public static Result ClearPinnedIps()
+    {
+        if (!OperatingSystem.IsWindows())
+            return new Result(false, 0, 0, "not_windows");
+        lock (PinGate)
+            return ClearPinnedIpsUnlocked();
+    }
+
+    private static Result ClearPinnedIpsUnlocked()
     {
         PinnedIps.Clear();
         try
         {
-            foreach (var name in ListOwnedFirewallRules()
-                         .Where(n => n.StartsWith(PinnedRulePrefix, StringComparison.OrdinalIgnoreCase)))
-            {
+            var pins = ListOwnedFirewallRules(bypassCache: true)
+                .Where(n => n.StartsWith(PinnedRulePrefix, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            foreach (var name in pins)
                 RunNetsh($"advfirewall firewall delete rule name=\"{EscapeNetsh(name)}\"");
-            }
+
+            InvalidateOwnedRuleCache();
+            var still = ListOwnedFirewallRules(bypassCache: true)
+                .Where(n => n.StartsWith(PinnedRulePrefix, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (still.Count > 0)
+                return new Result(false, 0, 0, "pin_clear_failed:" + string.Join(",", still));
+
+            return new Result(pins.Count > 0, 0, 0, pins.Count > 0 ? "pin_cleared" : "pin_absent");
         }
-        catch { /* ignore */ }
+        catch (Exception ex) when (IsAccessDenied(ex))
+        {
+            return new Result(false, 0, 0, "access_denied_need_admin");
+        }
+        catch (Exception ex)
+        {
+            return new Result(false, 0, 0, "pin_clear_failed:" + ex.Message);
+        }
     }
 
-    private static void RebuildPinnedFirewallRules()
+    private static void RebuildPinnedFirewallRulesUnlocked()
     {
         var all = PinnedIps.Keys
             .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        // Drop old PIN rules then recreate chunks (netsh remoteip length limit).
-        foreach (var name in ListOwnedFirewallRules()
+        foreach (var name in ListOwnedFirewallRules(bypassCache: true)
                      .Where(n => n.StartsWith(PinnedRulePrefix, StringComparison.OrdinalIgnoreCase)))
         {
             RunNetsh($"advfirewall firewall delete rule name=\"{EscapeNetsh(name)}\"");
@@ -334,12 +527,17 @@ internal static class DomainBlockEnforcer
             var resolveTargets = SelectResolveTargets(desired);
             if (desired.Count == 0)
             {
-                var ownedWhenEmpty = ListOwnedFirewallRules();
+                var ownedWhenEmpty = ListOwnedFirewallRules(bypassCache: true);
                 foreach (var name in ownedWhenEmpty)
                     RunNetsh($"advfirewall firewall delete rule name=\"{EscapeNetsh(name)}\"");
+                InvalidateOwnedRuleCache();
                 lock (FwStateGate)
                     _lastFwFingerprints = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 IpCache.Clear();
+                var leftover = ListOwnedFirewallRules(bypassCache: true);
+                if (leftover.Count > 0)
+                    return new Result(false, 0, 0,
+                        "fw_clear_incomplete:" + string.Join(",", leftover.Take(8)));
                 return new Result(ownedWhenEmpty.Count > 0, 0, 0,
                     ownedWhenEmpty.Count > 0 ? "fw_cleared" : "fw_empty");
             }
@@ -369,7 +567,7 @@ internal static class DomainBlockEnforcer
                 }
             }
 
-            var existing = ListOwnedFirewallRules();
+            var existing = ListOwnedFirewallRules(bypassCache: true);
             var existingSet = new HashSet<string>(existing, StringComparer.OrdinalIgnoreCase);
             var removed = 0;
             var added = 0;
@@ -412,10 +610,20 @@ internal static class DomainBlockEnforcer
                 RunNetsh(args);
             }
 
+            InvalidateOwnedRuleCache();
             var nextFp = desiredByRule.ToDictionary(
                 kv => kv.Key, kv => kv.Value.Fp, StringComparer.OrdinalIgnoreCase);
             lock (FwStateGate)
                 _lastFwFingerprints = nextFp;
+
+            // Orphan apex rules (not PIN) must be gone after shrink-set apply.
+            var orphans = ListOwnedFirewallRules(bypassCache: true)
+                .Where(n => !n.StartsWith(PinnedRulePrefix, StringComparison.OrdinalIgnoreCase)
+                            && !desiredByRule.ContainsKey(n))
+                .ToList();
+            if (orphans.Count > 0)
+                return new Result(false, desired.Count, desiredByRule.Count,
+                    "fw_clear_incomplete:" + string.Join(",", orphans.Take(8)));
 
             var changed = removed > 0 || added > 0 || updated > 0;
             return new Result(changed, desired.Count, desiredByRule.Count,
@@ -555,12 +763,29 @@ internal static class DomainBlockEnforcer
         return list;
     }
 
-    private static List<string> ListOwnedFirewallRules()
+    private static void InvalidateOwnedRuleCache()
     {
+        _ownedRuleCache = null;
+        _ownedRuleCacheAt = DateTimeOffset.MinValue;
+    }
+
+    private static List<string> ListOwnedFirewallRules(bool bypassCache = false)
+    {
+        if (!bypassCache &&
+            _ownedRuleCache is not null &&
+            DateTimeOffset.UtcNow - _ownedRuleCacheAt < OwnedRuleCacheTtl)
+        {
+            return _ownedRuleCache;
+        }
+
         var list = new List<string>();
         var (ok, output) = RunNetsh("advfirewall firewall show rule name=all");
         if (!ok || string.IsNullOrEmpty(output))
+        {
+            _ownedRuleCache = list;
+            _ownedRuleCacheAt = DateTimeOffset.UtcNow;
             return list;
+        }
 
         foreach (Match m in Regex.Matches(output, @"^Rule Name:\s*(.+)\s*$", RegexOptions.Multiline))
         {
@@ -568,6 +793,8 @@ internal static class DomainBlockEnforcer
             if (name.StartsWith(FirewallRulePrefix, StringComparison.OrdinalIgnoreCase))
                 list.Add(name);
         }
+        _ownedRuleCache = list;
+        _ownedRuleCacheAt = DateTimeOffset.UtcNow;
         return list;
     }
 
@@ -704,15 +931,25 @@ internal static class DomainBlockEnforcer
         return true;
     }
 
+    /// <summary>
+    /// Removes URLBlocklist + DoH/Quic keys we wrote. Failures must throw (no silent catch)
+    /// so Apply → EnforceWorker refuse to fingerprint-advance and retry next tick.
+    /// </summary>
     private static bool ClearBrowserPolicies(string policyKey, string urlBlockKey)
     {
         var changed = false;
-        try
+
+        using (var existing = Registry.LocalMachine.OpenSubKey(urlBlockKey, writable: false))
         {
-            Registry.LocalMachine.DeleteSubKeyTree(urlBlockKey, throwOnMissingSubKey: false);
-            changed = true;
+            if (existing is not null)
+            {
+                Registry.LocalMachine.DeleteSubKeyTree(urlBlockKey, throwOnMissingSubKey: false);
+                using var still = Registry.LocalMachine.OpenSubKey(urlBlockKey, writable: false);
+                if (still is not null)
+                    throw new InvalidOperationException("urlblocklist_clear_failed:" + urlBlockKey);
+                changed = true;
+            }
         }
-        catch { /* absent */ }
 
         using var key = Registry.LocalMachine.OpenSubKey(policyKey, writable: true);
         if (key is null) return changed;
@@ -769,11 +1006,19 @@ internal static class DomainBlockEnforcer
         return string.Join("\r\n", kept);
     }
 
+    /// <summary>
+    /// Firewall rule name suffix. Long domains get a stable hash suffix so two names
+    /// truncated at 40 chars cannot collide into one AlphaAI-DLP-* rule.
+    /// </summary>
     private static string SanitizeRuleName(string domain)
     {
-        var s = Regex.Replace(domain, @"[^a-zA-Z0-9.\-_]", "_");
-        if (s.Length > 40) s = s[..40];
-        return s;
+        var lower = domain.Trim().ToLowerInvariant();
+        var s = Regex.Replace(lower, @"[^a-zA-Z0-9.\-_]", "_");
+        if (s.Length <= 40)
+            return s;
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(lower)))[..8]
+            .ToLowerInvariant();
+        return s[..31] + "-" + hash;
     }
 
     private static string EscapeNetsh(string s) => s.Replace("\"", "'");

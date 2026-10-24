@@ -381,10 +381,13 @@ Server: no special env beyond normal DB; optional `DLP_REMOVAL_CODE_TTL_MIN=60`.
 - [x] DNS sink (hosts `AlphaAI-DLP-*` markers) apply/remove from `web_navigate` block rules + `shadowDeny.domains` (schedule-aware)  
 - [x] Alerts when domain sink is applied / access denied  
 - [x] Web **Web Blocker** UI: domain chips, related-domain expand, Active/Inactive auto-publish, edit + revision history (migration 054 relational), RBAC `web-blocker`  
-- [x] Branded localhost block page (`BlockPageServer` / HTTPS :443 + local CA) + tracker opens it on denied navigate (no TLS MITM)  
+- [x] ~~Branded localhost block page~~ **removed** (HTTPS never redirected to `:47832`; Chrome org interstitial = URLBlocklist)  
 - [x] Outbound firewall `AlphaAI-DLP-*` (incremental + IP cache) + `TcpConnectionKiller` on policy apply  
 - [x] **DNS-cache pin** (`DnsBlockPinWorker`): live `*.googlevideo.com` (etc.) IPs → `AlphaAI-DLP-PIN-*` + TCP-kill — mid-session cut **without** PC/browser restart  
-- [x] Chrome/Edge DoH-off (+ URLBlocklist/QuicAllowed as defense-in-depth; not required for the cut)  
+- [x] Chrome/Edge DoH-off (+ URLBlocklist/QuicAllowed as defense-in-depth)  
+- [x] **Empty-policy clear / self-heal**: `Apply([])` tears down hosts + FW/PIN + URLBlocklist; leftovers re-cleared each tick (no fingerprint advance on failed clear)  
+- [x] **Production reconcile + PIN generation lock**: `OsStateMatchesDesired` every Enforce tick; `PinGate` + gen so `DnsBlockPinWorker` cannot recreate `AlphaAI-DLP-PIN-*` after Inactive (pins not in dlp.db — clear by prefix)  
+
 - [ ] Optional true WFP callout / per-connection block events (beyond netsh firewall + DNS pin)  
 - [ ] Tracker-side path-pattern alert when browser hits a denied path (path hard-block still P7)  
 

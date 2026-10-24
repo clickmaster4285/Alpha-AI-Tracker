@@ -3,6 +3,24 @@
 > **Last audited:** 2026-10-24
 > **Changelog:**
 >
+> - 2026-10-24: **Production web-block reconcile + DNS-pin generation lock (DlpService).** Root cause
+>   of YouTube staying blocked after Inactive while Facebook cleared: orphan
+>   `AlphaAI-DLP-PIN-*` firewall rules (CDN IPs, not in `dlp.db` / not named per-site) plus pin
+>   worker racing clears. **Fix:** Apply bumps `PolicyGeneration` under `PinGate`, honest
+>   `ClearPinnedIps` (verify + fail), `PinRemoteIps(ips, gen)` no-ops on stale gen; every Enforce
+>   tick reconciles via `OsStateMatchesDesired` (`web_domain_reconcile`); empty pin worker also
+>   clears PIN leftovers. Lab: `TESTING.md` §F.1–F.2. Verified: `dotnet build` DlpService.
+>
+> - 2026-10-24: **Remove localhost block page + fix stale blocks after rule delete (DlpService +
+>   tracker).** Root cause of “`dlp.db` empty but Chrome still blocks”: OS leftovers
+>   (especially `HKLM\...\Chrome\URLBlocklist`) with fingerprint short-circuit after a silent
+>   clear failure. **Fix:** `ClearBrowserPolicies` no longer swallows delete failures;
+>   EnforceWorker does not fingerprint-advance on `access_denied` / `browser_error` / incomplete
+>   clear; `HasLeftoverOsArtifacts` self-heals hosts / `AlphaAI-DLP-*` / URLBlocklist each tick
+>   (`web_domain_clear` audit). **Removed:** `BlockPageServer` / `BlockHttpsServer` /
+>   `BlockPageCertStore`, tracker `WebBlockUxService` + `IWebBlockHitSink`, `ALPHA_DLP_BLOCK_PAGE*`.
+>   Lab: `TESTING.md` §F.1. Verified: `dotnet build` DlpService + client.
+>
 > - 2026-10-24: **P2 Web Blocker hardening — mid-session YouTube without PC/browser restart (service +
 >   web + server).** Root gap: hosts cannot wildcard `rr*---sn-*.googlevideo.com`, and apex firewall
 >   IPs miss rotating CDN nodes; TCP-kill alone misses QUIC. **Service:** incremental

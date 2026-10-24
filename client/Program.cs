@@ -627,10 +627,6 @@ if (config.BrowserTrackingEnabled)
     builder.Services.AddSingleton<BrowserHistoryReader>();
     if (!isProtectedUninstall && !isRemoveAccount)
     {
-        // DLP web-block UX: pipe poll + open localhost branded page on denied navigate.
-        builder.Services.AddSingleton<WebBlockUxService>();
-        builder.Services.AddSingleton<IWebBlockHitSink>(sp => sp.GetRequiredService<WebBlockUxService>());
-        builder.Services.AddHostedService(sp => sp.GetRequiredService<WebBlockUxService>());
         builder.Services.AddHostedService<AccessibilityBrowserTracker>();
     }
 }
